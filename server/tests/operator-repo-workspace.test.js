@@ -13,6 +13,7 @@ const { createNodeService } = require('../services/nodeService');
 const { createOperatorSpawnService } = require('../services/operatorSpawnService');
 const { createConversationService } = require('../services/conversationService');
 const { createManagerRouter } = require('../routes/manager');
+const { resolveManagerApiEndpoints } = require('../services/managerSystemPrompt');
 const { repoSourceHash } = require('../utils/repoOperatorThread');
 
 async function mkdb(t) {
@@ -45,9 +46,19 @@ function withRepoFlag(t, value) {
   });
 }
 
+function withDefaultRepoFlag(t) {
+  const old = process.env.PALANTIR_PROJECT_REPO;
+  delete process.env.PALANTIR_PROJECT_REPO;
+  t.after(() => {
+    if (old === undefined) delete process.env.PALANTIR_PROJECT_REPO;
+    else process.env.PALANTIR_PROJECT_REPO = old;
+  });
+}
+
 function makeAdapter() {
   const starts = [];
   const disposes = [];
+  const turns = [];
   return {
     type: 'codex',
     capabilities: { persistentProcess: false, supportsResume: true },
@@ -58,7 +69,10 @@ function makeAdapter() {
       }
       return { sessionRef: { resumedThreadId: opts.resumeThreadId || null } };
     },
-    runTurn() { return { accepted: true }; },
+    runTurn(runId, payload) {
+      turns.push({ runId, payload });
+      return { accepted: true };
+    },
     isSessionAlive() { return true; },
     detectExitCode() { return null; },
     emitSessionEndedIfNeeded() {},
@@ -69,6 +83,7 @@ function makeAdapter() {
     buildGuardrailsSection() { return ''; },
     _starts: starts,
     _disposes: disposes,
+    _turns: turns,
   };
 }
 
@@ -117,7 +132,16 @@ function makeNodeService(realNodeService, { remote = false } = {}) {
   };
 }
 
-function makeSpawn({ runService, registry, adapter, projectService, projectBriefService, nodeService, materializationService }) {
+function makeSpawn({
+  runService,
+  registry,
+  adapter,
+  projectService,
+  projectBriefService,
+  nodeService,
+  materializationService,
+  managerApiEndpoints = { local: 'http://localhost:4177', remote: null },
+}) {
   return createOperatorSpawnService({
     runService,
     managerRegistry: registry,
@@ -126,6 +150,7 @@ function makeSpawn({ runService, registry, adapter, projectService, projectBrief
     projectBriefService,
     nodeService,
     projectMaterializationService: materializationService,
+    managerApiEndpoints,
   });
 }
 
@@ -342,9 +367,9 @@ test('flag-off git Operator fails closed before materialization', async (t) => {
   assert.equal(adapter._starts.length, 0);
 });
 
-test('remote git Operator fails closed as unsupported', async (t) => {
+test('default-on remote git cold PM message materializes workspace and reaches the Operator', async (t) => {
   withCodexAuth(t);
-  withRepoFlag(t, '1');
+  withDefaultRepoFlag(t);
   const db = await mkdb(t);
   const runService = createRunService(db, null);
   const projectService = createProjectService(db);
@@ -359,14 +384,64 @@ test('remote git Operator fails closed as unsupported', async (t) => {
     name: 'remote-repo',
     source_type: 'git',
     repo_url: 'file:///tmp/repo.git',
+    repo_subdir: 'packages/api',
     node_id: 'nodeA',
   });
-  const materializationService = makeMaterializationMock({ runService });
-  const spawn = makeSpawn({ runService, registry, adapter, projectService, projectBriefService, nodeService, materializationService });
+  assert.equal(project.pm_enabled, 1);
+  const materializationService = makeMaterializationMock({
+    runService,
+    workspacePath: '/workspace/.palantir-workspaces/remote-repo/run-1',
+    cwd: '/workspace/.palantir-workspaces/remote-repo/run-1/packages/api',
+  });
+  const managerApiEndpoints = resolveManagerApiEndpoints({
+    explicitBaseUrl: null,
+    host: '0.0.0.0',
+    port: 4177,
+    networkInterfaces: () => ({
+      tailnet0: [{ family: 'IPv4', internal: false, address: '100.120.25.112' }],
+      lo0: [{ family: 'IPv4', internal: true, address: '127.0.0.1' }],
+    }),
+  });
+  const spawn = makeSpawn({
+    runService,
+    registry,
+    adapter,
+    projectService,
+    projectBriefService,
+    nodeService,
+    materializationService,
+    managerApiEndpoints,
+  });
+  const conversationService = createConversationService({
+    runService,
+    managerRegistry: registry,
+    managerAdapterFactory: { getAdapter: () => adapter },
+    lifecycleService: null,
+    operatorSpawnService: spawn,
+    projectService,
+    projectBriefService,
+  });
 
-  assert.throws(() => spawn.ensureLiveOperator({ projectId: project.id }), /unsupported on remote/);
-  assert.equal(materializationService.calls.length, 0);
-  assert.equal(adapter._starts.length, 0);
+  const result = await conversationService.sendMessage(
+    `operator:${project.id}`,
+    { text: 'implement the remote change' },
+  );
+
+  assert.equal(result.status, 'sent');
+  assert.equal(materializationService.calls.length, 1);
+  assert.equal(materializationService.calls[0].nodeId, 'nodeA');
+  assert.equal(adapter._starts.length, 1);
+  assert.equal(
+    adapter._starts[0].opts.cwd,
+    '/workspace/.palantir-workspaces/remote-repo/run-1/packages/api',
+  );
+  assert.equal(adapter._starts[0].opts.nodeId, 'nodeA');
+  assert.equal(adapter._starts[0].opts.nodePrefix, '/opt/nodeA/bin');
+  assert.ok(adapter._starts[0].opts.executor);
+  assert.match(adapter._starts[0].opts.systemPrompt, /http:\/\/100\.120\.25\.112:4177\/api\/tasks/);
+  assert.doesNotMatch(adapter._starts[0].opts.systemPrompt, /http:\/\/localhost:4177/);
+  assert.equal(adapter._turns.length, 1);
+  assert.equal(adapter._turns[0].payload.text, 'implement the remote change');
 });
 
 test('source-generation mismatch clears stored thread and starts fresh', async (t) => {

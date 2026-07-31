@@ -89,6 +89,15 @@ const RUN_COLUMNS = [
   // P2/P3 review (migration 063): durable non-retryable flag for pre-claim
   // rejected runs (worker_profile_invalid / budget_exceeded).
   'non_retryable',
+  // Issue #469 (migration 076): immutable Claude permission snapshot used by
+  // manager boot resume after its mutable agent profile changes or disappears.
+  'session_permission_mode',
+  // Issue #469 follow-up (migration 078): exact Claude template runtime options
+  // used to resume the same manager session after profile edits.
+  'session_claude_options_json',
+  // Worker idle timeout (#466, migration 080): preserves the existing terminal
+  // status while recording why health cleanup finalized the run.
+  'terminal_reason',
 ];
 
 const COMPOSITION_EVENT_COLUMNS = [

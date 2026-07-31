@@ -7,6 +7,7 @@ const { PassThrough, Writable } = require('node:stream');
 
 const { createRemoteSshNodeExecutor, shq } = require('../services/remoteSshExecutor');
 const { createNodeUsageService } = require('../services/nodeUsageService');
+const { EXEC_ENV_KEYS } = require('../services/execEnvPolicy');
 
 const REMOTE_BASELINE = [
   'PATH',
@@ -256,6 +257,7 @@ test('worker spawn preserves pod allowlist names without manager network/vendor 
   const cwd = '/srv/root/project';
   const prefix = `/home/runner/agent bin/'quoted" $cash/*glob*`;
   const workerToken = 'worker-capability-literal-must-not-enter-argv';
+  const apiBase = 'https://argv-zero.example:8443/proxy-prefix';
   const explicitValue = `controller ' " $HOME * ? [abc]`;
   const spawn = rootAwareSpawn({ cwd });
   const executor = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
@@ -272,6 +274,7 @@ test('worker spawn preserves pod allowlist names without manager network/vendor 
       PALANTIR_PM_TOKEN: 'pm-global-secret',
       PALANTIR_MANAGER_TOKEN: 'wrong-run-secret',
       PALANTIR_WORKER_TOKEN: workerToken,
+      PALANTIR_API_BASE: apiBase,
     },
   });
 
@@ -308,18 +311,27 @@ test('worker spawn preserves pod allowlist names without manager network/vendor 
   assert.equal(inner.includes('PALANTIR_WORKER_TOKEN="$PALANTIR_WORKER_TOKEN"'), false);
   assert.ok(inner.includes('PALANTIR_WORKER_TOKEN=$(cat --'));
   assert.ok(inner.includes('export PALANTIR_WORKER_TOKEN'));
+  assert.ok(inner.includes('PALANTIR_API_BASE=$(cat --'));
+  assert.ok(inner.includes('export PALANTIR_API_BASE'));
   assert.equal(inner.includes(workerToken), false);
+  assert.equal(inner.includes(apiBase), false);
   for (const secret of ['human-global-secret', 'pm-global-secret', 'wrong-run-secret']) {
     assert.equal(inner.includes(secret), false);
   }
-  const tokenWrite = spawn.calls.find((call) => call.stdin === workerToken);
-  assert.ok(tokenWrite, 'worker capability is transported through the secret file write');
+  const bundleWrite = spawn.calls.find((call) => call.stdin === workerToken + apiBase);
+  assert.ok(bundleWrite, 'worker capability and API base share one stdin bundle write');
   for (const call of spawn.calls) {
     assert.equal(JSON.stringify(call.args).includes(workerToken), false);
+    assert.equal(JSON.stringify(call.args).includes(apiBase), false);
   }
+  assert.equal(
+    spawn.calls.reduce((count, call) => count + call.stdin.split(apiBase).length - 1, 0),
+    1,
+    'the API base value appears exactly once, in upload stdin',
+  );
 });
 
-test('git/materialize and filesystem exec paths keep their inherited-env behavior', async () => {
+test('git/materialize exec filters pod env with the shared policy while filesystem primitives stay separate', async () => {
   const spawn = makeSpawn((call, child) => {
     const script = logicalScriptOf(call);
     if (script === `exec ${shq('realpath')} ${shq('/srv/root')}`) {
@@ -335,14 +347,24 @@ test('git/materialize and filesystem exec paths keep their inherited-env behavio
     commandAllowlist: ['git'],
   });
 
-  await executor.exec('git', ['status'], { env: { LC_ALL: 'C' } });
+  await executor.exec('git', ['status'], {
+    env: { LC_ALL: 'C', PATH: '/explicit/git/bin' },
+  });
   await executor.realpath('/srv/root/project');
 
   const scripts = spawn.calls.map(logicalScriptOf);
   const gitScript = scripts.find((script) => script.includes(`${shq('git')} ${shq('status')}`));
   const filesystemScripts = scripts.filter((script) => script.includes(shq('realpath')));
-  assert.equal(gitScript, `exec env LC_ALL=${shq('C')} ${shq('git')} ${shq('status')}`);
-  assert.equal(gitScript.includes('env -i'), false);
+  assert.ok(gitScript.startsWith('set --; for k in '), gitScript);
+  assert.ok(gitScript.includes('exec env -i "$@"'), gitScript);
+  for (const key of EXEC_ENV_KEYS) {
+    assert.ok(gitScript.includes(shq(key)), `remote exec lost shared policy key ${key}`);
+  }
+  assert.ok(gitScript.includes(`PATH=${shq('/explicit/git/bin')}`));
+  assert.ok(gitScript.endsWith(`LC_ALL=${shq('C')} PATH=${shq('/explicit/git/bin')} ${shq('git')} ${shq('status')}`));
+  for (const secretKey of ['PALANTIR_TOKEN', 'ANTHROPIC_API_KEY', 'AWS_SECRET_ACCESS_KEY']) {
+    assert.equal(gitScript.includes(secretKey), false, `remote exec exposed ${secretKey}`);
+  }
   assert.ok(filesystemScripts.length > 0);
   for (const script of filesystemScripts) assert.equal(script.includes('env -i'), false);
 });

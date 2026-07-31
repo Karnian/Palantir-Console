@@ -1,6 +1,13 @@
 'use strict';
 
 const { randomUUID } = require('node:crypto');
+const {
+  MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
+  parseTerminalEventPayload,
+  isTerminalEventForInvocation,
+  normalizeTerminalError,
+  findPersistedTerminalEvent,
+} = require('./terminalEventReconciliation');
 
 const DEFAULT_PER_CONVERSATION_CAP = 50;
 const DEFAULT_TICK_MS = 1000;
@@ -25,6 +32,7 @@ const DEFAULT_IMMEDIATE_DISPATCH_TIMEOUT_MS = 9 * 60 * 1000;
 const MAX_PAYLOAD_BYTES = 12 * 1024 * 1024;
 const MAX_TERMINAL_RETRIES = 3;
 const ACTIVE_STATUSES = Object.freeze(['queued', 'sending', 'processing']);
+const PERSISTED_TERMINAL_SCAN_PENDING = Symbol('persisted-terminal-scan-pending');
 
 function createHttpError(message, httpStatus, code, retryable = false) {
   const err = new Error(message);
@@ -49,6 +57,7 @@ function createManagerMessageQueueService({
   const ownerId = randomUUID();
   const log = logger || ((message) => console.warn(`[manager-message-queue] ${message}`));
   const drains = new Map();
+  const sqliteRejectedTerminalCursors = new Map();
   let dispatcher = null;
   let timer = null;
   let unsubscribe = null;
@@ -261,25 +270,76 @@ function createManagerMessageQueueService({
       SET lease_expires_at = ?, updated_at = datetime('now')
       WHERE claimed_by = ? AND status IN ('sending', 'processing')
     `),
-    // `data.terminal` is REQUIRED, exactly as the live paths require it
-    // (parseTerminalEvent below, and operatorScheduler.onEvent). codexAdapter
-    // persists non-terminal failures under the same event_type + invocationId
-    // (`kind: 'codex_error', terminal: false`), so matching on invocationId
-    // alone made restart reconciliation mistake a transient error for a
-    // completion — closing the queue lane and, worse, stamping the row with a
-    // terminal_reason the scheduler's recovery does not recognize.
-    terminalEvent: db.prepare(`
-      SELECT event_type, payload_json
+    ownActiveClaims: db.prepare(`
+      SELECT id, run_id, adapter_invocation_id
+      FROM manager_message_queue
+      WHERE claimed_by = ?
+        AND status IN ('sending', 'processing')
+      ORDER BY sequence
+    `),
+    // Correlate before the bounded scan so unrelated and non-terminal events
+    // consume no JavaScript parsing budget. Merge-patching into an empty object
+    // is a fast prefilter that preserves later duplicate correlation values;
+    // the nested scans remain authoritative because merge patch may combine
+    // repeated objects. Oldest-first ordering preserves the live CAS contract.
+    terminalEventCandidates: db.prepare(`
+      SELECT id, event_type, payload_json
       FROM run_events
       WHERE run_id = ?
         AND event_type IN ('mgr.turn_completed', 'mgr.turn_failed')
-        AND json_extract(payload_json, '$.data.invocationId') = ?
         AND json_extract(
-          CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,
-          '$.data.terminal'
-        ) = 1
-      ORDER BY id DESC
-      LIMIT 1
+              json_patch(
+                '{}',
+                CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END
+              ),
+              '$.data.invocationId'
+            ) = ?
+        AND EXISTS (
+          SELECT 1
+          FROM (
+            SELECT value, type
+            FROM json_each(
+              CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END
+            )
+            WHERE key = 'data'
+            ORDER BY id DESC
+            LIMIT 1
+          ) AS parsed_data
+          WHERE parsed_data.type = 'object'
+            AND 1 = (
+              SELECT member.type = 'text' AND member.value = ?
+              FROM json_each(parsed_data.value) AS member
+              WHERE member.key = 'invocationId'
+              ORDER BY member.id DESC
+              LIMIT 1
+            )
+            AND 'true' = (
+              SELECT member.type
+              FROM json_each(parsed_data.value) AS member
+              WHERE member.key = 'terminal'
+              ORDER BY member.id DESC
+              LIMIT 1
+            )
+        )
+      ORDER BY id ASC
+      LIMIT ?
+    `),
+    // SQLite's JSON parser rejects otherwise valid JSON beyond its nesting
+    // limit. The correlation literal drops ordinary unrelated history before
+    // the authoritative parse. The cursor advances the bounded fallback across
+    // ticks, while the SQL terminal id remains an exclusive upper bound so a
+    // later SQL-valid event cannot overtake an earlier rejected completion.
+    sqliteRejectedTerminalEvents: db.prepare(`
+      SELECT id, event_type, payload_json
+      FROM run_events
+      WHERE run_id = ?
+        AND event_type IN ('mgr.turn_completed', 'mgr.turn_failed')
+        AND json_valid(payload_json) = 0
+        AND instr(payload_json, ?) > 0
+        AND (? IS NULL OR id > ?)
+        AND (? IS NULL OR id < ?)
+      ORDER BY id ASC
+      LIMIT ?
     `),
     failRunActive: db.prepare(`
       UPDATE manager_message_queue
@@ -746,9 +806,10 @@ function createManagerMessageQueueService({
     const id = existing.id;
     const status = success ? 'delivered' : 'failed';
     const reason = success ? 'turn_completed' : 'turn_failed';
+    const normalizedError = normalizeTerminalError(errorMessage);
     const result = stmts.complete.run(
       status,
-      errorMessage,
+      normalizedError,
       reason,
       status,
       status,
@@ -757,6 +818,7 @@ function createManagerMessageQueueService({
       runId,
     );
     if (result.changes !== 1) return null;
+    sqliteRejectedTerminalCursors.delete(id);
     const row = stmts.getById.get(id);
     emitRow(row);
     // A very fast adapter can emit the terminal event while the accepting
@@ -780,10 +842,9 @@ function createManagerMessageQueueService({
       ? runService.getRunEventById(runId, eventId)
       : null;
     if (!event || event.event_type !== eventType) return null;
-    let payload;
-    try { payload = event.payload_json ? JSON.parse(event.payload_json) : null; } catch { return null; }
+    const payload = parseTerminalEventPayload(event.payload_json);
     const id = payload?.data?.invocationId;
-    if (!id || payload?.data?.terminal !== true) return null;
+    if (!id || !isTerminalEventForInvocation(payload, id)) return null;
     return completeFromEvent(
       id,
       runId,
@@ -801,31 +862,96 @@ function createManagerMessageQueueService({
     }
   }
 
+  function completeFromPersistedTerminalEvent(row) {
+    // Current-owner and stale-claim reconciliation both enter through here, so
+    // neither recovery path can drift from the shared live-parser contract.
+    if (!row?.run_id) return null;
+    let terminal;
+    try {
+      const candidates = stmts.terminalEventCandidates.all(
+        row.run_id,
+        row.adapter_invocation_id,
+        row.adapter_invocation_id,
+        MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
+      );
+      const sqlTerminal = findPersistedTerminalEvent(
+        candidates,
+        row.adapter_invocation_id,
+      );
+      const cursor = sqliteRejectedTerminalCursors.get(row.id) ?? null;
+      const sqliteRejectedCandidates = stmts.sqliteRejectedTerminalEvents.all(
+        row.run_id,
+        JSON.stringify(row.adapter_invocation_id),
+        cursor,
+        cursor,
+        sqlTerminal?.id ?? null,
+        sqlTerminal?.id ?? null,
+        MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES,
+      );
+      const sqliteRejectedTerminal = findPersistedTerminalEvent(
+        sqliteRejectedCandidates,
+        row.adapter_invocation_id,
+      );
+      if (sqliteRejectedTerminal) {
+        sqliteRejectedTerminalCursors.delete(row.id);
+        terminal = sqliteRejectedTerminal;
+      } else if (
+        sqliteRejectedCandidates.length >= MAX_PERSISTED_TERMINAL_EVENT_CANDIDATES
+      ) {
+        sqliteRejectedTerminalCursors.set(
+          row.id,
+          sqliteRejectedCandidates[sqliteRejectedCandidates.length - 1].id,
+        );
+        return PERSISTED_TERMINAL_SCAN_PENDING;
+      } else {
+        if (sqliteRejectedCandidates.length > 0) {
+          sqliteRejectedTerminalCursors.set(
+            row.id,
+            sqliteRejectedCandidates[sqliteRejectedCandidates.length - 1].id,
+          );
+        }
+        terminal = sqlTerminal;
+        if (terminal) sqliteRejectedTerminalCursors.delete(row.id);
+      }
+    } catch {
+      return null;
+    }
+    if (!terminal) return null;
+    // Lookup failures are ignorable, but a matched event whose durable state
+    // transition fails must escape. In particular, stale recovery must not
+    // reinterpret a failed settlement as missing evidence and replay the turn.
+    return completeFromEvent(
+      row.adapter_invocation_id,
+      row.run_id,
+      terminal.event_type === 'mgr.turn_completed',
+      terminal.event_type === 'mgr.turn_failed'
+        ? (terminal.payload?.summaryText || 'manager turn failed')
+        : null,
+    );
+  }
+
+  function reconcilePersistedTerminalEvents() {
+    let reconciled = 0;
+    for (const row of stmts.ownActiveClaims.all(ownerId)) {
+      // A lease proves only that this process is alive; it cannot prove that
+      // the lossy live callback reflected the durable run outcome.
+      try {
+        const result = completeFromPersistedTerminalEvent(row);
+        if (result && result !== PERSISTED_TERMINAL_SCAN_PENDING) reconciled += 1;
+      } catch (err) {
+        // Current-owner polling is best-effort and retries the settlement on a
+        // later tick. The stale path deliberately does not catch this error.
+        log(`persisted terminal settlement failed for ${row.id}: ${err.message}`);
+      }
+    }
+    return reconciled;
+  }
+
   function reconcileStaleClaims() {
     const now = Date.now();
     const stale = stmts.staleClaims.all(ownerId, now);
     for (const row of stale) {
-      let terminal = null;
-      if (row.run_id) {
-        try {
-          terminal = stmts.terminalEvent.get(row.run_id, row.adapter_invocation_id);
-        } catch {
-          terminal = null;
-        }
-      }
-      if (terminal) {
-        let payload;
-        try { payload = JSON.parse(terminal.payload_json || '{}'); } catch { payload = {}; }
-        completeFromEvent(
-          row.adapter_invocation_id,
-          row.run_id,
-          terminal.event_type === 'mgr.turn_completed',
-          terminal.event_type === 'mgr.turn_failed'
-            ? (payload?.summaryText || 'manager turn failed')
-            : null,
-        );
-        continue;
-      }
+      if (completeFromPersistedTerminalEvent(row)) continue;
       // Ordinary chat is at-least-once and may be retried after a crashed
       // owner. Scheduler rows are different: operator_invocations already owns
       // their durable state, and replaying a turn that may have crossed the
@@ -892,6 +1018,7 @@ function createManagerMessageQueueService({
   async function tick() {
     if (stopped) return [];
     stmts.renewOwnLeases.run(Date.now() + leaseMs, ownerId);
+    reconcilePersistedTerminalEvents();
     reconcileStaleClaims();
     const conversations = stmts.runnableConversations.all(Date.now());
     return Promise.all(conversations.map(row => drainConversation(row.conversation_id)));
@@ -935,6 +1062,7 @@ function createManagerMessageQueueService({
     handleSlotCleared,
     terminalizeQueuedForConversation,
     notifyTerminalized,
+    reconcilePersistedTerminalEvents,
     reconcileStaleClaims,
     tick,
     start,

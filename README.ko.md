@@ -521,6 +521,14 @@ PATCH  /api/runs/:id/skill-packs/checks — 팩 체크 업데이트
 
 > **API 레퍼런스 완결성**: 위 섹션들은 `server/app.js` (Phase 10G merge 시점) 가 mount 하는 모든 라우트를 열거한다. 새 라우트 추가 시 `app.js` 에 mount 하는 동시에 이 섹션에도 추가하지 않으면 이 파일이 서버와 조용히 drift 됨.
 
+`codexAdapter` 로 시작한 Codex 매니저 세션은
+`--dangerously-bypass-approvals-and-sandbox` 를 붙여 항상 실행되며, 이 동작을
+전환하는 환경변수는 없다. 매니저가 Palantir Console API 를 호출하려면 네트워크
+접근이 필요하고, `--full-auto` 샌드박스가 이를 차단해 오케스트레이션이
+불가능해지기 때문이다. Codex 작업 워커는 별도의 lifecycle worker 경로를
+사용하므로 승인·샌드박스 플래그가 편집 가능한 프로필 `args_template` 에
+의존한다. 기본 `exec {prompt}` 프로필은 bypass 플래그를 추가하지 않는다.
+
 ## 환경변수
 
 | 변수 | 기본값 | 설명 |
@@ -530,7 +538,6 @@ PATCH  /api/runs/:id/skill-packs/checks — 팩 체크 업데이트
 | `HOST` | 자동 | 바인딩 주소 명시적 오버라이드. 토큰 없이 `0.0.0.0` 이면 경고 로그 |
 | `PALANTIR_ALLOWED_COMMANDS` | (없음) | 추가 허용 CLI 명령어 (쉼표 구분) |
 | `PALANTIR_DEFAULT_PM_ADAPTER` | `codex` | 인스턴스 CLI가 자동이고 프로젝트 preference도 없을 때 사용하는 전역 Operator 어댑터 fallback |
-| `PALANTIR_CODEX_MANAGER_BYPASS` | (미설정) | `1` 로 설정하면 Codex 매니저 턴이 `--dangerously-bypass-approvals-and-sandbox` 를 붙인다. 기본값은 sandbox 정책 유지 |
 | `ANTHROPIC_BASE_URL` / `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` | — | Claude Code 인증 (서버 시작 시 감지되면 `.claude-auth.json` 에 저장) |
 | `CODEX_API_KEY` / `OPENAI_API_KEY` | — | Codex 인증 (`~/.codex/auth.json` preflight 체크) |
 | `CODEX_BIN` | `codex` | Codex CLI 경로 |

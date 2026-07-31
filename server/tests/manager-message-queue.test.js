@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 const express = require('express');
 const request = require('supertest');
 
@@ -23,19 +24,28 @@ function createHarness(t, options = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-manager-queue-'));
   const handle = createDatabase(path.join(dir, 'test.db'));
   handle.migrate();
-  const eventBus = createEventBus();
+  const {
+    eventBus: providedEventBus,
+    withRunService = false,
+    ...queueOptions
+  } = options;
+  const eventBus = providedEventBus || createEventBus();
+  const runService = withRunService ? createRunService(handle.db, eventBus) : null;
   const service = createManagerMessageQueueService({
     db: handle.db,
     eventBus,
+    ...(runService ? { runService } : {}),
     tickMs: 100000,
-    ...options,
+    ...queueOptions,
   });
   t.after(() => {
     service.stop();
     try { handle.close(); } catch { /* already closed */ }
     fs.rmSync(dir, { recursive: true, force: true });
   });
-  return { dir, handle, db: handle.db, eventBus, service };
+  return {
+    dir, handle, db: handle.db, eventBus, runService, service,
+  };
 }
 
 test('durable queue preserves per-conversation FIFO and single-flight under concurrent sends', async (t) => {
@@ -168,6 +178,1252 @@ test('a terminal event racing dispatcher return still persists the dispatch-deri
     memoryOwnerType: 'workspace',
     memoryOwnerId: 'proj_fast',
   });
+});
+
+test('a persisted terminal event closes the current owner lane after its live callback is lost', async (t) => {
+  const baseEventBus = createEventBus();
+  let droppedCallbacks = 0;
+  const eventBus = {
+    ...baseEventBus,
+    subscribe(callback) {
+      return baseEventBus.subscribe((event) => {
+        if (
+          droppedCallbacks === 0
+          && event?.channel === 'run:event'
+          && event.data?.eventType === 'mgr.turn_completed'
+        ) {
+          droppedCallbacks += 1;
+          throw new Error('simulated lost queue completion callback');
+        }
+        callback(event);
+      });
+    },
+  };
+  const h = createHarness(t, { eventBus, withRunService: true });
+  const run = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: 'operator:oi_lost_completion',
+    prompt: 'operator',
+  });
+  h.runService.updateRunStatus(run.id, 'running', { force: true });
+  const dispatched = [];
+  h.service.setDispatcher((_conversationId, _payload, invocationId) => {
+    dispatched.push(invocationId);
+    return { status: 'sent', target: { kind: 'pm', runId: run.id } };
+  });
+  h.service.start();
+
+  const first = await h.service.enqueue(
+    'operator:oi_lost_completion',
+    { text: 'first scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_lost_completion',
+      adapterInvocationId: 'oinv_lost_completion',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(first.message.status, 'processing');
+
+  h.runService.addRunEvent(run.id, 'mgr.turn_completed', JSON.stringify({
+    summaryText: 'turn completed',
+    data: { terminal: true, invocationId: 'oinv_lost_completion' },
+  }));
+  assert.equal(droppedCallbacks, 1, 'the live completion callback must actually be lost');
+  assert.equal(
+    h.service.getMessage(first.message.id).status,
+    'processing',
+    'the live path must not have completed the row',
+  );
+
+  await h.service.tick();
+  assert.equal(h.service.getMessage(first.message.id).status, 'delivered');
+
+  const next = await h.service.enqueue(
+    'operator:oi_lost_completion',
+    { text: 'next scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_after_lost_completion',
+      adapterInvocationId: 'oinv_after_lost_completion',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(next.status, 'sent');
+  assert.equal(next.message.status, 'processing');
+  assert.deepEqual(dispatched, [
+    'oinv_lost_completion',
+    'oinv_after_lost_completion',
+  ]);
+});
+
+test('a long run does not parse unrelated terminal history during a queue tick', async (t) => {
+  const h = createHarness(t, { withRunService: true });
+  const run = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: 'operator:oi_long_run',
+    prompt: 'operator',
+  });
+  h.runService.updateRunStatus(run.id, 'running', { force: true });
+  h.service.setDispatcher(() => ({
+    status: 'sent',
+    target: { kind: 'pm', runId: run.id },
+  }));
+
+  const current = await h.service.enqueue(
+    'operator:oi_long_run',
+    { text: 'current scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_current_long_run',
+      adapterInvocationId: 'oinv_current_long_run',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(current.message.status, 'processing');
+
+  const historyCount = Number(process.env.PALANTIR_QUEUE_HISTORY_EVENT_COUNT || 20_000);
+  const historyPayload = JSON.stringify({
+    historyMarker: 'queue-unrelated-terminal-history',
+    data: { invocationId: 'oinv_historical', terminal: true },
+  });
+  const insertEvent = h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, 'mgr.turn_completed', ?)
+  `);
+  h.db.transaction(() => {
+    for (let index = 0; index < historyCount; index += 1) {
+      insertEvent.run(run.id, historyPayload);
+    }
+  })();
+
+  const originalParse = JSON.parse;
+  let historicalPayloadParses = 0;
+  JSON.parse = function countedParse(value, ...args) {
+    if (value === historyPayload) historicalPayloadParses += 1;
+    return originalParse.call(this, value, ...args);
+  };
+  const rssBefore = process.memoryUsage().rss;
+  const startedAt = performance.now();
+  try {
+    await h.service.tick();
+  } finally {
+    JSON.parse = originalParse;
+  }
+  const elapsedMs = performance.now() - startedAt;
+  const rssDeltaMb = (process.memoryUsage().rss - rssBefore) / (1024 * 1024);
+  t.diagnostic(
+    `history=${historyCount} parsed=${historicalPayloadParses} `
+      + `elapsed_ms=${elapsedMs.toFixed(1)} rss_delta_mb=${rssDeltaMb.toFixed(1)}`,
+  );
+
+  assert.equal(
+    historicalPayloadParses,
+    0,
+    'unrelated persisted events must not cross the SQL/JavaScript boundary',
+  );
+  assert.equal(h.service.getMessage(current.message.id).status, 'processing');
+
+  insertEvent.run(run.id, JSON.stringify({
+    data: { invocationId: 'oinv_current_long_run', terminal: true },
+  }));
+  await h.service.tick();
+  assert.equal(
+    h.service.getMessage(current.message.id).status,
+    'delivered',
+    'a normally correlated terminal event must still settle the lane',
+  );
+});
+
+test('current-owner reconciliation stays within a 128 MB heap with 90 large payloads', () => {
+  const fixture = path.join(
+    __dirname,
+    'fixtures',
+    'manager-queue-reconcile-memory.js',
+  );
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-queue-memory-parent-'));
+  try {
+    const child = spawnSync(
+      process.execPath,
+      ['--max-old-space-size=128', fixture],
+      {
+        encoding: 'utf8',
+        timeout: 60_000,
+        env: {
+          ...process.env,
+          PALANTIR_SKIP_HOST_CREDENTIALS: '1',
+          PALANTIR_SKIP_DOTENV: '1',
+          PALANTIR_QUEUE_MEMORY_DIR: fixtureDir,
+        },
+      },
+    );
+
+    assert.equal(
+      child.status,
+      0,
+      [
+        `signal=${child.signal || 'none'} error=${child.error?.message || 'none'}`,
+        child.stdout,
+        child.stderr,
+      ].join('\n'),
+    );
+    assert.match(child.stdout, /reconciled=0 rows=90 payload_bytes=1843232/);
+  } finally {
+    fs.rmSync(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test('SQLite-rejected queue fallback parsing has the shared candidate bound', (t) => {
+  const fixture = path.join(
+    __dirname,
+    'fixtures',
+    'manager-queue-sqlite-rejected-history.js',
+  );
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-queue-rejected-parent-'));
+  try {
+    const child = spawnSync(
+      process.execPath,
+      ['--max-old-space-size=128', fixture],
+      {
+        encoding: 'utf8',
+        timeout: 60_000,
+        env: {
+          ...process.env,
+          PALANTIR_SKIP_HOST_CREDENTIALS: '1',
+          PALANTIR_SKIP_DOTENV: '1',
+          PALANTIR_QUEUE_REJECTED_HISTORY_DIR: fixtureDir,
+        },
+      },
+    );
+
+    assert.equal(
+      child.status,
+      0,
+      [
+        `signal=${child.signal || 'none'} error=${child.error?.message || 'none'}`,
+        child.stdout,
+        child.stderr,
+      ].join('\n'),
+    );
+    assert.match(
+      child.stdout,
+      /history=12 payload_bytes=2000069 parsed=0 reconciled=0 .*heap_peak_mb=\d+\.\d .*\nbounded_history=8 bounded_parsed=8 bounded_reconciled=0\ntarget_reconciled=1 status=delivered/s,
+    );
+    t.diagnostic(child.stdout.trim());
+  } finally {
+    fs.rmSync(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test('a non-coercible failure summary settles from persistence after the live callback throws', async (t) => {
+  const baseEventBus = createEventBus();
+  let droppedCallbacks = 0;
+  const eventBus = {
+    ...baseEventBus,
+    subscribe(callback) {
+      return baseEventBus.subscribe((event) => {
+        if (
+          droppedCallbacks === 0
+          && event?.channel === 'run:event'
+          && event.data?.eventType === 'mgr.turn_failed'
+        ) {
+          droppedCallbacks += 1;
+          throw new Error('simulated throwing queue completion callback');
+        }
+        callback(event);
+      });
+    },
+  };
+  const h = createHarness(t, { eventBus, withRunService: true });
+  const run = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: 'operator:oi_structured_failure',
+    prompt: 'operator',
+  });
+  h.runService.updateRunStatus(run.id, 'running', { force: true });
+  const dispatched = [];
+  h.service.setDispatcher((_conversationId, _payload, invocationId) => {
+    dispatched.push(invocationId);
+    return { status: 'sent', target: { kind: 'pm', runId: run.id } };
+  });
+  h.service.start();
+
+  const first = await h.service.enqueue(
+    'operator:oi_structured_failure',
+    { text: 'first scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_bad_summary',
+      adapterInvocationId: 'oinv_bad_summary',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(first.message.status, 'processing');
+
+  h.runService.addRunEvent(run.id, 'mgr.turn_failed', JSON.stringify({
+    summaryText: { toString: null, valueOf: null },
+    data: { invocationId: 'oinv_bad_summary', terminal: true },
+  }));
+  assert.equal(droppedCallbacks, 1, 'the live failure callback must actually throw');
+  assert.equal(h.service.getMessage(first.message.id).status, 'processing');
+
+  await assert.doesNotReject(() => h.service.tick());
+  const failed = h.service.getMessage(first.message.id);
+  assert.equal(failed.status, 'failed');
+  assert.equal(failed.last_error, '{"toString":null,"valueOf":null}');
+  await h.service.awaitDrain();
+
+  const next = await h.service.enqueue(
+    'operator:oi_structured_failure',
+    { text: 'next scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_after_bad_summary',
+      adapterInvocationId: 'oinv_after_bad_summary',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(next.status, 'sent');
+  assert.equal(next.message.status, 'processing');
+  assert.deepEqual(dispatched, ['oinv_bad_summary', 'oinv_after_bad_summary']);
+});
+
+test('a non-coercible failure summary settles through the live queue callback', async (t) => {
+  const h = createHarness(t, { withRunService: true });
+  const run = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: 'operator:oi_live_bad_summary',
+    prompt: 'operator',
+  });
+  h.runService.updateRunStatus(run.id, 'running', { force: true });
+  const dispatched = [];
+  h.service.setDispatcher((_conversationId, _payload, invocationId) => {
+    dispatched.push(invocationId);
+    return { status: 'sent', target: { kind: 'pm', runId: run.id } };
+  });
+  h.service.start();
+
+  const first = await h.service.enqueue(
+    'operator:oi_live_bad_summary',
+    { text: 'first scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_live_bad_summary',
+      adapterInvocationId: 'oinv_live_bad_summary',
+      requireImmediate: true,
+    },
+  );
+
+  assert.doesNotThrow(() => h.runService.addRunEvent(
+    run.id,
+    'mgr.turn_failed',
+    JSON.stringify({
+      summaryText: { toString: null, valueOf: null },
+      data: { invocationId: 'oinv_live_bad_summary', terminal: true },
+    }),
+  ));
+  const failed = h.service.getMessage(first.message.id);
+  assert.equal(failed.status, 'failed');
+  assert.equal(failed.last_error, '{"toString":null,"valueOf":null}');
+  await h.service.awaitDrain();
+
+  const next = await h.service.enqueue(
+    'operator:oi_live_bad_summary',
+    { text: 'next scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_after_live_bad_summary',
+      adapterInvocationId: 'oinv_after_live_bad_summary',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(next.status, 'sent');
+  assert.deepEqual(dispatched, [
+    'oinv_live_bad_summary',
+    'oinv_after_live_bad_summary',
+  ]);
+});
+
+test('a persisted terminal settlement error does not escape the queue tick', async (t) => {
+  const h = createHarness(t, { withRunService: true });
+  const run = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: 'operator:oi_settlement_error',
+    prompt: 'operator',
+  });
+  h.runService.updateRunStatus(run.id, 'running', { force: true });
+  h.service.setDispatcher(() => ({
+    status: 'sent',
+    target: { kind: 'pm', runId: run.id },
+  }));
+
+  const first = await h.service.enqueue(
+    'operator:oi_settlement_error',
+    { text: 'scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_settlement_error',
+      adapterInvocationId: 'oinv_settlement_error',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(first.message.status, 'processing');
+  h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, 'mgr.turn_completed', ?)
+  `).run(run.id, JSON.stringify({
+    data: { invocationId: 'oinv_settlement_error', terminal: true },
+  }));
+  let settlementAttempts = 0;
+  h.db.function('record_queue_terminal_settlement', () => {
+    settlementAttempts += 1;
+    return null;
+  });
+  h.db.exec(`
+    CREATE TRIGGER reject_queue_terminal_settlement
+    BEFORE UPDATE ON manager_message_queue
+    WHEN OLD.status = 'processing' AND NEW.status = 'delivered'
+    BEGIN
+      SELECT record_queue_terminal_settlement();
+      SELECT RAISE(ABORT, 'simulated terminal settlement failure');
+    END
+  `);
+
+  await assert.doesNotReject(() => h.service.tick());
+  assert.equal(
+    settlementAttempts,
+    1,
+    'tick must run persisted reconciliation and reach the rejecting trigger',
+  );
+  assert.equal(h.service.getMessage(first.message.id).status, 'processing');
+});
+
+test('a stale chat settlement error cannot be mistaken for missing terminal evidence and replayed', async (t) => {
+  const h = createHarness(t, { withRunService: true });
+  const run = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'top',
+    conversation_id: 'top',
+    prompt: 'top',
+  });
+  h.runService.updateRunStatus(run.id, 'running', { force: true });
+  let dispatches = 0;
+  const dispatcher = () => {
+    dispatches += 1;
+    return { status: 'sent', target: { kind: 'top', runId: run.id } };
+  };
+  h.service.setDispatcher(dispatcher);
+
+  const original = await h.service.enqueue(
+    'top',
+    { text: 'must not replay after terminal settlement failure' },
+    { idempotencyKey: 'stale-settlement-error' },
+  );
+  assert.equal(original.message.status, 'processing');
+  assert.equal(dispatches, 1);
+  h.service.stop();
+
+  h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, 'mgr.turn_completed', ?)
+  `).run(run.id, JSON.stringify({
+    data: { invocationId: original.message.id, terminal: true },
+  }));
+  h.db.prepare(`
+    UPDATE manager_message_queue
+    SET lease_expires_at = 0
+    WHERE id = ?
+  `).run(original.message.id);
+  h.db.exec(`
+    CREATE TRIGGER reject_stale_queue_terminal_settlement
+    BEFORE UPDATE ON manager_message_queue
+    WHEN OLD.status = 'processing' AND NEW.status = 'delivered'
+    BEGIN
+      SELECT RAISE(ABORT, 'simulated stale terminal settlement failure');
+    END
+  `);
+
+  const restarted = createManagerMessageQueueService({
+    db: h.db,
+    eventBus: h.eventBus,
+    tickMs: 100000,
+  });
+  restarted.setDispatcher(dispatcher);
+  t.after(() => restarted.stop());
+
+  assert.throws(
+    () => restarted.reconcileStaleClaims(),
+    /simulated stale terminal settlement failure/,
+  );
+  await restarted.drainConversation('top');
+  assert.equal(dispatches, 1, 'the durable terminal turn must not be dispatched twice');
+  assert.equal(restarted.getMessage(original.message.id).status, 'processing');
+});
+
+test('same-invocation non-terminal failures cannot exhaust persisted terminal reconciliation', async (t) => {
+  const h = createHarness(t, { withRunService: true });
+  const run = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: 'operator:oi_candidate_exhaustion',
+    prompt: 'operator',
+  });
+  h.runService.updateRunStatus(run.id, 'running', { force: true });
+  const dispatched = [];
+  h.service.setDispatcher((_conversationId, _payload, invocationId) => {
+    dispatched.push(invocationId);
+    return { status: 'sent', target: { kind: 'pm', runId: run.id } };
+  });
+  h.service.start();
+
+  const first = await h.service.enqueue(
+    'operator:oi_candidate_exhaustion',
+    { text: 'scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_target',
+      adapterInvocationId: 'oinv_target',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(first.message.status, 'processing');
+
+  const insertEvent = h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, ?, ?)
+  `);
+  insertEvent.run(run.id, 'mgr.turn_completed', JSON.stringify({
+    data: { invocationId: 'oinv_target', terminal: true },
+  }));
+  for (let index = 0; index < 255; index += 1) {
+    insertEvent.run(run.id, 'mgr.turn_failed', JSON.stringify({
+      data: {
+        kind: 'codex_error',
+        invocationId: 'oinv_target',
+        terminal: false,
+      },
+    }));
+  }
+
+  assert.equal(h.service.reconcilePersistedTerminalEvents(), 1);
+  assert.equal(h.service.getMessage(first.message.id).status, 'delivered');
+  await h.service.awaitDrain();
+
+  const next = await h.service.enqueue(
+    'operator:oi_candidate_exhaustion',
+    { text: 'next scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_after_exhaustion',
+      adapterInvocationId: 'oinv_after_exhaustion',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(next.status, 'sent');
+  assert.deepEqual(dispatched, ['oinv_target', 'oinv_after_exhaustion']);
+});
+
+test('SQLite-rejected fallback preserves first-terminal-event-wins across bounded pages', async (t) => {
+  const h = createHarness(t, { withRunService: true });
+  const run = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: 'operator:oi_rejected_first_terminal',
+    prompt: 'operator',
+  });
+  h.runService.updateRunStatus(run.id, 'running', { force: true });
+  h.service.setDispatcher(() => ({
+    status: 'sent',
+    target: { kind: 'pm', runId: run.id },
+  }));
+
+  const first = await h.service.enqueue(
+    'operator:oi_rejected_first_terminal',
+    { text: 'oldest terminal must win', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_rejected_first_terminal',
+      adapterInvocationId: 'oinv_rejected_first_terminal',
+      requireImmediate: true,
+    },
+  );
+  const opening = '['.repeat(1000);
+  const closing = ']'.repeat(1000);
+  const insertEvent = h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, ?, ?)
+  `);
+  for (let index = 0; index < 8; index += 1) {
+    insertEvent.run(
+      run.id,
+      'mgr.turn_failed',
+      `{"extra":${opening}0${closing},`
+        + '"data":{"invocationId":"oinv_rejected_first_terminal","terminal":false}}',
+    );
+  }
+  insertEvent.run(
+    run.id,
+    'mgr.turn_completed',
+    `{"extra":${opening}0${closing},`
+      + '"data":{"invocationId":"oinv_rejected_first_terminal","terminal":true}}',
+  );
+  insertEvent.run(run.id, 'mgr.turn_failed', JSON.stringify({
+    summaryText: 'later failure',
+    data: { invocationId: 'oinv_rejected_first_terminal', terminal: true },
+  }));
+
+  assert.equal(h.service.reconcilePersistedTerminalEvents(), 0);
+  assert.equal(h.service.getMessage(first.message.id).status, 'processing');
+  assert.equal(h.service.reconcilePersistedTerminalEvents(), 1);
+  const delivered = h.service.getMessage(first.message.id);
+  assert.equal(delivered.status, 'delivered');
+  assert.equal(delivered.terminal_reason, 'turn_completed');
+  assert.equal(delivered.last_error, null);
+});
+
+test('JSON.parse-valid deeply nested completion closes the current owner lane', async (t) => {
+  const h = createHarness(t, { withRunService: true });
+  const run = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: 'operator:oi_deep_terminal',
+    prompt: 'operator',
+  });
+  h.runService.updateRunStatus(run.id, 'running', { force: true });
+  const dispatched = [];
+  h.service.setDispatcher((_conversationId, _payload, invocationId) => {
+    dispatched.push(invocationId);
+    return { status: 'sent', target: { kind: 'pm', runId: run.id } };
+  });
+
+  const first = await h.service.enqueue(
+    'operator:oi_deep_terminal',
+    { text: 'deeply nested completion', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_deep_terminal',
+      adapterInvocationId: 'oinv_deep_terminal',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(first.message.status, 'processing');
+
+  const payload = `{"extra":${'['.repeat(1000)}0${']'.repeat(1000)},`
+    + '"data":{"invocationId":"oinv_deep_terminal","terminal":true}}';
+  assert.equal(JSON.parse(payload).data.terminal, true);
+  assert.equal(h.db.prepare('SELECT json_valid(?) AS valid').get(payload).valid, 0);
+  h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, 'mgr.turn_completed', ?)
+  `).run(run.id, payload);
+
+  assert.equal(h.service.reconcilePersistedTerminalEvents(), 1);
+  assert.equal(h.service.getMessage(first.message.id).status, 'delivered');
+  await h.service.awaitDrain();
+
+  const next = await h.service.enqueue(
+    'operator:oi_deep_terminal',
+    { text: 'next scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_after_deep_terminal',
+      adapterInvocationId: 'oinv_after_deep_terminal',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(next.status, 'sent');
+  assert.equal(next.message.status, 'processing');
+  assert.deepEqual(dispatched, [
+    'oinv_deep_terminal',
+    'oinv_after_deep_terminal',
+  ]);
+});
+
+test('a persisted numeric terminal flag cannot close the current owner lane', async (t) => {
+  const h = createHarness(t, { withRunService: true });
+  const run = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: 'operator:oi_numeric_terminal',
+    prompt: 'operator',
+  });
+  h.runService.updateRunStatus(run.id, 'running', { force: true });
+  const dispatched = [];
+  h.service.setDispatcher((_conversationId, _payload, invocationId) => {
+    dispatched.push(invocationId);
+    return { status: 'sent', target: { kind: 'pm', runId: run.id } };
+  });
+  h.service.start();
+
+  const first = await h.service.enqueue(
+    'operator:oi_numeric_terminal',
+    { text: 'first scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_first',
+      adapterInvocationId: 'oinv_first',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(first.message.status, 'processing');
+
+  h.runService.addRunEvent(run.id, 'mgr.turn_failed', JSON.stringify({
+    data: { invocationId: 'oinv_first', terminal: 1 },
+  }));
+  assert.equal(
+    h.service.getMessage(first.message.id).status,
+    'processing',
+    'the live path must reject numeric 1 as a terminal flag',
+  );
+
+  await h.service.tick();
+  assert.equal(h.db.prepare('SELECT status FROM runs WHERE id = ?').get(run.id).status, 'running');
+  assert.equal(h.service.getMessage(first.message.id).status, 'processing');
+  assert.equal(h.service.getMessage(first.message.id).terminal_reason, null);
+
+  await assert.rejects(
+    h.service.enqueue(
+      'operator:oi_numeric_terminal',
+      { text: 'second scheduled turn', source: 'scheduled' },
+      {
+        idempotencyKey: 'invocation:oinv_second',
+        adapterInvocationId: 'oinv_second',
+        requireImmediate: true,
+      },
+    ),
+    err => err.code === 'OPERATOR_BUSY' && err.retryable === true,
+  );
+  assert.deepEqual(dispatched, ['oinv_first']);
+});
+
+test('persisted reconciliation follows JSON.parse for duplicate correlation keys', async (t) => {
+  const cases = [
+    {
+      name: 'duplicate top-level data keys',
+      suffix: 'duplicate_data',
+      payload(invocationId) {
+        return `{"data":{"invocationId":"wrong","terminal":false},"data":{"invocationId":"${invocationId}","terminal":true}}`;
+      },
+    },
+    {
+      name: 'duplicate invocationId keys',
+      suffix: 'duplicate_invocation',
+      payload(invocationId) {
+        return `{"data":{"invocationId":"wrong","invocationId":"${invocationId}","terminal":true}}`;
+      },
+    },
+  ];
+
+  for (const regressionCase of cases) {
+    await t.test(regressionCase.name, async (t) => {
+      const baseEventBus = createEventBus();
+      let droppedCallbacks = 0;
+      const eventBus = {
+        ...baseEventBus,
+        subscribe(callback) {
+          return baseEventBus.subscribe((event) => {
+            if (
+              droppedCallbacks === 0
+              && event?.channel === 'run:event'
+              && event.data?.eventType === 'mgr.turn_completed'
+            ) {
+              droppedCallbacks += 1;
+              return;
+            }
+            callback(event);
+          });
+        },
+      };
+      const h = createHarness(t, { eventBus, withRunService: true });
+      const invocationId = `oinv_${regressionCase.suffix}`;
+      const conversationId = `operator:oi_${regressionCase.suffix}`;
+      const run = h.runService.createRun({
+        is_manager: true,
+        manager_layer: 'operator',
+        conversation_id: conversationId,
+        prompt: 'operator',
+      });
+      h.runService.updateRunStatus(run.id, 'running', { force: true });
+      const dispatched = [];
+      h.service.setDispatcher((_conversationId, _payload, adapterInvocationId) => {
+        dispatched.push(adapterInvocationId);
+        return { status: 'sent', target: { kind: 'pm', runId: run.id } };
+      });
+      h.service.start();
+
+      const first = await h.service.enqueue(
+        conversationId,
+        { text: 'first scheduled turn', source: 'scheduled' },
+        {
+          idempotencyKey: `invocation:${invocationId}`,
+          adapterInvocationId: invocationId,
+          requireImmediate: true,
+        },
+      );
+      assert.equal(first.message.status, 'processing');
+
+      h.runService.addRunEvent(
+        run.id,
+        'mgr.turn_completed',
+        regressionCase.payload(invocationId),
+      );
+      assert.equal(droppedCallbacks, 1, 'the live completion callback must actually be lost');
+      assert.equal(
+        h.service.getMessage(first.message.id).status,
+        'processing',
+        'the persisted reconciler must be responsible for settlement',
+      );
+
+      await h.service.tick();
+      assert.equal(h.service.getMessage(first.message.id).status, 'delivered');
+      await h.service.awaitDrain();
+
+      const nextInvocationId = `${invocationId}_next`;
+      const next = await h.service.enqueue(
+        conversationId,
+        { text: 'next scheduled turn', source: 'scheduled' },
+        {
+          idempotencyKey: `invocation:${nextInvocationId}`,
+          adapterInvocationId: nextInvocationId,
+          requireImmediate: true,
+        },
+      );
+      assert.equal(next.status, 'sent');
+      assert.equal(next.message.status, 'processing');
+      assert.deepEqual(dispatched, [invocationId, nextInvocationId]);
+    });
+  }
+});
+
+test('persisted duplicate terminal keys cannot disagree with the live JSON parser', async (t) => {
+  const h = createHarness(t, { withRunService: true });
+  const run = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: 'operator:oi_duplicate_terminal',
+    prompt: 'operator',
+  });
+  h.runService.updateRunStatus(run.id, 'running', { force: true });
+  const dispatched = [];
+  h.service.setDispatcher((_conversationId, _payload, invocationId) => {
+    dispatched.push(invocationId);
+    return { status: 'sent', target: { kind: 'pm', runId: run.id } };
+  });
+  h.service.start();
+
+  const first = await h.service.enqueue(
+    'operator:oi_duplicate_terminal',
+    { text: 'first scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_first',
+      adapterInvocationId: 'oinv_first',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(first.message.status, 'processing');
+
+  h.runService.addRunEvent(
+    run.id,
+    'mgr.turn_failed',
+    '{"data":{"invocationId":"oinv_first","terminal":true,"terminal":false}}',
+  );
+  assert.equal(
+    h.service.getMessage(first.message.id).status,
+    'processing',
+    'the live path must use JSON.parse and keep the last terminal value',
+  );
+
+  await h.service.tick();
+  assert.equal(h.db.prepare('SELECT status FROM runs WHERE id = ?').get(run.id).status, 'running');
+  assert.equal(h.service.getMessage(first.message.id).status, 'processing');
+  assert.equal(h.service.getMessage(first.message.id).terminal_reason, null);
+
+  await assert.rejects(
+    h.service.enqueue(
+      'operator:oi_duplicate_terminal',
+      { text: 'second scheduled turn', source: 'scheduled' },
+      {
+        idempotencyKey: 'invocation:oinv_second',
+        adapterInvocationId: 'oinv_second',
+        requireImmediate: true,
+      },
+    ),
+    err => err.code === 'OPERATOR_BUSY' && err.retryable === true,
+  );
+  assert.deepEqual(dispatched, ['oinv_first']);
+});
+
+test('eight newer duplicate-terminal candidates cannot hide an earlier terminal event', async (t) => {
+  const h = createHarness(t, { withRunService: true });
+  const run = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: 'operator:oi_shadow',
+    prompt: 'operator',
+  });
+  h.runService.updateRunStatus(run.id, 'running', { force: true });
+  const dispatched = [];
+  h.service.setDispatcher((_conversationId, _payload, invocationId) => {
+    dispatched.push(invocationId);
+    return { status: 'sent', target: { kind: 'pm', runId: run.id } };
+  });
+  h.service.start();
+
+  const first = await h.service.enqueue(
+    'operator:oi_shadow',
+    { text: 'first scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_shadow',
+      adapterInvocationId: 'oinv_shadow',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(first.message.status, 'processing');
+
+  const insertEvent = h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, ?, ?)
+  `);
+  insertEvent.run(
+    run.id,
+    'mgr.turn_completed',
+    '{"data":{"invocationId":"oinv_shadow","terminal":true}}',
+  );
+  for (let index = 0; index < 8; index += 1) {
+    insertEvent.run(
+      run.id,
+      'mgr.turn_failed',
+      '{"data":{"invocationId":"oinv_shadow","terminal":true,"terminal":false}}',
+    );
+  }
+
+  await h.service.tick();
+  assert.equal(h.db.prepare('SELECT status FROM runs WHERE id = ?').get(run.id).status, 'running');
+  assert.equal(h.service.getMessage(first.message.id).status, 'delivered');
+  await h.service.awaitDrain();
+
+  const next = await h.service.enqueue(
+    'operator:oi_shadow',
+    { text: 'second scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_after_shadow',
+      adapterInvocationId: 'oinv_after_shadow',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(next.status, 'sent');
+  assert.equal(next.message.status, 'processing');
+  assert.deepEqual(dispatched, ['oinv_shadow', 'oinv_after_shadow']);
+});
+
+test('eight earlier duplicate-terminal candidates cannot hide a later terminal event', async (t) => {
+  const h = createHarness(t, { withRunService: true });
+  const run = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: 'operator:oi_earlier_shadow',
+    prompt: 'operator',
+  });
+  h.runService.updateRunStatus(run.id, 'running', { force: true });
+  const dispatched = [];
+  h.service.setDispatcher((_conversationId, _payload, invocationId) => {
+    dispatched.push(invocationId);
+    return { status: 'sent', target: { kind: 'pm', runId: run.id } };
+  });
+  h.service.start();
+
+  const first = await h.service.enqueue(
+    'operator:oi_earlier_shadow',
+    { text: 'first scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_earlier_shadow',
+      adapterInvocationId: 'oinv_earlier_shadow',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(first.message.status, 'processing');
+
+  const insertEvent = h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, ?, ?)
+  `);
+  for (let index = 0; index < 8; index += 1) {
+    insertEvent.run(
+      run.id,
+      'mgr.turn_failed',
+      '{"data":{"invocationId":"oinv_earlier_shadow","terminal":true,"terminal":false}}',
+    );
+  }
+  insertEvent.run(
+    run.id,
+    'mgr.turn_completed',
+    '{"data":{"invocationId":"oinv_earlier_shadow","terminal":true}}',
+  );
+
+  await h.service.tick();
+  assert.equal(h.db.prepare('SELECT status FROM runs WHERE id = ?').get(run.id).status, 'running');
+  assert.equal(h.service.getMessage(first.message.id).status, 'delivered');
+  await h.service.awaitDrain();
+
+  const next = await h.service.enqueue(
+    'operator:oi_earlier_shadow',
+    { text: 'second scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_after_earlier_shadow',
+      adapterInvocationId: 'oinv_after_earlier_shadow',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(next.status, 'sent');
+  assert.equal(next.message.status, 'processing');
+  assert.deepEqual(dispatched, ['oinv_earlier_shadow', 'oinv_after_earlier_shadow']);
+});
+
+test('persisted reconciliation preserves first-terminal-event-wins ordering', async (t) => {
+  const h = createHarness(t, { withRunService: true });
+  const run = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: 'operator:oi_first_terminal',
+    prompt: 'operator',
+  });
+  h.runService.updateRunStatus(run.id, 'running', { force: true });
+  const dispatched = [];
+  h.service.setDispatcher((_conversationId, _payload, invocationId) => {
+    dispatched.push(invocationId);
+    return { status: 'sent', target: { kind: 'pm', runId: run.id } };
+  });
+
+  const first = await h.service.enqueue(
+    'operator:oi_first_terminal',
+    { text: 'first scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_first_terminal',
+      adapterInvocationId: 'oinv_first_terminal',
+      requireImmediate: true,
+    },
+  );
+  const insertEvent = h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, ?, ?)
+  `);
+  insertEvent.run(run.id, 'mgr.turn_completed', JSON.stringify({
+    data: { invocationId: 'oinv_first_terminal', terminal: true },
+  }));
+  insertEvent.run(run.id, 'mgr.turn_failed', JSON.stringify({
+    summaryText: 'later failure must lose',
+    data: { invocationId: 'oinv_first_terminal', terminal: true },
+  }));
+
+  assert.equal(h.service.reconcilePersistedTerminalEvents(), 1);
+  const delivered = h.service.getMessage(first.message.id);
+  assert.equal(delivered.status, 'delivered');
+  assert.equal(delivered.terminal_reason, 'turn_completed');
+  assert.equal(delivered.last_error, null);
+  await h.service.awaitDrain();
+
+  const next = await h.service.enqueue(
+    'operator:oi_first_terminal',
+    { text: 'next scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_after_first_terminal',
+      adapterInvocationId: 'oinv_after_first_terminal',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(next.status, 'sent');
+  assert.deepEqual(dispatched, [
+    'oinv_first_terminal',
+    'oinv_after_first_terminal',
+  ]);
+});
+
+test('a malformed newer event cannot hide an earlier persisted terminal event', async (t) => {
+  const h = createHarness(t, { withRunService: true });
+  const run = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: 'operator:oi_malformed_terminal',
+    prompt: 'operator',
+  });
+  h.runService.updateRunStatus(run.id, 'running', { force: true });
+  const dispatched = [];
+  h.service.setDispatcher((_conversationId, _payload, invocationId) => {
+    dispatched.push(invocationId);
+    return { status: 'sent', target: { kind: 'pm', runId: run.id } };
+  });
+  h.service.start();
+
+  const first = await h.service.enqueue(
+    'operator:oi_malformed_terminal',
+    { text: 'first scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_first',
+      adapterInvocationId: 'oinv_first',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(first.message.status, 'processing');
+
+  const insertEvent = h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, ?, ?)
+  `);
+  insertEvent.run(run.id, 'mgr.turn_completed', JSON.stringify({
+    data: { invocationId: 'oinv_first', terminal: true },
+  }));
+  insertEvent.run(run.id, 'mgr.turn_failed', '{broken');
+
+  assert.equal(h.service.reconcilePersistedTerminalEvents(), 1);
+  assert.equal(h.service.getMessage(first.message.id).status, 'delivered');
+  await h.service.awaitDrain();
+
+  const next = await h.service.enqueue(
+    'operator:oi_malformed_terminal',
+    { text: 'second scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_second',
+      adapterInvocationId: 'oinv_second',
+      requireImmediate: true,
+    },
+  );
+  assert.equal(next.status, 'sent');
+  assert.equal(next.message.status, 'processing');
+  assert.deepEqual(dispatched, ['oinv_first', 'oinv_second']);
+});
+
+test('stale-claim reconciliation uses the same terminal candidate scan', async (t) => {
+  const h = createHarness(t);
+  const runService = createRunService(h.db, h.eventBus);
+  const run = runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: 'operator:oi_stale_terminal',
+    prompt: 'operator',
+  });
+  h.service.setDispatcher(() => ({
+    status: 'sent',
+    target: { kind: 'pm', runId: run.id },
+  }));
+  const original = await h.service.enqueue(
+    'operator:oi_stale_terminal',
+    { text: 'scheduled turn', source: 'scheduled' },
+    {
+      idempotencyKey: 'invocation:oinv_stale_terminal',
+      adapterInvocationId: 'oinv_stale_terminal',
+      requireImmediate: true,
+    },
+  );
+  h.service.stop();
+
+  const insertEvent = h.db.prepare(`
+    INSERT INTO run_events (run_id, event_type, payload_json)
+    VALUES (?, ?, ?)
+  `);
+  insertEvent.run(run.id, 'mgr.turn_completed', JSON.stringify({
+    data: { invocationId: 'oinv_stale_terminal', terminal: true },
+  }));
+  insertEvent.run(run.id, 'mgr.turn_failed', '{broken');
+  h.db.prepare('UPDATE manager_message_queue SET lease_expires_at = 0 WHERE id = ?')
+    .run(original.message.id);
+
+  const restarted = createManagerMessageQueueService({
+    db: h.db,
+    eventBus: h.eventBus,
+    tickMs: 100000,
+  });
+  t.after(() => restarted.stop());
+
+  assert.equal(restarted.reconcileStaleClaims(), 1);
+  const recovered = restarted.getMessage(original.message.id);
+  assert.equal(recovered.status, 'delivered');
+  assert.equal(recovered.terminal_reason, 'turn_completed');
+});
+
+test('the current owner reconciler ignores non-terminal failures and preserves chat replay', async (t) => {
+  const h = createHarness(t, { withRunService: true });
+  const run = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'top',
+    conversation_id: 'top',
+    prompt: 'top',
+  });
+  h.runService.updateRunStatus(run.id, 'running', { force: true });
+  h.service.setDispatcher(() => ({
+    status: 'sent',
+    target: { kind: 'top', runId: run.id },
+  }));
+  h.service.start();
+
+  const original = await h.service.enqueue(
+    'top',
+    { text: 'replay after restart' },
+    { idempotencyKey: 'own-non-terminal-key' },
+  );
+  h.runService.addRunEvent(run.id, 'mgr.turn_failed', JSON.stringify({
+    summaryText: 'transient codex error',
+    data: {
+      kind: 'codex_error',
+      message: 'boom',
+      terminal: false,
+      invocationId: original.message.id,
+    },
+  }));
+
+  await h.service.tick();
+  assert.equal(h.service.getMessage(original.message.id).status, 'processing');
+  assert.equal(h.service.getMessage(original.message.id).terminal_reason, null);
+
+  h.service.stop();
+  h.db.prepare('UPDATE manager_message_queue SET lease_expires_at = 0 WHERE id = ?')
+    .run(original.message.id);
+  const restarted = createManagerMessageQueueService({
+    db: h.db,
+    eventBus: h.eventBus,
+    tickMs: 100000,
+  });
+  t.after(() => restarted.stop());
+  const replayed = [];
+  restarted.setDispatcher((_conversationId, payload) => {
+    replayed.push(payload.text);
+    return { status: 'sent', target: { kind: 'top', runId: run.id } };
+  });
+
+  assert.equal(restarted.reconcileStaleClaims(), 1);
+  await restarted.drainConversation('top');
+  assert.equal(restarted.getMessage(original.message.id).status, 'processing');
+  assert.deepEqual(replayed, ['replay after restart']);
+});
+
+test('the current owner reconciler never terminalizes an old but live turn', async (t) => {
+  const h = createHarness(t, { withRunService: true, leaseMs: 1000 });
+  const run = h.runService.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    conversation_id: 'operator:oi_long_turn',
+    prompt: 'operator',
+  });
+  h.runService.updateRunStatus(run.id, 'running', { force: true });
+  h.service.setDispatcher(() => ({
+    status: 'sent',
+    target: { kind: 'pm', runId: run.id },
+  }));
+  h.service.start();
+
+  const active = await h.service.enqueue(
+    'operator:oi_long_turn',
+    { text: 'still working' },
+    { idempotencyKey: 'long-live-turn' },
+  );
+  h.db.prepare(`
+    UPDATE manager_message_queue
+       SET created_at = '2000-01-01 00:00:00',
+           updated_at = '2000-01-01 00:00:00',
+           lease_expires_at = 0
+     WHERE id = ?
+  `).run(active.message.id);
+
+  await h.service.tick();
+  const afterTick = h.db.prepare(
+    'SELECT status, claimed_by, lease_expires_at FROM manager_message_queue WHERE id = ?',
+  ).get(active.message.id);
+  assert.equal(afterTick.status, 'processing');
+  assert.equal(afterTick.claimed_by, h.service._ownerId);
+  assert.ok(
+    Number(afterTick.lease_expires_at) > Date.now(),
+    'a live turn keeps its lease regardless of absolute age',
+  );
 });
 
 test('queue cap applies backpressure and queued-only cancellation is CAS-safe', async (t) => {

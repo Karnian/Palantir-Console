@@ -382,6 +382,107 @@ test('resolveClaudeAuth flips canAuth true on keychain only and does not leak to
   assert.deepEqual(r.diagnostics, []);
 });
 
+test('resolveClaudeAuth materializes Keychain-only auth when --bare requires env auth', () => {
+  const { resolveClaudeAuth } = require('../services/authResolver');
+  const r = resolveClaudeAuth({
+    envAllowlist: ['NO_AUTH_ENV'],
+    bare: true,
+    hasKeychain: () => true,
+    readKeychainTokenSync: () => 'keychain-access-token',
+    hasCredentialsFile: () => false,
+  });
+
+  assert.equal(r.canAuth, true);
+  assert.equal(r.env.ANTHROPIC_API_KEY, 'keychain-access-token');
+  assert.ok(
+    r.sources.includes('materialize:bare:keychain:claudeAiOauth.accessToken'),
+  );
+  assert.deepEqual(r.diagnostics, []);
+});
+
+test('resolveClaudeAuth fails closed when --bare native auth cannot be materialized', () => {
+  const { resolveClaudeAuth } = require('../services/authResolver');
+  const r = resolveClaudeAuth({
+    envAllowlist: ['NO_AUTH_ENV'],
+    bare: true,
+    hasKeychain: () => true,
+    readKeychainTokenSync: () => null,
+    hasCredentialsFile: () => false,
+  });
+
+  assert.equal(r.canAuth, false);
+  assert.equal(r.env.ANTHROPIC_API_KEY, undefined);
+  assert.match(r.diagnostics[0], /--bare requires a materialized API credential/);
+});
+
+test('resolveClaudeAuth accepts explicit --settings as a --bare apiKeyHelper contract', () => {
+  const { resolveClaudeAuth } = require('../services/authResolver');
+  const r = resolveClaudeAuth({
+    envAllowlist: ['NO_AUTH_ENV'],
+    bare: true,
+    settings: '/pod/settings.json',
+    hasKeychain: () => false,
+    hasCredentialsFile: () => false,
+  });
+
+  assert.equal(r.canAuth, true);
+  assert.equal(r.env.ANTHROPIC_API_KEY, undefined);
+  assert.ok(r.sources.includes('cli:--settings'));
+  assert.deepEqual(r.diagnostics, []);
+});
+
+test('resolveClaudeAuth accepts only enabled, allowlisted cloud-provider auth modes under --bare', () => {
+  const {
+    CLAUDE_PROVIDER_AUTH_ENV_KEYS,
+    resolveClaudeAuth,
+  } = require('../services/authResolver');
+  const saved = Object.fromEntries(
+    CLAUDE_PROVIDER_AUTH_ENV_KEYS.map((key) => [key, process.env[key]]),
+  );
+
+  try {
+    for (const key of CLAUDE_PROVIDER_AUTH_ENV_KEYS) delete process.env[key];
+
+    for (const key of CLAUDE_PROVIDER_AUTH_ENV_KEYS) {
+      process.env[key] = '1';
+      const r = resolveClaudeAuth({
+        envAllowlist: [key],
+        bare: true,
+        hasKeychain: () => false,
+        hasCredentialsFile: () => false,
+      });
+      assert.equal(r.canAuth, true, key);
+      assert.equal(r.env[key], '1', key);
+      assert.ok(r.sources.includes(`env:${key}`), key);
+      assert.deepEqual(r.diagnostics, [], key);
+      delete process.env[key];
+    }
+
+    process.env.CLAUDE_CODE_USE_BEDROCK = '0';
+    const disabled = resolveClaudeAuth({
+      envAllowlist: ['CLAUDE_CODE_USE_BEDROCK'],
+      bare: true,
+      hasKeychain: () => false,
+      hasCredentialsFile: () => false,
+    });
+    assert.equal(disabled.canAuth, false, 'disabled provider mode stays fail-closed');
+
+    process.env.CLAUDE_CODE_USE_BEDROCK = '1';
+    const excluded = resolveClaudeAuth({
+      envAllowlist: ['AWS_REGION'],
+      bare: true,
+      hasKeychain: () => false,
+      hasCredentialsFile: () => false,
+    });
+    assert.equal(excluded.canAuth, false, 'excluded provider selector stays fail-closed');
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
 test('resolveCodexAuth honors env_allowlist diagnostics', async (t) => {
   // Deterministic: stub fs.existsSync so the test outcome doesn't depend on
   // whether the dev box happens to have ~/.codex/auth.json.
@@ -876,6 +977,9 @@ test('v3 Phase 0 behavior: claudeAdapter.startSession passes restricted Bash all
     prompt: 'test',
     cwd: process.cwd(),
     systemPrompt: 'test',
+    tools: ['Read', 'Grep'],
+    disallowedTools: ['Bash'],
+    maxBudgetUsd: 0.01,
   });
   assert.ok(capturedArgs, 'spawnAgent must be called');
   const tools = capturedArgs.allowedTools;
@@ -891,10 +995,13 @@ test('v3 Phase 0 behavior: claudeAdapter.startSession passes restricted Bash all
   assert.ok(tools.includes('Bash(jq:*)'), 'must include Bash(jq:*)');
   assert.ok(tools.includes('WebFetch'), 'must keep WebFetch for read-only HTTP fetches');
   assert.ok(tools.includes('Read'), 'must include Read');
+  assert.deepEqual(capturedArgs.tools, ['Read', 'Grep']);
+  assert.deepEqual(capturedArgs.disallowedTools, ['Bash']);
+  assert.equal(capturedArgs.maxBudgetUsd, 0.01);
   assert.equal(capturedArgs.isManager, true, 'must spawn as manager');
 });
 
-test('v3 Phase 0 behavior: codexAdapter role=manager spawn args OMIT sandbox bypass flag', () => {
+test('v3 Phase 0 behavior: codexAdapter role=manager spawn args INCLUDE sandbox bypass flag', () => {
   const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
 
   // Minimal fake child process — enough for spawnOneTurn to not throw

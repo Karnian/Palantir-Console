@@ -9,7 +9,12 @@ const {
   resolveActorTokenPolicy,
   buildWorkerProcessEnv,
   augmentProcessPath,
+  applyWorkerCredentialPolicy,
 } = require('./actorTokenPolicy');
+const {
+  classifyClaudeRateLimitEvents,
+  markWorkerLimitFailure,
+} = require('./workerLimit');
 
 function buildRemoteWorkerEnv(env) {
   const selected = {};
@@ -32,9 +37,10 @@ function buildRemoteWorkerEnv(env) {
  * for structured NDJSON stdin/stdout communication with Claude Code CLI.
  *
  * Auth: Local processes use the Console's resolved Claude credentials.
- * Detached remote workers preserve the pod login shell's HOME and therefore
- * use that pod's own `claude login` state; controller credential values are
- * never copied into their spec.
+ * Detached remote workers preserve the pod login shell's HOME and use that
+ * pod's own `claude login` state. For `--bare`, the remote executor materializes
+ * the pod token inside the clean child; controller credential values are never
+ * copied into their spec.
  */
 
 function createStreamJsonEngine({
@@ -151,8 +157,16 @@ function createStreamJsonEngine({
       args.push('--permission-mode', opts.permissionMode);
     }
 
+    if (opts.tools && opts.tools.length > 0) {
+      args.push('--tools', opts.tools.join(','));
+    }
+
     if (opts.allowedTools && opts.allowedTools.length > 0) {
       args.push('--allowedTools', opts.allowedTools.join(','));
+    }
+
+    if (opts.disallowedTools && opts.disallowedTools.length > 0) {
+      args.push('--disallowedTools', opts.disallowedTools.join(','));
     }
 
     if (opts.maxBudgetUsd) {
@@ -164,7 +178,40 @@ function createStreamJsonEngine({
     }
 
     if (opts.mcpConfig) {
-      args.push('--mcp-config', opts.mcpConfig);
+      if (Array.isArray(opts.mcpConfig)) {
+        const configs = opts.mcpConfig.filter(Boolean);
+        if (configs.length > 0) args.push('--mcp-config', ...configs);
+      } else {
+        args.push('--mcp-config', opts.mcpConfig);
+      }
+    }
+
+    if (opts.strictMcpConfig && !opts.isolated) {
+      args.push('--strict-mcp-config');
+    }
+
+    if (opts.safeMode) {
+      args.push('--safe-mode');
+    }
+
+    if (opts.bare && !opts.isolated) {
+      args.push('--bare');
+    }
+
+    if (opts.disableSlashCommands) {
+      args.push('--disable-slash-commands');
+    }
+
+    if (opts.noChrome) {
+      args.push('--no-chrome');
+    }
+
+    if (!opts.isolated && typeof opts.settingSources === 'string') {
+      args.push('--setting-sources', opts.settingSources);
+    }
+
+    if (!opts.isolated && opts.settings) {
+      args.push('--settings', opts.settings);
     }
 
     // Phase 10D Tier 2 (Claude isolated worker): drop host ~/.claude/
@@ -183,8 +230,15 @@ function createStreamJsonEngine({
           args.push('--plugin-dir', dir);
         }
       }
+      if (opts.settings && opts.settingsPath) {
+        throw new Error(
+          'isolated Claude worker cannot combine profile --settings with generated auth settings',
+        );
+      }
       if (opts.settingsPath) {
         args.push('--settings', opts.settingsPath);
+      } else if (opts.settings) {
+        args.push('--settings', opts.settings);
       }
     }
 
@@ -242,6 +296,7 @@ function createStreamJsonEngine({
       cwd: spec.cwd,
       env: buildRemoteWorkerEnv(spec.env),
       envAllowlist: Array.isArray(spec.envAllowlist) ? spec.envAllowlist : [],
+      claudeBareAuth: spec.bare === true && !spec.isolated,
       workerPath: workerPath || undefined,
     };
   }
@@ -250,9 +305,9 @@ function createStreamJsonEngine({
    * Spawn a Claude Code agent with stream-json protocol.
    */
   function spawnAgent(runId, { prompt, cwd, env, systemPrompt, permissionMode,
-    allowedTools, maxBudgetUsd, model, mcpConfig, addDir, isManager, maxTurns, resumeSessionId, onVendorEvent,
+    tools, allowedTools, disallowedTools, maxBudgetUsd, model, mcpConfig, strictMcpConfig, safeMode, bare, disableSlashCommands, noChrome, settingSources, settings, addDir, isManager, maxTurns, resumeSessionId, onVendorEvent,
     // Phase 10D Tier 2
-    isolated, pluginDirs, settingsPath, settingSources, onCleanup,
+    isolated, pluginDirs, settingsPath, onCleanup,
     executor, nodePrefix, envAllowlist, nodeId }) {
 
     const usingRemoteExecutor = !!executor;
@@ -263,9 +318,11 @@ function createStreamJsonEngine({
     }
     const claudeBin = usingRemoteExecutor ? 'claude' : resolveClaudeBin();
     const args = buildArgs({
-      prompt, systemPrompt, permissionMode, allowedTools,
-      maxBudgetUsd, model, mcpConfig, addDir, isManager, maxTurns, resumeSessionId,
-      isolated, pluginDirs, settingsPath, settingSources,
+      prompt, systemPrompt, permissionMode, tools, allowedTools, disallowedTools,
+      maxBudgetUsd, model, mcpConfig, strictMcpConfig, safeMode, bare,
+      disableSlashCommands, noChrome, settingSources, settings,
+      addDir, isManager, maxTurns, resumeSessionId,
+      isolated, pluginDirs, settingsPath,
     });
 
     const safeCwd = usingRemoteExecutor ? cwd : resolveSpawnCwd({ workspaceDir: cwd });
@@ -296,9 +353,16 @@ function createStreamJsonEngine({
       // PR4: if the caller passes a filtered env (manager adapter path), use it
       // as the authoritative base instead of process.env. Worker/legacy callers
       // receive only the safe process baseline plus their explicit allowlist.
-      const baseEnv = (isManager && env)
+      const profileEnv = (isManager && env)
         ? env
         : buildWorkerProcessEnv(process.env, env, actorTokens);
+      const baseEnv = isManager
+        ? profileEnv
+        : applyWorkerCredentialPolicy(profileEnv, {
+          workerToken: profileEnv.PALANTIR_WORKER_TOKEN,
+          apiBase: profileEnv.PALANTIR_API_BASE,
+          actorTokens,
+        });
       const extraPaths = ['/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin'];
       spawnEnv = augmentProcessPath(baseEnv, extraPaths);
     }
@@ -570,6 +634,7 @@ function createStreamJsonEngine({
           cwd: safeCwd,
           env: spawnEnv,
           pathPrefix: nodePrefix,
+          ...(bare && !isolated ? { claudeBareAuth: true } : {}),
           ...(Array.isArray(envAllowlist) ? { envAllowlist } : {}),
           ...(!isManager ? { worker: true } : {}),
         }))
@@ -712,8 +777,15 @@ function createStreamJsonEngine({
               const hitLimit = stopReason === 'max_turns' || stopReason === 'max_tokens';
 
               if (event.is_error) {
+                const limitFailure = classifyClaudeRateLimitEvents(proc.events);
+                if (limitFailure) {
+                  markWorkerLimitFailure(runService, runId, limitFailure);
+                }
                 proc.status = 'failed';
-                runService.updateRunStatus(runId, 'failed', { force: true });
+                runService.updateRunStatus(runId, 'failed', {
+                  force: true,
+                  reason: limitFailure ? 'claude-rate-limit' : null,
+                });
               } else if (hitLimit) {
                 // Agent was cut short by turn/token limit — not a real completion
                 proc.status = 'needs_input';

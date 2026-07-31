@@ -4,7 +4,11 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createPreactEnv, flushEffects } = require('./helpers/jsdom-preact');
 
-async function waitFor(assertion, timeoutMs = 1000) {
+// 5s rather than 1s: `node --test` runs test FILES in parallel, so a loaded
+// machine can push a Preact effect flush past a 1s budget and fail a test that
+// is not actually broken. A satisfied assertion returns immediately, so the
+// higher ceiling only costs wall-clock on a genuine failure.
+async function waitFor(assertion, timeoutMs = 5000) {
   const deadline = Date.now() + timeoutMs;
   let lastErr;
   while (Date.now() < deadline) {
@@ -146,6 +150,48 @@ test('TaskDetailPanel renders queue reason chips only for matching non-null queu
   await waitFor(() => assert.equal(root.querySelectorAll('[data-role="queue-reason-chip"]').length, 1));
   assert.match(root.textContent, /노드 슬롯 대기/);
   assert.equal(root.querySelectorAll('[data-role="node-badge"]').length, 2);
+});
+
+test('TaskDetailPanel distinguishes idle-timeout completion from normal completion', async (t) => {
+  const env = createPreactEnv();
+  t.after(env.cleanup);
+  installCommonStubs(env, async () => ({ nodes: [], queued: [] }));
+  env.loadComponent('TaskModals');
+
+  const root = renderComponent(env, env.context.TaskDetailPanel, {
+    task,
+    onClose: () => {},
+    projects: [],
+    agents: [],
+    runs: [
+      {
+        id: 'normal-completion',
+        task_id: 'task-1',
+        status: 'completed',
+        terminal_reason: null,
+        agent_name: 'Normal Agent',
+        created_at: '2026-07-05T00:00:00.000Z',
+      },
+      {
+        id: 'timeout-completion',
+        task_id: 'task-1',
+        status: 'completed',
+        terminal_reason: 'idle_timeout',
+        agent_name: 'Timeout Agent',
+        created_at: '2026-07-05T00:01:00.000Z',
+      },
+    ],
+    onOpenRun: () => {},
+    onExecute: () => {},
+    reloadTasks: () => {},
+  });
+
+  await flushEffects();
+  const rows = Array.from(root.querySelectorAll('.task-detail-run-item'));
+  const timeoutRow = rows.find(row => row.textContent.includes('Timeout Agent'));
+  const normalRow = rows.find(row => row.textContent.includes('Normal Agent'));
+  assert.match(timeoutRow.textContent, /완료 · idle 타임아웃 정리/);
+  assert.doesNotMatch(normalRow.textContent, /idle 타임아웃 정리/);
 });
 
 test('SessionGrid task row renders latest remote node badge', async (t) => {

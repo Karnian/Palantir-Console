@@ -42,6 +42,16 @@ const execFileAsync = promisify(execFile);
 const CLAUDE_AUTH_FILE = process.env.PALANTIR_CLAUDE_AUTH_FILE
   || path.join(__dirname, '..', '..', '.claude-auth.json');
 const CLAUDE_AUTH_KEYS = ['ANTHROPIC_BASE_URL', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY'];
+// Claude Code can authenticate through cloud-provider credential chains
+// instead of Anthropic credentials. These selectors are themselves
+// non-secret, but only count as an auth contract when they are explicitly
+// enabled and pass the profile env_allowlist; the CLI remains responsible for
+// validating the corresponding AWS/GCP/Azure credentials at spawn time.
+const CLAUDE_PROVIDER_AUTH_ENV_KEYS = Object.freeze([
+  'CLAUDE_CODE_USE_BEDROCK',
+  'CLAUDE_CODE_USE_VERTEX',
+  'CLAUDE_CODE_USE_FOUNDRY',
+]);
 const CLAUDE_KEYCHAIN_SERVICE = 'Claude Code-credentials';
 const CODEX_AUTH_KEYS = ['CODEX_API_KEY', 'OPENAI_API_KEY'];
 const CODEX_AUTH_FILE = path.join(os.homedir(), '.codex', 'auth.json');
@@ -144,6 +154,18 @@ function hostCredentialDiscoveryDisabled() {
   return process.env.PALANTIR_SKIP_HOST_CREDENTIALS === '1';
 }
 
+function resolveClaudeProviderAuthEnv(allow) {
+  const env = {};
+  const sources = [];
+  for (const key of CLAUDE_PROVIDER_AUTH_ENV_KEYS) {
+    if (allow.has(key) && process.env[key] === '1') {
+      env[key] = '1';
+      sources.push(`env:${key}`);
+    }
+  }
+  return { env, sources };
+}
+
 /**
  * Check whether the macOS Keychain has a Claude Code OAuth credentials item.
  *
@@ -221,6 +243,55 @@ function hasClaudeLinuxCredentials() {
   }
 }
 
+function parseClaudeOAuthAccessToken(raw) {
+  const parsed = JSON.parse(raw);
+  const oauth = parsed?.claudeAiOauth;
+  const token = oauth?.accessToken;
+  if (typeof token !== 'string' || !token) return null;
+  if (typeof oauth.expiresAt === 'number' && Date.now() >= oauth.expiresAt) return null;
+  return token;
+}
+
+/**
+ * Synchronous token readers for regular `--bare` spawns. Manager and
+ * Operator startup/resume are synchronous APIs, so they cannot use the
+ * Promise-based isolated-preset readers below. `--bare` cannot read either
+ * native credential store itself; materializing the access token before
+ * spawn is therefore part of the auth preflight contract.
+ */
+function readClaudeKeychainTokenSync() {
+  if (hostCredentialDiscoveryDisabled()) return null;
+  if (process.platform !== 'darwin') return null;
+  try {
+    const raw = execFileSync(
+      'security',
+      ['find-generic-password', '-s', CLAUDE_KEYCHAIN_SERVICE, '-w'],
+      { stdio: 'pipe', timeout: 3000, encoding: 'utf8' },
+    ).trim();
+    if (!raw) return null;
+    try {
+      return parseClaudeOAuthAccessToken(raw);
+    } catch {
+      // Older keychain schemas stored the token as a bare string.
+      return raw;
+    }
+  } catch {
+    return null;
+  }
+}
+
+function readClaudeLinuxCredentialsTokenSync() {
+  if (hostCredentialDiscoveryDisabled()) return null;
+  if (process.platform === 'darwin') return null;
+  try {
+    return parseClaudeOAuthAccessToken(
+      fs.readFileSync(CLAUDE_LINUX_CREDENTIALS_FILE, 'utf-8'),
+    );
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Read the access token out of ~/.claude/.credentials.json. File-based
  * counterpart to readClaudeKeychainToken() (non-macOS platforms — see
@@ -238,13 +309,9 @@ async function readClaudeLinuxCredentialsToken() {
   if (hostCredentialDiscoveryDisabled()) return null;
   if (process.platform === 'darwin') return null;
   try {
-    const raw = await fsp.readFile(CLAUDE_LINUX_CREDENTIALS_FILE, 'utf-8');
-    const parsed = JSON.parse(raw);
-    const oauth = parsed?.claudeAiOauth;
-    const token = oauth?.accessToken;
-    if (typeof token !== 'string' || !token) return null;
-    if (typeof oauth.expiresAt === 'number' && Date.now() >= oauth.expiresAt) return null;
-    return token;
+    return parseClaudeOAuthAccessToken(
+      await fsp.readFile(CLAUDE_LINUX_CREDENTIALS_FILE, 'utf-8'),
+    );
   } catch {
     return null;
   }
@@ -367,6 +434,15 @@ function bootstrapClaudeAuthFromEnv({ logger = console } = {}) {
  * @param {() => boolean} [opts.hasCredentialsFile] DI hook for tests;
  *                                           defaults to the real Linux
  *                                           credentials-file probe.
+ * @param {boolean} [opts.bare] When true, native/OAuth credentials are
+ *                              materialized as ANTHROPIC_API_KEY because
+ *                              Claude cannot read them under `--bare`.
+ *                              Cloud-provider credential chains remain
+ *                              child-resolved when their allowlisted selector
+ *                              is enabled.
+ * @param {string} [opts.settings] Explicit Claude `--settings` value. Under
+ *                                `--bare`, the CLI itself must validate any
+ *                                apiKeyHelper in this child-local file.
  * @returns {{ canAuth: boolean, env: object, sources: string[], diagnostics: string[] }}
  */
 function resolveAuthAllowSet(
@@ -420,15 +496,24 @@ function resolveClaudeAuth({
   blockedEnvKeys,
   hasKeychain = hasClaudeKeychainCredentials,
   hasCredentialsFile = hasClaudeLinuxCredentials,
+  bare = false,
+  settings,
+  readKeychainTokenSync = readClaudeKeychainTokenSync,
+  readCredentialsFileTokenSync = readClaudeLinuxCredentialsTokenSync,
 } = {}) {
   const env = {};
   const sources = [];
   const diagnostics = [];
 
-  const allow = resolveAuthAllowSet(envAllowlist, CLAUDE_AUTH_KEYS, {
-    allowDefaultAuth,
-    blockedEnvKeys,
-  });
+  // The cloud-provider auth-mode keys stay part of the DEFAULT set, as on main:
+  // a profile that declares no allowlist must still be able to authenticate
+  // through Bedrock/Vertex/Foundry. resolveAuthAllowSet adds this branch's
+  // allowDefaultAuth / blockedEnvKeys handling on top.
+  const allow = resolveAuthAllowSet(
+    envAllowlist,
+    [...CLAUDE_AUTH_KEYS, ...CLAUDE_PROVIDER_AUTH_ENV_KEYS],
+    { allowDefaultAuth, blockedEnvKeys },
+  );
 
   // (1) Direct env vars
   if (process.env.CLAUDE_CODE_OAUTH_TOKEN && allow.has('CLAUDE_CODE_OAUTH_TOKEN')) {
@@ -443,6 +528,10 @@ function resolveClaudeAuth({
     env.ANTHROPIC_BASE_URL = process.env.ANTHROPIC_BASE_URL;
     sources.push('env:ANTHROPIC_BASE_URL');
   }
+  const providerAuth = resolveClaudeProviderAuthEnv(allow);
+  Object.assign(env, providerAuth.env);
+  sources.push(...providerAuth.sources);
+  const hasProviderAuth = providerAuth.sources.length > 0;
 
   // (2) Saved auth file — re-read on demand. If the file has keys we
   //     don't yet have in env, merge them. This makes "drop file in,
@@ -474,20 +563,67 @@ function resolveClaudeAuth({
   const credentialsFile = hasCredentialsFile();
   if (credentialsFile) sources.push('file:~/.claude/.credentials.json');
 
-  const providerAuth = resolveProviderAuthSources(providerEnv, allow);
-  sources.push(...providerAuth.map((entry) => entry.source));
+  // Two distinct notions of "provider" coexist here and both count as auth:
+  //   hasProviderAuth       — a cloud auth MODE (Bedrock/Vertex/Foundry) picked
+  //                           up from the ambient environment, above.
+  //   declaredProviderAuth  — an operator-DECLARED provider whose approved
+  //                           secret keys are present and allowlisted (#457).
+  const declaredProviderAuth = resolveProviderAuthSources(providerEnv, allow);
+  sources.push(...declaredProviderAuth.map((entry) => entry.source));
+  const hasDeclaredProviderAuth = declaredProviderAuth.length > 0;
 
-  const canAuth = !!(
-    env.CLAUDE_CODE_OAUTH_TOKEN
-    || env.ANTHROPIC_API_KEY
-    || keychain
-    || credentialsFile
-    || providerAuth.length > 0
-  );
+  if (bare && !env.ANTHROPIC_API_KEY) {
+    let token = env.CLAUDE_CODE_OAUTH_TOKEN || null;
+    if (token) {
+      sources.push('materialize:bare:CLAUDE_CODE_OAUTH_TOKEN');
+    } else if (keychain) {
+      try {
+        token = readKeychainTokenSync();
+      } catch { /* treat a failed materialization as unavailable auth */ }
+      if (typeof token === 'string' && token) {
+        sources.push('materialize:bare:keychain:claudeAiOauth.accessToken');
+      }
+    }
+    if (!token && credentialsFile) {
+      try {
+        token = readCredentialsFileTokenSync();
+      } catch { /* treat a failed materialization as unavailable auth */ }
+      if (typeof token === 'string' && token) {
+        sources.push('materialize:bare:file:~/.claude/.credentials.json');
+      }
+    }
+    if (typeof token === 'string' && token) {
+      env.ANTHROPIC_API_KEY = token;
+    }
+  }
+
+  // An explicit --settings value may point at a child-local file containing
+  // apiKeyHelper. The controller cannot safely or reliably pre-read it: manager
+  // cwd may differ, and remote paths exist only on the pod. Treat it as a
+  // spawn-time auth contract and let Claude perform the authoritative
+  // settings/helper validation. Existing env/native materialization above is
+  // retained so settings files without apiKeyHelper keep working when another
+  // usable credential exists.
+  const settingsAuth = bare
+    && typeof settings === 'string'
+    && settings.trim().length > 0;
+  if (settingsAuth) sources.push('cli:--settings');
+
+  const canAuth = bare
+    ? hasProviderAuth || hasDeclaredProviderAuth || !!env.ANTHROPIC_API_KEY || settingsAuth
+    : hasProviderAuth
+      || hasDeclaredProviderAuth
+      || !!(env.CLAUDE_CODE_OAUTH_TOKEN || env.ANTHROPIC_API_KEY || keychain || credentialsFile);
   if (!canAuth) {
-    diagnostics.push('No Claude credentials found. Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY, activate a declared provider with an explicitly approved credential env key, run `claude login` (populates the macOS keychain, or ~/.claude/.credentials.json on Linux/Windows), or start the server once from inside a Claude Code session to seed .claude-auth.json.');
+    diagnostics.push(bare
+      ? 'Claude --bare requires a materialized API credential, an allowlisted cloud-provider auth mode, a declared provider with an explicitly approved credential env key, or apiKeyHelper via --settings, but none was available. Enable CLAUDE_CODE_USE_BEDROCK/CLAUDE_CODE_USE_VERTEX/CLAUDE_CODE_USE_FOUNDRY with its provider credentials, set ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN, refresh `claude login` credentials, or provide explicit settings with apiKeyHelper.'
+      : 'No Claude credentials found. Enable an allowlisted CLAUDE_CODE_USE_BEDROCK/CLAUDE_CODE_USE_VERTEX/CLAUDE_CODE_USE_FOUNDRY provider auth mode, activate a declared provider with an explicitly approved credential env key, set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY, run `claude login` (populates the macOS keychain, or ~/.claude/.credentials.json on Linux/Windows), or start the server once from inside a Claude Code session to seed .claude-auth.json.');
     if (Array.isArray(envAllowlist) && envAllowlist.length > 0) {
-      const blocked = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']
+      const blocked = [
+        'CLAUDE_CODE_OAUTH_TOKEN',
+        'ANTHROPIC_API_KEY',
+        ...CLAUDE_PROVIDER_AUTH_ENV_KEYS,
+      ]
         .filter(k => process.env[k] && !allow.has(k));
       if (blocked.length > 0) {
         diagnostics.push(`Profile env_allowlist excluded these present env vars: ${blocked.join(', ')}.`);
@@ -590,12 +726,7 @@ async function readClaudeKeychainToken() {
     // Claude Code stores its credentials as JSON in the keychain payload.
     // Fields of interest: claudeAiOauth.accessToken (+ expiresAt).
     try {
-      const parsed = JSON.parse(raw);
-      const oauth = parsed?.claudeAiOauth;
-      const token = oauth?.accessToken;
-      if (typeof token !== 'string' || !token) return null;
-      if (typeof oauth.expiresAt === 'number' && Date.now() >= oauth.expiresAt) return null;
-      return token;
+      return parseClaudeOAuthAccessToken(raw);
     } catch {
       // Older schemas / test fixtures may store a bare token string instead
       // of JSON. Accept any non-empty string — the Anthropic API itself is
@@ -614,7 +745,9 @@ async function readClaudeKeychainToken() {
  * `--bare` strips the CLI's ability to read OAuth / keychain / settings, so
  * we must materialize a token as `ANTHROPIC_API_KEY` and wire it via either
  * an `apiKeyHelper` script (default — token stays off `ps`/`/proc`) or an
- * env pass-through (fallback — test / temporary use).
+ * env pass-through (fallback — test / temporary use). An explicitly enabled,
+ * allowlisted cloud-provider mode instead keeps its provider credential chain
+ * child-resolved and needs no Anthropic token materialization.
  *
  * Token source priority (first hit wins) — normative per
  * docs/specs/worker-preset-and-plugin-injection.md §6.9:
@@ -660,7 +793,17 @@ async function resolveClaudeAuthForIsolated({
 
   const allow = Array.isArray(envAllowlist) && envAllowlist.length > 0
     ? new Set(envAllowlist)
-    : new Set(CLAUDE_AUTH_KEYS);
+    : new Set([...CLAUDE_AUTH_KEYS, ...CLAUDE_PROVIDER_AUTH_ENV_KEYS]);
+
+  const providerAuth = resolveClaudeProviderAuthEnv(allow);
+  if (providerAuth.sources.length > 0) {
+    return {
+      canAuth: true,
+      env: providerAuth.env,
+      sources: providerAuth.sources,
+      diagnostics,
+    };
+  }
 
   let token = null;
 
@@ -916,6 +1059,7 @@ module.exports = {
   resolveClaudeAuthForIsolated,
   hostCredentialDiscoveryDisabled,
   readClaudeKeychainToken,
+  readClaudeKeychainTokenSync,
   resolveCodexAuth,
   resolveManagerAuth,
   buildManagerSpawnEnv,
@@ -923,10 +1067,12 @@ module.exports = {
   hasClaudeKeychainCredentials,
   hasClaudeLinuxCredentials,
   readClaudeLinuxCredentialsToken,
+  readClaudeLinuxCredentialsTokenSync,
   // Exposed for tests
   CLAUDE_AUTH_FILE,
   CODEX_AUTH_FILE,
   CLAUDE_AUTH_KEYS,
+  CLAUDE_PROVIDER_AUTH_ENV_KEYS,
   CODEX_AUTH_KEYS,
   CLAUDE_KEYCHAIN_SERVICE,
   CLAUDE_LINUX_CREDENTIALS_FILE,

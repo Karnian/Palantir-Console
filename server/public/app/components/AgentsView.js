@@ -25,9 +25,40 @@ function vendorFromCommand(command) {
   // Case-insensitive to match the server's resolveAgentVendor (Codex P3 review:
   // an uppercase `Claude` command must not hide/null the model field on edit).
   const cmd = String(command || '').toLowerCase();
-  if (cmd.includes('codex')) return 'codex';
   if (cmd.includes('claude')) return 'claude';
+  if (cmd.includes('codex')) return 'codex';
   return 'other';
+}
+
+function effectivePermissionMode(agent) {
+  if (agent?.permission_mode) return agent.permission_mode;
+  // Match the server/runtime tokenizer: a value wrapped in double quotes is
+  // one token and loses those surrounding quotes before option resolution.
+  // Keeping a separate regex here previously made `"acceptEdits"` invisible,
+  // so an unrelated edit sent an explicit NULL and elevated the profile to
+  // bypassPermissions.
+  const tokens = (
+    String(agent?.args_template || '').match(/(?:[^\s"]+|"[^"]*")+/g) || []
+  ).map(token => token.replace(/^"(.*)"$/, '$1'));
+  const validModes = new Set([
+    'acceptEdits',
+    'auto',
+    'bypassPermissions',
+    'default',
+    'dontAsk',
+    'manual',
+    'plan',
+  ]);
+  for (let i = 0; i < tokens.length; i += 1) {
+    let value = null;
+    if (tokens[i] === '--permission-mode') {
+      value = tokens[i + 1];
+    } else if (tokens[i].startsWith('--permission-mode=')) {
+      value = tokens[i].slice('--permission-mode='.length);
+    }
+    if (validModes.has(value)) return value;
+  }
+  return 'bypassPermissions';
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -41,9 +72,11 @@ function AgentModal({ open, onClose, agent, onSaved }) {
   const [argsTemplate, setArgsTemplate] = useState('');
   const [model, setModel] = useState('');
   const [reasoningEffort, setReasoningEffort] = useState('');
+  const [permissionMode, setPermissionMode] = useState('');
   const [icon, setIcon] = useState('');
   const [color, setColor] = useState('');
   const [maxConcurrent, setMaxConcurrent] = useState(1);
+  const [idleTimeoutMinutes, setIdleTimeoutMinutes] = useState('');
   const [mcpTools, setMcpTools] = useState('');
   const [saving, setSaving] = useState(false);
 
@@ -55,9 +88,13 @@ function AgentModal({ open, onClose, agent, onSaved }) {
       setArgsTemplate(agent.args_template || '');
       setModel(agent.model || '');
       setReasoningEffort(agent.reasoning_effort || '');
+      setPermissionMode(effectivePermissionMode(agent));
       setIcon(agent.icon || '');
       setColor(agent.color || '');
       setMaxConcurrent(agent.max_concurrent || 1);
+      setIdleTimeoutMinutes(
+        agent.idle_timeout_ms == null ? '' : String(agent.idle_timeout_ms / 60000),
+      );
       try {
         const caps = JSON.parse(agent.capabilities_json || '{}');
         setMcpTools(Array.isArray(caps.mcp_tools) ? caps.mcp_tools.join('\n') : '');
@@ -65,7 +102,8 @@ function AgentModal({ open, onClose, agent, onSaved }) {
     } else if (open) {
       setName(''); setType('claude-code'); setCommand(''); setArgsTemplate('');
       setModel(''); setReasoningEffort('');
-      setIcon(''); setColor(''); setMaxConcurrent(1); setMcpTools('');
+      setPermissionMode('');
+      setIcon(''); setColor(''); setMaxConcurrent(1); setIdleTimeoutMinutes(''); setMcpTools('');
     }
   }, [open, agent]);
 
@@ -87,9 +125,13 @@ function AgentModal({ open, onClose, agent, onSaved }) {
         // not reach the server's merged-state validator and 400.
         model: (vendor === 'codex' || vendor === 'claude') ? (model.trim() || null) : null,
         reasoning_effort: vendor === 'codex' ? (reasoningEffort || null) : null,
+        permission_mode: vendor === 'claude' ? (permissionMode || null) : null,
         icon: icon.trim() || undefined,
         color: color.trim() || undefined,
         max_concurrent: parseInt(maxConcurrent, 10) || 1,
+        idle_timeout_ms: idleTimeoutMinutes === ''
+          ? null
+          : Math.round(Number(idleTimeoutMinutes) * 60000),
         capabilities_json: JSON.stringify(capsObj),
       };
       if (agent) {
@@ -128,16 +170,14 @@ function AgentModal({ open, onClose, agent, onSaved }) {
               value=${type}
               onChange=${t => {
                 setType(t);
-                if (!agent) {
-                  const presets = {
-                    'claude-code': { cmd: 'claude', args: '-p {prompt} --permission-mode bypassPermissions' },
-                    'codex': { cmd: 'codex', args: 'exec --full-auto --skip-git-repo-check {prompt}' },
-                    'gemini': { cmd: 'gemini', args: '-p {prompt} --yolo' },
-                  };
-                  const p = presets[t];
-                  if (p) { setCommand(p.cmd); setArgsTemplate(p.args); }
-                  if (t === 'codex') { setModel(''); setReasoningEffort('high'); }
-                }
+                const presets = {
+                  'claude-code': { cmd: 'claude', args: '-p {prompt}' },
+                  'codex': { cmd: 'codex', args: 'exec --full-auto --skip-git-repo-check {prompt}' },
+                  'gemini': { cmd: 'gemini', args: '-p {prompt} --yolo' },
+                };
+                const p = presets[t];
+                if (p) { setCommand(p.cmd); setArgsTemplate(p.args); }
+                if (t === 'codex') { setModel(''); setReasoningEffort('high'); }
               }}
               options=${[
                 { value: 'claude-code', label: 'claude-code' },
@@ -174,6 +214,27 @@ function AgentModal({ open, onClose, agent, onSaved }) {
               />
             </div>
           `}
+          ${vendor === 'claude' && html`
+            <div class="form-field">
+              <label class="form-label" for="agent-permission-mode">Permission mode</label>
+              <${Dropdown}
+                id="agent-permission-mode"
+                className="dropdown-field"
+                value=${permissionMode}
+                onChange=${setPermissionMode}
+                options=${[
+                  { value: '', label: '(none — runs as bypassPermissions)' },
+                  { value: 'acceptEdits', label: 'acceptEdits' },
+                  { value: 'auto', label: 'auto' },
+                  { value: 'bypassPermissions', label: 'bypassPermissions' },
+                  { value: 'default', label: 'default' },
+                  { value: 'dontAsk', label: 'dontAsk' },
+                  { value: 'manual', label: 'manual' },
+                  { value: 'plan', label: 'plan' },
+                ]}
+              />
+            </div>
+          `}
           <div class="form-field">
             <label class="form-label" for="agent-args">${AGENTS_LABELS.fieldArgsTemplate}</label>
             <input id="agent-args" class="form-input" value=${argsTemplate} onInput=${e => setArgsTemplate(e.target.value)} placeholder=${AGENTS_LABELS.argsTemplatePlaceholder} />
@@ -189,6 +250,20 @@ function AgentModal({ open, onClose, agent, onSaved }) {
           <div class="form-field">
             <label class="form-label" for="agent-max-concurrent">${AGENTS_LABELS.fieldMaxConcurrent}</label>
             <input id="agent-max-concurrent" class="form-input" type="number" min="1" value=${maxConcurrent} onInput=${e => setMaxConcurrent(e.target.value)} />
+          </div>
+          <div class="form-field">
+            <label class="form-label" for="agent-idle-timeout">${AGENTS_LABELS.fieldIdleTimeout}</label>
+            <input
+              id="agent-idle-timeout"
+              class="form-input"
+              type="number"
+              min="0.001"
+              step="0.001"
+              value=${idleTimeoutMinutes}
+              onInput=${e => setIdleTimeoutMinutes(e.target.value)}
+              placeholder=${AGENTS_LABELS.idleTimeoutPlaceholder}
+            />
+            <small class="form-hint">${AGENTS_LABELS.idleTimeoutHint}</small>
           </div>
           <div class="form-field">
             <label class="form-label" for="agent-mcp-tools">${AGENTS_LABELS.fieldMcpTools}</label>
@@ -299,9 +374,23 @@ function AgentDetailModal({ agent, open, onClose, onEdit }) {
               <span class="agent-detail-field-value mono">${agent.args_template}</span>
             </div>
           `}
+          ${vendorFromCommand(agent.command) === 'claude' && html`
+            <div class="agent-detail-field" data-role="agent-permission-mode">
+              <span class="agent-detail-field-label">Permission mode</span>
+              <span class="agent-detail-field-value mono">${effectivePermissionMode(agent)}</span>
+            </div>
+          `}
           <div class="agent-detail-field">
             <span class="agent-detail-field-label">${AGENTS_LABELS.fieldMaxConcurrent}</span>
             <span class="agent-detail-field-value">${agent.max_concurrent || 1}</span>
+          </div>
+          <div class="agent-detail-field">
+            <span class="agent-detail-field-label">${AGENTS_LABELS.fieldIdleTimeout}</span>
+            <span class="agent-detail-field-value">
+              ${agent.idle_timeout_ms == null
+                ? AGENTS_LABELS.idleTimeoutDefault
+                : `${agent.idle_timeout_ms / 60000}${AGENTS_LABELS.minutesSuffix}`}
+            </span>
           </div>
           <div class="agent-detail-field">
             <span class="agent-detail-field-label">${AGENTS_LABELS.fieldRunningNow}</span>

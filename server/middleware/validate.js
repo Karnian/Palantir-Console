@@ -216,7 +216,7 @@ function validateUpdateTask(req, res, next) {
  * POST /api/agents — agent profile 생성 검증
  * 필수: name (string), type (string), command (string)
  * 선택: args_template, capabilities_json, env_allowlist, icon, color (string or null)
- *       max_concurrent (number or null)
+ *       max_concurrent, idle_timeout_ms (number or null)
  */
 function validateCreateAgent(req, res, next) {
   const body = req.body || {};
@@ -232,6 +232,7 @@ function validateCreateAgent(req, res, next) {
   if ('environment_provider_ids' in body && !Array.isArray(body.environment_provider_ids)) {
     throw new BadRequestError('environment_provider_ids must be an array');
   }
+  optionalNumber(body, 'idle_timeout_ms', 'idle_timeout_ms');
   next();
 }
 
@@ -277,6 +278,7 @@ function validateUpdateAgent(req, res, next) {
   if ('environment_provider_ids' in body && !Array.isArray(body.environment_provider_ids)) {
     throw new BadRequestError('environment_provider_ids must be an array');
   }
+  optionalNumber(body, 'idle_timeout_ms', 'idle_timeout_ms');
   next();
 }
 

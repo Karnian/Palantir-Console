@@ -2,6 +2,10 @@
 
 const { conversationIdForProject } = require('../utils/conversationId');
 const { RUNNING_RECONCILE_MIN_AGE_MS } = require('./operatorScheduleService');
+const {
+  parseTerminalEventPayload,
+  isTerminalEventForInvocation,
+} = require('./terminalEventReconciliation');
 
 const DEFAULT_INTERVAL_MS = 20000;
 const DEFAULT_MAX_JOBS = 20;
@@ -264,10 +268,9 @@ function createOperatorScheduler({
         ? runService.getRunEventById(event.data.runId, event.data.eventId)
         : null;
       if (!row || row.event_type !== type) return;
-      let payload;
-      try { payload = row.payload_json ? JSON.parse(row.payload_json) : null; } catch { return; }
+      const payload = parseTerminalEventPayload(row.payload_json);
       const invocationId = payload?.data?.invocationId;
-      if (!invocationId || payload?.data?.terminal !== true) return;
+      if (!invocationId || !isTerminalEventForInvocation(payload, invocationId)) return;
       operatorScheduleService.completeInvocation(
         invocationId,
         event.data.runId,

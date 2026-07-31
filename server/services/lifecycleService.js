@@ -18,16 +18,26 @@ const {
 const { explainDispatch } = require('./dispatchPolicy');
 const { resolveProjectSource } = require('./projectSource');
 const { createProjectMaterializationService } = require('./projectMaterializationService');
-const { validateStructuredModelEffort } = require('./agentProfileService');
+const {
+  parseClaudeArgsTemplate,
+  resolveClaudePermissionMode,
+  validateStructuredModelEffort,
+} = require('./agentProfileService');
 const { compileGoalPrompt } = require('./goalPrompt'); // G1
 const { parseGoalReport } = require('./goalReport'); // G1
 const { parseClaudeStreamJsonOutput } = require('./claudeStreamJson');
+const {
+  classifyClaudeRateLimitEvents,
+  classifyCodexWorkerOutput,
+  markWorkerLimitFailure,
+} = require('./workerLimit');
 const { createGoalVerdictService } = require('./goalVerdictService'); // G3
 const { VERDICT_TO_TASK_STATUS } = require('./goalVerdict'); // G3
 const {
   resolveActorTokenPolicy,
   applyWorkerCredentialPolicy,
   isActorCredentialKey,
+  isWorkerApiBaseKey,
 } = require('./actorTokenPolicy');
 const { isBearerEnvKeyDenied } = require('./envDenylist');
 const {
@@ -180,6 +190,49 @@ function createLifecycleService({
   const _authResolverOpts = authResolverOpts || {};
   const HEARTBEAT_INTERVAL_MS = 30000;  // 30s
   const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 min (increased from 10 min for long-running tasks)
+  function resolveWorkerIdleTimeoutMs(run) {
+    if (!run?.agent_profile_id || !agentProfileService?.getProfile) {
+      return IDLE_TIMEOUT_MS;
+    }
+    try {
+      const configured = agentProfileService.getProfile(run.agent_profile_id)?.idle_timeout_ms;
+      return configured == null ? IDLE_TIMEOUT_MS : configured;
+    } catch {
+      // A deleted/missing profile must not make health monitoring fail closed.
+      return IDLE_TIMEOUT_MS;
+    }
+  }
+
+  function latestWorkerActivityAt(run) {
+    let value = null;
+    if (typeof runService.getLatestActivityAt === 'function') {
+      try { value = runService.getLatestActivityAt(run.id); } catch { value = null; }
+    } else {
+      // Compatibility for narrow test doubles. Null heartbeats are health
+      // observations, not worker activity, so they cannot extend the timeout.
+      try {
+        const events = runService.getRunEvents(run.id) || [];
+        const latest = [...events].reverse().find(
+          event => event.event_type !== 'heartbeat' || event.payload_json != null,
+        );
+        value = latest?.created_at || null;
+      } catch { value = null; }
+    }
+    return parseSqliteUtc(value || run.started_at || run.created_at);
+  }
+
+  function idleTimeoutTerminalReason(run) {
+    if (run?.status !== 'needs_input' || typeof runService.getLatestRunEvent !== 'function') {
+      return null;
+    }
+    try {
+      const event = runService.getLatestRunEvent(run.id, 'status:needs_input');
+      const payload = event?.payload_json ? JSON.parse(event.payload_json) : null;
+      return payload?.reason === 'idle_timeout' ? 'idle_timeout' : null;
+    } catch {
+      return null;
+    }
+  }
   // Normalize BOTH the injected option and the env var through Number() so a
   // caller passing '0' / 'abc' / a negative falls back to the 15-min default
   // (Codex N3-2 review NIT — the option was previously trusted verbatim).
@@ -459,6 +512,22 @@ function createLifecycleService({
     // Legacy-data-only safety net for opencode profiles created before new profiles were blocked.
     if (cmd.includes('opencode')) return 'opencode';
     return 'other';
+  }
+
+  function markCodexLimitFailure(run, output) {
+    if (!run?.agent_profile_id) return false;
+    let profile;
+    try {
+      profile = agentProfileService.getProfile(run.agent_profile_id);
+    } catch {
+      return false;
+    }
+    if (resolveAdapterName(profile) !== 'codex') return false;
+    return markWorkerLimitFailure(
+      runService,
+      run.id,
+      classifyCodexWorkerOutput(output),
+    );
   }
 
   // Fail-closed: a corrupt queued_args (manual DB edit, partial write) must
@@ -1108,7 +1177,7 @@ function createLifecycleService({
     }
     const buildWorkerEnv = (explicitEnv) => applyWorkerCredentialPolicy(explicitEnv, {
       workerToken: workerProposalToken,
-      apiBase: proposalApiBase,
+      apiBase: workerProposalToken ? proposalApiBase : null,
       actorTokens,
     });
     const profile = agentProfileService.getProfile(agentProfileId);
@@ -1116,13 +1185,14 @@ function createLifecycleService({
       ? agentProfileService.resolveEnvPolicy(profile)
       : null;
     const effectiveProfileEnvKeys = profileEnvPolicy
-      ? (profileEnvPolicy.valid ? profileEnvPolicy.effectiveKeys : [])
+      ? (profileEnvPolicy.valid ? stripWorkerApiBaseKeys(profileEnvPolicy.effectiveKeys) : [])
       : parseEnvAllowlistArray(profile.env_allowlist);
     const effectiveProfileEnvAllowlist = JSON.stringify(effectiveProfileEnvKeys);
     try {
       runService.setSessionSnapshot(run.id, {
         sessionModel: profile.model || null,
         sessionEffort: profile.reasoning_effort || null,
+        sessionPermissionMode: resolveClaudePermissionMode(profile) || null,
       });
     } catch { /* annotate-only */ }
     const adapterName = resolveAdapterName(profile);
@@ -1581,22 +1651,28 @@ function createLifecycleService({
       if (isClaude && streamJsonEngine) {
         // Use streamJsonEngine — same as Manager but isManager=false (single-shot worker)
         const mcpTools = parseMcpTools(profile.capabilities_json);
+        const templateOptions = parseClaudeArgsTemplate(profile.args_template);
 
         // Preset/skill-pack composed prompt (Phase 10C §6.8).
         const systemPrompt = composedSystemPrompt || undefined;
 
         // MCP config file: unified (preset > project > skill pack) if
         // anything merged, else plain project MCP, else undefined.
-        const effectiveMcpConfig = skillPackMcpConfigPath || projectMcpConfig || undefined;
+        const materializedMcpConfig = skillPackMcpConfigPath || projectMcpConfig || undefined;
+        const mcpConfigs = [
+          templateOptions.mcpConfig,
+          materializedMcpConfig,
+        ].filter(Boolean);
+        const effectiveMcpConfig = mcpConfigs.length > 1 ? mcpConfigs : mcpConfigs[0];
 
         // The detached SSH path is pod-native, but these two optional features
         // still materialize control-plane-local files. Never pass those paths
         // to the pod: fail non-retryably until a node-side asset transport
         // exists. Plain remote Claude workers remain supported.
-        if (isRemoteNode && (effectiveMcpConfig || presetResolution?.isolated)) {
+        if (isRemoteNode && (materializedMcpConfig || presetResolution?.isolated)) {
           const unsupported = {
             node_id: run.node_id,
-            mcp_config: !!effectiveMcpConfig,
+            mcp_config: !!materializedMcpConfig,
             isolated_preset: !!presetResolution?.isolated,
             reason: 'remote_claude_assets_not_materialized',
           };
@@ -1623,6 +1699,34 @@ function createLifecycleService({
           parseEnvAllowlist(effectiveProfileEnvAllowlist, trustedBearerEnvKeys),
         );
         let presetAuthCleanup = null;
+        // A detached remote `--bare` worker must resolve auth on the pod. The
+        // remote executor materializes the pod login token inside its clean
+        // shell, keeping the credential out of the controller and SSH argv.
+        // Only local workers preflight/materialize controller auth here.
+        if (
+          !isRemoteNode
+          && templateOptions.bare
+          && !(presetResolution && presetResolution.isolated)
+        ) {
+          const auth = _authResolver.resolveClaudeAuth({
+            envAllowlist: parseEnvAllowlistArray(profile.env_allowlist),
+            ..._authResolverOpts,
+            bare: true,
+            settings: templateOptions.settings,
+          });
+          runService.addRunEvent(run.id, 'worker:auth_sources', JSON.stringify({
+            sources: auth.sources,
+            bare: true,
+          }));
+          if (!auth.canAuth) {
+            const err = new Error(
+              auth.diagnostics[0] || 'Claude --bare requires a materialized API credential.',
+            );
+            err.status = 400;
+            throw err;
+          }
+          spawnEnv = { ...spawnEnv, ...auth.env };
+        }
         if (presetResolution && presetResolution.isolated) {
           const auth = await _authResolver.resolveClaudeAuthForIsolated({
             envAllowlist: effectiveProfileEnvKeys,
@@ -1667,9 +1771,26 @@ function createLifecycleService({
               env: spawnEnv,
               model: profile.model || undefined,
               systemPrompt,
-              permissionMode: 'bypassPermissions',
+              permissionMode: resolveClaudePermissionMode(profile),
+              tools: templateOptions.tools.length > 0
+                ? templateOptions.tools
+                : undefined,
               allowedTools: mcpTools.length > 0 ? mcpTools : undefined,
+              disallowedTools: templateOptions.disallowedTools.length > 0
+                ? templateOptions.disallowedTools
+                : undefined,
+              maxBudgetUsd: templateOptions.maxBudgetUsd || undefined,
               mcpConfig: effectiveMcpConfig,
+              strictMcpConfig: templateOptions.strictMcpConfig || undefined,
+              safeMode: templateOptions.safeMode || undefined,
+              bare: templateOptions.bare || undefined,
+              disableSlashCommands: templateOptions.disableSlashCommands || undefined,
+              noChrome: templateOptions.noChrome || undefined,
+              settingSources: typeof templateOptions.settingSources === 'string'
+                ? templateOptions.settingSources
+                : undefined,
+              settings: templateOptions.settings || undefined,
+              maxTurns: templateOptions.maxTurns ?? undefined,
               isManager: false,
               envAllowlist: [
                 ...effectiveProfileEnvKeys,
@@ -2122,10 +2243,20 @@ function createLifecycleService({
 
   // Raw allowlist (array) for callers that need the key set, not the
   // materialized env map.
+  // This endpoint is selected by the server and is meaningful only with a
+  // run-bound worker capability. Never ask a remote executor to recover an
+  // ambient pod value for it; the executor enforces the same boundary. Applies
+  // to EVERY source of worker env keys — the raw column and a declared
+  // environment provider policy alike (#457).
+  function stripWorkerApiBaseKeys(keys) {
+    return Array.isArray(keys)
+      ? keys.filter(k => typeof k === 'string' && !isWorkerApiBaseKey(k))
+      : [];
+  }
+
   function parseEnvAllowlistArray(allowlistJson) {
     try {
-      const arr = JSON.parse(allowlistJson || '[]');
-      return Array.isArray(arr) ? arr.filter(k => typeof k === 'string') : [];
+      return stripWorkerApiBaseKeys(JSON.parse(allowlistJson || '[]'));
     } catch {
       return [];
     }
@@ -2147,17 +2278,22 @@ function createLifecycleService({
   }
 
   function createRetryRun(run) {
-    const retryRun = runService.createRun({
+    const retryRootRunId = run.retry_root_run_id || run.id;
+    const retryCount = Number(run.retry_count || 0) + 1;
+    if (runService.findRetryAttempt(retryRootRunId, retryCount)) return null;
+
+    const retryRun = runService.insertRetryRun({
       task_id: run.task_id,
       agent_profile_id: run.agent_profile_id,
       prompt: run.prompt || '',
       node_id: run.node_id || 'local',
       queued_args: run.queued_args || null,
-      retry_count: Number(run.retry_count || 0) + 1,
+      retry_count: retryCount,
       operator_instance_id: run.operator_instance_id || null,
       parent_run_id: run.parent_run_id || null,
-      retry_root_run_id: run.retry_root_run_id || run.id,
+      retry_root_run_id: retryRootRunId,
     });
+    if (!retryRun) return null;
     runService.addRunEvent(retryRun.id, 'queue:retry', JSON.stringify({
       profile_id: run.agent_profile_id,
     }));
@@ -2470,7 +2606,7 @@ function createLifecycleService({
           if (!run || Number(run.is_manager || 0) === 1) continue;
 
           const nodeId = run.node_id || 'local';
-          const createdAtMs = Date.parse(run.created_at || '');
+          const createdAtMs = parseSqliteUtc(run.created_at);
           if (!Number.isFinite(createdAtMs)) continue;
 
           const waitedMs = timestamp - createdAtMs;
@@ -2517,7 +2653,7 @@ function createLifecycleService({
       for (const run of runs) {
         try {
           if (!run || Number(run.is_manager || 0) === 1) continue;
-          const started = Date.parse(run.materialize_started_at || '');
+          const started = parseSqliteUtc(run.materialize_started_at);
           if (!Number.isFinite(started)) continue;
           if (timestamp - started <= MATERIALIZE_STUCK_THRESHOLD_MS) continue;
           const token = run.materialize_claim_token || null;
@@ -2679,6 +2815,12 @@ function createLifecycleService({
 
     const stopReason = parsed.result.stop_reason;
     const hitLimit = stopReason === 'max_turns' || stopReason === 'max_tokens';
+    const limitFailure = parsed.result.is_error
+      ? classifyClaudeRateLimitEvents(parsed.events)
+      : null;
+    if (limitFailure && !alreadyParsed) {
+      markWorkerLimitFailure(runService, run.id, limitFailure);
+    }
     if (hitLimit && !alreadyParsed) {
       runService.addRunEvent(run.id, 'limit_reached', JSON.stringify({
         message: `Agent stopped due to ${stopReason} — task may be incomplete`,
@@ -2689,7 +2831,13 @@ function createLifecycleService({
     return {
       output: parsed.text || '',
       status: parsed.result.is_error ? 'failed' : hitLimit ? 'needs_input' : 'completed',
-      reason: parsed.result.is_error ? 'claude-result-error' : hitLimit ? stopReason : 'agent-exit-success',
+      reason: limitFailure
+        ? 'claude-rate-limit'
+        : parsed.result.is_error
+          ? 'claude-result-error'
+          : hitLimit
+            ? stopReason
+            : 'agent-exit-success',
       result: parsed.result,
     };
   }
@@ -2781,9 +2929,16 @@ function createLifecycleService({
         // usage, and goal-output text remain equivalent to the local engine.
         const claudeResult = await inspectDetachedClaudeResult(run, channel);
         const status = claudeResult?.status || ((exitCode === 0) ? 'completed' : 'failed');
+        const output = claudeResult
+          ? claudeResult.output
+          : await channel.getOutput(run.id, 200);
+        const codexLimitFailure = status === 'failed' && !claudeResult
+          ? markCodexLimitFailure(run, output)
+          : false;
         // v3 Phase 5: propagate the actual transition reason so
         // subscribers see WHY the run ended, not just that it did.
-        const reason = claudeResult?.reason || agentExitReason(exitCode);
+        const reason = claudeResult?.reason
+          || (codexLimitFailure ? 'codex-rate-limit' : agentExitReason(exitCode));
         const fromStatus = run.status;
         runService.updateRunStatus(run.id, status, { force: true, reason });
 
@@ -2795,9 +2950,6 @@ function createLifecycleService({
         }
 
         // Capture final output
-        const output = claudeResult
-          ? claudeResult.output
-          : await channel.getOutput(run.id, 200);
         if (output) {
           runService.addRunEvent(run.id, 'final_output', JSON.stringify({ output: output.slice(-2000) }));
         }
@@ -2883,12 +3035,17 @@ function createLifecycleService({
             runService.addRunEvent(run.id, 'heartbeat', JSON.stringify({ status: 'process_active_no_output' }));
           } else {
             // Process is idle or dead — check idle timeout
-            const events = runService.getRunEvents(run.id);
-            const lastEvent = events[events.length - 1];
-            const lastActivity = lastEvent ? new Date(lastEvent.created_at).getTime() : new Date(run.started_at || run.created_at).getTime();
-            const idleTime = Date.now() - lastActivity;
+            // latestWorkerActivityAt() subsumes the previous "last event wins"
+            // rule: it still reads run events, but skips null-payload heartbeats
+            // (a health observation is not worker activity) and keeps using
+            // parseSqliteUtc, so the UTC-parsing fix on main is preserved.
+            const lastActivity = latestWorkerActivityAt(run);
+            const idleTime = Number.isFinite(lastActivity)
+              ? Math.max(0, nowMs() - lastActivity)
+              : 0;
+            const idleTimeoutMs = resolveWorkerIdleTimeoutMs(run);
 
-            if (idleTime > IDLE_TIMEOUT_MS) {
+            if (idleTime > idleTimeoutMs) {
               // Double-check: is the process truly dead or just idle?
               const alive = await channel.isAlive(run.id, 'cli');
               if (!alive) {
@@ -2972,7 +3129,15 @@ function createLifecycleService({
         // Process died while in needs_input
         const exitCode = await channel.detectExitCode(run.id, 'cli');
         const status = (exitCode === 0) ? 'completed' : 'failed';
-        runService.updateRunStatus(run.id, status, { force: true, reason: agentExitReason(exitCode) });
+        runService.updateRunStatus(run.id, status, {
+          force: true,
+          reason: agentExitReason(exitCode),
+          // Derived at write time like the other two call sites: `run` is a
+          // snapshot from before the awaited detectExitCode(), and health can
+          // resume the run in that window — stamping idle_timeout on a run that
+          // had already recovered.
+          terminalReason: latest => idleTimeoutTerminalReason(latest),
+        });
         if (run.task_id) checkTaskCompletion(run.task_id);
         await channel.kill(run.id, 'cli');
         _outputHashes.delete(run.id);
@@ -3023,10 +3188,26 @@ function createLifecycleService({
 
       const claudeResult = await inspectDetachedClaudeResult(run, channel);
       const status = claudeResult?.status || (exitCode === 0 ? 'completed' : 'failed');
+      const output = claudeResult
+        ? claudeResult.output
+        : status === 'failed'
+          ? await channel.getOutput(run.id, 200, 'cli')
+          : null;
+      const codexLimitFailure = status === 'failed' && !claudeResult
+        ? markCodexLimitFailure(run, output)
+        : false;
       const fromStatus = run.status;
       runService.updateRunStatus(run.id, status, {
         force: true,
-        reason: claudeResult?.reason || agentExitReason(exitCode),
+        reason: claudeResult?.reason
+          || (codexLimitFailure ? 'codex-rate-limit' : agentExitReason(exitCode)),
+        // A run that health already parked as idle keeps that provenance when a
+        // restart's orphan sweep finalizes it. Without this the history shows a
+        // plain `completed` and the idle origin is lost — exactly the "timeout
+        // cleanup is indistinguishable from a real completion" case (#466).
+        // Derived at write time: several awaits separate this from the `run`
+        // snapshot above, and the CAS loop may re-read again on a lost race.
+        terminalReason: latest => idleTimeoutTerminalReason(latest),
       });
       if (eventBus && status === 'needs_input') {
         const finalRun = runService.getRun(run.id);
@@ -3340,9 +3521,15 @@ function createLifecycleService({
             // Session exists but agent terminated
             const exitCode = await workerChannel.detectExitCode(runId, 'cli');
             const status = (exitCode === 0) ? 'completed' : 'failed';
+            const output = status === 'failed'
+              ? await workerChannel.getOutput(runId, 200, 'cli')
+              : null;
+            const codexLimitFailure = status === 'failed'
+              ? markCodexLimitFailure(run, output)
+              : false;
             runService.updateRunStatus(runId, status, {
               force: true,
-              reason: agentExitReason(exitCode),
+              reason: codexLimitFailure ? 'codex-rate-limit' : agentExitReason(exitCode),
             });
             if (exitCode !== null) {
               runService.updateRunResult(runId, {
@@ -3428,6 +3615,7 @@ function createLifecycleService({
           toStatus === 'failed'
           && !run.is_manager
           && !run.goal_active   // G3: goal runs retry via the verdict loop, not B-lite
+          && !run.non_retryable
           && run.started_at
           && Number(run.retry_count || 0) < MAX_RETRY
         ) {
@@ -3619,7 +3807,18 @@ function createLifecycleService({
    * Cancel a running agent.
    */
   function finishCancelRun(run) {
-    runService.updateRunStatus(run.id, 'cancelled', { force: true });
+    // Cancelling a run that health had parked as idle must not erase why it was
+    // parked; the cancellation is the operator's response to the idle timeout,
+    // not an unrelated terminal event.
+    //
+    // Derive at WRITE time, not here: cancelRun awaits an async kill() and the
+    // CAS loop re-reads on every attempt, so health can park or un-park the run
+    // in either window. A value captured now would stamp idle_timeout on a run
+    // that resumed, or drop it from one that went idle mid-cancel.
+    runService.updateRunStatus(run.id, 'cancelled', {
+      force: true,
+      terminalReason: latest => idleTimeoutTerminalReason(latest),
+    });
     if (run.task_id) {
       checkTaskCompletion(run.task_id);
     }

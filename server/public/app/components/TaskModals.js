@@ -9,7 +9,7 @@ const html = htm.bind(h);
 import { apiFetch } from '../lib/api.js';
 import { addToast } from '../lib/toast.js';
 import { useEscape } from '../lib/hooks.js';
-import { formatTime, timeAgo } from '../lib/format.js';
+import { formatTime, parseDate, timeAgo } from '../lib/format.js';
 import { dueDateMeta } from '../lib/dueDate.js';
 import { Dropdown } from './Dropdown.js';
 import { Modal } from './Modal.js';
@@ -17,12 +17,12 @@ import { nodeDetailHref, queueReasonsByRunId, shouldRenderNodeBadge } from '../l
 import {
   COMMON_ACTIONS,
   TASK_STATUS_LABELS,
-  RUN_STATUS_LABELS,
   QUEUE_REASON_LABELS,
   FILTER_LABELS,
   TASK_DETAIL_LABELS,
   NEW_TASK_LABELS,
   EXECUTE_MODAL_LABELS,
+  runStatusLabel,
   statusLabel,
 } from '../lib/copy.js';
 
@@ -516,7 +516,7 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
   if (!task) return null;
 
   const taskRuns = runs.filter(r => r.task_id === task.id)
-    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+    .sort((a, b) => parseDate(b.created_at) - parseDate(a.created_at));
   const project = projects.find(p => p.id === task.project_id);
   const activeRun = taskRuns.find(r => r.status === 'running' || r.status === 'needs_input');
 
@@ -852,7 +852,7 @@ export function TaskDetailPanel({ task, onClose, projects, agents, runs, onOpenR
                     <span class="run-status-dot ${r.status}"></span>
                     <span style="flex:1;min-width:0;">
                       <span style="color:var(--text-primary);font-size:13px;">${r.agent_name || TASK_DETAIL_LABELS.agentFallback}</span>
-                      <span style="color:var(--text-muted);font-size:11px;margin-left:6px;">${statusLabel(RUN_STATUS_LABELS, r.status)}</span>
+                      <span style="color:var(--text-muted);font-size:11px;margin-left:6px;">${runStatusLabel(r)}</span>
                       <span class="run-row-badges">
                         <${NodeBadge} run=${r} />
                         ${r.status === 'queued' && html`<${QueueReasonChip} reason=${queueReasons[r.id]} />`}
