@@ -1198,10 +1198,13 @@ function createLifecycleService({
     }
     const node = getDispatchNode(run.node_id);
     const isRemoteNode = node && (node.kind || 'local') !== 'local';
-    const releaseOnLocalProcessExit = () => runService.releaseOwner(run.id, leaseId, {
-      state: 'released',
-      evidence: 'process_exit',
-    });
+    const releaseOnLocalProcessExit = () => {
+      if (typeof runService.releaseOwner !== 'function') return false;
+      return runService.releaseOwner(run.id, leaseId, {
+        state: 'released',
+        evidence: 'process_exit',
+      });
+    };
     // Loopback is a valid destination only for local workers. Remote workers
     // receive the proposal capability solely when the operator configured a
     // PALANTIR_BASE_URL that is reachable from the worker node.
@@ -1811,11 +1814,20 @@ function createLifecycleService({
             }));
           }
           if (!leaseStillCurrent()) {
-          const err = new Error('stale lease generation; spawn aborted');
-          err.code = 'STALE_LEASE_GENERATION';
-          throw err;
-        }
-        result = await channelForNode(run.node_id).spawnWorker(run.id, {
+            const err = new Error('stale lease generation; spawn aborted');
+            err.code = 'STALE_LEASE_GENERATION';
+            throw err;
+          }
+          const ownerEngine = isRemoteNode ? 'remote' : 'stream-json';
+          // Skip when the double lacks the API or the claim carried no lease
+          // (legacy narrow test doubles) — recording is lease-scoped anyway.
+          if (leaseId && typeof runService.recordOwnerEngine === 'function'
+            && !runService.recordOwnerEngine(run.id, leaseId, ownerEngine)) {
+            const err = new Error('stale lease generation; engine record aborted');
+            err.code = 'STALE_LEASE_GENERATION';
+            throw err;
+          }
+          result = await channelForNode(run.node_id).spawnWorker(run.id, {
             engine: 'stream-json',
             spec: {
               prompt,
@@ -2020,6 +2032,15 @@ function createLifecycleService({
           err.code = 'STALE_LEASE_GENERATION';
           throw err;
         }
+        const ownerEngine = isRemoteNode
+          ? 'remote'
+          : executionEngine?.type === 'tmux' ? 'tmux' : 'subprocess';
+        if (leaseId && typeof runService.recordOwnerEngine === 'function'
+          && !runService.recordOwnerEngine(run.id, leaseId, ownerEngine)) {
+          const err = new Error('stale lease generation; engine record aborted');
+          err.code = 'STALE_LEASE_GENERATION';
+          throw err;
+        }
         result = await channelForNode(run.node_id).spawnWorker(run.id, {
           engine: 'cli',
           spec: {
@@ -2162,7 +2183,7 @@ function createLifecycleService({
       throw error;
     }
     } finally {
-      if (!spawnAccepted) {
+      if (!spawnAccepted && typeof runService.releaseOwner === 'function') {
         runService.releaseOwner(runId, leaseId, {
           state: 'released',
           evidence: 'spawn_failed',
@@ -2661,6 +2682,130 @@ function createLifecycleService({
   /**
    * Check health of all running runs.
    */
+  function durableOwnerEngine(run, lease = null) {
+    if (lease?.engine) return lease.engine;
+    // Compatibility for pre-S1b leases: a persisted tmux session is durable
+    // routing evidence. Subprocess/stream handles are not recoverable.
+    return run?.tmux_session ? 'tmux' : null;
+  }
+
+  async function probeOwner(run, lease = null) {
+    const channel = channelForNode(run.node_id);
+    const durableEngine = durableOwnerEngine(run, lease);
+    // Routing is best-effort; the STATE decision belongs to the channel, which
+    // checks LIVE handles first (C8 row 1: a live in-memory handle is primary
+    // evidence even when nothing durable was recorded). Gating on durable
+    // identity here starved that check and mis-read live local runs as unknown
+    // — which is exactly the D1 failure shape inverted.
+    const engine = typeof channel.engineFor === 'function'
+      ? channel.engineFor(run.id, durableEngine)
+      : (durableEngine === 'stream-json' ? 'stream-json' : durableEngine ? 'cli' : null);
+
+    if (typeof channel.ownerState === 'function') {
+      let state;
+      try { state = await channel.ownerState(run.id, durableEngine); }
+      catch { state = 'unknown'; }
+      const normalized = ['alive', 'dead', 'unknown'].includes(state) ? state : 'unknown';
+      // A live/dead verdict implies the channel found a handle; route as cli
+      // when we had no durable identity so downstream detectExitCode works.
+      return { channel, engine: engine || (normalized === 'unknown' ? null : 'cli'), state: normalized };
+    }
+
+    // Compatibility for narrow injected test channels. Production local and
+    // remote channels expose ownerState and never take this branch.
+    const probeEngine = engine || 'cli';
+    try {
+      const alive = await channel.isAlive(run.id, probeEngine);
+      if (alive) return { channel, engine: probeEngine, state: 'alive' };
+      const exitCode = await channel.detectExitCode(run.id, probeEngine);
+      return { channel, engine: probeEngine, state: exitCode === null ? 'unknown' : 'dead' };
+    } catch {
+      return { channel, engine: engine || null, state: 'unknown' };
+    }
+  }
+
+  // Unknown grace (contract §8.2 C8 + adversarial review of the first S1b cut):
+  // "unknown never terminates" taken literally deletes the old TTL safety net,
+  // leaving ack-lost remote runs (and marker-less session loss) running forever.
+  // The reconciliation: unknown holds status for ONE grace window, anchored to
+  // the lease's first probe_unknown annotation; after it expires the ordinary
+  // terminal rules apply — but the LEASE stays held (the owner was never
+  // confirmed dead), so requeue keeps 409ing and capacity (flag on) stays
+  // conservative. Reuses REMOTE_OWNERSHIP_UNCERTAIN_TTL_MS.
+  function unknownGraceExpired(run, lease, now = Date.now()) {
+    if (!lease) return true; // no lease to protect — legacy behavior applies
+    let since = null;
+    try {
+      if (typeof runService.ownerProbeUnknownSince === 'function') {
+        since = runService.ownerProbeUnknownSince(run.id, lease.lease_id);
+      }
+      if (!since) {
+        // First observation: start the clock (dedup inside the annotator).
+        if (typeof runService.annotateOwnerProbeUnknown === 'function') {
+          runService.annotateOwnerProbeUnknown(run.id, lease.lease_id);
+        }
+        return false;
+      }
+    } catch { return false; }
+    const sinceMs = Date.parse(`${since.replace(' ', 'T')}Z`);
+    if (!Number.isFinite(sinceMs)) return false;
+    return now - sinceMs >= REMOTE_OWNERSHIP_UNCERTAIN_TTL_MS;
+  }
+
+  function releaseDeadOwner(run, evidence = 'probe:dead') {
+    if (!runService || typeof runService.getHeldLease !== 'function') return false;
+    const lease = runService.getHeldLease(run.id);
+    if (!lease || typeof runService.releaseOwner !== 'function') return false;
+    if (typeof runService.releaseOwner !== 'function') return false;
+    return runService.releaseOwner(run.id, lease.lease_id, {
+      state: 'released',
+      evidence,
+    });
+  }
+
+  // This pass is deliberately lease-driven, not status-driven. It sees paused
+  // workers and terminal draining runs, never writes run status, and converts
+  // every probe exception into durable unknown evidence.
+  async function sweepHeldOwnerLeases() {
+    if (!runService || typeof runService.listHeldOwnerLeases !== 'function') return 0;
+    let leases;
+    try { leases = runService.listHeldOwnerLeases() || []; }
+    catch { return 0; }
+
+    let changed = 0;
+    for (const lease of leases) {
+      if (!lease || Number(lease.is_manager || 0) === 1) continue;
+      try {
+        const run = {
+          id: lease.run_id,
+          status: lease.run_status,
+          node_id: lease.node_id,
+          tmux_session: lease.tmux_session,
+        };
+        const observed = await probeOwner(run, lease);
+        if (observed.state === 'dead') {
+          const evidence = lease.acquired_at ? 'probe:dead' : 'boot:reserved_dead';
+          if (typeof runService.releaseOwner === 'function' && runService.releaseOwner(run.id, lease.lease_id, {
+            state: 'released',
+            evidence,
+          })) changed++;
+        } else if (observed.state === 'alive' && !lease.acquired_at) {
+          if (typeof runService.acquireOwnerLeaseLate === 'function'
+            && runService.acquireOwnerLeaseLate(run.id, lease.lease_id)) changed++;
+        } else if (observed.state === 'unknown') {
+          if (typeof runService.annotateOwnerProbeUnknown === 'function'
+            && runService.annotateOwnerProbeUnknown(run.id, lease.lease_id)) changed++;
+        }
+      } catch {
+        try {
+          if (typeof runService.annotateOwnerProbeUnknown === 'function'
+            && runService.annotateOwnerProbeUnknown(lease.run_id, lease.lease_id)) changed++;
+        } catch { /* never-throws */ }
+      }
+    }
+    return changed;
+  }
+
   async function checkHealth() {
     // Re-entrancy guard: prevent overlapping health checks
     if (healthCheckRunning) return;
@@ -2677,6 +2822,7 @@ function createLifecycleService({
       // the same tick.)
       console.warn(`[lifecycle] health check failed: ${err && err.message}`);
     } finally {
+      await sweepHeldOwnerLeases();
       sweepStuckQueuedRuns();
       sweepStuckMaterializations();
       healthCheckRunning = false;
@@ -2975,15 +3121,27 @@ function createLifecycleService({
     for (const run of runningRuns) {
       // Skip manager runs and streamJsonEngine workers — they manage their own lifecycle
       if (run.is_manager) continue;
-      const channel = channelForNode(run.node_id);
-      const owner = await channel.ownerOf(run.id);
+      const lease = typeof runService.getHeldLease === 'function'
+        ? runService.getHeldLease(run.id)
+        : null;
+      const observed = await probeOwner(run, lease);
+      const { channel, engine: owner, state: ownerState } = observed;
+      // Absence of a durable handle/session/sentinel is not death. Preserve
+      // status, lease, output, and runtime artifacts until positive evidence.
+      let unknownExpired = false;
+      if (ownerState === 'unknown') {
+        unknownExpired = unknownGraceExpired(run, lease, nowMs());
+        if (!unknownExpired) continue;
+        // Grace over: fall through to the ordinary terminal rules below with
+        // no dead evidence (alive=false, exitCode=null). The lease stays held.
+      }
       if (owner === 'stream-json') {
         // streamJsonEngine handles exit via its own event handler (result → updateRunStatus)
         // Just check for orphaned processes where exit was missed
-        const alive = await channel.isAlive(run.id, 'stream-json');
-        if (!alive) {
+        if (ownerState === 'dead') {
           const exitCode = await channel.detectExitCode(run.id, 'stream-json');
           if (exitCode !== null) {
+            releaseDeadOwner(run);
             const status = exitCode === 0 ? 'completed' : 'failed';
             try { runService.updateRunStatus(run.id, status, { force: true }); } catch {}
             if (run.task_id) checkTaskCompletion(run.task_id);
@@ -2991,13 +3149,14 @@ function createLifecycleService({
         }
         continue;
       }
-      // Anything that is not stream-json-owned falls through to the cli
-      // handling — the pre-channel code's else-default. Do NOT gate this on
-      // ownerOf(...)==='cli': a dead/unknown run must still be terminalized
-      // here, and skipping it would strand the run in 'running' forever.
+      // Anything routed to the CLI falls through to its terminal handling.
+      // Dead evidence terminalizes; unknown evidence returned above preserves
+      // the run and lease.
 
-      const alive = await channel.isAlive(run.id, 'cli');
-      const exitCode = await channel.detectExitCode(run.id, 'cli');
+      const alive = ownerState === 'alive';
+      const exitCode = ownerState === 'dead'
+        ? await channel.detectExitCode(run.id, 'cli')
+        : null;
 
       // A spawn whose SSH acknowledgement was lost may still be starting on the
       // pod. "No tmux session and no exit sentinel" is exactly what a remote
@@ -3009,9 +3168,6 @@ function createLifecycleService({
       //   exit sentinel written → confirmed, terminalize normally
       // Until the TTL runs out the run stays `running`; after it, the ordinary
       // terminal rules apply again so the slot is never held indefinitely.
-      if (!alive && exitCode === null && hasUnresolvedRemoteOwnershipUncertainty(run, nowMs())) {
-        continue;
-      }
       if (alive && hasUnresolvedRemoteOwnershipUncertainty(run, nowMs())) {
         try {
           runService.addRunEvent(run.id, 'spawn:remote_ownership_confirmed', JSON.stringify({
@@ -3020,7 +3176,7 @@ function createLifecycleService({
         } catch { /* annotate-only */ }
       }
 
-      if (!alive || exitCode !== null) {
+      if (ownerState === 'dead' || unknownExpired) {
         // Detached remote Claude still writes stream-json. Parse that durable
         // log before committing status so result semantics (limits/errors),
         // usage, and goal-output text remain equivalent to the local engine.
@@ -3056,7 +3212,10 @@ function createLifecycleService({
           checkTaskCompletion(run.task_id);
         }
 
-        // Cleanup tmux session and output tracking
+        // Cleanup tmux session and output tracking. The lease is released ONLY
+        // on confirmed death — an expired-unknown terminalization leaves it
+        // held (owner unconfirmed; requeue keeps 409ing).
+        if (ownerState === 'dead') releaseDeadOwner(run);
         await channel.kill(run.id, 'cli');
         _outputHashes.delete(run.id);
 
@@ -3146,18 +3305,23 @@ function createLifecycleService({
               // Capture the evidence the owner-exit investigation was missing
               // before any liveness recheck can lead to terminalization/kill.
               await annotateWorkerIdleSnapshot(run, lastActivity);
-              // Double-check: is the process truly dead or just idle?
-              const alive = await channel.isAlive(run.id, 'cli');
-              if (!alive) {
+              // Double-check through the same tri-state contract: a handle can
+              // disappear between the first probe and this idle recheck.
+              const currentLease = typeof runService.getHeldLease === 'function'
+                ? runService.getHeldLease(run.id)
+                : lease;
+              const reObserved = await probeOwner(run, currentLease);
+              if (reObserved.state === 'dead') {
                 // Process is dead — finalize as completed/failed
-                const exitCode = await channel.detectExitCode(run.id, 'cli');
+                const exitCode = await reObserved.channel.detectExitCode(run.id, 'cli');
                 const status = (exitCode === 0) ? 'completed' : 'failed';
                 const reason = exitCode === null ? 'agent-exit-unknown' : 'process_dead_after_idle';
                 runService.updateRunStatus(run.id, status, { force: true, reason });
                 if (run.task_id) checkTaskCompletion(run.task_id);
-                await channel.kill(run.id, 'cli');
+                releaseDeadOwner(run);
+                await reObserved.channel.kill(run.id, 'cli');
                 _outputHashes.delete(run.id);
-              } else {
+              } else if (reObserved.state === 'alive') {
                 // Process alive but truly idle for too long — mark needs_input
                 const fromStatus = run.status;
                 runService.updateRunStatus(run.id, 'needs_input', { force: true, reason: 'idle_timeout' });
@@ -3194,8 +3358,16 @@ function createLifecycleService({
       if (run.is_manager) continue;
       // Skip streamJsonEngine runs — everything else falls through to the
       // cli handling (pre-channel else-default; see health loop note above).
-      const channel = channelForNode(run.node_id);
-      const owner = await channel.ownerOf(run.id);
+      const lease = typeof runService.getHeldLease === 'function'
+        ? runService.getHeldLease(run.id)
+        : null;
+      const observed = await probeOwner(run, lease);
+      const { channel, engine: owner, state: ownerState } = observed;
+      let unknownExpired = false;
+      if (ownerState === 'unknown') {
+        unknownExpired = unknownGraceExpired(run, lease, nowMs());
+        if (!unknownExpired) continue;
+      }
       if (owner === 'stream-json') continue;
       const hasDetachedLimit = typeof runService.hasRunEvent === 'function'
         ? runService.hasRunEvent(run.id, 'limit_reached')
@@ -3212,8 +3384,7 @@ function createLifecycleService({
         continue;
       }
 
-      const alive = await channel.isAlive(run.id, 'cli');
-      if (alive) {
+      if (ownerState === 'alive') {
         // Check if output changed — agent may still be working
         const currentOutput = await channel.getOutput(run.id, 10);
         const outputHash = currentOutput ? currentOutput.length + ':' + currentOutput.slice(-100) : '';
@@ -3225,9 +3396,13 @@ function createLifecycleService({
           runService.updateRunStatus(run.id, 'running', { force: true });
           runService.addRunEvent(run.id, 'recovered', JSON.stringify({ message: 'Agent output detected, recovered from needs_input' }));
         }
-      } else {
-        // Process died while in needs_input
-        const exitCode = await channel.detectExitCode(run.id, 'cli');
+      } else if (ownerState === 'dead' || unknownExpired) {
+        // Process died while in needs_input — or its unknown grace expired
+        // (owner unconfirmed: terminalize per the legacy contract, but the
+        // lease stays held; only confirmed death releases it below).
+        const exitCode = ownerState === 'dead'
+          ? await channel.detectExitCode(run.id, 'cli')
+          : null;
         const status = (exitCode === 0) ? 'completed' : 'failed';
         runService.updateRunStatus(run.id, status, {
           force: true,
@@ -3239,6 +3414,7 @@ function createLifecycleService({
           terminalReason: latest => idleTimeoutTerminalReason(latest),
         });
         if (run.task_id) checkTaskCompletion(run.task_id);
+        if (ownerState === 'dead') releaseDeadOwner(run);
         await channel.kill(run.id, 'cli');
         _outputHashes.delete(run.id);
       }
@@ -3938,6 +4114,14 @@ function createLifecycleService({
     return finishCancelRun(run);
   }
 
+  // Explicit deletion fences a held owner regardless of run status. This is a
+  // best-effort kill only: runService.deleteRun performs the ordered durable
+  // abandon immediately afterwards.
+  function killRunOwner(runId) {
+    const run = runService.getRun(runId);
+    return channelForNode(run.node_id).kill(runId);
+  }
+
   /**
    * Clean up orphan MCP config files from runtime/mcp/ on boot.
    * Files whose runs are no longer active (not running/queued) are removed.
@@ -4011,6 +4195,7 @@ function createLifecycleService({
     checkHealth,
     sweepStuckQueuedRuns,
     sweepStuckMaterializations,
+    sweepHeldOwnerLeases,
     recoverOrphanSessions,
     cleanupOrphanMcpConfigs,
     cleanupStaleTerminalWorktrees,
@@ -4018,6 +4203,7 @@ function createLifecycleService({
     stopMonitoring,
     sendAgentInput,
     cancelRun,
+    killRunOwner,
     // G3: boot sweeper — settle unverdicted terminal goal runs (crash mid-
     // harvest) + reconcile verdicted ones (redrive undelivered outbox effects).
     // MUST run before stale-worktree cleanup so a settle that needs a workspace

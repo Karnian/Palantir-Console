@@ -225,6 +225,31 @@ function createRunService(db, eventBus) {
         AND status = 'running'
         AND is_manager = 0
     `),
+    countHeldOwners: db.prepare(`
+      SELECT COUNT(*) as count
+      FROM run_owner_leases l
+      JOIN runs r ON r.id = l.run_id
+      WHERE l.state = 'held'
+        AND r.agent_profile_id = ?
+        AND r.is_manager = 0
+    `),
+    countHeldOwnersOnNode: db.prepare(`
+      SELECT COUNT(*) as count
+      FROM run_owner_leases l
+      JOIN runs r ON r.id = l.run_id
+      WHERE l.state = 'held'
+        AND COALESCE(r.node_id, 'local') = ?
+        AND r.agent_profile_id = ?
+        AND r.is_manager = 0
+    `),
+    countHeldOwnersTotalOnNode: db.prepare(`
+      SELECT COUNT(*) as count
+      FROM run_owner_leases l
+      JOIN runs r ON r.id = l.run_id
+      WHERE l.state = 'held'
+        AND COALESCE(r.node_id, 'local') = ?
+        AND r.is_manager = 0
+    `),
     getOldestQueued: db.prepare(`
       SELECT r.*, ap.name as agent_name, ap.type as agent_type, ap.icon as agent_icon,
              t.title as task_title, t.project_id as project_id, p.name as project_name
@@ -700,6 +725,22 @@ function createRunService(db, eventBus) {
       WHERE run_id = ? AND state = 'held'
       LIMIT 1
     `),
+    listHeldOwnerLeases: db.prepare(`
+      SELECT l.*,
+             r.status AS run_status,
+             r.node_id AS node_id,
+             r.tmux_session AS tmux_session,
+             r.is_manager AS is_manager
+      FROM run_owner_leases l
+      JOIN runs r ON r.id = l.run_id
+      WHERE l.state = 'held'
+      ORDER BY l.created_at ASC, l.rowid ASC
+    `),
+    recordOwnerEngine: db.prepare(`
+      UPDATE run_owner_leases
+      SET engine = ?
+      WHERE run_id = ? AND lease_id = ? AND state = 'held'
+    `),
     stampOwnerLeaseAcquired: db.prepare(`
       UPDATE run_owner_leases
       SET acquired_at = datetime('now')
@@ -747,6 +788,21 @@ function createRunService(db, eventBus) {
     hasEventType: db.prepare(`
       SELECT 1 AS found FROM run_events
       WHERE run_id = ? AND event_type = ?
+      LIMIT 1
+    `),
+    hasOwnerProbeUnknown: db.prepare(`
+      SELECT 1 AS found FROM run_events
+      WHERE run_id = ?
+        AND event_type = 'worker:lease_probe_unknown'
+        AND json_extract(payload_json, '$.lease_id') = ?
+      LIMIT 1
+    `),
+    ownerProbeUnknownSince: db.prepare(`
+      SELECT created_at FROM run_events
+      WHERE run_id = ?
+        AND event_type = 'worker:lease_probe_unknown'
+        AND json_extract(payload_json, '$.lease_id') = ?
+      ORDER BY rowid ASC
       LIMIT 1
     `),
   };
@@ -816,6 +872,29 @@ function createRunService(db, eventBus) {
       eventId = eventInfo.lastInsertRowid;
     }
     return { eventType, eventId };
+  });
+
+  const acquireOwnerLeaseLateTx = db.transaction((runId, leaseId) => {
+    const info = stmts.stampOwnerLeaseAcquired.run(runId, leaseId);
+    if (info.changes === 0 || !stmts.runRowExists.get(runId)) return null;
+    const eventInfo = stmts.insertEvent.run(
+      runId,
+      'worker:lease_acquired_late',
+      JSON.stringify({ lease_id: leaseId }),
+    );
+    return eventInfo.lastInsertRowid;
+  });
+
+  const annotateOwnerProbeUnknownTx = db.transaction((runId, leaseId) => {
+    if (!stmts.runRowExists.get(runId) || stmts.hasOwnerProbeUnknown.get(runId, leaseId)) {
+      return null;
+    }
+    const eventInfo = stmts.insertEvent.run(
+      runId,
+      'worker:lease_probe_unknown',
+      JSON.stringify({ lease_id: leaseId }),
+    );
+    return eventInfo.lastInsertRowid;
   });
 
   function listRuns({ task_id, status } = {}) {
@@ -1247,14 +1326,23 @@ function createRunService(db, eventBus) {
   }
 
   function countRunning(profileId) {
+    if (process.env.PALANTIR_LEASE_CAPACITY === '1') {
+      return stmts.countHeldOwners.get(profileId).count;
+    }
     return stmts.countRunning.get(profileId).count;
   }
 
   function countRunningOnNode(nodeId, profileId) {
+    if (process.env.PALANTIR_LEASE_CAPACITY === '1') {
+      return stmts.countHeldOwnersOnNode.get(nodeId || 'local', profileId).count;
+    }
     return stmts.countRunningOnNode.get(nodeId || 'local', profileId).count;
   }
 
   function countRunningTotalOnNode(nodeId) {
+    if (process.env.PALANTIR_LEASE_CAPACITY === '1') {
+      return stmts.countHeldOwnersTotalOnNode.get(nodeId || 'local').count;
+    }
     return stmts.countRunningTotalOnNode.get(nodeId || 'local').count;
   }
 
@@ -1360,6 +1448,50 @@ function createRunService(db, eventBus) {
 
   function getHeldLease(runId) {
     return stmts.getHeldOwnerLease.get(runId) || null;
+  }
+
+  function listHeldOwnerLeases() {
+    return stmts.listHeldOwnerLeases.all();
+  }
+
+  function recordOwnerEngine(runId, leaseId, engine) {
+    if (!['subprocess', 'tmux', 'stream-json', 'remote'].includes(engine)) {
+      throw new BadRequestError(`Invalid owner engine: ${engine}`);
+    }
+    return stmts.recordOwnerEngine.run(engine, runId, leaseId).changes > 0;
+  }
+
+  function acquireOwnerLeaseLate(runId, leaseId) {
+    const eventId = acquireOwnerLeaseLateTx(runId, leaseId);
+    if (eventId === null) return false;
+    if (eventBus) {
+      eventBus.emit('run:event', {
+        runId,
+        eventType: 'worker:lease_acquired_late',
+        eventId,
+      });
+    }
+    return true;
+  }
+
+  // First moment this lease was observed as unknown — the anchor for the
+  // unknown grace TTL (see lifecycleService). Null until the first annotation.
+  function ownerProbeUnknownSince(runId, leaseId) {
+    const row = stmts.ownerProbeUnknownSince.get(runId, leaseId);
+    return row ? row.created_at : null;
+  }
+
+  function annotateOwnerProbeUnknown(runId, leaseId) {
+    const eventId = annotateOwnerProbeUnknownTx(runId, leaseId);
+    if (eventId === null) return false;
+    if (eventBus) {
+      eventBus.emit('run:event', {
+        runId,
+        eventType: 'worker:lease_probe_unknown',
+        eventId,
+      });
+    }
+    return true;
   }
 
   function releaseOwner(runId, leaseId, options = {}, legacyOptions = {}) {
@@ -2132,7 +2264,8 @@ function createRunService(db, eventBus) {
     getOldestMaterializableOnNode,
     countMaterializingOnNode, countMaterializingGlobal,
     claimQueuedRun, claimQueuedRunForMaterialization, restartMaterializationAttempt,
-    getHeldLease, releaseOwner,
+    getHeldLease, listHeldOwnerLeases, recordOwnerEngine,
+    acquireOwnerLeaseLate, annotateOwnerProbeUnknown, ownerProbeUnknownSince, releaseOwner,
     markMaterializePending, updateRunMaterialized, markMaterializedReady,
     getProjectNodeWorkspace, markProjectNodeWorkspaceReady, markProjectNodeWorkspaceFailed,
     touchProjectNodeWorkspace, acquireMaterializationLease, touchMaterializationLease, releaseMaterializationLease,
