@@ -1,6 +1,6 @@
 # Worker owner-exit — 재설계 brief (v8)
 
-**상태**: S0 #489 / S1a #491 / S1b #493 머지됨 / S2 계약 확정 검토 중(§8.3) / S3 미확정 (§8 의 S2·S3 항목 + S1b 구현이 추가한 계약: unknown 유예 TTL, 세대-원자 terminal write(requireHeldLease), '증거 파괴 블록이 lease 를 닫는다')
+**상태**: S0 #489 / S1a #491 / S1b #493 / S2a #495 머지됨 / S2b(§8.3 C15)·S3 미확정 (§8 의 S2·S3 항목 + S1b 구현이 추가한 계약: unknown 유예 TTL, 세대-원자 terminal write(requireHeldLease), '증거 파괴 블록이 lease 를 닫는다')
 **참고 자산**: `fix/465`(PR #478) · `fix/466`(PR #482) 의 미머지 잔여분
 **선행 완료**: #486(idle timeout + terminal_reason) · #487(terminal CAS + retry 유일성)
 
