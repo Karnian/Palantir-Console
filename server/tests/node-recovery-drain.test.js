@@ -347,3 +347,146 @@ test('reachable executable ssh node can drain queued repo materialization', asyn
   assert.equal(calls[0].claimToken, 'claim-remote');
   assert.equal(runs[0].status, 'materializing');
 });
+
+test('a closed admission gate blocks repo materialization, not just the worker spawn', async (t) => {
+  // codex S2a R1: ensureWorkspace() clones/fetches on a node — a spawn-equivalent
+  // side effect. A closed gate (shutdown, or pre-recovery boot) must not start it,
+  // and the run must stay queued for the next boot.
+  const prev = process.env.PALANTIR_PROJECT_REPO;
+  process.env.PALANTIR_PROJECT_REPO = '1';
+  t.after(() => {
+    if (prev === undefined) delete process.env.PALANTIR_PROJECT_REPO;
+    else process.env.PALANTIR_PROJECT_REPO = prev;
+  });
+  const runs = [{
+    id: 'run-gated-1', task_id: 'task-gated-1', project_id: 'project-gated',
+    agent_profile_id: 'P1', status: 'queued', is_manager: 0, node_id: 'pod-a',
+    prompt: 'gated', queued_args: null,
+  }];
+  const calls = [];
+  let lifecycleService;
+  const runService = {
+    listRuns(filter = {}) { return runs.filter((run) => !filter.status || run.status === filter.status); },
+    countMaterializingOnNode(nodeId) { return runs.filter((r) => r.status === 'materializing' && r.node_id === nodeId).length; },
+    countMaterializingGlobal() { return runs.filter((r) => r.status === 'materializing').length; },
+    getOldestMaterializableOnNode(nodeId, profileId) {
+      return runs.find((r) => r.status === 'queued' && r.node_id === nodeId && r.agent_profile_id === profileId) || null;
+    },
+    claimQueuedRunForMaterialization(runId) {
+      const run = runs.find((item) => item.id === runId);
+      if (!run || run.status !== 'queued') return null;
+      run.status = 'materializing';
+      // codex S2a R2: admission can close in the tick between this claim and the
+      // deferred ensureWorkspace() call. Close it here to prove the deferred
+      // callback re-checks the gate rather than cloning after shutdown.
+      lifecycleService.closeAdmission();
+      return { claimed: true, token: 'claim-gated' };
+    },
+    restartMaterializationAttempt() { return null; },
+    requeueMaterializingRun(runId, opts = {}) {
+      // Mirror the real service: no token → no-op (this is the exact gap the
+      // deferred requeue must satisfy — codex S2a R3).
+      if (!opts.token) return null;
+      const run = runs.find((item) => item.id === runId);
+      if (run) run.status = 'queued';
+      return { requeued: true };
+    },
+    getOldestQueuedReadyOnNode() { return null; },
+    getRun(runId) { return runs.find((run) => run.id === runId) || null; },
+    addRunEvent() {},
+  };
+  lifecycleService = createLifecycleService({
+    runService,
+    taskService: { getTask() { return { id: 'task-gated-1', project_id: 'project-gated' }; } },
+    agentProfileService: {
+      getProfile() { return { id: 'P1', command: 'claude', max_concurrent: 1 }; },
+      getRunningCount() { return 0; },
+    },
+    projectService: { getProject(id) { return { id, source_type: 'git', repo_url: 'https://github.com/acme/repo.git' }; } },
+    executionEngine: {}, streamJsonEngine: {},
+    nodeService: {
+      getNode(nodeId) { return { id: nodeId, kind: 'ssh', reachable: 1, can_execute: 1, files_only: 0, cordoned: 0 }; },
+      pickExecutor() { throw new Error('gated drain must not dispatch'); },
+    },
+    projectMaterializationService: {
+      ensureWorkspace(args) { calls.push(args); return Promise.resolve({ pending: true, backoffMs: 1000 }); },
+    },
+    nodeExecutor: { async spawnWorker() { throw new Error('should not spawn'); } },
+    // NOTE: gate starts OPEN so materialization can CLAIM; the claim hook then
+    // closes it, exercising the tick-straddling deferred path.
+    admissionStartsClosed: false,
+  });
+
+  await lifecycleService.drainQueue('P1');
+  await immediate();
+  await immediate();
+  lifecycleService.stopMonitoring();
+
+  assert.deepEqual(calls, [], 'no ensureWorkspace once the gate closed mid-claim');
+  assert.equal(runs[0].status, 'queued', 'the materialize claim is requeued for the next boot');
+});
+
+test('an in-flight materialization registers an admission ticket that shutdown waits on', async (t) => {
+  // codex S2a R4: ensureWorkspace() is a clone/fetch — shutdown must wait for it
+  // exactly as it waits for a worker spawn. The claim→materialization span holds
+  // an in-flight admission ticket, so closeAdmission()'s snapshot is non-empty
+  // while the clone is running.
+  const prev = process.env.PALANTIR_PROJECT_REPO;
+  process.env.PALANTIR_PROJECT_REPO = '1';
+  t.after(() => {
+    if (prev === undefined) delete process.env.PALANTIR_PROJECT_REPO;
+    else process.env.PALANTIR_PROJECT_REPO = prev;
+  });
+  const runs = [{
+    id: 'run-mat-inflight', task_id: 'task-mi', project_id: 'project-mi',
+    agent_profile_id: 'P1', status: 'queued', is_manager: 0, node_id: 'pod-a',
+    prompt: 'mat', queued_args: null,
+  }];
+  let releaseClone;
+  const clonePromise = new Promise((resolve) => { releaseClone = resolve; });
+  const runService = {
+    listRuns(filter = {}) { return runs.filter((r) => !filter.status || r.status === filter.status); },
+    countMaterializingOnNode(nodeId) { return runs.filter((r) => r.status === 'materializing' && r.node_id === nodeId).length; },
+    countMaterializingGlobal() { return runs.filter((r) => r.status === 'materializing').length; },
+    getOldestMaterializableOnNode(nodeId, profileId) {
+      return runs.find((r) => r.status === 'queued' && r.node_id === nodeId && r.agent_profile_id === profileId) || null;
+    },
+    claimQueuedRunForMaterialization(runId) {
+      const run = runs.find((item) => item.id === runId);
+      if (!run || run.status !== 'queued') return null;
+      run.status = 'materializing';
+      return { claimed: true, token: 'claim-mi' };
+    },
+    restartMaterializationAttempt() { return null; },
+    requeueMaterializingRun(runId, opts = {}) { if (!opts.token) return null; const r = runs.find((x) => x.id === runId); if (r) r.status = 'queued'; return { requeued: true }; },
+    getOldestQueuedReadyOnNode() { return null; },
+    getRun(runId) { return runs.find((r) => r.id === runId) || null; },
+    addRunEvent() {},
+  };
+  const lifecycleService = createLifecycleService({
+    runService,
+    taskService: { getTask() { return { id: 'task-mi', project_id: 'project-mi' }; } },
+    agentProfileService: { getProfile() { return { id: 'P1', command: 'claude', max_concurrent: 1 }; }, getRunningCount() { return 0; } },
+    projectService: { getProject(id) { return { id, source_type: 'git', repo_url: 'https://github.com/acme/repo.git' }; } },
+    executionEngine: {}, streamJsonEngine: {},
+    nodeService: {
+      getNode(nodeId) { return { id: nodeId, kind: 'ssh', reachable: 1, can_execute: 1, files_only: 0, cordoned: 0 }; },
+      pickExecutor() { throw new Error('no dispatch'); },
+    },
+    projectMaterializationService: {
+      ensureWorkspace() { return clonePromise; }, // stays pending until we release
+    },
+    nodeExecutor: { async spawnWorker() { throw new Error('no spawn'); } },
+  });
+
+  await lifecycleService.drainQueue('P1');
+  await immediate(); await immediate();
+
+  // The clone is in flight — shutdown's snapshot must include it.
+  const snapshot = lifecycleService.closeAdmission();
+  assert.ok(snapshot.length >= 1, 'the in-flight materialization is in the shutdown snapshot');
+
+  releaseClone({ pending: false });
+  await Promise.allSettled(snapshot);
+  lifecycleService.stopMonitoring();
+});

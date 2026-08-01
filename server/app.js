@@ -1370,6 +1370,14 @@ function createApp(options = {}) {
     workerProposalBaseUrl,
     workerProposalRemoteBaseUrl,
     goalFeatureActive, // G2 §6
+    // C12/C14: API dispatch and boot drain stay queued until orphan recovery
+    // has established the prior boot's worker ownership state. Tie the closed
+    // start to the SAME condition that runs recovery-to-completion + boot drain
+    // (forceBootDrain, or a non-test process): a unit harness that neither runs
+    // recovery nor opts into boot drain must keep the gate OPEN, or every one of
+    // its spawns strands as queued. This mirrors the pre-existing shouldBootDrain
+    // seam so the two can never diverge.
+    admissionStartsClosed: Boolean(options.forceBootDrain) || !process.env.NODE_TEST_CONTEXT,
   });
 
   // G4b §5j: goal 산출물 전달. Fires when a goal task is marked 'done' (the
@@ -1901,32 +1909,39 @@ function createApp(options = {}) {
   // run:ended subscriber) instead of duplicating teardown logic in the
   // recovery path (Codex-agreed option A).
   lifecycleService.startMonitoring();
-  const recovered = lifecycleService.recoverOrphanSessions();
-  Promise.resolve(recovered)
-    .then((sessions) => {
-      if (sessions.length > 0) {
-        console.log(`[app] Recovered ${sessions.length} orphan session(s)`);
-      }
-    })
-    .catch((err) => {
-      console.warn(`[app] Orphan session recovery failed: ${err.message}`);
-    });
   // Boot drain restarts queued worker runs after a restart. Skip under the
   // node test runner by default: createApp() in tests would otherwise claim
   // (→running) any seeded queued rows, hit the P0 spawn guard, and corrupt
   // them to failed/retry. Tests that exercise boot drain pass forceBootDrain.
   const shouldBootDrain = options.forceBootDrain || !process.env.NODE_TEST_CONTEXT;
-  if (shouldBootDrain) {
-    Promise.resolve(lifecycleService.drainAllQueues())
-      .then((started) => {
-        if (started > 0) {
-          console.log(`[app] Started ${started} queued worker run(s)`);
-        }
-      })
-      .catch((err) => {
-        console.warn(`[app] Queue boot drain failed: ${err.message}`);
-      });
-  }
+  const recovered = lifecycleService.recoverOrphanSessions();
+  Promise.resolve(recovered)
+    .then((sessions) => {
+      // Recovery completion is the boot readiness boundary. Open first so the
+      // async drain below and direct API dispatch share the same admission rule.
+      lifecycleService.openAdmission();
+      if (sessions.length > 0) {
+        console.log(`[app] Recovered ${sessions.length} orphan session(s)`);
+      }
+      if (shouldBootDrain) {
+        Promise.resolve(lifecycleService.drainAllQueues())
+          .then((started) => {
+            if (started > 0) {
+              console.log(`[app] Started ${started} queued worker run(s)`);
+            }
+          })
+          .catch((err) => {
+            console.warn(`[app] Queue boot drain failed: ${err.message}`);
+          });
+      }
+    })
+    .catch((err) => {
+      // Failure must not brick API dispatch, but automatically draining an
+      // ownership state we failed to recover could overlap an orphan worker.
+      lifecycleService.openAdmission();
+      console.warn(`[app] Orphan session recovery failed: ${err.message}`);
+      console.warn('[app] boot:drain_skipped_recovery_failed');
+    });
   // G3: sweep goal verdicts BEFORE stale-worktree cleanup — settle any terminal
   // goal run that crashed mid-harvest (no verdict) + reconcile verdicted ones to
   // redrive undelivered outbox effects (goal:verdict/exhausted/error) and repair
@@ -2079,13 +2094,25 @@ function createApp(options = {}) {
     _dbClosed = true;
     try { closeDb(); } catch (err) { console.warn('[app.shutdown] closeDb:', err && err.message); }
   };
-  app.shutdown = () => {
-    if (_shutdownPromise) return _shutdownPromise;
-    // Guard synchronous re-entry during the dispose sweep (e.g. an adapter's
-    // disposeSession() itself calling app.shutdown) so the sweep runs once
-    // (Codex PR5b NIT). _closeDbOnce is the second line of defense.
-    if (_shuttingDown) return Promise.resolve();
-    _shuttingDown = true;
+  const _settleWithCap = (waits, capMs, label) => new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      console.warn(`[app.shutdown] ${label} timed out after ${capMs}ms`);
+      finish();
+    }, capMs);
+    Promise.allSettled(waits).then(finish, finish);
+  });
+
+  // C13 steps 4–5. Kept as a synchronous fast path until it encounters an
+  // actual asynchronous disposer so existing callers still observe immediate
+  // manager disposal when there are no admitted/held workers to wait for.
+  const _finishShutdown = () => {
     const disposeWaits = [];
     // Stop queue claims/subscriptions before adapter disposal can emit terminal
     // events. Persisted queued rows remain intact for the next server process.
@@ -2101,7 +2128,7 @@ function createApp(options = {}) {
     // `.palantir-worktrees/` leaks) and, in production, survived a
     // graceful restart as zombie processes.
     //
-    // Order matters:
+    // Order within the post-worker phase matters:
     //   1) manager dispose — uses runService + eventBus, so must
     //      happen BEFORE closeDb() severs the sqlite handle,
     //   2) webhookService.stop() — removes eventBus subscribers before
@@ -2170,10 +2197,44 @@ function createApp(options = {}) {
       if (schedulerInflight && typeof schedulerInflight.then === 'function') disposeWaits.push(Promise.resolve(schedulerInflight));
     } catch { /* ignore */ }
     if (disposeWaits.length > 0) {
-      _shutdownPromise = Promise.allSettled(disposeWaits).then(_closeDbOnce);
+      return Promise.allSettled(disposeWaits).then(_closeDbOnce);
+    }
+    _closeDbOnce();
+    return Promise.resolve();
+  };
+
+  const _sweepWorkersThenFinish = () => {
+    const sweepDeadline = Date.now() + 8000;
+    let sweep = null;
+    try {
+      sweep = lifecycleService.shutdownWorkerSweep({ deadlineAt: sweepDeadline });
+    } catch (err) {
+      console.warn('[app.shutdown] worker sweep failed:', err && err.message);
+    }
+    if (!sweep || typeof sweep.then !== 'function') return _finishShutdown();
+    return _settleWithCap([sweep], 8000, 'worker sweep').then(_finishShutdown);
+  };
+
+  app.shutdown = () => {
+    if (_shutdownPromise) return _shutdownPromise;
+    // Guard synchronous re-entry during the dispose sweep (e.g. an adapter's
+    // disposeSession() itself calling app.shutdown) so every phase runs once.
+    if (_shuttingDown) return Promise.resolve();
+    _shuttingDown = true;
+
+    // C13: close + snapshot are synchronous, so no admitted spawn can fall
+    // between the boundary and the in-flight set being captured.
+    let admitted = [];
+    try { admitted = lifecycleService.closeAdmission() || []; }
+    catch (err) { console.warn('[app.shutdown] admission close failed:', err && err.message); }
+
+    if (admitted.length > 0) {
+      _shutdownPromise = _settleWithCap(admitted, 5000, 'worker admission drain')
+        .then(_sweepWorkersThenFinish);
     } else {
-      _closeDbOnce();
-      _shutdownPromise = Promise.resolve();
+      // With no admitted workers, start the lease sweep in this same call. Its
+      // no-work path remains synchronous and preserves manager shutdown timing.
+      _shutdownPromise = Promise.resolve(_sweepWorkersThenFinish());
     }
     return _shutdownPromise;
   };
