@@ -6,8 +6,10 @@
 않는다. #436의 same-UID 문제는 새 중간 등급이 아니라 기존 `isolated`를 운영자가
 달성·진단하기 쉽게 만드는 방향으로 해결한다.
 
-브랜치 `fix/436-attenuated-manager-capability`, commit `69797ad`에서 설계를 만들고
-적대 리뷰를 8라운드 수행했으나 모두 NO-GO였고 누적 지적은 33건이었다. 핵심 결론은
+commit `69797ad`(원래 브랜치 `fix/436-attenuated-manager-capability`, 2026-08-01 에
+브랜치는 회수하고 annotated 태그 `design/shared-uid-attenuated-rejected` 로 보존 —
+GC 방지, 머지 후보 아님)에서 설계를 만들고 적대 리뷰를 8라운드 수행했으나 모두
+NO-GO였고 누적 지적은 33건이었다. 핵심 결론은
 “복사 가능한 자격증명의 위험을 감쇠하려면 저장소에 아직 없는 소유권·감사·비용
 모델을 먼저 만들어야 한다”는 것이다.
 
@@ -78,4 +80,5 @@ Linux `/proc/<pid>/environ`은 exec 당시 환경을 노출하며 이후 `proces
 
 향후 중간 등급을 다시 제안하려면 위 다섯 선행 요구가 독립적으로 구현·검증됐다는
 근거와 producer-side 유출 방지 테스트가 먼저 있어야 한다. 그 전에는 commit
-`69797ad`를 구현 출발점으로 cherry-pick하거나 응답 스크러버를 되살리지 않는다.
+`69797ad`(태그 `design/shared-uid-attenuated-rejected`)를 구현 출발점으로
+cherry-pick하거나 응답 스크러버를 되살리지 않는다.
