@@ -94,10 +94,14 @@ async function gracefulShutdown(signal) {
   console.log(`[shutdown] ${signal} received, shutting down...`);
   // Watchdog FIRST: installed before any await so a hung in-flight distill drain
   // (or a rejecting app.shutdown) can never block exit (Codex BLOCKER).
+  const configuredWatchdogMs = Number(process.env.PALANTIR_SHUTDOWN_WATCHDOG_MS);
+  const shutdownWatchdogMs = Number.isFinite(configuredWatchdogMs) && configuredWatchdogMs > 0
+    ? configuredWatchdogMs
+    : 20000;
   const watchdog = setTimeout(() => {
     console.warn('[shutdown] Forcing exit after timeout');
     process.exit(1);
-  }, 10000);
+  }, shutdownWatchdogMs);
   watchdog.unref();
   // Refuse new connections BEFORE the (possibly slow) async cleanup, so requests
   // don't arrive against torn-down services / a closing DB (Codex SERIOUS).

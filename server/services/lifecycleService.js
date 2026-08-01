@@ -45,6 +45,7 @@ const {
   prepareCodexMcpArgs,
   removeSecretDirWithRetry,
 } = require('./managerAdapters/codexMcpSecretTransport');
+const { createAdmissionGate } = require('./admissionGate');
 
 // G1: cap a string to at most maxBytes UTF-8 bytes without splitting a
 // multi-byte codepoint (final_output is stored raw; the 64KB bound is on bytes,
@@ -145,6 +146,9 @@ function createLifecycleService({
   workerProposalRemoteBaseUrl = null,
   runtimeMcpDir = path.resolve(process.cwd(), 'runtime', 'mcp'),
   goalWorkspaceRoot = path.join(process.cwd(), 'runtime', 'goal-workspaces'),
+  // Direct lifecycle harnesses historically spawn immediately. The real app
+  // opts into a closed boot gate until orphan recovery settles (C12/C14).
+  admissionStartsClosed = false,
   // G2 §6 (Codex BLOCKER-1): goal features only activate when goal mode is on
   // AND the PM token is separated. Injectable for tests; defaults to the real
   // env-derived gate. When it returns false, a goal_enabled task runs exactly
@@ -157,6 +161,19 @@ function createLifecycleService({
   goalJudgeActive = (e) => goalFeatureActive(e) && ((e || process.env).PALANTIR_GOAL_JUDGE === '1'),
   workerSnapshotCollector = collectIdleWorkerSnapshot,
 }) {
+  const admissionGate = createAdmissionGate({ startsClosed: admissionStartsClosed });
+  let admissionPermanentlyClosed = false;
+  function admissionClosed() {
+    return admissionGate.isClosed();
+  }
+  function openAdmission() {
+    if (!admissionPermanentlyClosed) admissionGate.open();
+  }
+  function closeAdmission() {
+    admissionPermanentlyClosed = true;
+    return admissionGate.close();
+  }
+
   goalWorkspaceRoot = path.resolve(goalWorkspaceRoot);
   nodeExecutor = nodeExecutor || createLocalNodeExecutor({ executionEngine, streamJsonEngine });
   const workerChannel = (nodeExecutor && typeof nodeExecutor.spawnWorker === 'function')
@@ -1053,6 +1070,9 @@ function createLifecycleService({
   }
 
   async function spawnQueuedRun(runId) {
+    const admissionTicket = admissionGate.enter();
+    if (!admissionTicket) return null;
+    try {
     // P2-A2: fail-closed structured-field backstop BEFORE claim (non-retryable).
     // Catches raw-SQL-contaminated profiles that bypassed the save-time
     // validation.
@@ -1813,6 +1833,11 @@ function createLifecycleService({
               version: 1,
             }));
           }
+          if (admissionClosed()) {
+            const err = new Error('worker admission closed; spawn aborted');
+            err.code = 'ADMISSION_CLOSED';
+            throw err;
+          }
           if (!leaseStillCurrent()) {
             const err = new Error('stale lease generation; spawn aborted');
             err.code = 'STALE_LEASE_GENERATION';
@@ -2027,6 +2052,11 @@ function createLifecycleService({
             } catch { goalOutputLog = null; }
           }
         }
+        if (admissionClosed()) {
+          const err = new Error('worker admission closed; spawn aborted');
+          err.code = 'ADMISSION_CLOSED';
+          throw err;
+        }
         if (!leaseStillCurrent()) {
           const err = new Error('stale lease generation; spawn aborted');
           err.code = 'STALE_LEASE_GENERATION';
@@ -2111,6 +2141,31 @@ function createLifecycleService({
 
       return runService.getRun(run.id);
     } catch (error) {
+      if (error?.code === 'ADMISSION_CLOSED') {
+        // The run was claimed before shutdown closed admission, but no channel
+        // spawn was called. Close this reserved generation first, then restore
+        // queued so the next boot can admit it normally.
+        try {
+          if (typeof runService.releaseOwner === 'function') {
+            runService.releaseOwner(run.id, leaseId, {
+              state: 'released', evidence: 'admission_closed',
+            });
+          }
+          runService.updateRunStatus(run.id, 'queued', {
+            force: true, reason: 'admission_closed',
+          });
+        } catch (abortErr) {
+          console.warn(`[lifecycle] Failed to restore admission-aborted run ${run.id}: ${abortErr.message}`);
+        }
+        await cleanupRunWorktree({
+          id: run.id,
+          is_manager: false,
+          worktree_path: worktreePath,
+          branch,
+          task_id: run.task_id,
+        });
+        return null;
+      }
       if (isRemoteNode && error.code === 'REMOTE_SPAWN_UNCERTAIN') {
         spawnAccepted = true;
         // The SSH acknowledgement was lost after the detached start command
@@ -2189,6 +2244,9 @@ function createLifecycleService({
           evidence: 'spawn_failed',
         });
       }
+    }
+    } finally {
+      admissionTicket.resolve();
     }
   }
 
@@ -2613,6 +2671,7 @@ function createLifecycleService({
         if (!next) break;
         const spawned = await spawnQueuedRun(next.id);
         if (spawned) started++;
+        else if (admissionClosed()) return started;
       }
     }
     return started;
@@ -2631,6 +2690,7 @@ function createLifecycleService({
     let started = 0;
     for (const profileId of profileIds) {
       started += await drainQueue(profileId);
+      if (admissionClosed()) break;
     }
     return started;
   }
@@ -2743,6 +2803,66 @@ function createLifecycleService({
     } catch {
       return { channel, engine: engine || null, state: 'unknown' };
     }
+  }
+
+  /**
+   * Graceful-shutdown worker sweep (C13). The lease snapshot is taken before
+   * any probe, remote owners are deliberately untouched, and every local kill
+   * is routed from the durable lease engine instead of a mutable profile.
+   *
+   * Return null when there is no local work so app.shutdown can preserve its
+   * historical synchronous manager-dispose fast path.
+   */
+  function shutdownWorkerSweep({ deadlineAt = Date.now() + 8000 } = {}) {
+    if (!runService || typeof runService.listHeldOwnerLeases !== 'function') return null;
+    let leases;
+    try { leases = runService.listHeldOwnerLeases() || []; }
+    catch (err) {
+      console.warn(`[lifecycle] Shutdown worker lease snapshot failed: ${err.message}`);
+      return null;
+    }
+
+    const localLeases = leases.filter((lease) => (
+      lease
+      && Number(lease.is_manager || 0) !== 1
+      && lease.engine !== 'remote'
+      && !isRemoteNodeId(lease.node_id)
+    ));
+    if (localLeases.length === 0) return null;
+
+    const sweeps = localLeases.map(async (lease) => {
+      const run = {
+        id: lease.run_id,
+        status: lease.run_status,
+        node_id: lease.node_id,
+        tmux_session: lease.tmux_session,
+      };
+      const killEngine = lease.engine === 'stream-json' ? 'stream-json' : 'cli';
+      try {
+        const observed = await probeOwner(run, lease);
+        if (Date.now() >= deadlineAt) {
+          console.warn(`[lifecycle] Shutdown worker sweep deadline reached before kill for ${run.id}`);
+          return { runId: run.id, status: 'timed_out' };
+        }
+        if (observed.state === 'dead' && typeof runService.releaseOwner === 'function') {
+          try {
+            runService.releaseOwner(run.id, lease.lease_id, {
+              state: 'released', evidence: 'probe:dead',
+            });
+          } catch (err) {
+            console.warn(`[lifecycle] Shutdown worker lease release failed for ${run.id}: ${err.message}`);
+          }
+        }
+        // Existing primitive exactly once: no escalation and no post-kill probe.
+        await observed.channel.kill(run.id, killEngine);
+        return { runId: run.id, status: 'kill_sent', ownerState: observed.state, engine: killEngine };
+      } catch (err) {
+        console.warn(`[lifecycle] Shutdown worker sweep failed for ${run.id}: ${err.message}`);
+        return { runId: run.id, status: 'failed', engine: killEngine };
+      }
+    });
+
+    return Promise.allSettled(sweeps);
   }
 
   // Unknown grace (contract §8.2 C8 + adversarial review of the first S1b cut):
@@ -4471,6 +4591,10 @@ function createLifecycleService({
     spawnQueuedRun,
     drainQueue,
     drainAllQueues,
+    admissionClosed,
+    openAdmission,
+    closeAdmission,
+    shutdownWorkerSweep,
     scheduleDrainForNode,
     checkHealth,
     sweepStuckQueuedRuns,
