@@ -2600,10 +2600,16 @@ function createLifecycleService({
           // spawn-equivalent side effect the gate exists to stop — so re-check
           // here and requeue the materialize-claim if the gate closed.
           if (admissionClosed()) {
+            // Requeue with the claim token — requeueMaterializingRun returns
+            // null (no-op) without it, stranding the run in materializing
+            // (codex S2a R3). We hold the token from the claim above.
             if (typeof runService.requeueMaterializingRun === 'function') {
               try {
                 runService.requeueMaterializingRun(runId, {
-                  message: 'admission closed before materialization started',
+                  token: claimToken,
+                  error: 'admission closed before materialization started',
+                  reason: 'materialize:admission_closed',
+                  eventType: 'materialize:admission_closed',
                   transient: true,
                 });
               } catch { /* best-effort — next boot re-drains */ }

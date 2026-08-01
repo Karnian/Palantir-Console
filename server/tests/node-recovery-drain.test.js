@@ -383,9 +383,13 @@ test('a closed admission gate blocks repo materialization, not just the worker s
       return { claimed: true, token: 'claim-gated' };
     },
     restartMaterializationAttempt() { return null; },
-    requeueMaterializingRun(runId) {
+    requeueMaterializingRun(runId, opts = {}) {
+      // Mirror the real service: no token → no-op (this is the exact gap the
+      // deferred requeue must satisfy — codex S2a R3).
+      if (!opts.token) return null;
       const run = runs.find((item) => item.id === runId);
       if (run) run.status = 'queued';
+      return { requeued: true };
     },
     getOldestQueuedReadyOnNode() { return null; },
     getRun(runId) { return runs.find((run) => run.id === runId) || null; },
