@@ -2592,6 +2592,27 @@ function createLifecycleService({
     if (!claim) return false;
     const claimToken = claim.token || null;
 
+    // In-flight ticket for the ENTIRE claim→materialization span (codex S2a R4):
+    // ensureWorkspace() is a clone/fetch, and shutdown must wait for it just as
+    // it waits for a worker spawn. Registered synchronously here; resolved when
+    // the deferred chain settles. A null ticket means the gate is already closed
+    // — but the claim already succeeded, so requeue and bail without cloning.
+    const materializeTicket = admissionGate.enter();
+    if (!materializeTicket) {
+      if (typeof runService.requeueMaterializingRun === 'function') {
+        try {
+          runService.requeueMaterializingRun(runId, {
+            token: claimToken,
+            error: 'admission closed before materialization started',
+            reason: 'materialize:admission_closed',
+            eventType: 'materialize:admission_closed',
+            transient: true,
+          });
+        } catch { /* best-effort — next boot re-drains */ }
+      }
+      return false;
+    }
+
     setImmediate(() => {
       Promise.resolve()
         .then(() => {
@@ -2641,7 +2662,8 @@ function createLifecycleService({
           failOrRequeueMaterializingRun(runId, nodeId, err, { token: claimToken });
           scheduleDrain(profileId);
           scheduleMaterializeRetry(profileId, nodeId, 1000);
-        });
+        })
+        .finally(() => { materializeTicket.resolve(); });
     });
     return true;
   }
