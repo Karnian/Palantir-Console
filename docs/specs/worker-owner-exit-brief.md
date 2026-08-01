@@ -1,6 +1,6 @@
 # Worker owner-exit — 재설계 brief (v8)
 
-**상태**: S0 #489 / S1a #491 / S1b #493 / S2a #495 머지됨 / S2b(§8.3 C15)·S3 미확정 (§8 의 S2·S3 항목 + S1b 구현이 추가한 계약: unknown 유예 TTL, 세대-원자 terminal write(requireHeldLease), '증거 파괴 블록이 lease 를 닫는다')
+**상태**: S0 #489 / S1a #491 / S1b #493 / S2a #495 머지됨 / **S2b(detached)·S3 = S0 관측 데이터 대기로 보류**(§8.4 — codex 3R 이 C15 전제 결함 발견) (§8 의 S2·S3 항목 + S1b 구현이 추가한 계약: unknown 유예 TTL, 세대-원자 terminal write(requireHeldLease), '증거 파괴 블록이 lease 를 닫는다')
 **참고 자산**: `fix/465`(PR #478) · `fix/466`(PR #482) 의 미머지 잔여분
 **선행 완료**: #486(idle timeout + terminal_reason) · #487(terminal CAS + retry 유일성)
 
@@ -668,6 +668,42 @@ SIGINT/SIGTERM → gracefulShutdown(`index.js:115`).
 - ESRCH(-pid 소멸)는 성공으로 취급. tmux·원격 kill 경로는 불변.
 - **회귀 위험(§3 명시)**: 그룹 분리로 터미널 SIGINT 가 워커에 전파되지 않는다 —
   C13 의 sweep 이 그 자리를 대신한다는 것이 S2a 선행의 이유다.
+
+### §8.4 S2b 보류 결정 (C15 전제 결함 — codex 3R, 2026-08-01)
+
+C15 를 구현으로 확정하려 codex 3라운드 적대 검토를 돌린 결과, **detached 프로세스 그룹 +
+kill 에스컬레이션이라는 접근 자체가 안전하게 완결되지 않는다**는 전제 결함이 드러났다.
+`fix/465`·`fix/466` 이 "구현으로" 겪은 수렴 실패를 "계약으로" 반복하지 않기 위해 여기 기록한다.
+
+**핵심 결함 (B1 — pgid 재사용은 유예 창 전체에 걸친 실재 위험).**
+`process.kill(-pgid, …)` 는 그 숫자 pgid 를 **현재** 가진 그룹을 때릴 뿐, identity 를 지니지
+않는다. 인터리빙(Linux·XNU 공통): ① 그룹 4242 가 SIGTERM 받음 → ② 마지막 멤버 exit →
+그룹 lifetime 종료 → 4242 재사용 가능 → ③ 무관한 프로세스가 pid 4242 로 새 PGID 4242 생성 →
+④ 유예 뒤 `kill(-4242,0)` 이 **새 그룹**에 성공 → ⑤ `SIGKILL(-4242)` 이 엉뚱한 그룹을 죽인다.
+POSIX 의 "그룹 lifetime 동안 pgid 미재사용" 은 **그룹이 빈 순간 보호가 풀린다**. 재사용은
+probe↔SIGKILL 사이 sub-ms 가 아니라 **유예 창(기본 5s) 전체**에 열려 있고, detached 워커가
+전부 그룹 리더이므로(워커 spawn 이 setsid) 교체 워커가 그 pgid 를 재점유할 확률은 무시 못 한다.
+(초기 반박 "그룹이 비면서 동시에 alive 는 모순" 은 순차성을 오독한 오류였다 — codex 가 반증.)
+
+**안전 부분집합의 한계.** -pgid 시그널이 증명 가능하게 우리 것인 유일한 순간은
+`proc.exitedAt === null`(우리 child 핸들로 리더 생존 확인)을 **동기 가드**로 확인할 때다
+(Node 단일스레드라 `if (exitedAt===null) process.kill(-pgid,SIG)` 는 exit 이벤트가 끼어들 수
+없어 원자적 → 리더 생존 ⟹ pgid 가 그룹에 pin 됨). 그러나 이 가드는 **리더가 죽은 뒤엔 항상
+실패**하므로:
+- wedged-leader(리더가 SIGTERM 무시하며 생존) + 리더 생존 중 손자 SIGTERM 전달은 안전히 처리 가능.
+- **리더 자연종료 후 잔존 손자 강제수확(§3 D2 의 주목적)은 pgid 로 안전하게 불가.** 손자를 담을
+  고정 identity(**cgroup(Linux) / reaper-subreaper(macOS)**)가 있어야만 닫힌다 — brief 가 예산잡지
+  않은 범위이고 macOS 는 cgroup 부재라 이식성 비용이 크다.
+- detached 만 넣으면 손자가 controller foreground 그룹을 벗어나 **Ctrl-C·`kill <pid>` 시 정리 안 되는
+  회귀**(prod cgroup KillMode 아래서만 무해).
+
+**결정: S2b(detached)·S3 를 S0 관측 데이터가 정당화할 때까지 보류.** 근거:
+① S0(#489, 방금 머지)이 "손자 고아"가 실제 종료 실패 원인이라는 데이터를 **아직 안 냈다**
+(root cause UNDETERMINED). ② brief 의 방법론 자체가 "S0 이 원인을 지목한 뒤 그 원인에 필요한
+범위만 확정" 이다. ③ 확정된 결함 D3(shutdown 이 워커를 sweep 안 함)은 이미 S2a 의 non-group
+sweep 으로 해결됐다. 따라서 **owner-exit 트랙은 지금 구현이 아니라 S0 관측 데이터에 블록돼 있다.**
+S0 이 손자-고아를 지목하면, 그때 containment primitive(cgroup/reaper)를 **별도 epic** 으로 확정해
+B1·B2 를 하드 닫고 detached 를 재개한다. (2026-08-01 사용자 승인.)
 
 ### S3 — fence 범위와 순서
 
