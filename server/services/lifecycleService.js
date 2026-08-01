@@ -2595,6 +2595,21 @@ function createLifecycleService({
     setImmediate(() => {
       Promise.resolve()
         .then(() => {
+          // The claim + this callback straddle a tick, so admission can close in
+          // between (codex S2a R2). ensureWorkspace() is the clone/fetch — the
+          // spawn-equivalent side effect the gate exists to stop — so re-check
+          // here and requeue the materialize-claim if the gate closed.
+          if (admissionClosed()) {
+            if (typeof runService.requeueMaterializingRun === 'function') {
+              try {
+                runService.requeueMaterializingRun(runId, {
+                  message: 'admission closed before materialization started',
+                  transient: true,
+                });
+              } catch { /* best-effort — next boot re-drains */ }
+            }
+            return null;
+          }
           const current = runService.getRun(runId);
           const project = projectService.getProject(current.project_id);
           return materializationService.ensureWorkspace({
