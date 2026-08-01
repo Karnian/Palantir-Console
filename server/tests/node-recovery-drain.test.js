@@ -347,3 +347,64 @@ test('reachable executable ssh node can drain queued repo materialization', asyn
   assert.equal(calls[0].claimToken, 'claim-remote');
   assert.equal(runs[0].status, 'materializing');
 });
+
+test('a closed admission gate blocks repo materialization, not just the worker spawn', async (t) => {
+  // codex S2a R1: ensureWorkspace() clones/fetches on a node — a spawn-equivalent
+  // side effect. A closed gate (shutdown, or pre-recovery boot) must not start it,
+  // and the run must stay queued for the next boot.
+  const prev = process.env.PALANTIR_PROJECT_REPO;
+  process.env.PALANTIR_PROJECT_REPO = '1';
+  t.after(() => {
+    if (prev === undefined) delete process.env.PALANTIR_PROJECT_REPO;
+    else process.env.PALANTIR_PROJECT_REPO = prev;
+  });
+  const runs = [{
+    id: 'run-gated-1', task_id: 'task-gated-1', project_id: 'project-gated',
+    agent_profile_id: 'P1', status: 'queued', is_manager: 0, node_id: 'pod-a',
+    prompt: 'gated', queued_args: null,
+  }];
+  const calls = [];
+  const runService = {
+    listRuns(filter = {}) { return runs.filter((run) => !filter.status || run.status === filter.status); },
+    countMaterializingOnNode(nodeId) { return runs.filter((r) => r.status === 'materializing' && r.node_id === nodeId).length; },
+    countMaterializingGlobal() { return runs.filter((r) => r.status === 'materializing').length; },
+    getOldestMaterializableOnNode(nodeId, profileId) {
+      return runs.find((r) => r.status === 'queued' && r.node_id === nodeId && r.agent_profile_id === profileId) || null;
+    },
+    claimQueuedRunForMaterialization(runId) {
+      const run = runs.find((item) => item.id === runId);
+      if (!run || run.status !== 'queued') return null;
+      run.status = 'materializing';
+      return { claimed: true, token: 'claim-gated' };
+    },
+    getOldestQueuedReadyOnNode() { return null; },
+    getRun(runId) { return runs.find((run) => run.id === runId) || null; },
+    addRunEvent() {},
+  };
+  const lifecycleService = createLifecycleService({
+    runService,
+    taskService: { getTask() { return { id: 'task-gated-1', project_id: 'project-gated' }; } },
+    agentProfileService: {
+      getProfile() { return { id: 'P1', command: 'claude', max_concurrent: 1 }; },
+      getRunningCount() { return 0; },
+    },
+    projectService: { getProject(id) { return { id, source_type: 'git', repo_url: 'https://github.com/acme/repo.git' }; } },
+    executionEngine: {}, streamJsonEngine: {},
+    nodeService: {
+      getNode(nodeId) { return { id: nodeId, kind: 'ssh', reachable: 1, can_execute: 1, files_only: 0, cordoned: 0 }; },
+      pickExecutor() { throw new Error('gated drain must not dispatch'); },
+    },
+    projectMaterializationService: {
+      ensureWorkspace(args) { calls.push(args); return Promise.resolve({ pending: true, backoffMs: 1000 }); },
+    },
+    nodeExecutor: { async spawnWorker() { throw new Error('should not spawn'); } },
+    admissionStartsClosed: true,
+  });
+
+  await lifecycleService.drainQueue('P1');
+  await immediate();
+  lifecycleService.stopMonitoring();
+
+  assert.deepEqual(calls, [], 'no ensureWorkspace under a closed gate');
+  assert.equal(runs[0].status, 'queued', 'the git run stays queued for the next boot');
+});

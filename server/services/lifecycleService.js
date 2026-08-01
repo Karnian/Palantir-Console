@@ -2652,8 +2652,13 @@ function createLifecycleService({
     }
 
     for (const nodeId of nodeIds) {
-      if (repoFeatureEnabled() && materializationService) {
+      // Admission gates materialization as well (codex S2a R1): a git run's
+      // ensureWorkspace() is a spawn-equivalent side effect (clone/fetch on a
+      // node), so a closed gate — shutdown or pre-recovery boot — must not
+      // start it. The post-spawn re-check at the CLI branch is too late.
+      if (repoFeatureEnabled() && materializationService && !admissionClosed()) {
         while (canMaterializeOnNode(nodeId)) {
+          if (admissionClosed()) break;
           const nextMaterialize = typeof runService.getOldestMaterializableOnNode === 'function'
             ? runService.getOldestMaterializableOnNode(nodeId, profileId)
             : null;
@@ -2844,17 +2849,33 @@ function createLifecycleService({
           console.warn(`[lifecycle] Shutdown worker sweep deadline reached before kill for ${run.id}`);
           return { runId: run.id, status: 'timed_out' };
         }
-        if (observed.state === 'dead' && typeof runService.releaseOwner === 'function') {
-          try {
-            runService.releaseOwner(run.id, lease.lease_id, {
-              state: 'released', evidence: 'probe:dead',
-            });
-          } catch (err) {
-            console.warn(`[lifecycle] Shutdown worker lease release failed for ${run.id}: ${err.message}`);
+        if (observed.state === 'dead') {
+          // Dead evidence → release BEFORE the kill destroys the sentinel (S1b).
+          // If the CAS loses (a reclaim superseded this generation) or throws,
+          // this observation no longer owns the run — skip the evidence-
+          // destroying kill entirely (codex S2a R2). Only release success
+          // authorises the kill.
+          let released = false;
+          if (typeof runService.releaseOwner === 'function') {
+            try {
+              released = runService.releaseOwner(run.id, lease.lease_id, {
+                state: 'released', evidence: 'probe:dead',
+              });
+            } catch (err) {
+              console.warn(`[lifecycle] Shutdown worker lease release failed for ${run.id}: ${err.message}`);
+            }
+          }
+          if (!released) {
+            return { runId: run.id, status: 'release_lost', engine: killEngine };
           }
         }
         // Existing primitive exactly once: no escalation and no post-kill probe.
-        await observed.channel.kill(run.id, killEngine);
+        const killOk = await observed.channel.kill(run.id, killEngine);
+        if (killOk === false) {
+          // The primitive reported failure — a real orphan (codex S2a R3).
+          console.warn(`[lifecycle] Shutdown worker kill primitive returned false for ${run.id} (${killEngine})`);
+          return { runId: run.id, status: 'kill_failed', ownerState: observed.state, engine: killEngine };
+        }
         return { runId: run.id, status: 'kill_sent', ownerState: observed.state, engine: killEngine };
       } catch (err) {
         console.warn(`[lifecycle] Shutdown worker sweep failed for ${run.id}: ${err.message}`);

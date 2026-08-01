@@ -201,17 +201,25 @@ test('spawn finally settles its synchronous ticket and a mid-flight close preven
   assert.equal(h.runService.getHeldLease(seeded.run.id), null);
 });
 
-function shutdownSweepHarness(leases, ownerStates) {
+function shutdownSweepHarness(leases, ownerStates, {
+  releaseResult = () => true,
+  killResult = () => true,
+} = {}) {
   const order = [];
   const leaseState = new Map(leases.map((lease) => [lease.run_id, 'held']));
   const runService = {
     listHeldOwnerLeases() { return leases; },
     releaseOwner(runId, leaseId, options) {
-      order.push(`release:${runId}:${options.state}:${options.evidence}`);
+      const outcome = releaseResult(runId);
+      if (outcome instanceof Error) {
+        order.push(`release_throw:${runId}`);
+        throw outcome;
+      }
+      order.push(`release:${runId}:${options.state}:${options.evidence}:${outcome}`);
       const lease = leases.find((item) => item.run_id === runId);
       assert.equal(lease?.lease_id, leaseId);
-      leaseState.set(runId, options.state);
-      return true;
+      if (outcome) leaseState.set(runId, options.state);
+      return outcome;
     },
   };
   const nodeExecutor = {
@@ -225,7 +233,7 @@ function shutdownSweepHarness(leases, ownerStates) {
     },
     async kill(runId, engine) {
       order.push(`kill:${runId}:${engine}`);
-      return true;
+      return killResult(runId);
     },
   };
   const lifecycleService = createLifecycleService({
@@ -437,4 +445,55 @@ test('a close that lands after claim aborts the spawn and terminates the drain l
   assert.ok(lookups <= 3, `drain must stop promptly once admission closes, saw ${lookups} lookups`);
   // The claimed run was restored to queued by the ADMISSION_CLOSED handler.
   assert.equal(rs.getRun(seeded.run.id).status, 'queued');
+});
+
+test('shutdown sweep skips the evidence-destroying kill when the dead release loses its CAS', async () => {
+  // codex S2a R2: a reclaim can supersede the probed generation, so the dead
+  // release loses the CAS. Killing anyway destroys the tmux sentinel while the
+  // lease stays held → stuck unknown next boot. Only release success authorises
+  // the kill.
+  const leases = [{
+    run_id: 'dead-stale', lease_id: 'lease-stale', engine: 'tmux',
+    acquired_at: '2026-08-01 00:00:00', run_status: 'running',
+    node_id: 'local', tmux_session: 'palantir-run-dead-stale', is_manager: 0,
+  }];
+  const h = shutdownSweepHarness(leases, { 'dead-stale': 'dead' }, {
+    releaseResult: () => false, // the CAS lost
+  });
+  const results = await h.lifecycleService.shutdownWorkerSweep();
+  const settled = results.map((r) => r.value ?? r.reason);
+  assert.equal(settled[0].status, 'release_lost');
+  assert.ok(!h.order.some((e) => e.startsWith('kill:')), 'no kill after a lost release');
+});
+
+test('shutdown sweep skips the kill when the dead release throws', async () => {
+  const leases = [{
+    run_id: 'dead-throw', lease_id: 'lease-throw', engine: 'tmux',
+    acquired_at: '2026-08-01 00:00:00', run_status: 'running',
+    node_id: 'local', tmux_session: 'palantir-run-dead-throw', is_manager: 0,
+  }];
+  const h = shutdownSweepHarness(leases, { 'dead-throw': 'dead' }, {
+    releaseResult: () => new Error('db gone'),
+  });
+  const results = await h.lifecycleService.shutdownWorkerSweep();
+  const settled = results.map((r) => r.value ?? r.reason);
+  assert.equal(settled[0].status, 'release_lost');
+  assert.ok(!h.order.some((e) => e.startsWith('kill:')), 'a thrown release must not authorise the kill');
+});
+
+test('shutdown sweep records a kill primitive that returns false as a failure', async () => {
+  // codex S2a R3: subprocess/tmux/stream-json kill all can return false; the
+  // sweep must not report kill_sent for a real orphan.
+  const leases = [{
+    run_id: 'alive-fail', lease_id: 'lease-fail', engine: 'stream-json',
+    acquired_at: '2026-08-01 00:00:00', run_status: 'running',
+    node_id: 'local', tmux_session: null, is_manager: 0,
+  }];
+  const h = shutdownSweepHarness(leases, { 'alive-fail': 'alive' }, {
+    killResult: () => false,
+  });
+  const results = await h.lifecycleService.shutdownWorkerSweep();
+  const settled = results.map((r) => r.value ?? r.reason);
+  assert.equal(settled[0].status, 'kill_failed');
+  assert.equal(settled[0].engine, 'stream-json');
 });
