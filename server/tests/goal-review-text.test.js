@@ -42,7 +42,9 @@ test('buildGoalReviewText: gate2 verdict — verdict/attempt/acceptance/criteria
   assert.match(text, /worker report:/);
   assert.match(text, /기능 구현 완료/);
   assert.match(text, /의미 판단\(Gate 2\)/);
-  assert.match(text, /"done"/);
+  assert.match(text, /사람에게 acceptance\/rejection을 권고/);
+  assert.match(text, /task 상태는 "review"로 유지/);
+  assert.doesNotMatch(text, /"done"/);
 });
 
 test('buildGoalReviewText: exhausted verdict → budget line + escalation', () => {

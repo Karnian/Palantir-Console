@@ -123,6 +123,32 @@ test('Codex Operator prompt distinguishes repo-defined worktrees from remote leg
   assert.match(prompt, /Delegate remote\s+work anyway to preserve attribution and tracked execution/i);
 });
 
+test('Codex Operator prompt preserves distinct goal and non-goal review completion contracts', () => {
+  const { buildManagerSystemPrompt } = require('../services/managerSystemPrompt');
+  const prompt = buildManagerSystemPrompt({
+    adapter: null,
+    port: 4177,
+    token: 'tok',
+    layer: 'operator',
+    adapterType: 'codex',
+  });
+
+  assert.match(prompt, /Inspect the task's `goal_enabled` value/);
+  assert.match(
+    prompt,
+    /Satisfactory, non-goal task \(`goal_enabled` is false\)[^\n]*PATCH \/api\/tasks\/TASK_ID\/status with \{"status":"done"\}/,
+    'non-goal tasks must retain direct done transition guidance',
+  );
+  assert.match(
+    prompt,
+    /Satisfactory, goal-enabled task \(`goal_enabled` is true\)[^\n]*recommend acceptance or rejection to the human[^\n]*leave the task status in "review"[^\n]*Do not mark it "done"/,
+    'goal-enabled tasks must remain in review pending human acceptance or rejection',
+  );
+  assert.match(prompt, /# PATCH \(non-goal only; goal-enabled: recommend human acceptance\/rejection and leave in review\)/);
+  assert.match(prompt, /Complete a satisfactory non-goal task: PATCH[^\n]*\{"status":"done"\}/);
+  assert.match(prompt, /For a goal-enabled task, do not mark it "done":[^\n]*recommend human acceptance\/rejection[^\n]*"review"/);
+});
+
 test('Codex Top prompt routes project work through Operator without a conflicting worker contract', () => {
   const { createCodexAdapter } = require('../services/managerAdapters/codexAdapter');
   const { buildManagerSystemPrompt } = require('../services/managerSystemPrompt');
@@ -1006,7 +1032,7 @@ curl -s http://localhost:4177/api/runs -H "Authorization: Bearer $PALANTIR_MANAG
 # POST (create/execute)
 curl -s -X POST http://localhost:4177/api/tasks -H "Authorization: Bearer $PALANTIR_MANAGER_TOKEN" -H "Content-Type: application/json" -d '{"title":"...","project_id":"..."}'
 
-# PATCH (update)
+# PATCH (non-goal only; goal-enabled: recommend human acceptance/rejection and leave in review)
 curl -s -X PATCH http://localhost:4177/api/tasks/TASK_ID/status -H "Authorization: Bearer $PALANTIR_MANAGER_TOKEN" -H "Content-Type: application/json" -d '{"status":"done"}'
 
 # DELETE
