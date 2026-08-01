@@ -1,6 +1,6 @@
 # Palantir Console Backlog
 
-> Last updated: 2026-07-23 (Operator-first Scheduler MVP 구현)
+> Last updated: 2026-08-02 (OP 트랙 착수 — Orca 파리티 + Action Control Plane)
 >
 > **2026-07-20 완료 (origin/main HEAD `3df7b5b`)**: favorite/codebase-pool 트랙(A0~flip) + A2b-3 + **B-adm declared_node_major staleness 근본해결**(`ccfa153`) + **공유 detectInjection/redactSecrets hardening**(`d14d188`). 상세·교훈·다른 기기 재입장은 [`handoff-2026-07-20-memory-safety.md`](./handoff-2026-07-20-memory-safety.md) + `docs/specs/codebase-pool-memory-axes-brief.md` §0. (로컬 `~/.claude` memory 는 기기 간 동기화 안 됨 — repo 문서가 authoritative.)
 >
@@ -37,6 +37,14 @@
 - **Phase 2 나머지 3개 DROP/DEFER (소비자 부재 = dead code)**: claude thinking(CLI 플래그 없음), gemini vendor(manager 어댑터 없음), operator_profile 스코프(specialist=non-CLI backend).
 - **Phase 3 Cost cap ✅ 완료·머지 (2026-07-16, Claude 구현 + Codex 5R SHIP)**: `projects.budget_usd`(dormant) 활성화 — `runService.sumProjectCost` + spawn-time `spent>=budget → reject`(run:budget_exceeded, NULL=opt-out byte-identical, 0/음수 cap, fail-open lookup). 부산물로 pre-claim 거부 인프라 경화: `rejectQueuedRun` 원자 CAS(queued-only, MAX(retry_count)/ended_at/non_retryable) + migration 063 `runs.non_retryable` + isNonRetryable 확장 → goal retry-child 반례까지 non-retryable(P2 profile backstop findings 3+4 공유 수정). node feasibility=defer(워커 모델에러=executionEngine 경로, 마진 낮음). 전체 2357.
 - **Phase 1 후 follow-up (스코프 밖, Codex final review 지적)**: **codex 워커 prompt-argv 주입 하드닝** — worker `{prompt}` 가 argv 위치라 `-` 로 시작하는 prompt 가 codex 옵션으로 파싱될 수 있음(tier 뿐 아니라 전 `-c` 옵션). MP-4b 템플릿-레벨 refuse 는 견고, prompt 경로만 미커버. F-1 **우발 유출**은 완전 차단(prompt 주입은 의도적 조작 벡터, trusted-local 위협모델 저우선). 근본 수정 = codex 워커 prompt 를 `--`/stdin 으로 전달(전 codex worker spawn argv 위생, tier 국한 아님).
+
+### OP. Orca 파리티 + Action Control Plane 트랙 (2026-08-02 착수)
+
+- **Spec**: [`docs/specs/orca-parity-and-action-plane-brief.md`](./specs/orca-parity-and-action-plane-brief.md) (Codex 4R 교차검토 + 사용자 lock-in). 진행 큐는 [`goal-session-protocol.md`](./goal-session-protocol.md) #9~14.
+- **전제**: Palantir 로 **Orca 를 대체**한다. 범위는 코드 작업이 아니라 **코드 + 일상 업무 전반**. 매니저를 통한 전체 관리·통제·보고가 축.
+- **0단계 R-1 ✅ 완료**(#498): goal 태스크 완료 지시를 서버 권한 경계와 일치. 다음은 R-2+R-3 최소안(cap 을 soft guard 로 재명명 + 비용 미집계 run 표면화 — ⚠️ 탐지 시그널 미정, `cost_usd IS NULL` 은 무효).
+- **본체는 2단계 action control plane** — `action` goal kind + ledger + idempotency + read-back validator + `unknown` 1급 + 승인 경계. 현재 `goal-delegation-brief.md` §2 가 v2 유보로 남겨둔 부분이다.
+- **안 할 것**: Orca IDE 복제(브라우저·에뮬레이터·computer-use·터미널 pane), connector marketplace 확장, 범용 DAG/비주얼 빌더, `orcaExecutor`.
 
 **나머지 Ready 비어 있음.** K-2~K-5 시리즈 + Fleet P4/P5(F1/F2 포함) + MP Phase 1 전부 종결.
 
