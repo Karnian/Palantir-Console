@@ -282,7 +282,7 @@ function buildGoalReviewText({ run, task }) {
     lines.push(`verdict=error (${run.goal_verdict_reason || 'internal'}) — 인프라/소스 이상으로 재시도하지 않았습니다. 원인을 진단하세요 (자동 재시도 아님).`);
   } else {
     lines.push('Gate 1 (기계 검증) 통과 또는 미해당 — 이제 의미 판단(Gate 2)이 필요합니다.');
-    lines.push('- 목표/기준을 충족하면 task 상태를 "done" 으로 전환하세요 (→ 산출물 전달).');
+    lines.push('- 실행 증거·gate 결과·미충족 사항을 요약하고 사람에게 acceptance/rejection을 권고하세요. task 상태는 "review"로 유지하세요.');
     lines.push('- 부족하면 corrective 지시로 새 워커를 /execute 하세요 (goal 루프가 다음 attempt 를 돕니다).');
   }
   return lines.filter((l) => l !== undefined && l !== null).join('\n');

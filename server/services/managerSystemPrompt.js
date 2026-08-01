@@ -133,12 +133,13 @@ function _buildCommonBaseInner({ base, token, layer, adapterType, specialistAvai
 When a worker completes or fails, the system automatically sends you a review notification.
 You MUST review the worker's output and take action:
 
-1. **Fetch the worker's output**: GET the run events to see what the worker actually did.
+1. **Fetch the task and worker output**: Inspect the task's \`goal_enabled\` value, then GET the run events to see what the worker actually did.
 2. **Evaluate the result**:
    - Did the worker complete the task correctly?
    - Are there errors, missing pieces, or quality issues?
 3. **Act on your review**:
-   - **Satisfactory**: Update the task status to "done" via PATCH /api/tasks/TASK_ID/status with {"status":"done"}.
+   - **Satisfactory, non-goal task (\`goal_enabled\` is false)**: Update the task status to "done" via PATCH /api/tasks/TASK_ID/status with {"status":"done"}.
+   - **Satisfactory, goal-enabled task (\`goal_enabled\` is true)**: Summarize the execution evidence, gate results, and unmet criteria; recommend acceptance or rejection to the human; and leave the task status in "review". Do not mark it "done".
    - **Needs fixes**: Spawn a new worker with corrective instructions (include what went wrong and what to fix).
    - **Failed/unrecoverable**: Update task status to "failed" and report to the user with a summary of what went wrong.
 
@@ -247,7 +248,7 @@ curl -s ${base}/api/runs${authHeader} | head -c 2000
 # POST (create/execute)
 curl -s -X POST ${base}/api/tasks${authHeader} -H "Content-Type: application/json" -d '{"title":"...","project_id":"..."}'
 
-# PATCH (update)
+# PATCH (non-goal only; goal-enabled: recommend human acceptance/rejection and leave in review)
 curl -s -X PATCH ${base}/api/tasks/TASK_ID/status${authHeader} -H "Content-Type: application/json" -d '{"status":"done"}'
 
 # DELETE
@@ -356,7 +357,8 @@ ${token && adapterType !== 'codex' ? '\nIMPORTANT: All API requests require auth
 - Create task: POST ${base}/api/tasks  body: {"title":"...","description":"...","priority":"medium","project_id":"PROJECT_ID"}
   Only include project_id if the task clearly belongs to an existing project. If unrelated, omit project_id (the task will be unassigned). Do NOT guess or force a project assignment.
 - Update task: PATCH ${base}/api/tasks/TASK_ID  body: {"title":"...","description":"...","priority":"high"}
-- Update task status: PATCH ${base}/api/tasks/TASK_ID/status  body: {"status":"done"}
+- Complete a satisfactory non-goal task: PATCH ${base}/api/tasks/TASK_ID/status  body: {"status":"done"}
+- For a goal-enabled task, do not mark it "done": recommend human acceptance/rejection and leave its status in "review".
 - Delete task: DELETE ${base}/api/tasks/TASK_ID
 - Execute task with agent: POST ${base}/api/tasks/TASK_ID/execute  body: {"agent_profile_id":"AGENT_ID","prompt":"detailed work instructions here"${isProjectLayer(layer) ? ',"pm_run_id":"YOUR_OWN_OPERATOR_RUN_ID","skill_pack_ids":["PACK_ID",...]' : ''}}${isProjectLayer(layer) ? `
   pm_run_id (ALWAYS include this when you dispatch): YOUR OWN Operator run id (shown in your Project Scope section). It attributes the spawned worker to YOU so the worker's completion/failure review notification comes back to YOU — including for a turn directed at a codebase you don't primarily own. Omitting it leaves the worker unattributed and its review falls back to the codebase's default Operator.
