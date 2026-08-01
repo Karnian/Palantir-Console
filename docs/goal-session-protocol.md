@@ -16,9 +16,17 @@
 | 6 | **G5: 메모리 연계** (harvest:acceptance → R1b, project-less 캡처 검토) | 동 spec §5i | 〃 | PR 1개 |
 | 7 | **G2b: goal workspace remote provider** | 동 spec §5k-1 | 〃 | ⚠️ **실 Pi 검증 필요 — 착수 전 사용자 확인** |
 | 8 | **G3b: 원격 check runner** / **G3c: judge (Gate 1.5)** | 동 spec §5f/5k-4 | ✅ **완료·merged**. **G3c** (#363, migration 060 + goalJudgeService/harvest judge stage + decideGoalVerdict judge 분기, `PALANTIR_GOAL_JUDGE=1` 기본 off). **G3b Part A** (#364): 원격 deliverable ARTIFACT check 를 **클린 로컬 번들** 대상 평가(shell 0). rmrf 는 complete+durable+acceptance-persisted 만, 심볼릭 링크 chain 거부, promise-gate single-flight, fail-closed injectivity. codex 3R→PASS, 실 Pi 검증. **G3b Part B (원격 command runner) = DEFER** (unsandboxed pod shell 기밀 유출 = 별도 sandboxed-runner/fleet 보안 프로젝트). command check 원격 = skipped('runner_unavailable')→gate2 불변. | PR 2개 (G3c #363, G3b-A #364) |
-| 9 | backlog Ready 섹션 잔여 항목 | `docs/backlog.md` | ⏳ **큐 소진 — 사용자 우선순위 협의 대기** | 큐 소진 시 사용자와 우선순위 협의 |
+| 9 | **OP 트랙 0단계 R-1**: goal 태스크 완료 지시를 서버 권한 경계와 일치 | `specs/orca-parity-and-action-plane-brief.md` §4 | ✅ **완료·merged** (#498). managerSystemPrompt goal/non-goal 분기 + app.js buildGoalReviewText 권고형 교체. non-goal 자동 done 보존. 역회귀 3종 재현, Themis PASS, codex 적대리뷰 결함 0. | PR 1개 |
+| 10 | **OP 0단계 R-2+R-3 (최소안)**: cost cap 을 soft spend-governance guard 로 재명명 + **비용 미집계 run 표면화** + 동시 통과 한계 문서화 | 동 brief §4 | ⏳ **다음** — 최소안 기준으로 계획 재수립 필요. ⚠️ **탐지 시그널 미정**: `cost_usd IS NULL` 은 무효(writer 가 `?? 0`, 스키마 기본값 0). 벤더 판별 또는 "계측 전무 terminal run" 중 착수 시 결정. 전체안(가격표 추정·전액 reservation) 기각 사유는 brief §4. | PR 1개 |
+| 11 | **OP 1단계 T6-min**: manager-callable operation manifest | 동 brief §4 | ⏳ 대기 — auth allowlist·요청 검증·프롬프트 계약·`GET /api/agent-context` 의 공통 원천. 전체 route 자동생성 아님 | PR 1~2개 |
+| 12 | **OP 2단계 Action control plane** ★본체 | 동 brief §4 + `goal-delegation-brief.md` §2(v2 유보분) | ⏳ 대기 — `action` goal kind + ledger + idempotency + read-back validator + `unknown` 1급 + 승인 경계(cookie provenance). **쪼개지 말고 하나로 설계** | 다중 PR |
+| 13 | **OP 3단계 스케줄러 파리티** / **4단계 얇은 CLI** | 동 brief §4 | ⏳ 대기 — precheck(named verify check 참조)·missed-run grace·프롬프트 외부화 / spawn·follow·input·cancel 만 | PR 2~3개 |
+| 14 | **OP 5단계**: T1 durable 질문/승인 mailbox → inbound event inbox → T5 durable review ledger → T2 worker progress → **T3 DAG(마지막)** | 동 brief §4 "5단계 이후" | ⏳ 대기 — **T1 은 `POST /runs/:id/input` 기반 설계 금지**(`remoteSshExecutor.sendInput` 이 스텁이라 fleet 에서 조용히 실패). 워커가 long-poll 로 가져가는 구조 + question class enum(Operator 가능 vs cookie-only) | PR 다수 |
+| 15 | backlog Ready 섹션 잔여 항목 | `docs/backlog.md` | ⏳ OP 트랙 이후 | 협의 |
 
 순서 근거: F-1 은 소형이라 이 프로토콜 자체의 파일럿. G 트랙은 페이즈 의존 순서 (G1+G2 만으로도 독립 가치, G3 가 본체). 원격/하드웨어가 필요한 것 (G2b/G3b) 은 뒤로.
+
+**OP 트랙 (#9~14) 순서 근거**: 0단계(계약·비용 수리)가 먼저인 이유는 2단계에서 워커가 **외부 side effect** 를 만들기 시작하면 잘못된 계약이 외부로 확대되기 때문이다. 1단계 manifest 가 2단계보다 앞서는 이유는 action API 를 얹기 전에 계약 원천을 만들어야 R-1 같은 드리프트가 재발하지 않기 때문이다. T1(질문 mailbox)·DAG 는 파리티 이후로 미룬다 — 실사용 자동화 2개가 선형 workflow 로 충분하다. 전체 배경·기각 사유·리스크는 [`specs/orca-parity-and-action-plane-brief.md`](./specs/orca-parity-and-action-plane-brief.md).
 
 ## 2. 작업별 진행 프로토콜 (goal 방식)
 
