@@ -14,6 +14,7 @@
     "test:visual": "PALANTIR_VISUAL_ONLY=1 npx playwright test --grep @visual",
     "diagnose:isolation": "node scripts/diagnose-isolation.mjs",
     "diagnose:mcp": "node scripts/diagnose-mcp-conflicts.mjs",
+    "diagnose:migrations": "node scripts/migration-audit.mjs",
     "fleet:spike": "node scripts/fleet-spike.mjs"
   },
   "keywords": [],
