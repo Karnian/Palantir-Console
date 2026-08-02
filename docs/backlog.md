@@ -42,7 +42,8 @@
 
 - **Spec**: [`docs/specs/orca-parity-and-action-plane-brief.md`](./specs/orca-parity-and-action-plane-brief.md) (Codex 4R 교차검토 + 사용자 lock-in). 진행 큐는 [`goal-session-protocol.md`](./goal-session-protocol.md) #9~14.
 - **전제**: Palantir 로 **Orca 를 대체**한다. 범위는 코드 작업이 아니라 **코드 + 일상 업무 전반**. 매니저를 통한 전체 관리·통제·보고가 축.
-- **0단계 R-1 ✅ 완료**(#498): goal 태스크 완료 지시를 서버 권한 경계와 일치. 다음은 R-2+R-3 최소안(cap 을 soft guard 로 재명명 + 비용 미집계 run 표면화 — ⚠️ 탐지 시그널 미정, `cost_usd IS NULL` 은 무효).
+- **0단계 R-1 ✅ 완료**(#498): goal 태스크 완료 지시를 서버 권한 경계와 일치. **R-2+R-3(cost cap)은 ⏸ DEFER** — 최소안이 cap 을 고치지 않고 표면화만 하는데 `budget_usd` 사용처가 없다. 재개 조건은 brief §4.
+- **다음은 1단계 T6-min**(manager-callable operation manifest) — R-1 같은 계약 드리프트의 구조적 재발 방지.
 - **본체는 2단계 action control plane** — `action` goal kind + ledger + idempotency + read-back validator + `unknown` 1급 + 승인 경계. 현재 `goal-delegation-brief.md` §2 가 v2 유보로 남겨둔 부분이다.
 - **안 할 것**: Orca IDE 복제(브라우저·에뮬레이터·computer-use·터미널 pane), connector marketplace 확장, 범용 DAG/비주얼 빌더, `orcaExecutor`.
 

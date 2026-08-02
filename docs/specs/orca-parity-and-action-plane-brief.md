@@ -13,7 +13,6 @@
 > 각 단계는 착수 시점에 **별도 구현 brief** 가 필요하다. 최소한 다음이 정해지지 않았다:
 > - **T6**: manifest 에 담을 operation 목록, 생성 방식, 검증·allowlist 와의 결합 지점
 > - **Action plane**: 첫 connector 와 수직 슬라이스, action 상태 전이(`pending|succeeded|failed|unknown`)와 reconciliation 계약, migration/flag/rollout 순서, 수락 기준
-> - **R-2**: 비용 미집계 탐지 시그널 (§4 참조 — `cost_usd IS NULL` 은 무효)
 >
 > 따라서 각 단계는 "spec 재독 → 구현 brief 작성 → codex 설계검토 → 위임" 순으로 진행한다. 이 문서만 보고 바로 구현에 들어가지 말 것.
 
@@ -112,8 +111,21 @@
 외부 side effect 를 만들기 시작하면 **잘못된 계약이 외부로 확대**되므로 먼저 닫는다.
 
 - **R-1 계약 드리프트** ✅ 완료 (PR #498) — goal/non-goal 분기, non-goal 자동 done 보존
-- **R-2 + R-3 (최소안 lock-in)** — cap 을 **"soft spend-governance guard"** 로 정직하게 재명명 + **비용 미집계 run 이 있으면 "cap 신뢰 불가" 표면화** + 동시 통과 가능성을 알려진 한계로 문서화
-  - ⚠️ **탐지 시그널은 미해결(착수 시 결정)**: `cost_usd IS NULL` 은 **작동하지 않는다** — writer 가 `?? 0`, 스키마 기본값도 `0` 이라 DB 에 NULL 이 남지 않는다. "토큰>0 인데 cost=0" 도 codex **워커**에는 안 통한다(토큰조차 저장 안 됨). 실현 가능한 후보는 **벤더 판별**(`utils/agentVendor.resolveAgentVendor(profile.command)` 재사용) 또는 "계측이 전혀 없는 terminal run" 이며, 둘 다 오탐/미탐 경계를 착수 시 정해야 한다
+- **R-2 + R-3 — ⏸ DEFER (2026-08-03, 사용자 결정)**
+
+  **왜 미루나**: 최소안(cap 을 "soft spend-governance guard" 로 재명명 + 비용 미집계 표면화)은 **cap 을 고치지 않는다.** "cap 이 고장나 있다"를 보이게 할 뿐이다. 그런데 `budget_usd` 를 설정한 프로젝트가 실제로 없다 — 아무도 안 쓰는 기능의 고장을 표면화하는 셈이다.
+
+  예산 통제가 실제로 필요해지는 시점은 **2단계 action control plane 에서 외부 API 호출 비용이 커질 때**인데, 그때 필요한 것은 run 단위 USD cap 이 아니라 **액션 단위 비용·쿼터**라는 다른 설계다. 지금 반쪽짜리 표면화를 만들어두면 그때 걷어내야 한다.
+
+  **재개 조건**: (a) `budget_usd` 를 실제 운영에 쓰기 시작하거나, (b) action plane 에서 비용 통제 설계를 할 때 함께. 그때는 아래 사실들이 입력값이다.
+
+  **현재 사실 (재개 시 출발점)**:
+  - **claude 워커만 비용이 잡힌다.** stream-json `result` 이벤트의 `costUsd` 를 저장(`lifecycleService:3282`).
+  - **codex 워커는 비용도 토큰도 저장되지 않는다** — `exit_code`/`result_summary` 만(`lifecycleService:3485`). codex 매니저는 토큰은 저장하되 `cost_usd:null`(`codexAdapter:967`).
+  - **`cost_usd` 는 DB 에 `NULL` 이 아니라 `0` 으로 남는다** — `runService.updateRunResult` 가 `?? 0`, 스키마 기본값도 `0`(`001_initial.sql:54`). 따라서 **`cost_usd IS NULL` 탐지는 무효**이고, codex 워커는 토큰조차 없어 "토큰>0인데 cost=0" 도 못 쓴다. 실현 가능한 후보는 **벤더 판별**(`utils/agentVendor.resolveAgentVendor(profile.command)`) 또는 "계측이 전무한 terminal run" 이다.
+  - cap 은 lookup fail-open + 예약 없음 → 동시 spawn 이 함께 통과 가능.
+
+  **기각된 전체안** (재검토 시 이 사유부터 반박할 것)
   - ⚠️ **전체안은 기각됨**: (a) 추정 가격표 + `--json` 은 codex 워커의 현재 plain stdout 계약을 바꾸고 출력 수집 경로들을 함께 손대야 하며 가격표 갱신 부채를 만든다. (b) 원자적 reservation 은 **codex 계획이 제안한 "남은 잔액 전체를 예약" 방식일 때** capped 프로젝트를 상시 직렬화(워커 1개)한다 — per-run 최대 지출 상한이라는 새 제품 계약이 없어서 부분 예약을 할 수 없기 때문이다. cap 이 이미 fail-open 이고 단일 run 초과도 못 막는 상황에서 비용/편익이 맞지 않는다. per-run 상한을 도입한다면 재검토 가능하다
 - **R-4** — 대상 없음으로 종결. `goal-delegation-brief.md` 의 deterministic 서술은 이미 정확하다
 
