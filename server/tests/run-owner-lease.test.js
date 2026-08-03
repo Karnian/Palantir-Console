@@ -117,6 +117,63 @@ function createQueuedWorker(h, queuedArgs = {}) {
   });
 }
 
+test('terminal observation fences both source status and owner generation before emission', async (t) => {
+  const db = await mkdb(t);
+  const eventBus = createEventBus();
+  const runService = createRunService(db, eventBus);
+  let acceptedHooks = 0;
+  const ended = [];
+  eventBus.subscribe((event) => {
+    if (event.channel === 'run:ended') ended.push(event.data.run);
+  });
+
+  insertBareRun(db, 'cancelled-held', 'running');
+  db.prepare(`
+    INSERT INTO run_owner_leases (run_id, lease_id, state, acquired_at)
+    VALUES ('cancelled-held', 'held-generation', 'held', datetime('now'))
+  `).run();
+  runService.updateRunStatus('cancelled-held', 'cancelled', { force: true });
+  const heldLoser = runService.updateRunStatus('cancelled-held', 'failed', {
+    force: true,
+    requireHeldLease: 'held-generation',
+    requireCurrentStatus: 'running',
+    nonRetryable: true,
+    onAcceptedBeforeEmit() { acceptedHooks += 1; },
+  });
+  assert.equal(heldLoser, null, 'the same held lease cannot authorize overwriting cancellation');
+  assert.equal(runService.getRun('cancelled-held').status, 'cancelled');
+  assert.equal(runService.getRun('cancelled-held').non_retryable, 0);
+
+  insertBareRun(db, 'cancelled-legacy', 'running');
+  runService.updateRunStatus('cancelled-legacy', 'cancelled', { force: true });
+  assert.equal(runService.updateRunStatus('cancelled-legacy', 'failed', {
+    force: true,
+    requireCurrentStatus: 'running',
+    onAcceptedBeforeEmit() { acceptedHooks += 1; },
+  }), null, 'lease-less legacy runs still require the observed source status');
+  assert.equal(runService.getRun('cancelled-legacy').status, 'cancelled');
+
+  insertBareRun(db, 'accepted-terminal', 'running');
+  const accepted = runService.updateRunStatus('accepted-terminal', 'failed', {
+    force: true,
+    requireCurrentStatus: 'running',
+    nonRetryable: true,
+    onAcceptedBeforeEmit() {
+      acceptedHooks += 1;
+      runService.updateRunResult('accepted-terminal', {
+        exit_code: 1,
+        result_summary: 'winner result',
+      });
+    },
+  });
+  assert.equal(accepted.status, 'failed');
+  assert.equal(accepted.non_retryable, 1);
+  assert.equal(accepted.result_summary, 'winner result');
+  assert.equal(acceptedHooks, 1, 'winner-only persistence never runs for either loser');
+  assert.equal(ended.at(-1).non_retryable, 1, 'run:ended observes retry suppression');
+  assert.equal(ended.at(-1).result_summary, 'winner result', 'run:ended observes the committed result');
+});
+
 test('claim creates one reserved lease atomically and markRunStarted acquires it once', async (t) => {
   const db = await mkdb(t);
   const runService = createRunService(db, createEventBus());
