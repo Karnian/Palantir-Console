@@ -5,7 +5,7 @@ const { join } = require('node:path');
 /**
  * Creates and initializes a SQLite database with WAL mode and migration support.
  * @param {string} dbPath - Path to the SQLite database file
- * @returns {{ db: Database, migrate: () => void, close: () => void }}
+ * @returns {{ db: Database, migrate: (migrationsDir?: string) => void, close: () => void }}
  */
 function createDatabase(dbPath) {
   const db = new Database(dbPath);
@@ -16,11 +16,29 @@ function createDatabase(dbPath) {
   db.pragma('synchronous = NORMAL');
   db.pragma('foreign_keys = ON');
 
-  function migrate() {
-    const migrationsDir = join(__dirname, 'migrations');
-    const files = readdirSync(migrationsDir)
-      .filter(f => f.endsWith('.sql'))
-      .sort();
+  function migrate(migrationsDir = join(__dirname, 'migrations')) {
+    const seenVersions = new Map();
+    const migrations = readdirSync(migrationsDir)
+      .filter(file => file.endsWith('.sql'))
+      .map(file => {
+        const match = /^(\d+)_.+\.sql$/.exec(file);
+        if (!match) {
+          throw new Error(`malformed migration filename "${file}"; expected NNN_name.sql`);
+        }
+
+        const version = Number(match[1]);
+        if (!Number.isSafeInteger(version) || version <= 0) {
+          throw new Error(`migration version must be a positive integer: "${file}"`);
+        }
+
+        const duplicate = seenVersions.get(version);
+        if (duplicate) {
+          throw new Error(`duplicate migration version ${version}: "${duplicate}" and "${file}"`);
+        }
+        seenVersions.set(version, file);
+        return { file, version };
+      })
+      .sort((a, b) => a.version - b.version);
 
     // Ensure schema_version table exists (bootstrap)
     db.exec(`
@@ -30,13 +48,19 @@ function createDatabase(dbPath) {
       )
     `);
 
-    const currentVersion = db.prepare(
-      'SELECT COALESCE(MAX(version), 0) as version FROM schema_version'
-    ).get().version;
+    const appliedVersions = db.prepare(
+      'SELECT version FROM schema_version'
+    ).all().map(row => Number(row.version));
+    const applied = new Set(appliedVersions);
+    let maxApplied = appliedVersions.length ? Math.max(...appliedVersions) : 0;
 
-    for (const file of files) {
-      const version = parseInt(file.split('_')[0], 10);
-      if (isNaN(version) || version <= currentVersion) continue;
+    for (const { file, version } of migrations) {
+      if (applied.has(version)) continue;
+      if (version < maxApplied) {
+        throw new Error(
+          `retroactive migration ${file} is below the applied head (${maxApplied}) — renumber it above the head`
+        );
+      }
 
       const sql = readFileSync(join(migrationsDir, file), 'utf-8');
       // Check if this migration opts into FK-off mode (exact first-line match only)
@@ -81,6 +105,9 @@ function createDatabase(dbPath) {
           }
         })();
       }
+
+      applied.add(version);
+      maxApplied = version;
     }
   }
 
