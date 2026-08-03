@@ -97,6 +97,21 @@ function managerCapabilityRequestAllowed(req, grant = null) {
       || rawPath === '/api/operator/specialist';
   }
   if (method === 'PATCH') {
+    // `/reorder` is declared before `/:id` in routes/tasks.js, so a request the
+    // router resolves to that literal segment reaches the reorder handler —
+    // which rewrites sort_order for arbitrary task ids with no project scoping.
+    // Express matches literal routes case-insensitively by default, so
+    // `/api/tasks/REORDER` reaches it: lowercasing is what actually closes the
+    // bypass. Decoding first is belt-and-braces — Express does NOT percent-decode
+    // before matching a literal route (`%72eorder` resolves to `/:id`), and
+    // refusing that form too costs nothing because no real task id decodes to
+    // "reorder". An undecodable segment is refused rather than passed through.
+    const taskSegment = /^\/api\/tasks\/([^/]+)\/?$/.exec(rawPath);
+    if (taskSegment) {
+      let decoded;
+      try { decoded = decodeURIComponent(taskSegment[1]); } catch { return false; }
+      if (decoded.toLowerCase() === 'reorder') return false;
+    }
     return /^\/api\/tasks\/[^/]+(?:\/status)?\/?$/.test(rawPath)
       || (
         grant?.layer !== 'top'
