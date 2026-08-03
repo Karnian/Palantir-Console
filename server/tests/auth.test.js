@@ -14,7 +14,11 @@ const path = require('node:path');
 const os = require('node:os');
 const request = require('supertest');
 const { createApp } = require('../app');
-const { parseCookies, createAuthMiddleware } = require('../middleware/auth');
+const {
+  parseCookies,
+  createAuthMiddleware,
+  managerCapabilityRequestAllowed,
+} = require('../middleware/auth');
 const {
   createWorkerProposalTokenService,
   createManagerCapabilityTokenService,
@@ -711,6 +715,149 @@ test('createAuthMiddleware: Operator capability reaches artifact verify-check CR
   assert.equal(allowed('PATCH', '/api/verify-checks/42'), true);
   assert.equal(allowed('DELETE', '/api/verify-checks/42'), true);
   assert.equal(allowed('POST', '/api/master-memory/remember'), false);
+});
+
+// This is not a raw-path set equivalence proof; it is a regression sample of
+// known branches. Its purpose is to make allowlist drift visible during the
+// operation-manifest refactor.
+test('manager capability allowlist has witnesses for every known positive branch', () => {
+  const allowed = (layer, method, originalUrl) => managerCapabilityRequestAllowed(
+    { method, originalUrl },
+    { layer },
+  );
+
+  const getWitnesses = [
+    '/api/runs',
+    '/api/runs/run_one',
+    '/api/runs/run_one/events',
+    '/api/runs/run_one/output',
+    '/api/tasks',
+    '/api/tasks/task_one',
+    '/api/projects',
+    '/api/projects/project_one/tasks',
+    '/api/projects/project_one/memory',
+    '/api/projects/project_one/skill-packs',
+    '/api/agents',
+    '/api/skill-packs',
+    '/api/operator/profiles',
+    '/api/conversations/operator%3Aproject_one/events',
+  ];
+  for (const originalUrl of getWitnesses) {
+    assert.equal(allowed('top', 'GET', originalUrl), true, `Top GET witness: ${originalUrl}`);
+    assert.equal(allowed('operator', 'GET', originalUrl), true, `Operator GET witness: ${originalUrl}`);
+  }
+
+  const commonMutationWitnesses = [
+    ['POST', '/api/tasks'],
+    ['POST', '/api/tasks/task_one/execute'],
+    ['POST', '/api/conversations/operator%3Aproject_one/message'],
+    ['POST', '/api/conversations/operator%3Aproject_one/memory/propose'],
+    ['POST', '/api/operator/specialist'],
+    ['PATCH', '/api/tasks/task_one'],
+    ['PATCH', '/api/tasks/task_one/status'],
+    ['DELETE', '/api/tasks/task_one'],
+  ];
+  for (const [method, originalUrl] of commonMutationWitnesses) {
+    assert.equal(allowed('top', method, originalUrl), true, `Top ${method} witness: ${originalUrl}`);
+    assert.equal(allowed('operator', method, originalUrl), true, `Operator ${method} witness: ${originalUrl}`);
+  }
+});
+
+test('Top denies worker intervention variants that Operator allows', () => {
+  const allowed = (layer, method, originalUrl) => managerCapabilityRequestAllowed(
+    { method, originalUrl },
+    { layer },
+  );
+  const variants = (rawPath) => [
+    rawPath,
+    `${rawPath}/`,
+    `${rawPath}?trace=witness`,
+    `${rawPath}/?trace=witness`,
+  ];
+  const interventionPaths = [
+    '/api/runs/run_worker/input',
+    '/api/runs/run_worker/cancel',
+    '/api/conversations/worker:run_worker/message',
+    '/api/conversations/worker%3Arun_worker/message',
+    '/api/conversations/worker%3arun_worker/message',
+  ];
+
+  for (const rawPath of interventionPaths) {
+    for (const originalUrl of variants(rawPath)) {
+      assert.equal(allowed('top', 'POST', originalUrl), false, `Top denial: ${originalUrl}`);
+      assert.equal(allowed('operator', 'POST', originalUrl), true, `Operator allowance: ${originalUrl}`);
+    }
+  }
+
+  for (const originalUrl of variants('/api/dispatch-audit')) {
+    assert.equal(allowed('top', 'POST', originalUrl), false, `Top audit denial: ${originalUrl}`);
+  }
+  assert.equal(allowed('operator', 'POST', '/api/dispatch-audit'), true);
+  assert.equal(allowed('operator', 'POST', '/api/dispatch-audit?trace=witness'), true);
+});
+
+test('verify-check operations and assignment are Operator-only', () => {
+  const allowed = (layer, method, originalUrl) => managerCapabilityRequestAllowed(
+    { method, originalUrl },
+    { layer },
+  );
+  const operatorOnlyWitnesses = [
+    ['GET', '/api/verify-checks?project_id=project_one'],
+    ['POST', '/api/verify-checks'],
+    ['POST', '/api/verify-checks/assign'],
+    ['PATCH', '/api/verify-checks/check_one'],
+    ['DELETE', '/api/verify-checks/check_one'],
+  ];
+
+  for (const [method, originalUrl] of operatorOnlyWitnesses) {
+    assert.equal(allowed('operator', method, originalUrl), true, `Operator allowance: ${method} ${originalUrl}`);
+    assert.equal(allowed('top', method, originalUrl), false, `Top denial: ${method} ${originalUrl}`);
+  }
+});
+
+test('manager capability denies task reorder without blocking task patches', () => {
+  // Express matches literal routes case-insensitively by default, so the CASED
+  // forms below reach the reorder handler and a raw-string compare against
+  // '/api/tasks/reorder' would let them through — that is the live bypass this
+  // guards. The percent-encoded forms do NOT reach that handler (Express does
+  // not decode before matching a literal route; they resolve to `/:id`), so
+  // they are conservative extras rather than proven bypasses. Asserting them
+  // keeps the guard from regressing to a raw-string compare.
+  const reorderVariants = [
+    '/api/tasks/reorder',
+    '/api/tasks/reorder/',
+    '/api/tasks/reorder?project_id=project_one',
+    '/api/tasks/reorder/?project_id=project_one',
+    '/api/tasks/%72eorder',
+    '/api/tasks/%72eorder/',
+    '/api/tasks/REORDER',
+    '/api/tasks/ReOrDeR',
+    '/api/tasks/%52EORDER',
+  ];
+
+  for (const layer of ['top', 'operator']) {
+    for (const originalUrl of reorderVariants) {
+      assert.equal(
+        managerCapabilityRequestAllowed({ method: 'PATCH', originalUrl }, { layer }),
+        false,
+        `${layer} denial: ${originalUrl}`,
+      );
+    }
+    assert.equal(
+      managerCapabilityRequestAllowed(
+        { method: 'PATCH', originalUrl: '/api/tasks/task_one' },
+        { layer },
+      ),
+      true,
+    );
+    assert.equal(
+      managerCapabilityRequestAllowed(
+        { method: 'PATCH', originalUrl: '/api/tasks/task_one/status' },
+        { layer },
+      ),
+      true,
+    );
+  }
 });
 
 test('app manager capability expires with the active registry slot', async (t) => {
