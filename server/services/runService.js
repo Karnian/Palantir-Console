@@ -188,6 +188,7 @@ function createRunService(db, eventBus) {
     updateStatusCasWithLease: db.prepare(`
       UPDATE runs
          SET status = ?,
+             non_retryable = CASE WHEN ? THEN 1 ELSE non_retryable END,
              ended_at = CASE
                WHEN ? IN ('completed','failed','cancelled','stopped') THEN datetime('now')
                ELSE ended_at
@@ -205,6 +206,7 @@ function createRunService(db, eventBus) {
     updateStatusCas: db.prepare(`
       UPDATE runs
          SET status = ?,
+             non_retryable = CASE WHEN ? THEN 1 ELSE non_retryable END,
              ended_at = CASE
                WHEN ? IN ('completed','failed','cancelled','stopped') THEN datetime('now')
                ELSE ended_at
@@ -1197,11 +1199,26 @@ function createRunService(db, eventBus) {
     force = false,
     reason = null,
     terminalReason = null,
+    // Limit classification must be committed by the same CAS as the terminal
+    // status. Setting it before the CAS contaminates a cancellation/reclaim
+    // winner; setting it afterwards lets the synchronous run:ended listener
+    // enqueue a retry before it can observe the flag.
+    nonRetryable = false,
+    // Synchronous winner-only persistence hook. Terminal observers often need
+    // to attach a parsed result or limit marker, and run:ended consumers must
+    // see those fields on the emitted run. The hook runs only after every CAS
+    // fence accepts and before status/run:ended emission.
+    onAcceptedBeforeEmit = null,
     // Generation-atomic terminal write (codex S1b R6): every check-then-act
     // guard left an await window; conditioning the WRITE itself on the probed
     // lease still being the current held one closes the class. On a stale
     // generation the CAS matches nothing and the caller gets null back.
     requireHeldLease = null,
+    // A lease fences owner generations, not user terminal writes. A refused
+    // cancel kill deliberately leaves the same lease held, so an observer that
+    // started from `running` must also require that status at commit time or it
+    // can force-overwrite the user's newer `cancelled` decision.
+    requireCurrentStatus = null,
   } = {}) {
     if (!VALID_STATUSES.includes(status)) {
       throw new BadRequestError(`Invalid run status: ${status}`);
@@ -1239,6 +1256,7 @@ function createRunService(db, eventBus) {
     // same terminal state again is a no-op with no events.
     for (let attempt = 0; attempt < 8; attempt += 1) {
       current = getRun(id);
+      if (requireCurrentStatus && current.status !== requireCurrentStatus) return null;
       // Gated on `force` so this stays an internal-writer concession. The one
       // unforced caller is PATCH /api/runs/:id/status, whose contract is that a
       // terminal run rejects further writes; turning that 400 into a silent 200
@@ -1253,6 +1271,7 @@ function createRunService(db, eventBus) {
           const held = stmts.getHeldOwnerLease.get(id);
           if (!held || held.lease_id !== requireHeldLease) return null;
         }
+        if (nonRetryable) markRunNonRetryable(id);
         // Deliberately no terminal_reason backfill here. A reason is derived
         // from the row at write time, and by now the row is already terminal —
         // so the derivation has nothing left to read and would either produce
@@ -1265,7 +1284,10 @@ function createRunService(db, eventBus) {
             addRunEvent(id, 'status:duplicate_terminal', JSON.stringify({ status, reason }));
           } catch { /* annotate-only */ }
         }
-        return current;
+        if (typeof onAcceptedBeforeEmit === 'function') onAcceptedBeforeEmit(current);
+        return (nonRetryable || typeof onAcceptedBeforeEmit === 'function')
+          ? stmts.getById.get(id)
+          : current;
       }
 
       // Enforce state machine unless forced (internal lifecycle use)
@@ -1283,6 +1305,7 @@ function createRunService(db, eventBus) {
       const info = requireHeldLease
         ? stmts.updateStatusCasWithLease.run(
           status,
+          nonRetryable ? 1 : 0,
           status,
           status,
           attemptTerminalReason,
@@ -1293,6 +1316,7 @@ function createRunService(db, eventBus) {
         )
         : stmts.updateStatusCas.run(
           status,
+          nonRetryable ? 1 : 0,
           status,
           status,
           attemptTerminalReason,
@@ -1316,7 +1340,11 @@ function createRunService(db, eventBus) {
     // The write already happened inside the CAS loop above — terminal_reason
     // rides along in the same conditional UPDATE so a losing racer cannot
     // overwrite the winner's provenance.
-    const run = stmts.getById.get(id);
+    let run = stmts.getById.get(id);
+    if (typeof onAcceptedBeforeEmit === 'function') {
+      onAcceptedBeforeEmit(run);
+      run = stmts.getById.get(id);
+    }
     addRunEvent(id, `status:${status}`, reason ? JSON.stringify({ reason }) : null);
     if (eventBus) {
       // v3 Phase 5 semantic event fields (spec §9.8):

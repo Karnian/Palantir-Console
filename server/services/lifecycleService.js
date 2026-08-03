@@ -563,7 +563,7 @@ function createLifecycleService({
     return 'other';
   }
 
-  function markCodexLimitFailure(run, output) {
+  function classifyCodexLimitFailure(run, output) {
     if (!run?.agent_profile_id) return false;
     let profile;
     try {
@@ -572,11 +572,7 @@ function createLifecycleService({
       return false;
     }
     if (resolveAdapterName(profile) !== 'codex') return false;
-    return markWorkerLimitFailure(
-      runService,
-      run.id,
-      classifyCodexWorkerOutput(output),
-    );
+    return classifyCodexWorkerOutput(output);
   }
 
   // Fail-closed: a corrupt queued_args (manual DB edit, partial write) must
@@ -3218,8 +3214,47 @@ function createLifecycleService({
     const parsed = parseClaudeStreamJsonOutput(raw);
     if (!parsed.recognized) return null;
 
-    const priorEvents = runService.getRunEvents(run.id);
-    const alreadyParsed = priorEvents.some(
+    if (!parsed.result) {
+      // Recognized NDJSON may consist solely of user/tool events. Never fall
+      // back to that raw stream: tool inputs/results can contain file contents
+      // or tokens that must not enter observable final_output events.
+      return {
+        output: parsed.text || '', status: null, reason: null, result: null,
+        parsed, limitFailure: null, hitLimit: false, stopReason: null,
+      };
+    }
+
+    const stopReason = parsed.result.stop_reason;
+    const hitLimit = stopReason === 'max_turns' || stopReason === 'max_tokens';
+    const limitFailure = parsed.result.is_error
+      ? classifyClaudeRateLimitEvents(parsed.events)
+      : null;
+    return {
+      output: parsed.text || '',
+      status: parsed.result.is_error ? 'failed' : hitLimit ? 'needs_input' : 'completed',
+      reason: limitFailure
+        ? 'claude-rate-limit'
+        : parsed.result.is_error
+          ? 'claude-result-error'
+          : hitLimit
+            ? stopReason
+            : 'agent-exit-success',
+      result: parsed.result,
+      parsed,
+      limitFailure,
+      hitLimit,
+      stopReason,
+    };
+  }
+
+  // Persist parsed output only AFTER the generation-scoped terminal CAS wins.
+  // Parsing can await remote I/O; a cancellation or reclaim may win during
+  // that wait. Writing result/usage/limit events before the CAS would then
+  // contaminate the winning generation even though its status is preserved.
+  function persistDetachedClaudeResult(run, inspection) {
+    if (!inspection?.parsed) return;
+    const { parsed, limitFailure, hitLimit, stopReason } = inspection;
+    const alreadyParsed = runService.getRunEvents(run.id).some(
       (event) => event.event_type === 'runtime:remote_claude_stream_parsed',
     );
     if (!alreadyParsed) {
@@ -3272,12 +3307,7 @@ function createLifecycleService({
       }));
     }
 
-    if (!parsed.result) {
-      // Recognized NDJSON may consist solely of user/tool events. Never fall
-      // back to that raw stream: tool inputs/results can contain file contents
-      // or tokens that must not enter observable final_output events.
-      return { output: parsed.text || '', status: null, reason: null };
-    }
+    if (!parsed.result) return;
 
     runService.updateRunResult(run.id, {
       result_summary: typeof parsed.result.result === 'string'
@@ -3289,11 +3319,6 @@ function createLifecycleService({
       cost_usd: parsed.usage.costUsd,
     });
 
-    const stopReason = parsed.result.stop_reason;
-    const hitLimit = stopReason === 'max_turns' || stopReason === 'max_tokens';
-    const limitFailure = parsed.result.is_error
-      ? classifyClaudeRateLimitEvents(parsed.events)
-      : null;
     if (limitFailure && !alreadyParsed) {
       markWorkerLimitFailure(runService, run.id, limitFailure);
     }
@@ -3304,18 +3329,6 @@ function createLifecycleService({
         num_turns: parsed.result.num_turns,
       }));
     }
-    return {
-      output: parsed.text || '',
-      status: parsed.result.is_error ? 'failed' : hitLimit ? 'needs_input' : 'completed',
-      reason: limitFailure
-        ? 'claude-rate-limit'
-        : parsed.result.is_error
-          ? 'claude-result-error'
-          : hitLimit
-            ? stopReason
-            : 'agent-exit-success',
-      result: parsed.result,
-    };
   }
 
   // True while a run carries a spawn-ownership uncertainty that no later
@@ -3387,6 +3400,7 @@ function createLifecycleService({
             try {
               sjDeadWrite = runService.updateRunStatus(run.id, status, {
                 force: true, requireHeldLease: lease?.lease_id ?? null,
+                requireCurrentStatus: run.status,
               });
             } catch {}
             if (sjDeadWrite !== null) {
@@ -3404,6 +3418,7 @@ function createLifecycleService({
             sjWrite = runService.updateRunStatus(run.id, 'failed', {
               force: true, reason: 'agent-exit-unknown',
               requireHeldLease: lease?.lease_id ?? null,
+              requireCurrentStatus: run.status,
             });
           } catch {}
           if (sjWrite !== null && run.task_id) checkTaskCompletion(run.task_id);
@@ -3455,8 +3470,8 @@ function createLifecycleService({
           ? claudeResult.output
           : await channel.getOutput(run.id, 200);
         const codexLimitFailure = status === 'failed' && !claudeResult
-          ? markCodexLimitFailure(run, output)
-          : false;
+          ? classifyCodexLimitFailure(run, output)
+          : null;
         // v3 Phase 5: propagate the actual transition reason so
         // subscribers see WHY the run ended, not just that it did.
         const reason = claudeResult?.reason
@@ -3465,6 +3480,20 @@ function createLifecycleService({
         const terminalWrite = runService.updateRunStatus(run.id, status, {
           force: true, reason,
           requireHeldLease: lease?.lease_id ?? null,
+          requireCurrentStatus: run.status,
+          nonRetryable: Boolean(codexLimitFailure || claudeResult?.limitFailure),
+          onAcceptedBeforeEmit: () => {
+            persistDetachedClaudeResult(run, claudeResult);
+            if (codexLimitFailure) {
+              markWorkerLimitFailure(runService, run.id, codexLimitFailure);
+            }
+            if (!claudeResult?.result && exitCode !== null) {
+              runService.updateRunResult(run.id, {
+                exit_code: exitCode,
+                result_summary: agentExitSummary(exitCode),
+              });
+            }
+          },
         });
         if (terminalWrite === null) {
           // The probed generation is no longer the current held one — a
@@ -3479,13 +3508,6 @@ function createLifecycleService({
             }));
           } catch { /* annotate-only */ }
           continue;
-        }
-
-        if (!claudeResult?.result && exitCode !== null) {
-          runService.updateRunResult(run.id, {
-            exit_code: exitCode,
-            result_summary: agentExitSummary(exitCode),
-          });
         }
 
         // Capture final output
@@ -3615,6 +3637,7 @@ function createLifecycleService({
                 const idleWrite = runService.updateRunStatus(run.id, status, {
                   force: true, reason,
                   requireHeldLease: currentLease?.lease_id ?? null,
+                  requireCurrentStatus: run.status,
                 });
                 if (idleWrite === null) {
                   try {
@@ -3728,6 +3751,7 @@ function createLifecycleService({
         const niWrite = runService.updateRunStatus(run.id, status, {
           force: true,
           requireHeldLease: lease?.lease_id ?? null,
+          requireCurrentStatus: run.status,
           reason: agentExitReason(exitCode),
           // Derived at write time like the other two call sites: `run` is a
           // snapshot from before the awaited detectExitCode(), and health can
@@ -3795,10 +3819,10 @@ function createLifecycleService({
         ? runService.getHeldLease(run.id)
         : null;
       const alive = await channel.isAlive(run.id, 'cli');
-      if (alive) return false;
+      if (alive) return 'not_terminal';
 
       const exitCode = await channel.detectExitCode(run.id, 'cli');
-      if (exitCode === null) return false;
+      if (exitCode === null) return 'not_terminal';
 
       const claudeResult = await inspectDetachedClaudeResult(run, channel);
       const status = claudeResult?.status || (exitCode === 0 ? 'completed' : 'failed');
@@ -3808,12 +3832,28 @@ function createLifecycleService({
           ? await channel.getOutput(run.id, 200, 'cli')
           : null;
       const codexLimitFailure = status === 'failed' && !claudeResult
-        ? markCodexLimitFailure(run, output)
-        : false;
+        ? classifyCodexLimitFailure(run, output)
+        : null;
       const fromStatus = run.status;
       const recoveryWrite = runService.updateRunStatus(run.id, status, {
         force: true,
         requireHeldLease: observedLease?.lease_id ?? null,
+        requireCurrentStatus: run.status,
+        nonRetryable: Boolean(codexLimitFailure || claudeResult?.limitFailure),
+        onAcceptedBeforeEmit: () => {
+          persistDetachedClaudeResult(run, claudeResult);
+          if (codexLimitFailure) {
+            markWorkerLimitFailure(runService, run.id, codexLimitFailure);
+          }
+          if (!claudeResult?.result) {
+            runService.updateRunResult(run.id, {
+              exit_code: exitCode,
+              result_summary: status === 'completed'
+                ? 'Agent completed (recovered after restart)'
+                : `Agent exited with code ${exitCode} (recovered after restart)`,
+            });
+          }
+        },
         reason: claudeResult?.reason
           || (codexLimitFailure ? 'codex-rate-limit' : agentExitReason(exitCode)),
         // A run that health already parked as idle keeps that provenance when a
@@ -3830,7 +3870,7 @@ function createLifecycleService({
             lease_id: observedLease?.lease_id ?? null, pass: 'boot:recover',
           }));
         } catch { /* annotate-only */ }
-        return false;
+        return 'stale';
       }
       if (eventBus && status === 'needs_input') {
         const finalRun = runService.getRun(run.id);
@@ -3844,14 +3884,6 @@ function createLifecycleService({
           project_id: finalRun.project_id || null,
           node_id: finalRun.node_id || null,
           priority: 'alert',
-        });
-      }
-      if (!claudeResult?.result) {
-        runService.updateRunResult(run.id, {
-          exit_code: exitCode,
-          result_summary: status === 'completed'
-            ? 'Agent completed (recovered after restart)'
-            : `Agent exited with code ${exitCode} (recovered after restart)`,
         });
       }
       if (claudeResult?.output) {
@@ -3877,7 +3909,7 @@ function createLifecycleService({
       } catch { /* observation only */ }
       if (run.goal_active) await captureGoalOutput(runService.getRun(run.id));
       if (run.task_id) checkTaskCompletion(run.task_id);
-      return true;
+      return 'recovered';
     };
 
     // Remote workers are not discoverable through the control plane's local
@@ -3957,10 +3989,12 @@ function createLifecycleService({
       let channel;
       try {
         channel = channelForNode(run.node_id);
-        if (await recoverTerminalResult(run, channel)) {
+        const terminalRecovery = await recoverTerminalResult(run, channel);
+        if (terminalRecovery === 'recovered') {
           recovered.push({ runId: run.id, status: 'terminated' });
           continue;
         }
+        if (terminalRecovery === 'stale') continue;
         await channel.kill(run.id, 'cli');
         if (await channel.isAlive(run.id, 'cli')) {
           throw new Error('worker remained alive after kill');
@@ -4117,9 +4151,13 @@ function createLifecycleService({
           ? 'Worker stopped because its boot-local proposal capability expired on restart'
           : 'Legacy worker stopped before scoped-capability recovery';
         try {
-          if (persistedRun && await recoverTerminalResult(persistedRun, workerChannel)) {
-            recovered.push({ runId, status: 'terminated' });
-            continue;
+          if (persistedRun) {
+            const terminalRecovery = await recoverTerminalResult(persistedRun, workerChannel);
+            if (terminalRecovery === 'recovered') {
+              recovered.push({ runId, status: 'terminated' });
+              continue;
+            }
+            if (terminalRecovery === 'stale') continue;
           }
           await workerChannel.kill(runId, 'cli');
           if (await workerChannel.isAlive(runId, 'cli')) {
@@ -4207,11 +4245,26 @@ function createLifecycleService({
               ? await workerChannel.getOutput(runId, 200, 'cli')
               : null;
             const codexLimitFailure = status === 'failed'
-              ? markCodexLimitFailure(run, output)
-              : false;
+              ? classifyCodexLimitFailure(run, output)
+              : null;
             const orphanWrite = runService.updateRunStatus(runId, status, {
               force: true,
               requireHeldLease: observedLease?.lease_id ?? null,
+              requireCurrentStatus: run.status,
+              nonRetryable: Boolean(codexLimitFailure),
+              onAcceptedBeforeEmit: () => {
+                if (codexLimitFailure) {
+                  markWorkerLimitFailure(runService, run.id, codexLimitFailure);
+                }
+                if (exitCode !== null) {
+                  runService.updateRunResult(runId, {
+                    exit_code: exitCode,
+                    result_summary: status === 'completed'
+                      ? 'Agent completed (recovered after restart)'
+                      : `Agent exited with code ${exitCode} (recovered after restart)`,
+                  });
+                }
+              },
               reason: codexLimitFailure ? 'codex-rate-limit' : agentExitReason(exitCode),
             });
             if (orphanWrite === null) {
@@ -4221,14 +4274,6 @@ function createLifecycleService({
                 }));
               } catch { /* annotate-only */ }
               continue;
-            }
-            if (exitCode !== null) {
-              runService.updateRunResult(runId, {
-                exit_code: exitCode,
-                result_summary: status === 'completed'
-                  ? 'Agent completed (recovered after restart)'
-                  : `Agent exited with code ${exitCode} (recovered after restart)`,
-              });
             }
             await workerChannel.kill(runId, 'cli');
             try {

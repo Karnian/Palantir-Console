@@ -456,3 +456,63 @@ test('a reclaim inside the terminal block awaits cannot fail the new generation'
   `).get(run.id).c;
   assert.ok(annotated >= 1, 'the discarded observation is visible');
 });
+
+async function exerciseBootCancelRace(t, output) {
+  const db = await mkdb(t);
+  const engine = makeEngine({ type: 'tmux', alive: true, exitCode: null });
+  const h = createHarness(db, engine);
+  const run = await spawnWorker(h);
+
+  engine.setAlive(false);
+  engine.setExitCode(1);
+  engine.discoverGhostSessions = () => [{
+    runId: run.id,
+    name: `palantir-run-${run.id}`,
+  }];
+  // The operator's cancel is accepted as a status decision even when the
+  // underlying kill is refused. That deliberately leaves the same owner lease
+  // held, proving the status fence is independent from the generation fence.
+  engine.kill = () => false;
+  let cancelled = false;
+  engine.getOutput = async () => {
+    if (!cancelled) {
+      cancelled = true;
+      await h.lifecycleService.cancelRun(run.id);
+    }
+    return output;
+  };
+
+  const recovered = await h.lifecycleService.recoverOrphanSessions();
+  return { db, h, run, recovered, cancelled };
+}
+
+test('boot recovery cannot overwrite a cancellation that wins during output collection', async (t) => {
+  const { h, run, recovered, cancelled } = await exerciseBootCancelRace(t, 'ordinary failure');
+  const after = h.runService.getRun(run.id);
+
+  assert.equal(cancelled, true, 'the cancellation must land inside the recovery await');
+  assert.deepEqual(recovered, []);
+  assert.equal(after.status, 'cancelled');
+  assert.equal(after.exit_code, null);
+  assert.equal(after.result_summary, null);
+  assert.equal(after.non_retryable, 0);
+  assert.equal(
+    h.runService.getRunEvents(run.id).some((event) => event.event_type === 'final_output'),
+    false,
+  );
+});
+
+test('boot recovery leaves no limit side effects when cancellation wins the same race', async (t) => {
+  const { h, run, recovered } = await exerciseBootCancelRace(t, 'Rate limit exceeded');
+  const after = h.runService.getRun(run.id);
+  const events = h.runService.getRunEvents(run.id);
+
+  assert.deepEqual(recovered, []);
+  assert.equal(after.status, 'cancelled');
+  assert.equal(after.exit_code, null);
+  assert.equal(after.result_summary, null);
+  assert.equal(after.non_retryable, 0);
+  assert.equal(events.some((event) => event.event_type === 'worker:limit_rejected'), false);
+  assert.equal(events.some((event) => event.event_type === 'final_output'), false);
+  assert.equal(h.runService.listRuns({ task_id: run.task_id }).length, 1, 'no retry is enqueued');
+});
