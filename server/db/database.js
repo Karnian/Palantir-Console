@@ -1,4 +1,5 @@
 const Database = require('better-sqlite3');
+const { createHash } = require('node:crypto');
 const { readFileSync, readdirSync } = require('node:fs');
 const { join } = require('node:path');
 
@@ -48,14 +49,51 @@ function createDatabase(dbPath) {
       )
     `);
 
-    const appliedVersions = db.prepare(
-      'SELECT version FROM schema_version'
-    ).all().map(row => Number(row.version));
+    const schemaVersionColumns = db.pragma('table_info(schema_version)');
+    if (!schemaVersionColumns.some(column => column.name === 'content_sha256')) {
+      try {
+        db.exec('ALTER TABLE schema_version ADD COLUMN content_sha256 TEXT');
+      } catch (err) {
+        if (
+          err.code !== 'SQLITE_ERROR' ||
+          !/duplicate column name:\s*content_sha256/i.test(err.message)
+        ) {
+          throw err;
+        }
+      }
+    }
+
+    // migrate() is single-runner by design: it reads the applied set once here
+    // and loops. Concurrent boot against one DB is unsupported (pre-existing —
+    // this read, the ALTER above, and re-execution all assume a single runner;
+    // the app runs one control-plane instance per DB). Under that assumption an
+    // apply-path row is always created by the current migration's transaction,
+    // so the unconditional checksum UPDATE below records the runner's
+    // authoritative hash (correcting a migration that self-inserts its own
+    // schema_version row). Full concurrent-boot safety is out of scope.
+    const appliedRows = db.prepare(
+      'SELECT version, content_sha256 FROM schema_version'
+    ).all();
+    const appliedVersions = appliedRows.map(row => Number(row.version));
     const applied = new Set(appliedVersions);
+    const recordedChecksums = new Map(
+      appliedRows.map(row => [Number(row.version), row.content_sha256])
+    );
     let maxApplied = appliedVersions.length ? Math.max(...appliedVersions) : 0;
 
     for (const { file, version } of migrations) {
-      if (applied.has(version)) continue;
+      if (applied.has(version)) {
+        const sql = readFileSync(join(migrationsDir, file), 'utf-8');
+        const currentChecksum = createHash('sha256').update(sql).digest('hex');
+        const recordedChecksum = recordedChecksums.get(version);
+        if (recordedChecksum !== null && recordedChecksum !== currentChecksum) {
+          throw new Error(
+            `migration ${file} content changed after it was applied ` +
+            `(recorded ${recordedChecksum.slice(0, 8)} != current ${currentChecksum.slice(0, 8)})`
+          );
+        }
+        continue;
+      }
       if (version < maxApplied) {
         throw new Error(
           `retroactive migration ${file} is below the applied head (${maxApplied}) — renumber it above the head`
@@ -63,6 +101,7 @@ function createDatabase(dbPath) {
       }
 
       const sql = readFileSync(join(migrationsDir, file), 'utf-8');
+      const contentSha256 = createHash('sha256').update(sql).digest('hex');
       // Check if this migration opts into FK-off mode (exact first-line match only)
       const firstLine = sql.split('\n')[0].trim();
       const fkOff = firstLine === '-- migrate:no-foreign-keys';
@@ -77,7 +116,13 @@ function createDatabase(dbPath) {
           const v = db.pragma('foreign_key_check');
           if (v.length) throw new Error('FK violation: ' + JSON.stringify(v[0]));
           if (!db.prepare('SELECT 1 FROM schema_version WHERE version = ?').get(version)) {
-            db.prepare('INSERT INTO schema_version (version) VALUES (?)').run(version);
+            db.prepare(
+              'INSERT INTO schema_version (version, content_sha256) VALUES (?, ?)'
+            ).run(version, contentSha256);
+          } else {
+            db.prepare(
+              'UPDATE schema_version SET content_sha256 = ? WHERE version = ?'
+            ).run(contentSha256, version);
           }
           db.exec('COMMIT');
         } catch (err) {
@@ -101,7 +146,13 @@ function createDatabase(dbPath) {
             'SELECT 1 FROM schema_version WHERE version = ?'
           ).get(version);
           if (!exists) {
-            db.prepare('INSERT INTO schema_version (version) VALUES (?)').run(version);
+            db.prepare(
+              'INSERT INTO schema_version (version, content_sha256) VALUES (?, ?)'
+            ).run(version, contentSha256);
+          } else {
+            db.prepare(
+              'UPDATE schema_version SET content_sha256 = ? WHERE version = ?'
+            ).run(contentSha256, version);
           }
         })();
       }
