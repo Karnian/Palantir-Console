@@ -35,6 +35,7 @@ const { createTasksRouter } = require('./routes/tasks');
 const { createRunsRouter } = require('./routes/runs');
 const { createAgentsRouter } = require('./routes/agents');
 const { createEventsRouter } = require('./routes/events');
+const { createAgentContextRouter } = require('./routes/agentContext');
 const { createClaudeSessionsRouter } = require('./routes/claude-sessions');
 const { createExecutionEngine } = require('./services/executionEngine');
 const { createStreamJsonEngine } = require('./services/streamJsonEngine');
@@ -1833,6 +1834,10 @@ function createApp(options = {}) {
     },
   });
   app.use('/api', auth);
+  app.use('/api/agent-context', createAgentContextRouter({
+    goalFeatureActive,
+    isSpecialistAvailable,
+  }));
 
   // Existing routes
   app.use('/api/sessions', createSessionsRouter({
