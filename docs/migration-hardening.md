@@ -48,10 +48,16 @@ read-only 진단이 정당화하는 실제 수정. 부팅 동작을 바꾸므로
 renumber 는 이중 실행 위험 → idempotent forward reconciliation 또는 리뷰된 retroactive 적용.
 #479 의 082/083 은 기존 배포에서 skip 돼 **아무 데서도 안 돌았으므로** 085 로 renumber 안전.
 
-## 선택적 추가 하드닝 (런너 수정 시 함께)
+## 추가 하드닝 — content 체크섬 ✅ 구현됨
 
 per-migration **content 체크섬**(sha256) 컬럼. `MAX` 버그와 독립. 이미 적용된 migration 의 파일
-내용이 나중에 바뀐 경우를 잡는다. 실행한 정확한 바이트의 sha 를 version 행과 원자적으로 저장,
-과거 행은 `NULL`(unknown), 현재 파일 해시를 과거 해시로 조용히 라벨링 금지. 단일 운영자 repo
-에선 immutable-migration CI + 이 audit 만으로도 충분할 수 있으나, 런너를 어차피 고칠 때 넣을
-가치는 있다.
+내용이 나중에 바뀐 경우를 잡는다. `schema_version.content_sha256`(runner bootstrap 이 legacy DB 에
+ALTER 로 추가), 적용 시 실행한 정확한 바이트의 sha 를 version 행과 **원자적으로** 기록(FK-off·일반
+branch + self-insert 행은 backfill), boot 시 기록 체크섬 ≠ 현재 파일이면 **fail-loud**(적용 후 변경
+감지). 과거 `NULL` 행은 unknown → skip(현재 해시로 조용히 backfill 안 함).
+
+**스코프: single-runner.** `migrate()` 는 applied 집합을 boot 에 1회 읽고 루프하는 single-runner
+설계다(this repo = 단일 컨트롤플레인 인스턴스/DB). **단일 DB 동시 boot 은 미지원**(pre-existing —
+ALTER·applied-read·재실행 모두 single-runner 전제). codex 적대리뷰가 동시-boot 축으로 반복 지적했으나
+실배포에 없는 시나리오라 스코프 밖으로 확정(사용자 승인). immutable-migration 규율 + 이 체크섬 +
+audit(`diagnose:migrations`)이 방어선.
