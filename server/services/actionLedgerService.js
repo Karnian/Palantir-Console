@@ -111,40 +111,40 @@ function normalizeJsonValue(value, path = 'params') {
 
 function canonicalizeParams(params) {
   if (!isPlainObject(params)) throw new BadRequestError('params must be an object');
-  const ownKeys = Reflect.ownKeys(params);
+  const snapshot = Object.create(null);
+  for (const key of ALLOWED_PARAM_KEYS) {
+    snapshot[key] = Object.hasOwn(params, key) ? params[key] : undefined;
+  }
+  const ownKeys = Object.keys(params);
   const paramsForValidation = Object.create(null);
-  for (const key of ownKeys) {
-    if (typeof key === 'string' && key === 'labels' && params[key] === undefined) continue;
-    if (typeof key === 'string') paramsForValidation[key] = params[key];
+  for (const key of ALLOWED_PARAM_KEYS) {
+    if (key === 'labels' && snapshot[key] === undefined) continue;
+    paramsForValidation[key] = snapshot[key];
   }
   validateBoundedJson(paramsForValidation);
   for (const key of ownKeys) {
-    if (
-      typeof key !== 'string'
-      || !Object.prototype.propertyIsEnumerable.call(params, key)
-      || !ALLOWED_PARAM_KEYS.has(key)
-    ) {
-      throw new BadRequestError(`unknown create_issue param field: ${String(key)}`);
+    if (!ALLOWED_PARAM_KEYS.has(key)) {
+      throw new BadRequestError(`unknown create_issue param field: ${key}`);
     }
   }
   for (const field of ['repo', 'title', 'body']) {
-    if (!Object.hasOwn(params, field) || typeof params[field] !== 'string') {
+    if (typeof snapshot[field] !== 'string') {
       throw new BadRequestError(`params.${field} must be a string`);
     }
   }
-  if (params.labels !== undefined && !Array.isArray(params.labels)) {
+  if (snapshot.labels !== undefined && !Array.isArray(snapshot.labels)) {
     throw new BadRequestError('params.labels must be an array when present');
   }
-  const labels = params.labels === undefined ? [] : params.labels;
+  const labels = snapshot.labels === undefined ? [] : snapshot.labels;
   if (labels.length > MAX_LABELS) throw new BadRequestError('params.labels has too many items');
   if (!labels.every((label) => typeof label === 'string')) {
     throw new BadRequestError('params.labels must contain only strings');
   }
 
   const withCanonicalFields = Object.create(null);
-  withCanonicalFields.repo = params.repo.normalize('NFC').toLowerCase();
-  withCanonicalFields.title = params.title.normalize('NFC');
-  withCanonicalFields.body = params.body.normalize('NFC');
+  withCanonicalFields.repo = snapshot.repo.normalize('NFC').toLowerCase();
+  withCanonicalFields.title = snapshot.title.normalize('NFC');
+  withCanonicalFields.body = snapshot.body.normalize('NFC');
   withCanonicalFields.labels = [
     ...new Set(labels.map((label) => label.normalize('NFC'))),
   ].sort();
@@ -331,12 +331,14 @@ function createActionLedgerService(db, options = {}) {
 
     const paramsJson = canonicalParamsJson(input.params);
     const hash = paramsHash(paramsJson);
+    const reissuesActionId = input.reissuesActionId ?? input.reissues_action_id ?? null;
     const existing = stmts.getByIntent.get(taskId, actionSlot);
     if (existing) {
       if (
         existing.connector !== connector
         || existing.operation !== operation
         || existing.params_hash !== hash
+        || existing.reissues_action_id !== reissuesActionId
       ) {
         throw new ConflictError(`action intent ${taskId}/${actionSlot} was declared differently`);
       }
@@ -345,7 +347,6 @@ function createActionLedgerService(db, options = {}) {
 
     const id = String(actionIdFactory());
     const createdAt = nowIso();
-    const reissuesActionId = input.reissuesActionId ?? input.reissues_action_id ?? null;
     stmts.insertAction.run(
       id,
       taskId,

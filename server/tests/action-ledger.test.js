@@ -49,6 +49,7 @@ function declare(ledger, overrides = {}) {
     connector: 'github',
     operation: 'github.create_issue',
     params: overrides.params || BASE_PARAMS,
+    reissuesActionId: overrides.reissuesActionId,
   });
 }
 
@@ -117,24 +118,54 @@ test('canonical params reject ambiguous, polluting, sparse, and unbounded inputs
     (error) => error.status === 400 && /exceed/.test(error.message),
   );
 
-  const tooDeep = { leaf: true };
+  const tooDeep = [];
   for (let depth = 0, node = tooDeep; depth < 10; depth += 1) {
-    node.child = {};
-    node = node.child;
+    node.push([]);
+    node = node[0];
   }
   // MUTATION: removing the depth cap makes normalization recurse without a small bound.
   assert.throws(
-    () => canonicalParamsJson({ ...BASE_PARAMS, extra: tooDeep }),
+    () => canonicalParamsJson({ ...BASE_PARAMS, labels: tooDeep }),
     (error) => error.status === 400 && /nesting exceeds/.test(error.message),
   );
 
-  const cyclic = { ...BASE_PARAMS };
-  cyclic.self = cyclic;
+  const cyclic = [];
+  cyclic.push(cyclic);
   // MUTATION: removing ancestor tracking lets cyclic input recurse indefinitely.
   assert.throws(
-    () => canonicalParamsJson(cyclic),
+    () => canonicalParamsJson({ ...BASE_PARAMS, labels: cyclic }),
     (error) => error.status === 400 && /must not be cyclic/.test(error.message),
   );
+});
+
+test('canonical params use one validated snapshot of own properties', () => {
+  Object.prototype.labels = ['X'];
+  try {
+    // MUTATION: reading inherited labels turns an absent field into attacker-controlled data.
+    const inherited = JSON.parse(canonicalParamsJson({
+      repo: BASE_PARAMS.repo,
+      title: BASE_PARAMS.title,
+      body: BASE_PARAMS.body,
+    }));
+    assert.deepEqual(inherited.labels, []);
+  } finally {
+    delete Object.prototype.labels;
+  }
+
+  let titleReads = 0;
+  const changing = {
+    repo: BASE_PARAMS.repo,
+    body: BASE_PARAMS.body,
+    labels: BASE_PARAMS.labels,
+    get title() {
+      titleReads += 1;
+      return titleReads === 1 ? 'validated title' : 'x'.repeat(50 * 1024);
+    },
+  };
+  // MUTATION: re-reading a getter can validate one value and persist a different value.
+  const canonical = JSON.parse(canonicalParamsJson(changing));
+  assert.equal(titleReads, 1);
+  assert.equal(canonical.title, 'validated title');
 });
 
 test('approval requires the exact hash reviewed by the human', (t) => {
@@ -312,6 +343,37 @@ test('logical idempotency is task and slot, with params only a conflict detector
   const second = declare(ledger, { actionSlot: 'follow-up' });
   assert.notEqual(second.id, first.id);
   assert.equal(db.prepare('SELECT count(*) AS count FROM actions').get().count, 2);
+});
+
+test('logical idempotency includes immutable reissue lineage', (t) => {
+  const { ledger } = setup(t);
+  const parentA = declare(ledger, { actionSlot: 'parent-a' });
+  const parentB = declare(ledger, { actionSlot: 'parent-b' });
+  const child = declare(ledger, {
+    actionSlot: 'reissue-child',
+    reissuesActionId: parentA.id,
+  });
+
+  const same = declare(ledger, {
+    actionSlot: 'reissue-child',
+    reissuesActionId: parentA.id,
+  });
+  assert.equal(same.id, child.id);
+
+  // MUTATION: removing reissues_action_id from the conflict check lets a re-declare
+  // silently return a row with different reissue lineage.
+  assert.throws(
+    () => declare(ledger, {
+      actionSlot: 'reissue-child',
+      reissuesActionId: parentB.id,
+    }),
+    (error) => error.status === 409 && error.constructor.name === 'ConflictError',
+  );
+  assert.throws(
+    () => declare(ledger, { actionSlot: 'reissue-child' }),
+    (error) => error.status === 409 && error.constructor.name === 'ConflictError',
+  );
+  assert.equal(ledger.getAction(child.id).reissues_action_id, parentA.id);
 });
 
 test('expiry CAS requeues for approval, audits once, and claim atomically rejects expiry', (t) => {
