@@ -16,10 +16,6 @@ function createDatabase(dbPath) {
   db.pragma('busy_timeout = 5000');
   db.pragma('synchronous = NORMAL');
   db.pragma('foreign_keys = ON');
-  db.pragma('recursive_triggers = ON');
-  if (db.pragma('recursive_triggers', { simple: true }) !== 1) {
-    throw new Error('SQLite recursive_triggers must be enabled');
-  }
 
   function migrate(migrationsDir = join(__dirname, 'migrations')) {
     const seenVersions = new Map();

@@ -119,6 +119,13 @@ CREATE TABLE action_events (
 CREATE INDEX idx_action_events_action_ts
   ON action_events(action_id, ts, id);
 
+CREATE TRIGGER trg_action_events_no_replace
+BEFORE INSERT ON action_events
+WHEN EXISTS (SELECT 1 FROM action_events WHERE id = NEW.id)
+BEGIN
+  SELECT RAISE(ABORT, 'action_events is append-only');
+END;
+
 CREATE TRIGGER trg_action_events_no_update
 BEFORE UPDATE ON action_events
 BEGIN

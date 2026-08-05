@@ -382,8 +382,14 @@ test('events append while actions retains only current state, and evidence canno
     () => db.prepare('DELETE FROM action_events WHERE id = ?').run(events[0].id),
     /action_events is append-only/,
   );
-  assert.equal(db.pragma('recursive_triggers', { simple: true }), 1);
-  // MUTATION: disabling recursive_triggers lets REPLACE implicitly delete old evidence.
+  const originalEvent = { ...events[0] };
+  const rowCount = events.length;
+  assert.deepEqual(
+    db.pragma('index_list(action_events)').filter((index) => index.unique === 1),
+    [],
+    'no secondary UNIQUE index can provide another REPLACE conflict target',
+  );
+  // MUTATION: removing the BEFORE INSERT collision guard lets REPLACE overwrite evidence.
   assert.throws(
     () => db.prepare(`
       INSERT OR REPLACE INTO action_events (id, action_id, phase, ts)
@@ -391,7 +397,15 @@ test('events append while actions retains only current state, and evidence canno
     `).run(events[0].id, action.id, '2026-08-05T00:00:00.000Z'),
     /action_events is append-only/,
   );
-  assert.equal(ledger.listEvents(action.id)[0].phase, 'action.declared');
+  assert.deepEqual(ledger.listEvents(action.id)[0], originalEvent);
+  assert.equal(ledger.listEvents(action.id).length, rowCount);
+
+  db.prepare(`
+    INSERT INTO action_events (action_id, phase, ts)
+    VALUES (?, 'plain.append', ?)
+  `).run(action.id, '2026-08-05T00:00:01.000Z');
+  assert.equal(ledger.listEvents(action.id).length, rowCount + 1);
+  assert.equal(ledger.listEvents(action.id).at(-1).phase, 'plain.append');
 
   // MUTATION: accepting arbitrary receipt strings bypasses the JSON evidence contract.
   assert.throws(
