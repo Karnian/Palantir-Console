@@ -18,6 +18,7 @@ const ERROR_CODES = new Set([
   'http_error',
   'response_too_large',
   'network_error',
+  'refresh_ambiguous',
 ]);
 
 const COMMANDS = Object.freeze({
@@ -538,6 +539,12 @@ async function getSshClaudeCard(node, spawnInteractive, opts, readClaudeUsage) {
     }
     if (res?.code === 7) {
       throw new UsageProbeError('network_error', 'claude quota probe network request failed or timed out');
+    }
+    if (res?.code === 8 && (res?.stdout || '').trim() === '__CLAUDE_REFRESH_AMBIGUOUS__') {
+      throw new UsageProbeError(
+        'refresh_ambiguous',
+        'claude refresh outcome is unknown — automatic retry is blocked to protect the CLI login',
+      );
     }
     if (res?.code !== 0) {
       // Unknown/malformed code+sentinel combinations remain fail-closed.
