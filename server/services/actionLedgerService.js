@@ -31,6 +31,12 @@ const EXECUTION_RESULT_STATUSES = new Set([
   'failed',
   'unknown',
 ]);
+const RECONCILE_RESULT_STATUSES = new Set([
+  'succeeded',
+  'partially_applied',
+  'conflict',
+  'unknown',
+]);
 
 function isPlainObject(value) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -216,6 +222,13 @@ function translateSqliteConstraint(error) {
   return new BadRequestError(error.message);
 }
 
+function isExternalIdentityUniqueViolation(error) {
+  return error
+    && error.code === 'SQLITE_CONSTRAINT_UNIQUE'
+    && /actions\.connector,\s*actions\.external_node_id|ux_actions_external_node/i
+      .test(String(error.message || ''));
+}
+
 function publicMutation(fn) {
   try {
     return fn();
@@ -233,6 +246,15 @@ function createActionLedgerService(db, options = {}) {
     getAction: db.prepare('SELECT * FROM actions WHERE id = ?'),
     getByIntent: db.prepare('SELECT * FROM actions WHERE task_id = ? AND action_slot = ?'),
     listActions: db.prepare('SELECT * FROM actions ORDER BY created_at, rowid'),
+    listReconcilableActionIds: db.prepare(`
+      SELECT id FROM actions
+      WHERE status = 'unknown'
+        AND (
+          next_reconcile_at IS NULL
+          OR julianday(next_reconcile_at) <= julianday(@now)
+        )
+      ORDER BY created_at, rowid
+    `),
     listEvents: db.prepare('SELECT * FROM action_events WHERE action_id = ? ORDER BY id'),
     insertAction: db.prepare(`
       INSERT INTO actions (
@@ -291,6 +313,18 @@ function createActionLedgerService(db, options = {}) {
         AND approved_params_hash = params_hash
         AND julianday(approval_expires_at) > julianday(@claimed_at)
     `),
+    claimForReconcile: db.prepare(`
+      UPDATE actions
+      SET status = 'reconciling',
+          active_attempt_id = @attempt_id,
+          claimed_at = @claimed_at
+      WHERE id = @id
+        AND status = 'unknown'
+        AND (
+          next_reconcile_at IS NULL
+          OR julianday(next_reconcile_at) <= julianday(@claimed_at)
+        )
+    `),
     recordExecutionResult: db.prepare(`
       UPDATE actions
       SET status = @target_status,
@@ -311,6 +345,46 @@ function createActionLedgerService(db, options = {}) {
       WHERE id = @id
         AND status = 'executing'
         AND active_attempt_id = @attempt_id
+    `),
+    recordReconcileResult: db.prepare(`
+      UPDATE actions
+      SET status = @target_status,
+          external_id = CASE WHEN @has_external_id = 1 THEN @external_id ELSE external_id END,
+          external_node_id = CASE
+            WHEN @has_external_node_id = 1 THEN @external_node_id ELSE external_node_id
+          END,
+          receipt_json = CASE WHEN @has_receipt = 1 THEN @receipt_json ELSE receipt_json END,
+          next_reconcile_at = CASE
+            WHEN @target_status = 'unknown' THEN @next_reconcile_at ELSE NULL
+          END,
+          verdict = CASE WHEN @has_verdict = 1 THEN @verdict ELSE verdict END,
+          active_attempt_id = NULL,
+          claimed_at = NULL
+      WHERE id = @id
+        AND status = 'reconciling'
+        AND active_attempt_id = @attempt_id
+    `),
+    orphanCandidates: db.prepare(`
+      SELECT * FROM actions
+      WHERE status IN ('executing', 'reconciling', 'repairing')
+        AND ROUND(
+          (julianday(@now) - julianday(claimed_at)) * 86400000
+        ) >= @lease_ttl_ms
+      ORDER BY claimed_at, rowid
+    `),
+    recoverOrphan: db.prepare(`
+      UPDATE actions
+      SET status = 'unknown',
+          active_attempt_id = NULL,
+          claimed_at = NULL,
+          next_reconcile_at = @now
+      WHERE id = @id
+        AND status = @status
+        AND active_attempt_id = @attempt_id
+        AND claimed_at = @claimed_at
+        AND ROUND(
+          (julianday(@now) - julianday(claimed_at)) * 86400000
+        ) >= @lease_ttl_ms
     `),
   };
 
@@ -485,6 +559,30 @@ function createActionLedgerService(db, options = {}) {
     return attemptId;
   });
 
+  const claimForReconcileTx = db.transaction((id, reconcileOptions = {}) => {
+    requiredString(id, 'id');
+    const claimedAt = reconcileOptions.now === undefined
+      ? nowIso()
+      : timestamp(reconcileOptions.now, 'now');
+    const current = stmts.getAction.get(id);
+    if (!current || current.status !== 'unknown') return null;
+
+    const attemptId = String(attemptIdFactory());
+    const info = stmts.claimForReconcile.run({
+      id,
+      attempt_id: attemptId,
+      claimed_at: claimedAt,
+    });
+    if (info.changes !== 1) return null;
+    const row = stmts.getAction.get(id);
+    insertEvent(id, {
+      attemptId,
+      phase: 'reconcile.claimed',
+      requestDigest: row.params_hash,
+    }, claimedAt);
+    return attemptId;
+  });
+
   const expireTx = db.transaction(() => {
     const expiredAt = nowIso();
     const candidates = stmts.expiredQueued.all(expiredAt);
@@ -549,17 +647,137 @@ function createActionLedgerService(db, options = {}) {
     return info.changes === 1;
   });
 
+  const recordReconcileResultTx = db.transaction((input) => {
+    const id = requiredString(input.id ?? input.actionId ?? input.action_id, 'id');
+    const attemptId = requiredString(input.attemptId ?? input.attempt_id, 'attemptId');
+    const targetStatus = input.status;
+    if (!RECONCILE_RESULT_STATUSES.has(targetStatus)) {
+      throw new BadRequestError(`invalid reconcile result status: ${targetStatus}`);
+    }
+    const event = input.event || {};
+    const receiptValue = input.receipt ?? input.receipt_json;
+    const nextReconcileValue = input.nextReconcileAt ?? input.next_reconcile_at;
+    const nextReconcileAt = targetStatus === 'unknown'
+      ? timestamp(nextReconcileValue, 'nextReconcileAt')
+      : null;
+    const externalId = input.externalId ?? input.external_id;
+    const externalNodeId = input.externalNodeId ?? input.external_node_id;
+    const verdict = input.verdict;
+    const params = {
+      id,
+      attempt_id: attemptId,
+      target_status: targetStatus,
+      has_external_id: externalId !== undefined ? 1 : 0,
+      external_id: externalId ?? null,
+      has_external_node_id: externalNodeId !== undefined ? 1 : 0,
+      external_node_id: externalNodeId ?? null,
+      has_receipt: receiptValue !== undefined ? 1 : 0,
+      receipt_json: jsonOrNull(receiptValue),
+      next_reconcile_at: nextReconcileAt,
+      has_verdict: verdict !== undefined ? 1 : 0,
+      verdict: verdict ?? null,
+    };
+
+    let info;
+    let identityConflict = false;
+    try {
+      info = stmts.recordReconcileResult.run(params);
+    } catch (error) {
+      if (
+        externalNodeId === undefined
+        || !isExternalIdentityUniqueViolation(error)
+      ) {
+        throw error;
+      }
+      identityConflict = true;
+      info = stmts.recordReconcileResult.run({
+        ...params,
+        target_status: 'conflict',
+        has_external_id: 0,
+        external_id: null,
+        has_external_node_id: 0,
+        external_node_id: null,
+        next_reconcile_at: null,
+        has_verdict: 1,
+        verdict: JSON.stringify({
+          status: 'conflict',
+          reason: 'external_identity_conflict',
+        }),
+      });
+    }
+
+    const existing = stmts.getAction.get(id);
+    if (!existing) return false;
+    insertEvent(id, {
+      attemptId,
+      phase: info.changes !== 1
+        ? 'reconcile.result.stale'
+        : (identityConflict ? 'reconcile.conflict' : (event.phase || 'reconcile.result')),
+      requestDigest: event.requestDigest ?? event.request_digest ?? null,
+      transportClass: event.transportClass ?? event.transport_class ?? null,
+      externalRequestId: event.externalRequestId ?? event.external_request_id ?? null,
+      candidateExternalId: event.candidateExternalId
+        ?? event.candidate_external_id
+        ?? externalNodeId
+        ?? null,
+      receipt: event.receipt ?? event.receipt_json ?? receiptValue ?? null,
+      error: event.error ?? null,
+    });
+    return info.changes === 1;
+  });
+
+  const recoverOrphansTx = db.transaction((input = {}) => {
+    const leaseTtlMs = Number(input.leaseTtlMs ?? input.lease_ttl_ms);
+    if (!Number.isFinite(leaseTtlMs) || leaseTtlMs < 0) {
+      throw new BadRequestError('leaseTtlMs must be a non-negative number');
+    }
+    const recoveredAt = input.now === undefined ? nowIso() : timestamp(input.now, 'now');
+    const candidates = stmts.orphanCandidates.all({
+      now: recoveredAt,
+      lease_ttl_ms: leaseTtlMs,
+    });
+    let count = 0;
+    for (const row of candidates) {
+      const info = stmts.recoverOrphan.run({
+        id: row.id,
+        status: row.status,
+        attempt_id: row.active_attempt_id,
+        claimed_at: row.claimed_at,
+        now: recoveredAt,
+        lease_ttl_ms: leaseTtlMs,
+      });
+      if (info.changes !== 1) continue;
+      insertEvent(row.id, {
+        attemptId: row.active_attempt_id,
+        phase: 'orphan.recovered',
+        requestDigest: row.params_hash,
+        receipt: { orphaned_status: row.status },
+      }, recoveredAt);
+      count += 1;
+    }
+    return count;
+  });
+
   return {
     clock,
     declareAction: (input) => publicMutation(() => declareTx(input)),
     approveAction: (id, approval) => publicMutation(() => approveTx(id, approval || {})),
     claimForExecution: (id) => publicMutation(() => claimTx(id)),
     recordExecutionResult: (input) => publicMutation(() => recordExecutionResultTx(input)),
+    claimForReconcile: (id, reconcileOptions) => publicMutation(
+      () => claimForReconcileTx(id, reconcileOptions || {}),
+    ),
+    recordReconcileResult: (input) => publicMutation(() => recordReconcileResultTx(input)),
+    recoverOrphans: (input) => publicMutation(() => recoverOrphansTx(input || {})),
     expireStaleApprovals: () => publicMutation(() => expireTx()),
     appendEvent: (actionId, event) => publicMutation(() => insertEvent(actionId, event)),
     getAction: (id) => stmts.getAction.get(id) || null,
     getActionByIntent: (taskId, actionSlot) => stmts.getByIntent.get(taskId, actionSlot) || null,
     listActions: () => stmts.listActions.all(),
+    listReconcilableActionIds: (input = {}) => {
+      const asOf = input.now === undefined ? nowIso() : timestamp(input.now, 'now');
+      return stmts.listReconcilableActionIds.all({ now: asOf }).map((row) => row.id);
+    },
     listEvents: (actionId) => stmts.listEvents.all(actionId),
   };
 }

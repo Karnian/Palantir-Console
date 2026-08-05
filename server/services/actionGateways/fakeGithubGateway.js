@@ -37,10 +37,14 @@ function createFakeGithubGateway(script = {}) {
   const queues = {
     createIssue: Array.isArray(script.createIssue) ? [...script.createIssue] : [],
     getIssue: Array.isArray(script.getIssue) ? [...script.getIssue] : [],
+    searchIssuesByMarker: Array.isArray(script.searchIssuesByMarker)
+      ? [...script.searchIssuesByMarker]
+      : [],
   };
   let nextNumber = Number.isSafeInteger(script.seed) ? script.seed : 1;
   let postCount = 0;
   let getCount = 0;
+  let searchCount = 0;
   const byRepoAndNumber = new Map();
   const byNodeId = new Map();
 
@@ -104,11 +108,36 @@ function createFakeGithubGateway(script = {}) {
     return cloneIssue(stored);
   }
 
+  for (const issue of Array.isArray(script.issues) ? script.issues : []) {
+    storeIssue(issue);
+  }
+
+  async function searchIssuesByMarker(input) {
+    searchCount += 1;
+    const behavior = nextBehavior('searchIssuesByMarker');
+    if (Array.isArray(behavior)) return behavior.map(cloneIssue);
+    const kind = behavior.kind || 'ok';
+    if (kind !== 'ok') {
+      throw new FakeGithubGatewayError(kind, 'searchIssuesByMarker', behavior);
+    }
+    const scriptedIssues = behavior.issues ?? behavior.candidates ?? behavior.result;
+    if (Array.isArray(scriptedIssues)) return scriptedIssues.map(cloneIssue);
+    return [...byRepoAndNumber.values()]
+      .filter((issue) => (
+        issue.repo === input.repo
+        && typeof issue.body === 'string'
+        && issue.body.includes(input.marker)
+      ))
+      .map(cloneIssue);
+  }
+
   return {
     createIssue,
     getIssue,
+    searchIssuesByMarker,
     getPostCount: () => postCount,
     getGetCount: () => getCount,
+    getSearchCount: () => searchCount,
   };
 }
 

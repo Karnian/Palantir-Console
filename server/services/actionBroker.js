@@ -4,6 +4,7 @@ const { sanitizeMessage } = require('../utils/errors');
 const {
   buildOutgoingBody,
   classifyCreateOutcome,
+  markerFor,
   validateReadback,
 } = require('./actionReadback');
 
@@ -103,7 +104,24 @@ function serializeVerdict(verdict) {
   return JSON.stringify(sanitizeValue(verdict));
 }
 
-function createActionBroker({ ledger, gateway, clock, reconcileDelayMs = DEFAULT_RECONCILE_DELAY_MS }) {
+function hasValidExternalIdentity(issue) {
+  return Boolean(
+    issue
+    && Number.isSafeInteger(issue.number)
+    && issue.number > 0
+    && typeof issue.node_id === 'string'
+    && issue.node_id.length > 0
+    && typeof issue.html_url === 'string'
+    && issue.html_url.length > 0
+  );
+}
+
+function createActionBroker({
+  ledger,
+  gateway,
+  clock,
+  reconcileDelayMs = DEFAULT_RECONCILE_DELAY_MS,
+}) {
   const effectiveClock = clock || ledger.clock;
   if (typeof effectiveClock !== 'function') {
     throw new TypeError('action broker requires a clock or a ledger with an exposed clock');
@@ -122,18 +140,6 @@ function createActionBroker({ ledger, gateway, clock, reconcileDelayMs = DEFAULT
 
   function nextReconcileAt() {
     return new Date(nowMilliseconds() + reconcileDelayMs).toISOString();
-  }
-
-  function hasValidExternalIdentity(issue) {
-    return Boolean(
-      issue
-      && Number.isSafeInteger(issue.number)
-      && issue.number > 0
-      && typeof issue.node_id === 'string'
-      && issue.node_id.length > 0
-      && typeof issue.html_url === 'string'
-      && issue.html_url.length > 0
-    );
   }
 
   async function executeClaimedAction({ action, attemptId }) {
@@ -287,10 +293,186 @@ function createActionBroker({ ledger, gateway, clock, reconcileDelayMs = DEFAULT
     return verdict;
   }
 
-  return { executeClaimedAction };
+  async function reconcileClaimedAction({ action, attemptId }) {
+    const current = typeof ledger.getAction === 'function' ? ledger.getAction(action.id) : action;
+    if (
+      current
+      && (current.status !== 'reconciling' || current.active_attempt_id !== attemptId)
+    ) {
+      return { status: 'stale' };
+    }
+
+    const params = JSON.parse(action.params_json);
+    const expected = {
+      repo: params.repo,
+      title: params.title,
+      userBody: params.body,
+      actionId: action.id,
+      labels: params.labels,
+    };
+
+    function persistResult({ status, verdict, issue, error, event = {} }) {
+      const won = ledger.recordReconcileResult({
+        id: action.id,
+        attemptId,
+        status,
+        externalId: issue === undefined
+          ? undefined
+          : JSON.stringify(sanitizeValue({
+            repo: issue.repo,
+            number: issue.number,
+            html_url: issue.html_url,
+          })),
+        externalNodeId: issue === undefined ? undefined : issue.node_id,
+        receipt: issue === undefined ? undefined : sanitizeIssueReceipt(issue, nowIso()),
+        verdict: serializeVerdict(verdict),
+        nextReconcileAt: status === 'unknown' ? nextReconcileAt() : undefined,
+        event: {
+          ...event,
+          phase: event.phase || `reconcile.${status}`,
+          error: error === undefined ? event.error : sanitizeError(error),
+        },
+      });
+      if (!won) return { status: 'stale' };
+      const persisted = typeof ledger.getAction === 'function'
+        ? ledger.getAction(action.id)
+        : null;
+      if (persisted && persisted.status !== status) {
+        return {
+          status: persisted.status,
+          reason: persisted.status === 'conflict'
+            ? 'external_identity_conflict'
+            : 'persisted_status_changed',
+        };
+      }
+      return verdict;
+    }
+
+    let candidates;
+    try {
+      candidates = await gateway.searchIssuesByMarker({
+        repo: params.repo,
+        marker: markerFor(action.id),
+      });
+      if (!Array.isArray(candidates)) {
+        throw new TypeError('searchIssuesByMarker must return an array');
+      }
+    } catch (error) {
+      return persistResult({
+        status: 'unknown',
+        verdict: { status: 'unknown', reason: 'search_fault' },
+        error,
+        event: { phase: 'reconcile.unknown', transportClass: 'ambiguous' },
+      });
+    }
+
+    const validMatches = [];
+    let sawAmbiguousCandidate = false;
+    for (const candidate of candidates) {
+      let issue;
+      try {
+        issue = await gateway.getIssue({
+          repo: params.repo,
+          number: candidate && candidate.number,
+          node_id: candidate && candidate.node_id,
+        });
+      } catch (error) {
+        return persistResult({
+          status: 'unknown',
+          verdict: { status: 'unknown', reason: 'candidate_get_fault' },
+          error,
+          event: { phase: 'reconcile.unknown', transportClass: 'ambiguous' },
+        });
+      }
+      if (!hasValidExternalIdentity(issue)) {
+        sawAmbiguousCandidate = true;
+        continue;
+      }
+      const verdict = validateReadback({ issue, expected });
+      if (verdict.status === 'succeeded' || verdict.status === 'partially_applied') {
+        validMatches.push({ issue, verdict });
+      } else {
+        sawAmbiguousCandidate = true;
+      }
+    }
+
+    if (validMatches.length > 1) {
+      return persistResult({
+        status: 'conflict',
+        verdict: {
+          status: 'conflict',
+          reason: 'ambiguous_candidates',
+          candidateCount: validMatches.length,
+        },
+      });
+    }
+    if (sawAmbiguousCandidate) {
+      return persistResult({
+        status: 'unknown',
+        verdict: { status: 'unknown', reason: 'ambiguous_candidate' },
+      });
+    }
+    if (validMatches.length === 1) {
+      const match = validMatches[0];
+      return persistResult({
+        status: match.verdict.status,
+        verdict: match.verdict,
+        issue: match.issue,
+      });
+    }
+    return persistResult({
+      status: 'unknown',
+      verdict: {
+        status: 'unknown',
+        reason: candidates.length === 0 ? 'search_empty' : 'no_valid_candidate',
+      },
+    });
+  }
+
+  async function driveReconciliation({ leaseTtlMs, now } = {}) {
+    const driveDate = now === undefined ? new Date(nowMilliseconds()) : new Date(now);
+    if (!Number.isFinite(driveDate.getTime())) {
+      throw new TypeError('driveReconciliation now is invalid');
+    }
+    const driveNow = driveDate.toISOString();
+    const summary = {
+      recovered: ledger.recoverOrphans({ leaseTtlMs, now: driveNow }),
+      claimed: 0,
+      outcomes: {
+        succeeded: 0,
+        partially_applied: 0,
+        conflict: 0,
+        unknown: 0,
+        stale: 0,
+      },
+    };
+
+    const eligibleIds = ledger.listReconcilableActionIds({ now: driveNow });
+    for (const id of eligibleIds) {
+      const attemptId = ledger.claimForReconcile(id, { now: driveNow });
+      if (attemptId === null) continue;
+      summary.claimed += 1;
+      const outcome = await reconcileClaimedAction({
+        action: ledger.getAction(id),
+        attemptId,
+      });
+      if (Object.hasOwn(summary.outcomes, outcome.status)) {
+        summary.outcomes[outcome.status] += 1;
+      }
+    }
+    return summary;
+  }
+
+  return {
+    driveReconciliation,
+    executeClaimedAction,
+    reconcileClaimedAction,
+  };
 }
 
 module.exports = {
   DEFAULT_RECONCILE_DELAY_MS,
   createActionBroker,
+  hasValidExternalIdentity,
+  sanitizeIssueReceipt,
 };
