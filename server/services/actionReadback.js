@@ -37,37 +37,35 @@ function classifyCreateOutcome(behaviorOrError) {
     return { transportClass: 'ok', issue: value.issue };
   }
   if (
-    kind === 'not_found_repo'
-    || kind === 'validation_error'
-    || statusCode === 404
-    || statusCode === 422
-  ) {
-    return { transportClass: 'permanent_no_effect' };
-  }
-  if (
-    kind === 'rate_limited'
-    || kind === 'abuse_denied'
-    || statusCode === 429
-    || statusCode === 403
-  ) {
-    return { transportClass: 'rate_limited' };
-  }
-  if (
     kind === 'server_error'
     || kind === 'timeout'
     || kind === 'response_lost'
     || kind === 'malformed'
-    || (statusCode !== null && statusCode >= 500)
   ) {
     return { transportClass: 'ambiguous' };
+  }
+  if (kind === 'not_found_repo' || kind === 'validation_error') {
+    return { transportClass: 'permanent_no_effect' };
+  }
+  if (kind === 'rate_limited' || kind === 'abuse_denied') {
+    return { transportClass: 'rate_limited' };
+  }
+  if (kind === 'permission_denied') {
+    return { transportClass: 'permanent_no_effect' };
   }
 
   // A successful fake response is the created issue itself. Unknown failures
   // are classified conservatively because liveness is safer to sacrifice than
   // issuing a duplicate POST.
-  if (value && typeof value === 'object' && value.number !== undefined) {
+  if (kind === null && statusCode === null && value.number !== undefined) {
     return { transportClass: 'ok', issue: value };
   }
+  if (statusCode !== null && statusCode >= 500) return { transportClass: 'ambiguous' };
+  if (statusCode === 404 || statusCode === 422) {
+    return { transportClass: 'permanent_no_effect' };
+  }
+  if (statusCode === 429) return { transportClass: 'rate_limited' };
+  if (statusCode === 403) return { transportClass: 'permanent_no_effect' };
   return { transportClass: 'ambiguous' };
 }
 
@@ -97,9 +95,12 @@ function validateReadback({ issue, expected }) {
   const actualLabels = new Set(
     (Array.isArray(issue.labels) ? issue.labels : [])
       .map(labelName)
-      .filter((label) => label !== null),
+      .filter((label) => label !== null)
+      .map((label) => label.toLowerCase()),
   );
-  const missingLabels = requestedLabels.filter((label) => !actualLabels.has(label));
+  const missingLabels = requestedLabels.filter(
+    (label) => !actualLabels.has(label.toLowerCase()),
+  );
   if (missingLabels.length > 0) {
     return {
       status: 'partially_applied',

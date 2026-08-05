@@ -9,6 +9,9 @@ const {
 
 const DEFAULT_RECONCILE_DELAY_MS = 60_000;
 const SENSITIVE_KEY = /^(?:authorization|token|access[_-]?token|credential|credentials|password|secret|api[_-]?key)$/i;
+const MAX_RECEIPT_LABELS = 100;
+const MAX_RECEIPT_LABEL_LENGTH = 256;
+const MAX_RECEIPT_ID_LENGTH = 2_048;
 
 function redactString(value) {
   return String(value)
@@ -45,17 +48,33 @@ function sanitizeError(error) {
   return JSON.stringify(sanitizeValue(clean));
 }
 
-function sanitizeIssueReceipt(issue) {
-  return sanitizeValue({
-    repo: issue && issue.repo,
-    number: issue && issue.number,
-    node_id: issue && issue.node_id,
-    html_url: issue && issue.html_url,
-    state: issue && issue.state,
-    title: issue && issue.title,
-    body: issue && issue.body,
-    labels: issue && issue.labels,
-  });
+function boundedString(value, maxLength) {
+  if (typeof value !== 'string') return null;
+  return redactString(value).slice(0, maxLength);
+}
+
+function receiptLabelName(label) {
+  if (typeof label === 'string') return label;
+  if (label && typeof label.name === 'string') return label.name;
+  return null;
+}
+
+function sanitizeIssueReceipt(issue, validatedAt) {
+  const labels = (Array.isArray(issue && issue.labels) ? issue.labels : [])
+    .map(receiptLabelName)
+    .filter((label) => label !== null)
+    .slice(0, MAX_RECEIPT_LABELS)
+    .map((label) => boundedString(label, MAX_RECEIPT_LABEL_LENGTH));
+  return {
+    number: Number.isSafeInteger(issue && issue.number) && issue.number > 0
+      ? issue.number
+      : null,
+    node_id: boundedString(issue.node_id, MAX_RECEIPT_ID_LENGTH),
+    html_url: boundedString(issue.html_url, MAX_RECEIPT_ID_LENGTH),
+    state: boundedString(issue.state, 64),
+    labels,
+    validated_at: validatedAt,
+  };
 }
 
 function serializeVerdict(verdict) {
@@ -68,11 +87,31 @@ function createActionBroker({ ledger, gateway, clock, reconcileDelayMs = DEFAULT
     throw new TypeError('action broker requires a clock or a ledger with an exposed clock');
   }
 
-  function nextReconcileAt() {
+  function nowMilliseconds() {
     const current = effectiveClock();
     const milliseconds = current instanceof Date ? current.getTime() : new Date(current).getTime();
     if (!Number.isFinite(milliseconds)) throw new TypeError('action broker clock is invalid');
-    return new Date(milliseconds + reconcileDelayMs).toISOString();
+    return milliseconds;
+  }
+
+  function nowIso() {
+    return new Date(nowMilliseconds()).toISOString();
+  }
+
+  function nextReconcileAt() {
+    return new Date(nowMilliseconds() + reconcileDelayMs).toISOString();
+  }
+
+  function hasValidExternalIdentity(issue) {
+    return Boolean(
+      issue
+      && Number.isSafeInteger(issue.number)
+      && issue.number > 0
+      && typeof issue.node_id === 'string'
+      && issue.node_id.length > 0
+      && typeof issue.html_url === 'string'
+      && issue.html_url.length > 0
+    );
   }
 
   async function executeClaimedAction({ action, attemptId }) {
@@ -135,6 +174,22 @@ function createActionBroker({ ledger, gateway, clock, reconcileDelayMs = DEFAULT
     }
 
     createdIssue = outcome.issue;
+    if (!hasValidExternalIdentity(createdIssue)) {
+      const identityError = {
+        name: 'GatewayProtocolError',
+        kind: 'malformed',
+        message: 'createIssue returned a malformed external identity',
+      };
+      ledger.recordExecutionResult({
+        id: action.id,
+        attemptId,
+        status: 'unknown',
+        error: sanitizeError(identityError),
+        nextReconcileAt: nextReconcileAt(),
+        event: { phase: 'execution.unknown', transportClass: 'ambiguous' },
+      });
+      return { status: 'unknown' };
+    }
     const externalId = JSON.stringify(sanitizeValue({
       repo: createdIssue.repo,
       number: createdIssue.number,
@@ -186,7 +241,7 @@ function createActionBroker({ ledger, gateway, clock, reconcileDelayMs = DEFAULT
       id: action.id,
       attemptId,
       status: verdict.status,
-      receipt: sanitizeIssueReceipt(issue),
+      receipt: sanitizeIssueReceipt(issue, nowIso()),
       verdict: serializeVerdict(verdict),
       event: { phase: `execution.${verdict.status}` },
     });

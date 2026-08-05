@@ -78,9 +78,22 @@ test('happy path declares, approves, claims, creates once, and validates the mar
   assert.equal(gateway.getPostCount(), 1);
   assert.equal(gateway.getGetCount(), 1);
   const receipt = JSON.parse(row.receipt_json);
+  const externalId = JSON.parse(row.external_id);
+  const storedIssue = await gateway.getIssue({
+    repo: externalId.repo,
+    number: externalId.number,
+  });
   // MUTATION: removing the server marker from buildOutgoingBody makes full GET validation unsafe.
-  assert.ok(receipt.body.includes(markerFor(claimed.action.id)));
-  assert.equal(receipt.body, `${BASE_PARAMS.body}\n\n${markerFor(claimed.action.id)}`);
+  assert.ok(storedIssue.body.includes(markerFor(claimed.action.id)));
+  assert.equal(storedIssue.body, `${BASE_PARAMS.body}\n\n${markerFor(claimed.action.id)}`);
+  assert.deepEqual(receipt, {
+    number: 41,
+    node_id: 'FAKE_NODE_41',
+    html_url: 'https://github.test/acme/widgets/issues/41',
+    state: 'open',
+    labels: ['P1', 'security'],
+    validated_at: START,
+  });
   assert.deepEqual(JSON.parse(row.verdict), {
     reason: 'full_readback_valid',
     status: 'succeeded',
@@ -151,6 +164,73 @@ test('429 and abuse 403 are terminal rate-limited failures with no automatic ret
   }
 });
 
+test('explicit create fault kinds dominate conflicting HTTP statuses', async (t) => {
+  const { ledger, clock } = setup(t);
+  const scenarios = [
+    {
+      script: { createIssue: [{ kind: 'response_lost', statusCode: 422 }] },
+      expectedStatus: 'unknown',
+    },
+    {
+      script: { createIssue: [{ kind: 'timeout', statusCode: 404 }] },
+      expectedStatus: 'unknown',
+    },
+    {
+      script: { createIssue: [{ kind: 'validation_error' }] },
+      expectedStatus: 'failed',
+    },
+  ];
+
+  for (const [index, scenario] of scenarios.entries()) {
+    const claimed = claim(ledger, `precedence-${index}`);
+    const { gateway, row } = await execute(ledger, clock, claimed, scenario.script);
+    // MUTATION: checking 404/422 before an explicit ambiguous kind misclassifies possible effects.
+    assert.equal(row.status, scenario.expectedStatus);
+    assert.equal(gateway.getPostCount(), 1);
+  }
+
+  const plain5xxClaim = claim(ledger, 'precedence-plain-5xx');
+  let postCount = 0;
+  const plain5xxGateway = {
+    async createIssue() {
+      postCount += 1;
+      throw { statusCode: 503, message: 'server unavailable' };
+    },
+    async getIssue() {
+      throw new Error('must not read back after an ambiguous create');
+    },
+  };
+  const broker = createActionBroker({ ledger, gateway: plain5xxGateway, clock });
+  await broker.executeClaimedAction(plain5xxClaim);
+  // MUTATION: omitting the status-only 5xx fallback can treat an untyped transport fault as success.
+  assert.equal(ledger.getAction(plain5xxClaim.action.id).status, 'unknown');
+  assert.equal(postCount, 1);
+});
+
+test('permission-denied 403 is terminal no-effect, not rate-limited', async (t) => {
+  const { ledger, clock } = setup(t);
+  const claimed = claim(ledger, 'permission-denied');
+  let postCount = 0;
+  const gateway = {
+    async createIssue() {
+      postCount += 1;
+      throw { kind: 'permission_denied', statusCode: 403, message: 'forbidden' };
+    },
+    async getIssue() {
+      throw new Error('must not read back after permission denial');
+    },
+  };
+  const broker = createActionBroker({ ledger, gateway, clock });
+  await broker.executeClaimedAction(claimed);
+  const row = ledger.getAction(claimed.action.id);
+
+  // MUTATION: grouping every 403 with abuse incorrectly records rate_limited:true.
+  assert.equal(row.status, 'failed');
+  assert.deepEqual(JSON.parse(row.verdict), { reason: 'no_effect' });
+  assert.equal(row.next_reconcile_at, null);
+  assert.equal(postCount, 1);
+});
+
 test('ambiguous create faults become unknown with a reconcile time and are never recreated', async (t) => {
   const { ledger, clock } = setup(t);
   const kinds = ['timeout', 'server_error', 'response_lost', 'malformed'];
@@ -203,6 +283,67 @@ test('a read-back transport fault becomes unknown without a second create', asyn
   assert.equal(row.next_reconcile_at, '2026-08-05T00:01:00.000Z');
   assert.equal(gateway.getPostCount(), 1);
   assert.equal(gateway.getGetCount(), 1);
+});
+
+test('a valid maximum-size body succeeds with a bounded receipt', async (t) => {
+  const { ledger, clock } = setup(t);
+  const params = { ...BASE_PARAMS, body: 'a'.repeat(48 * 1024) };
+  const claimed = claim(ledger, 'max-body', params);
+  const { gateway, row } = await execute(ledger, clock, claimed, {});
+
+  // MUTATION: storing the raw issue body in the receipt strands a valid max-body action in executing.
+  assert.equal(row.status, 'succeeded');
+  assert.equal(row.active_attempt_id, null);
+  const receipt = JSON.parse(row.receipt_json);
+  assert.equal(Object.hasOwn(receipt, 'body'), false);
+  assert.equal(Object.hasOwn(receipt, 'title'), false);
+  assert.equal(receipt.validated_at, START);
+  assert.ok(Buffer.byteLength(row.receipt_json, 'utf8') < 64 * 1024);
+  assert.equal(gateway.getPostCount(), 1);
+});
+
+test('a malformed create identity becomes unknown before external-id persistence', async (t) => {
+  const { ledger, clock } = setup(t);
+  const claimed = claim(ledger, 'malformed-identity');
+  const { gateway, row } = await execute(ledger, clock, claimed, {
+    createIssue: [{
+      kind: 'ok',
+      issue: { number: null, node_id: null, html_url: null },
+    }],
+  });
+
+  // MUTATION: skipping the identity check records bogus null external ids as succeeded.
+  assert.equal(row.status, 'unknown');
+  assert.equal(row.external_id, null);
+  assert.equal(row.external_node_id, null);
+  assert.equal(row.next_reconcile_at, '2026-08-05T00:01:00.000Z');
+  assert.equal(gateway.getPostCount(), 1);
+  assert.equal(gateway.getGetCount(), 0);
+});
+
+test('label subset matching is case-insensitive and preserves missing-label spelling', async (t) => {
+  const { ledger, clock } = setup(t);
+  const appliedClaim = claim(ledger, 'label-case-applied', {
+    ...BASE_PARAMS,
+    labels: ['security'],
+  });
+  const applied = await execute(ledger, clock, appliedClaim, {
+    createIssue: [{ kind: 'ok', issue: { labels: ['Security', 'Extra'] } }],
+  });
+  // MUTATION: case-sensitive label matching routes an already-applied label to repair.
+  assert.equal(applied.row.status, 'succeeded');
+  assert.equal(applied.gateway.getPostCount(), 1);
+
+  const missingClaim = claim(ledger, 'label-case-missing', {
+    ...BASE_PARAMS,
+    labels: ['security', 'triage'],
+  });
+  const missing = await execute(ledger, clock, missingClaim, {
+    createIssue: [{ kind: 'ok', issue: { labels: ['Security'] } }],
+  });
+  assert.equal(missing.row.status, 'partially_applied');
+  assert.deepEqual(JSON.parse(missing.row.verdict).missingLabels, ['triage']);
+  assert.equal(missing.gateway.getPostCount(), 1);
 });
 
 test('stale fenced writes are evidence-only and the active broker attempt wins', async (t) => {
