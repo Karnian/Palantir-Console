@@ -116,37 +116,49 @@ function canonicalizeParams(params) {
     snapshot[key] = Object.hasOwn(params, key) ? params[key] : undefined;
   }
   const ownKeys = Object.keys(params);
-  const paramsForValidation = Object.create(null);
-  for (const key of ALLOWED_PARAM_KEYS) {
-    if (key === 'labels' && snapshot[key] === undefined) continue;
-    paramsForValidation[key] = snapshot[key];
-  }
-  validateBoundedJson(paramsForValidation);
   for (const key of ownKeys) {
     if (!ALLOWED_PARAM_KEYS.has(key)) {
       throw new BadRequestError(`unknown create_issue param field: ${key}`);
     }
+  }
+  if (snapshot.labels !== undefined && !Array.isArray(snapshot.labels)) {
+    throw new BadRequestError('params.labels must be an array when present');
+  }
+  const labelValues = [];
+  if (snapshot.labels !== undefined) {
+    if (snapshot.labels.length > MAX_LABELS) {
+      throw new BadRequestError('params.labels has too many items');
+    }
+    for (let index = 0; index < snapshot.labels.length; index += 1) {
+      if (!Object.hasOwn(snapshot.labels, index)) {
+        throw new BadRequestError('params.labels must not be sparse');
+      }
+      labelValues.push(snapshot.labels[index]);
+    }
+  }
+  const paramsForValidation = Object.create(null);
+  for (const key of ALLOWED_PARAM_KEYS) {
+    if (key === 'labels') {
+      paramsForValidation.labels = labelValues;
+    } else {
+      paramsForValidation[key] = snapshot[key];
+    }
+  }
+  validateBoundedJson(paramsForValidation);
+  if (!labelValues.every((label) => typeof label === 'string')) {
+    throw new BadRequestError('params.labels must contain only strings');
   }
   for (const field of ['repo', 'title', 'body']) {
     if (typeof snapshot[field] !== 'string') {
       throw new BadRequestError(`params.${field} must be a string`);
     }
   }
-  if (snapshot.labels !== undefined && !Array.isArray(snapshot.labels)) {
-    throw new BadRequestError('params.labels must be an array when present');
-  }
-  const labels = snapshot.labels === undefined ? [] : snapshot.labels;
-  if (labels.length > MAX_LABELS) throw new BadRequestError('params.labels has too many items');
-  if (!labels.every((label) => typeof label === 'string')) {
-    throw new BadRequestError('params.labels must contain only strings');
-  }
-
   const withCanonicalFields = Object.create(null);
   withCanonicalFields.repo = snapshot.repo.normalize('NFC').toLowerCase();
   withCanonicalFields.title = snapshot.title.normalize('NFC');
   withCanonicalFields.body = snapshot.body.normalize('NFC');
   withCanonicalFields.labels = [
-    ...new Set(labels.map((label) => label.normalize('NFC'))),
+    ...new Set(labelValues.map((label) => label.normalize('NFC'))),
   ].sort();
   return normalizeJsonValue(withCanonicalFields);
 }
@@ -331,7 +343,14 @@ function createActionLedgerService(db, options = {}) {
 
     const paramsJson = canonicalParamsJson(input.params);
     const hash = paramsHash(paramsJson);
-    const reissuesActionId = input.reissuesActionId ?? input.reissues_action_id ?? null;
+    const rawReissuesActionId = input.reissuesActionId ?? input.reissues_action_id ?? null;
+    if (
+      rawReissuesActionId !== null
+      && (typeof rawReissuesActionId !== 'string' || rawReissuesActionId.length === 0)
+    ) {
+      throw new BadRequestError('reissuesActionId must be a string');
+    }
+    const reissuesActionId = rawReissuesActionId;
     const existing = stmts.getByIntent.get(taskId, actionSlot);
     if (existing) {
       if (

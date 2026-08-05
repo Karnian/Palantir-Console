@@ -166,6 +166,32 @@ test('canonical params use one validated snapshot of own properties', () => {
   const canonical = JSON.parse(canonicalParamsJson(changing));
   assert.equal(titleReads, 1);
   assert.equal(canonical.title, 'validated title');
+
+  let labelReads = 0;
+  const changingLabels = [];
+  Object.defineProperty(changingLabels, 0, {
+    enumerable: true,
+    configurable: true,
+    get() {
+      labelReads += 1;
+      return labelReads === 1 ? 'validated-label' : 'x'.repeat(49 * 1024);
+    },
+  });
+  changingLabels.length = 1;
+  // MUTATION: re-reading a label index can validate one value and persist another.
+  const labelsCanonical = JSON.parse(canonicalParamsJson({
+    ...BASE_PARAMS,
+    labels: changingLabels,
+  }));
+  assert.equal(labelReads, 1);
+  assert.deepEqual(labelsCanonical.labels, ['validated-label']);
+
+  const deceptiveLabel = 7;
+  // MUTATION: calling normalize before checking the snapshotted value's type stores non-strings.
+  assert.throws(
+    () => canonicalParamsJson({ ...BASE_PARAMS, labels: [deceptiveLabel] }),
+    (error) => error.status === 400 && /only strings/.test(error.message),
+  );
 });
 
 test('approval requires the exact hash reviewed by the human', (t) => {
@@ -374,6 +400,28 @@ test('logical idempotency includes immutable reissue lineage', (t) => {
     (error) => error.status === 409 && error.constructor.name === 'ConflictError',
   );
   assert.equal(ledger.getAction(child.id).reissues_action_id, parentA.id);
+});
+
+test('reissue lineage rejects non-string ids before TEXT-affinity comparison', (t) => {
+  const { db } = setup(t);
+  const ids = ['1', 'child-with-numeric-check'];
+  const ledger = createActionLedgerService(db, {
+    clock: () => new Date('2026-08-05T00:00:00.000Z'),
+    actionIdFactory: () => ids.shift(),
+  });
+  const parent = declare(ledger, { actionSlot: 'numeric-parent' });
+  assert.equal(parent.id, '1');
+  const child = declare(ledger, {
+    actionSlot: 'numeric-child',
+    reissuesActionId: parent.id,
+  });
+
+  // MUTATION: passing numeric lineage through SQLite TEXT affinity causes false re-declare conflicts.
+  assert.throws(
+    () => declare(ledger, { actionSlot: 'numeric-child', reissuesActionId: 1 }),
+    (error) => error.status === 400 && /reissuesActionId must be a string/.test(error.message),
+  );
+  assert.equal(ledger.getAction(child.id).reissues_action_id, '1');
 });
 
 test('expiry CAS requeues for approval, audits once, and claim atomically rejects expiry', (t) => {
