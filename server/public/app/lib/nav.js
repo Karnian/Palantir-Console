@@ -44,6 +44,7 @@ export const NAV_SUB_ITEMS = [
   // DEFAULT_ROUTE and one click away via the sidebar brand logo, but this
   // keeps it Cmd+K-searchable too, same as manager was before it moved up.
   { hash: 'dashboard',             icon: '◉', label: NAV_LABELS.dashboard },
+  { hash: 'actions',               icon: '⎇', label: NAV_LABELS.actions },
   { hash: 'resources/nodes',       icon: '⬢', label: NAV_LABELS.nodes },
   { hash: 'resources/skills',      icon: '♢', label: NAV_LABELS.skills },
   { hash: 'resources/presets',     icon: '❖', label: NAV_LABELS.presets },

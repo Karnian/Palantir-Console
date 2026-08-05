@@ -39,6 +39,7 @@ import { McpTemplatesView } from './app/components/McpTemplatesView.js';
 import { ModelPoliciesView } from './app/components/ModelPoliciesView.js';
 import { NodesView } from './app/components/NodesView.js';
 import { MemoryView } from './app/components/MemoryView.js';
+import { ActionsView } from './app/components/ActionsView.js';
 import { SpecialistView } from './app/components/SpecialistView.js';
 import { OperatorProfilesView } from './app/components/OperatorProfilesView.js';
 import { OperatorsView } from './app/components/OperatorsView.js';
@@ -471,6 +472,9 @@ function App() {
     }
     if (routeBase === 'memory') {
       return html`<${MemoryView} projects=${projects} />`;
+    }
+    if (routeBase === 'actions') {
+      return html`<${ActionsView} />`;
     }
     if (routeBase === 'operator') {
       const routeParts = route.split('/');

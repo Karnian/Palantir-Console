@@ -35,6 +35,7 @@ const ROUTES = [
   // U-2: node detail not-found state — deterministic (no probe, no data)
   'resources/nodes/ghost-e2e',
   'memory',
+  'actions',
   'operator/roster',
   'operator/specialist',
   'operator/profiles',
