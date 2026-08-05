@@ -1,10 +1,28 @@
 'use strict';
 
+/**
+ * Approval provenance passed here is derived by the route. Cookie authentication
+ * itself belongs to PR2 (`req.auth.method === 'cookie'`); this service trusts its
+ * caller for that authentication fact and durably records the supplied provenance.
+ */
+
 const { createHash, randomUUID } = require('node:crypto');
-const { BadRequestError, ConflictError, ForbiddenError } = require('../utils/errors');
+const {
+  AppError,
+  BadRequestError,
+  ConflictError,
+  ForbiddenError,
+} = require('../utils/errors');
 
 const CONNECTOR = 'github';
 const OPERATION = 'github.create_issue';
+const ALLOWED_PARAM_KEYS = new Set(['repo', 'title', 'body', 'labels']);
+const MAX_PARAMS_BYTES = 64 * 1024;
+const MAX_NESTING_DEPTH = 8;
+const MAX_JSON_KEYS = 64;
+const MAX_ARRAY_ITEMS = 256;
+const MAX_LABELS = 100;
+const MAX_STRING_LENGTH = 48 * 1024;
 const EXECUTION_RESULT_STATUSES = new Set([
   'executing',
   'succeeded',
@@ -19,6 +37,57 @@ function isPlainObject(value) {
   return prototype === Object.prototype || prototype === null;
 }
 
+function validateBoundedJson(value, rootPath = 'params') {
+  const ancestors = new Set();
+  const state = { keyCount: 0 };
+
+  function visit(current, path, depth) {
+    if (depth > MAX_NESTING_DEPTH) {
+      throw new BadRequestError(`${rootPath} nesting exceeds ${MAX_NESTING_DEPTH}`);
+    }
+    if (typeof current === 'string') {
+      if (current.length > MAX_STRING_LENGTH) {
+        throw new BadRequestError(`${path} exceeds the string length limit`);
+      }
+      return;
+    }
+    if (current === null || typeof current === 'boolean') return;
+    if (typeof current === 'number' && Number.isFinite(current)) return;
+    if (typeof current !== 'object') {
+      throw new BadRequestError(`${path} must contain only JSON values`);
+    }
+    if (ancestors.has(current)) throw new BadRequestError(`${rootPath} must not be cyclic`);
+    ancestors.add(current);
+    try {
+      if (Array.isArray(current)) {
+        if (current.length > MAX_ARRAY_ITEMS) {
+          throw new BadRequestError(`${path} has too many items`);
+        }
+        for (let index = 0; index < current.length; index += 1) {
+          if (!Object.hasOwn(current, index)) {
+            throw new BadRequestError(`${path} must not be sparse`);
+          }
+          visit(current[index], `${path}[${index}]`, depth + 1);
+        }
+        return;
+      }
+      if (!isPlainObject(current)) {
+        throw new BadRequestError(`${path} must contain only JSON values`);
+      }
+      const keys = Object.keys(current);
+      state.keyCount += keys.length;
+      if (state.keyCount > MAX_JSON_KEYS) {
+        throw new BadRequestError(`${rootPath} has too many keys`);
+      }
+      for (const key of keys) visit(current[key], `${path}.${key}`, depth + 1);
+    } finally {
+      ancestors.delete(current);
+    }
+  }
+
+  visit(value, rootPath, 0);
+}
+
 function normalizeJsonValue(value, path = 'params') {
   if (typeof value === 'string') return value.normalize('NFC');
   if (value === null || typeof value === 'boolean') return value;
@@ -30,7 +99,7 @@ function normalizeJsonValue(value, path = 'params') {
     throw new BadRequestError(`${path} must contain only JSON values`);
   }
 
-  const sorted = {};
+  const sorted = Object.create(null);
   for (const key of Object.keys(value).sort()) {
     if (value[key] === undefined) {
       throw new BadRequestError(`${path}.${key} must contain a JSON value`);
@@ -42,8 +111,24 @@ function normalizeJsonValue(value, path = 'params') {
 
 function canonicalizeParams(params) {
   if (!isPlainObject(params)) throw new BadRequestError('params must be an object');
+  const ownKeys = Reflect.ownKeys(params);
+  const paramsForValidation = Object.create(null);
+  for (const key of ownKeys) {
+    if (typeof key === 'string' && key === 'labels' && params[key] === undefined) continue;
+    if (typeof key === 'string') paramsForValidation[key] = params[key];
+  }
+  validateBoundedJson(paramsForValidation);
+  for (const key of ownKeys) {
+    if (
+      typeof key !== 'string'
+      || !Object.prototype.propertyIsEnumerable.call(params, key)
+      || !ALLOWED_PARAM_KEYS.has(key)
+    ) {
+      throw new BadRequestError(`unknown create_issue param field: ${String(key)}`);
+    }
+  }
   for (const field of ['repo', 'title', 'body']) {
-    if (typeof params[field] !== 'string') {
+    if (!Object.hasOwn(params, field) || typeof params[field] !== 'string') {
       throw new BadRequestError(`params.${field} must be a string`);
     }
   }
@@ -51,22 +136,27 @@ function canonicalizeParams(params) {
     throw new BadRequestError('params.labels must be an array when present');
   }
   const labels = params.labels === undefined ? [] : params.labels;
+  if (labels.length > MAX_LABELS) throw new BadRequestError('params.labels has too many items');
   if (!labels.every((label) => typeof label === 'string')) {
     throw new BadRequestError('params.labels must contain only strings');
   }
 
-  const withCanonicalFields = {
-    ...params,
-    repo: params.repo.normalize('NFC').toLowerCase(),
-    title: params.title.normalize('NFC'),
-    body: params.body.normalize('NFC'),
-    labels: [...new Set(labels.map((label) => label.normalize('NFC')))].sort(),
-  };
+  const withCanonicalFields = Object.create(null);
+  withCanonicalFields.repo = params.repo.normalize('NFC').toLowerCase();
+  withCanonicalFields.title = params.title.normalize('NFC');
+  withCanonicalFields.body = params.body.normalize('NFC');
+  withCanonicalFields.labels = [
+    ...new Set(labels.map((label) => label.normalize('NFC'))),
+  ].sort();
   return normalizeJsonValue(withCanonicalFields);
 }
 
 function canonicalParamsJson(params) {
-  return JSON.stringify(canonicalizeParams(params));
+  const json = JSON.stringify(canonicalizeParams(params));
+  if (Buffer.byteLength(json, 'utf8') > MAX_PARAMS_BYTES) {
+    throw new BadRequestError(`canonical params exceed ${MAX_PARAMS_BYTES} bytes`);
+  }
+  return json;
 }
 
 function paramsHash(paramsJson) {
@@ -86,10 +176,39 @@ function requiredString(value, name) {
   return value;
 }
 
-function jsonOrNull(value) {
+function jsonOrNull(value, name = 'receipt') {
   if (value === undefined || value === null) return null;
-  if (typeof value === 'string') return value;
-  return JSON.stringify(value);
+  let parsed = value;
+  if (typeof value === 'string') {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      throw new BadRequestError(`${name} must be valid JSON`);
+    }
+  }
+  validateBoundedJson(parsed, name);
+  const json = typeof value === 'string' ? value : JSON.stringify(parsed);
+  if (Buffer.byteLength(json, 'utf8') > MAX_PARAMS_BYTES) {
+    throw new BadRequestError(`${name} exceeds ${MAX_PARAMS_BYTES} bytes`);
+  }
+  return json;
+}
+
+function translateSqliteConstraint(error) {
+  if (error instanceof AppError) return error;
+  if (!String(error && error.code || '').startsWith('SQLITE_CONSTRAINT')) return error;
+  if (error.code === 'SQLITE_CONSTRAINT_UNIQUE' || error.code === 'SQLITE_CONSTRAINT_PRIMARYKEY') {
+    return new ConflictError(error.message);
+  }
+  return new BadRequestError(error.message);
+}
+
+function publicMutation(fn) {
+  try {
+    return fn();
+  } catch (error) {
+    throw translateSqliteConstraint(error);
+  }
 }
 
 function createActionLedgerService(db, options = {}) {
@@ -126,7 +245,9 @@ function createActionLedgerService(db, options = {}) {
           approved_params_hash = params_hash,
           approval_policy_version = @approval_policy_version,
           approval_expires_at = @approval_expires_at
-      WHERE id = @id AND status = 'awaiting_approval'
+      WHERE id = @id
+        AND status = 'awaiting_approval'
+        AND params_hash = @expected_params_hash
     `),
     expireOne: db.prepare(`
       UPDATE actions
@@ -242,6 +363,10 @@ function createActionLedgerService(db, options = {}) {
 
   const approveTx = db.transaction((id, approval) => {
     requiredString(id, 'id');
+    const expectedParamsHash = requiredString(
+      approval.expectedParamsHash ?? approval.expected_params_hash,
+      'expectedParamsHash',
+    );
     const approvedBy = requiredString(
       approval.approvedBy ?? approval.approved_by,
       'approvedBy',
@@ -264,9 +389,15 @@ function createActionLedgerService(db, options = {}) {
     if (new Date(expiresAt).getTime() <= new Date(approvedAt).getTime()) {
       throw new BadRequestError('approvalExpiresAt must be in the future');
     }
+    const current = stmts.getAction.get(id);
+    if (!current) return null;
+    if (current.params_hash !== expectedParamsHash) {
+      throw new ConflictError('action params changed after they were reviewed');
+    }
 
     const info = stmts.approve.run({
       id,
+      expected_params_hash: expectedParamsHash,
       approved_at: approvedAt,
       approved_by: approvedBy,
       approval_policy_version: policyVersion,
@@ -382,7 +513,7 @@ function createActionLedgerService(db, options = {}) {
       attemptId,
       phase: info.changes === 1
         ? (event.phase || 'execution.result')
-        : (event.phase || 'execution.result.stale'),
+        : 'execution.result.stale',
       requestDigest: event.requestDigest ?? event.request_digest ?? null,
       transportClass: event.transportClass ?? event.transport_class ?? null,
       externalRequestId: event.externalRequestId ?? event.external_request_id ?? null,
@@ -397,12 +528,12 @@ function createActionLedgerService(db, options = {}) {
   });
 
   return {
-    declareAction: (input) => declareTx(input),
-    approveAction: (id, approval) => approveTx(id, approval || {}),
-    claimForExecution: (id) => claimTx(id),
-    recordExecutionResult: (input) => recordExecutionResultTx(input),
-    expireStaleApprovals: () => expireTx(),
-    appendEvent: (actionId, event) => insertEvent(actionId, event),
+    declareAction: (input) => publicMutation(() => declareTx(input)),
+    approveAction: (id, approval) => publicMutation(() => approveTx(id, approval || {})),
+    claimForExecution: (id) => publicMutation(() => claimTx(id)),
+    recordExecutionResult: (input) => publicMutation(() => recordExecutionResultTx(input)),
+    expireStaleApprovals: () => publicMutation(() => expireTx()),
+    appendEvent: (actionId, event) => publicMutation(() => insertEvent(actionId, event)),
     getAction: (id) => stmts.getAction.get(id) || null,
     getActionByIntent: (taskId, actionSlot) => stmts.getByIntent.get(taskId, actionSlot) || null,
     listActions: () => stmts.listActions.all(),

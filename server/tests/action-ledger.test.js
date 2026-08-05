@@ -53,11 +53,13 @@ function declare(ledger, overrides = {}) {
 }
 
 function approve(ledger, id, overrides = {}) {
+  const current = ledger.getAction(id);
   return ledger.approveAction(id, {
     approvedBy: overrides.approvedBy || 'user-1',
     authMethod: overrides.authMethod || 'cookie',
     policyVersion: overrides.policyVersion || 'policy-v1',
     expiresAt: overrides.expiresAt || '2026-08-05T01:00:00.000Z',
+    expectedParamsHash: overrides.expectedParamsHash ?? current.params_hash,
   });
 }
 
@@ -79,6 +81,75 @@ test('canonical params normalize repo, labels, Unicode, and key order without tr
   assert.deepEqual(JSON.parse(canonicalParamsJson({ ...BASE_PARAMS, labels: undefined })).labels, []);
 });
 
+test('canonical params reject ambiguous, polluting, sparse, and unbounded inputs', () => {
+  const clean = canonicalParamsJson(BASE_PARAMS);
+
+  // MUTATION: accepting unknown top-level fields makes operation semantics ambiguous.
+  assert.throws(
+    () => canonicalParamsJson({ ...BASE_PARAMS, milestone: 7 }),
+    (error) => error.status === 400 && /unknown create_issue param field/.test(error.message),
+  );
+
+  const polluting = JSON.parse(JSON.stringify({ ...BASE_PARAMS }).replace(
+    /}$/, ',"__proto__":{"polluted":true}}',
+  ));
+  // MUTATION: constructing canonical maps with {} lets __proto__ mutate their prototype.
+  assert.throws(() => canonicalParamsJson(polluting), (error) => error.status === 400);
+  assert.equal(Object.prototype.polluted, undefined);
+  assert.equal(canonicalParamsJson(BASE_PARAMS), clean, 'polluting input cannot collide with clean params');
+
+  const sparseLabels = new Array(2);
+  sparseLabels[0] = 'P1';
+  // MUTATION: Array.map on a sparse array serializes holes as null.
+  assert.throws(
+    () => canonicalParamsJson({ ...BASE_PARAMS, labels: sparseLabels }),
+    (error) => error.status === 400 && /must not be sparse/.test(error.message),
+  );
+
+  const oversized = {
+    ...BASE_PARAMS,
+    title: 't'.repeat(30_000),
+    body: 'b'.repeat(40_000),
+  };
+  // MUTATION: removing the serialized byte cap permits memory-amplification inputs.
+  assert.throws(
+    () => canonicalParamsJson(oversized),
+    (error) => error.status === 400 && /exceed/.test(error.message),
+  );
+
+  const tooDeep = { leaf: true };
+  for (let depth = 0, node = tooDeep; depth < 10; depth += 1) {
+    node.child = {};
+    node = node.child;
+  }
+  // MUTATION: removing the depth cap makes normalization recurse without a small bound.
+  assert.throws(
+    () => canonicalParamsJson({ ...BASE_PARAMS, extra: tooDeep }),
+    (error) => error.status === 400 && /nesting exceeds/.test(error.message),
+  );
+
+  const cyclic = { ...BASE_PARAMS };
+  cyclic.self = cyclic;
+  // MUTATION: removing ancestor tracking lets cyclic input recurse indefinitely.
+  assert.throws(
+    () => canonicalParamsJson(cyclic),
+    (error) => error.status === 400 && /must not be cyclic/.test(error.message),
+  );
+});
+
+test('approval requires the exact hash reviewed by the human', (t) => {
+  const { ledger } = setup(t);
+  const action = declare(ledger);
+
+  // MUTATION: removing expectedParamsHash comparison approves a different reviewed state.
+  assert.throws(
+    () => approve(ledger, action.id, { expectedParamsHash: 'f'.repeat(64) }),
+    (error) => error.status === 409 && /changed after they were reviewed/.test(error.message),
+  );
+  assert.equal(ledger.getAction(action.id).status, 'awaiting_approval');
+  assert.equal(approve(ledger, action.id).status, 'queued');
+});
+
 test('approval CAS is the execution boundary and binds the current params hash', (t) => {
   const { db, ledger } = setup(t);
   const unapproved = declare(ledger, { actionSlot: 'unapproved' });
@@ -93,6 +164,7 @@ test('approval CAS is the execution boundary and binds the current params hash',
       authMethod: 'bearer',
       policyVersion: 'policy-v1',
       expiresAt: '2026-08-05T01:00:00.000Z',
+      expectedParamsHash: unapproved.params_hash,
     }),
     (error) => error.status === 403,
   );
@@ -107,12 +179,13 @@ test('approval CAS is the execution boundary and binds the current params hash',
   assert.equal(approved.approval_policy_version, 'policy-v1');
   assert.equal(approved.approval_expires_at, '2026-08-05T01:00:00.000Z');
 
-  db.prepare(`
-    UPDATE actions SET params_json = ?, params_hash = ? WHERE id = ?
-  `).run('{"body":"tampered"}', 'f'.repeat(64), tampered.id);
-  // MUTATION: removing approved_params_hash=params_hash makes changed params executable.
-  assert.equal(ledger.claimForExecution(tampered.id), null);
-  assert.equal(ledger.getAction(tampered.id).status, 'queued');
+  // MUTATION: removing the intent-immutable trigger permits an approved payload swap.
+  assert.throws(
+    () => db.prepare('UPDATE actions SET params_json = ? WHERE id = ?')
+      .run('{"body":"tampered"}', tampered.id),
+    /action intent columns are immutable/,
+  );
+  assert.equal(ledger.getAction(tampered.id).params_json, tampered.params_json);
 
   const valid = declare(ledger, { actionSlot: 'valid' });
   approve(ledger, valid.id);
@@ -141,10 +214,12 @@ test('attempt fencing makes a stale result evidence-only while the active attemp
     externalNodeId: 'NODE_stale',
     receipt: { stale: true },
     verdict: 'wrong',
+    event: { phase: 'caller.override.must.not_win' },
   }), false);
   assert.deepEqual(ledger.getAction(action.id), before);
   const afterStaleEvents = ledger.listEvents(action.id);
   assert.equal(afterStaleEvents.length, eventsBefore + 1);
+  // MUTATION: using caller event.phase for a lost CAS misclassifies stale evidence.
   assert.equal(afterStaleEvents.at(-1).phase, 'execution.result.stale');
   assert.equal(afterStaleEvents.at(-1).attempt_id, 'stale-attempt');
 
@@ -165,6 +240,49 @@ test('attempt fencing makes a stale result evidence-only while the active attemp
   assert.equal(completed.verdict, 'full_get_valid');
   assert.equal(completed.active_attempt_id, null);
   assert.equal(completed.claimed_at, null);
+});
+
+test('database CHECKs reject invalid approval claims and live attempts on terminal rows', (t) => {
+  const { db, ledger } = setup(t);
+  const action = declare(ledger);
+  approve(ledger, action.id);
+
+  // MUTATION: removing the post-approval hash CHECK permits hand-written mismatched execution.
+  assert.throws(
+    () => db.prepare(`
+      UPDATE actions
+      SET status = 'executing', approved_params_hash = ?,
+          active_attempt_id = 'raw-mismatch', claimed_at = ?
+      WHERE id = ?
+    `).run('f'.repeat(64), '2026-08-05T00:00:00.000Z', action.id),
+    { code: 'SQLITE_CONSTRAINT_CHECK' },
+  );
+
+  // MUTATION: removing the claim-time expiry CHECK permits execution after approval expiry.
+  assert.throws(
+    () => db.prepare(`
+      UPDATE actions
+      SET status = 'executing', approval_expires_at = ?,
+          active_attempt_id = 'raw-expired', claimed_at = ?
+      WHERE id = ?
+    `).run(
+      '2026-08-05T00:00:00.000Z',
+      '2026-08-05T00:00:00.000Z',
+      action.id,
+    ),
+    { code: 'SQLITE_CONSTRAINT_CHECK' },
+  );
+
+  // MUTATION: weakening the bidirectional attempt CHECK leaves a live fence on terminal state.
+  assert.throws(
+    () => db.prepare(`
+      UPDATE actions
+      SET status = 'succeeded', active_attempt_id = 'raw-terminal', claimed_at = ?
+      WHERE id = ?
+    `).run('2026-08-05T00:00:00.000Z', action.id),
+    { code: 'SQLITE_CONSTRAINT_CHECK' },
+  );
+  assert.equal(ledger.getAction(action.id).status, 'queued');
 });
 
 test('logical idempotency is task and slot, with params only a conflict detector', (t) => {
@@ -264,6 +382,50 @@ test('events append while actions retains only current state, and evidence canno
     () => db.prepare('DELETE FROM action_events WHERE id = ?').run(events[0].id),
     /action_events is append-only/,
   );
+  assert.equal(db.pragma('recursive_triggers', { simple: true }), 1);
+  // MUTATION: disabling recursive_triggers lets REPLACE implicitly delete old evidence.
+  assert.throws(
+    () => db.prepare(`
+      INSERT OR REPLACE INTO action_events (id, action_id, phase, ts)
+      VALUES (?, ?, 'replacement', ?)
+    `).run(events[0].id, action.id, '2026-08-05T00:00:00.000Z'),
+    /action_events is append-only/,
+  );
+  assert.equal(ledger.listEvents(action.id)[0].phase, 'action.declared');
+
+  // MUTATION: accepting arbitrary receipt strings bypasses the JSON evidence contract.
+  assert.throws(
+    () => ledger.appendEvent(action.id, { phase: 'bad.receipt', receipt: 'not json' }),
+    (error) => error.status === 400,
+  );
+});
+
+test('public mutations translate SQLite constraints into AppError subclasses', (t) => {
+  const { ledger } = setup(t);
+  const first = declare(ledger, { actionSlot: 'external-first' });
+  approve(ledger, first.id);
+  const firstAttempt = ledger.claimForExecution(first.id);
+  ledger.recordExecutionResult({
+    id: first.id,
+    attemptId: firstAttempt,
+    status: 'succeeded',
+    externalNodeId: 'NODE_unique',
+  });
+
+  const second = declare(ledger, { actionSlot: 'external-second' });
+  approve(ledger, second.id);
+  const secondAttempt = ledger.claimForExecution(second.id);
+  // MUTATION: exposing raw SqliteError violates the public service error contract.
+  assert.throws(
+    () => ledger.recordExecutionResult({
+      id: second.id,
+      attemptId: secondAttempt,
+      status: 'succeeded',
+      externalNodeId: 'NODE_unique',
+    }),
+    (error) => error.status === 409 && error.constructor.name === 'ConflictError',
+  );
+  assert.equal(ledger.getAction(second.id).status, 'executing');
 });
 
 test('migration 085 applies on a fresh DB and enforces status and identity constraints', (t) => {
@@ -302,5 +464,20 @@ test('migration 085 applies on a fresh DB and enforces status and identity const
   assert.throws(
     () => insert.run(...values('external-2', 'external-2', 'awaiting_approval', 'NODE_same')),
     { code: 'SQLITE_CONSTRAINT_UNIQUE' },
+  );
+  assert.throws(
+    () => insert.run(
+      'bad-hash',
+      'task-migration',
+      'bad-hash',
+      'github',
+      'github.create_issue',
+      '{"body":"b","labels":[],"repo":"a/b","title":"t"}',
+      'G'.repeat(64),
+      'awaiting_approval',
+      '2026-08-05T00:00:00.000Z',
+      null,
+    ),
+    { code: 'SQLITE_CONSTRAINT_CHECK' },
   );
 });

@@ -5,8 +5,12 @@ CREATE TABLE actions (
   action_slot TEXT NOT NULL,
   connector TEXT NOT NULL CHECK(connector IN ('github')),
   operation TEXT NOT NULL CHECK(operation IN ('github.create_issue')),
-  params_json TEXT NOT NULL,
-  params_hash TEXT NOT NULL CHECK(length(params_hash) = 64),
+  params_json TEXT NOT NULL CHECK(json_valid(params_json)),
+  params_hash TEXT NOT NULL CHECK(
+    params_hash GLOB '[0-9a-f]*'
+    AND params_hash NOT GLOB '*[^0-9a-f]*'
+    AND length(params_hash) = 64
+  ),
   status TEXT NOT NULL CHECK(status IN (
     'awaiting_approval',
     'queued',
@@ -28,7 +32,12 @@ CREATE TABLE actions (
     approval_auth_method IS NULL OR approval_auth_method = 'cookie'
   ),
   approved_params_hash TEXT CHECK(
-    approved_params_hash IS NULL OR length(approved_params_hash) = 64
+    approved_params_hash IS NULL
+    OR (
+      approved_params_hash GLOB '[0-9a-f]*'
+      AND approved_params_hash NOT GLOB '*[^0-9a-f]*'
+      AND length(approved_params_hash) = 64
+    )
   ),
   approval_policy_version TEXT,
   approval_expires_at TEXT,
@@ -36,7 +45,7 @@ CREATE TABLE actions (
   claimed_at TEXT,
   external_id TEXT,
   external_node_id TEXT,
-  receipt_json TEXT,
+  receipt_json TEXT CHECK(receipt_json IS NULL OR json_valid(receipt_json)),
   last_error TEXT,
   next_reconcile_at TEXT,
   verdict TEXT,
@@ -58,15 +67,34 @@ CREATE TABLE actions (
       AND approval_expires_at IS NOT NULL
     )
   ),
+  CHECK(status = 'awaiting_approval' OR approved_params_hash = params_hash),
   CHECK(
-    status NOT IN ('awaiting_approval', 'queued')
-    OR active_attempt_id IS NULL
+    (active_attempt_id IS NOT NULL)
+    = (status IN ('executing', 'reconciling', 'repairing'))
   ),
   CHECK(
     status NOT IN ('executing', 'reconciling', 'repairing')
-    OR active_attempt_id IS NOT NULL
+    OR (
+      claimed_at IS NOT NULL
+      AND julianday(approval_expires_at) IS NOT NULL
+      AND julianday(claimed_at) IS NOT NULL
+      AND julianday(approval_expires_at) > julianday(claimed_at)
+    )
   )
 );
+
+CREATE TRIGGER trg_actions_intent_immutable
+BEFORE UPDATE ON actions
+WHEN NEW.task_id != OLD.task_id
+  OR NEW.action_slot != OLD.action_slot
+  OR NEW.connector != OLD.connector
+  OR NEW.operation != OLD.operation
+  OR NEW.params_json != OLD.params_json
+  OR NEW.params_hash != OLD.params_hash
+  OR NEW.reissues_action_id IS NOT OLD.reissues_action_id
+BEGIN
+  SELECT RAISE(ABORT, 'action intent columns are immutable');
+END;
 
 CREATE UNIQUE INDEX ux_actions_external_node
   ON actions(connector, external_node_id)
@@ -83,7 +111,7 @@ CREATE TABLE action_events (
   transport_class TEXT,
   external_request_id TEXT,
   candidate_external_id TEXT,
-  receipt_json TEXT,
+  receipt_json TEXT CHECK(receipt_json IS NULL OR json_valid(receipt_json)),
   error TEXT,
   ts TEXT NOT NULL
 );
