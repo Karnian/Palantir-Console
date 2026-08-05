@@ -118,48 +118,8 @@ function hasValidExternalIdentity(issue) {
   );
 }
 
-function statusCodeOf(value) {
-  const status = value && (
-    value.statusCode
-    ?? value.status
-    ?? (value.response && value.response.status)
-  );
-  const number = Number(status);
-  return Number.isInteger(number) ? number : null;
-}
-
 function classifyRepairOutcome(value) {
-  const candidate = value || {};
-  const kind = candidate.kind || candidate.code || null;
-  const statusCode = statusCodeOf(candidate);
-  if (kind === 'ok') return { transportClass: 'ok', issue: candidate.issue };
-  if (
-    kind === 'server_error'
-    || kind === 'timeout'
-    || kind === 'response_lost'
-    || kind === 'malformed'
-  ) {
-    return { transportClass: 'ambiguous' };
-  }
-  if (kind === 'not_found_repo' || kind === 'validation_error') {
-    return { transportClass: 'permanent_no_effect' };
-  }
-  if (kind === 'rate_limited' || kind === 'abuse_denied') {
-    return { transportClass: 'rate_limited' };
-  }
-  if (kind === 'permission_denied') {
-    return { transportClass: 'permanent_no_effect' };
-  }
-  if (kind === null && statusCode === null && candidate.number !== undefined) {
-    return { transportClass: 'ok', issue: candidate };
-  }
-  if (statusCode !== null && statusCode >= 500) return { transportClass: 'ambiguous' };
-  if (statusCode === 404 || statusCode === 422) {
-    return { transportClass: 'permanent_no_effect' };
-  }
-  if (statusCode === 429) return { transportClass: 'rate_limited' };
-  if (statusCode === 403) return { transportClass: 'permanent_no_effect' };
-  return { transportClass: 'ambiguous' };
+  return classifyCreateOutcome(value);
 }
 
 function createActionBroker({
@@ -248,6 +208,33 @@ function createActionBroker({
     const recordOutcome = (status, input) => ({
       status: ledger.recordRepairResult(input) ? status : 'stale',
     });
+    const retryOrBlock = ({
+      retryReason,
+      receipt,
+      error,
+      transportClass,
+      verdict = {},
+    }) => {
+      const canRetry = Number(current.repair_attempts) < limit;
+      const status = canRetry ? 'repair_retry_wait' : 'repair_blocked';
+      return recordOutcome(status, {
+        id: action.id,
+        attemptId,
+        status,
+        receipt,
+        error,
+        nextRepairAt: canRetry ? retryAt() : undefined,
+        verdict: serializeVerdict({
+          ...verdict,
+          status,
+          reason: canRetry ? retryReason : 'max_attempts',
+        }),
+        event: {
+          phase: canRetry ? 'repair.retry_wait' : 'repair.blocked',
+          transportClass,
+        },
+      });
+    };
 
     const recordUnknown = (error, receipt, reason = 'ambiguous_repair') => {
       return recordOutcome('unknown', {
@@ -309,15 +296,11 @@ function createActionBroker({
       });
     }
     if (addOutcome.transportClass === 'rate_limited') {
-      return recordOutcome('repair_retry_wait', {
-        id: action.id,
-        attemptId,
-        status: 'repair_retry_wait',
+      return retryOrBlock({
+        retryReason: 'rate_limited',
         receipt: initialReceipt,
         error: sanitizeError(addError),
-        nextRepairAt: retryAt(),
-        verdict: serializeVerdict({ status: 'repair_retry_wait', reason: 'rate_limited' }),
-        event: { phase: 'repair.retry_wait', transportClass: addOutcome.transportClass },
+        transportClass: addOutcome.transportClass,
       });
     }
     if (addOutcome.transportClass === 'ambiguous') return recordUnknown(addError, initialReceipt);
@@ -341,24 +324,11 @@ function createActionBroker({
       });
     }
     if (verdict.status === 'partially_applied') {
-      const targetStatus = Number(current.repair_attempts) < limit
-        ? 'repair_retry_wait'
-        : 'repair_blocked';
-      return recordOutcome(targetStatus, {
-        id: action.id,
-        attemptId,
-        status: targetStatus,
+      return retryOrBlock({
+        retryReason: 'still_missing_labels',
         receipt,
-        nextRepairAt: targetStatus === 'repair_retry_wait' ? retryAt() : undefined,
-        verdict: serializeVerdict({
-          ...verdict,
-          status: targetStatus,
-          reason: targetStatus === 'repair_blocked' ? 'max_attempts' : 'still_missing_labels',
-        }),
-        event: {
-          phase: targetStatus === 'repair_blocked' ? 'repair.blocked' : 'repair.retry_wait',
-          transportClass: 'ok',
-        },
+        transportClass: 'ok',
+        verdict,
       });
     }
     return recordUnknown(null, receipt, verdict.reason);

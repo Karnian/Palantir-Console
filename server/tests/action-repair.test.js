@@ -261,6 +261,85 @@ test('explicit repair fault kinds dominate conflicting HTTP statuses', async (t)
   assert.equal(stored.getPostCount(), 0);
 });
 
+test('native transport codes dominate conflicting HTTP statuses for repair and create', async (t) => {
+  const { ledger, clock } = setup(t);
+  const scenarios = [
+    {
+      error: { code: 'ETIMEDOUT', statusCode: 403, message: 'timed out' },
+      expected: 'unknown',
+    },
+    {
+      error: { code: 'ECONNRESET', message: 'connection reset' },
+      expected: 'unknown',
+    },
+    {
+      error: { statusCode: 422, message: 'invalid labels' },
+      expected: 'repair_blocked',
+    },
+  ];
+  for (const [index, scenario] of scenarios.entries()) {
+    const partial = makePartial(ledger, 'native-transport-' + index);
+    const stored = createFakeGithubGateway({ issues: [partial.issue] });
+    const gateway = {
+      ...stored,
+      async addLabels() {
+        throw scenario.error;
+      },
+    };
+    const result = await claimAndRepair(ledger, clock, partial, gateway);
+    // MUTATION: letting statusCode override a transport error code downgrades a timeout.
+    assert.equal(result.row.status, scenario.expected);
+    assert.equal(stored.getPostCount(), 0);
+  }
+
+  const action = declareApproved(ledger, 'native-transport-create');
+  const attemptId = ledger.claimForExecution(action.id);
+  const gateway = {
+    async createIssue() {
+      throw { code: 'ETIMEDOUT', statusCode: 403, message: 'timed out' };
+    },
+    async getIssue() {
+      throw new Error('ambiguous create must not read back immediately');
+    },
+  };
+  const broker = createActionBroker({ ledger, gateway, clock });
+  await broker.executeClaimedAction({
+    action: ledger.getAction(action.id),
+    attemptId,
+  });
+  assert.equal(ledger.getAction(action.id).status, 'unknown');
+});
+
+test('rate-limit retry is blocked at MAX and remains retryable below MAX', async (t) => {
+  const { ledger, clock } = setup(t);
+  const atMax = makePartial(ledger, 'rate-at-max');
+  const atMaxGateway = createFakeGithubGateway({
+    issues: [atMax.issue],
+    addLabels: [{ kind: 'rate_limited' }],
+  });
+  // MUTATION: the rate-limit branch scheduling retry at MAX leaves a terminal attempt retryable.
+  const blocked = await claimAndRepair(ledger, clock, atMax, atMaxGateway, {
+    maxRepairAttempts: 1,
+  });
+  assert.equal(blocked.row.repair_attempts, 1);
+  assert.equal(blocked.outcome.status, 'repair_blocked');
+  assert.equal(blocked.row.status, 'repair_blocked');
+  assert.equal(blocked.row.next_repair_at, null);
+
+  const belowMax = makePartial(ledger, 'rate-below-max');
+  const belowMaxGateway = createFakeGithubGateway({
+    issues: [belowMax.issue],
+    addLabels: [{ kind: 'rate_limited' }],
+  });
+  const waiting = await claimAndRepair(ledger, clock, belowMax, belowMaxGateway, {
+    maxRepairAttempts: 2,
+  });
+  assert.equal(waiting.row.repair_attempts, 1);
+  assert.equal(waiting.outcome.status, 'repair_retry_wait');
+  assert.equal(waiting.row.status, 'repair_retry_wait');
+  assert.equal(waiting.row.next_repair_at, '2026-08-05T00:01:00.000Z');
+});
+
 test('final-attempt bounding uses the authoritative post-claim repair count', async (t) => {
   const { ledger, clock } = setup(t);
   const partial = makePartial(ledger, 'authoritative-attempts');
