@@ -5,7 +5,6 @@ const { asyncHandler } = require('../middleware/asyncHandler');
 const {
   BadRequestError,
   NotFoundError,
-  sanitizeMessage,
 } = require('../utils/errors');
 
 const ACTION_STATUSES = new Set([
@@ -31,7 +30,6 @@ const SENSITIVE_KEY_MARKERS = new Set([
   'passphrase',
   'credential',
   'authorization',
-  'auth',
   'apikey',
   'accesskey',
   'accesskeyid',
@@ -44,41 +42,61 @@ const SENSITIVE_KEY_MARKERS = new Set([
   'cookie',
   'signature',
 ]);
+const EXACT_SENSITIVE_KEYS = new Set(['pw', 'pwd', 'pass', 'sig']);
 const OPAQUE_SECRET = /^(?=.{24,}$)(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9+/=_-]+$/;
+const MAX_SUMMARY_STRING_LENGTH = 180;
 const MAX_SUMMARY_DEPTH = 4;
 const MAX_SUMMARY_ITEMS = 24;
 
 function isSensitiveKey(key) {
-  const normalized = String(key).toLowerCase().replace(/[_-]/g, '');
+  const normalized = String(key).toLowerCase().replace(/[\s_-]/g, '');
+  if (EXACT_SENSITIVE_KEYS.has(normalized)) return true;
   for (const marker of SENSITIVE_KEY_MARKERS) {
     if (normalized.includes(marker)) return true;
   }
   return false;
 }
 
-function redactString(value, { opaque = false } = {}) {
-  let text = sanitizeMessage(value);
+function capSummaryString(text) {
+  return text.length > MAX_SUMMARY_STRING_LENGTH
+    ? text.slice(0, MAX_SUMMARY_STRING_LENGTH - 3) + '...'
+    : text;
+}
+
+function redactString(value, { opaque = false, longRuns = false } = {}) {
+  // This route is a primary redaction layer for the observability surface.
+  // Free text still has an inherent residual: arbitrary prose secrets with no
+  // marker and no recognized value format cannot be guaranteed to be found.
+  // Structured receipt/verdict data avoids that class via allowlist projection.
+  let text = String(value ?? '');
   text = text
     .replace(/\bgithub_pat_[A-Za-z0-9_]+\b/gi, '[redacted]')
     .replace(/\bgh[pousr]_[A-Za-z0-9_]+\b/g, '[redacted]')
     .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[redacted]')
-    .replace(/\b(?:AKIA|ASIA|AGPA|AIDA|AROA)[0-9A-Z]{12,}\b/g, '[redacted]')
-    // Marked free-text secrets are redacted through the end of the sanitized
-    // value, including whitespace-bearing passphrases. Arbitrary prose secrets
-    // with no marker remain best-effort; actionBroker sanitizeError is the
-    // primary gate for those values.
+    .replace(/\b(?:AKIA|ASIA|AGPA|AIDA|AROA|ACCA)[0-9A-Z]{12,}\b/g, '[redacted]');
+  if (longRuns) {
+    text = text
+      .replace(/[0-9a-fA-F]{40,}/g, '[redacted]')
+      .replace(/[A-Za-z0-9+/=_-]{40,}/g, '[redacted]');
+  }
+  text = text
+    // Redact each marked value through its line ending. The global flag keeps
+    // later lines independently protected without consuming them wholesale.
     .replace(
-      /(["']?(?:password|passwd|passphrase|secret|token|api(?:[ _-]?key)|credentials?|bearer)["']?\s*[:=]\s*).*/i,
+      /(["']?\b(?:password|passwd|passphrase|secret|token|api[ \t_-]?key|access[ \t_-]?key|private[ \t_-]?key|secret[ \t_-]?key|client[ \t_-]?secret|credentials?|authorization|bearer|cookie|signature|basic)\b["']?[ \t]*[:=][ \t]*)[^\r\n]*/gim,
       '$1[redacted]',
     )
     .replace(/\b(?:token|secret)[-_:][A-Za-z0-9._~+/-]{4,}\b/gi, '[redacted]');
-  return opaque && OPAQUE_SECRET.test(text) ? '[redacted]' : text;
+  if (opaque && OPAQUE_SECRET.test(text)) text = '[redacted]';
+  return capSummaryString(text);
 }
 
 function redactValue(value, key = '', depth = 0) {
   if (isSensitiveKey(key)) return '[redacted]';
   if (value === null || value === undefined) return null;
-  if (typeof value === 'string') return redactString(value, { opaque: true });
+  if (typeof value === 'string') {
+    return redactString(value, { opaque: true, longRuns: true });
+  }
   if (typeof value === 'number' || typeof value === 'boolean') return value;
   if (depth >= MAX_SUMMARY_DEPTH) return '[truncated]';
   if (Array.isArray(value)) {
@@ -87,7 +105,7 @@ function redactValue(value, key = '', depth = 0) {
   }
   if (typeof value !== 'object') return redactString(String(value));
 
-  const summary = Object.create(null);
+  const summary = {};
   for (const [childKey, childValue] of Object.entries(value).slice(0, MAX_SUMMARY_ITEMS)) {
     if (['__proto__', 'prototype', 'constructor'].includes(childKey)) continue;
     summary[childKey] = redactValue(childValue, childKey, depth + 1);
@@ -95,14 +113,67 @@ function redactValue(value, key = '', depth = 0) {
   return summary;
 }
 
-function parseJsonSummary(value) {
+function parsePlainJsonObject(value) {
   if (value === null || value === undefined) return null;
   try {
     const parsed = typeof value === 'string' ? JSON.parse(value) : value;
-    return redactValue(parsed);
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const prototype = Object.getPrototypeOf(parsed);
+    return prototype === Object.prototype || prototype === null ? parsed : null;
   } catch {
-    return { summary: '[unavailable]' };
+    return null;
   }
+}
+
+function projectReceipt(value) {
+  const source = parsePlainJsonObject(value);
+  if (!source) return null;
+  const receipt = {};
+
+  if (Number.isSafeInteger(source.number)) receipt.number = source.number;
+  for (const key of ['node_id', 'html_url', 'state', 'validated_at']) {
+    if (typeof source[key] === 'string') receipt[key] = source[key];
+  }
+  if (
+    Array.isArray(source.labels)
+    && source.labels.every((label) => typeof label === 'string')
+  ) {
+    receipt.labels = source.labels;
+  }
+  if (Number.isSafeInteger(source.label_count)) receipt.label_count = source.label_count;
+  if (typeof source.labels_truncated === 'boolean') {
+    receipt.labels_truncated = source.labels_truncated;
+  }
+
+  return redactValue(receipt);
+}
+
+function projectVerdict(value) {
+  const source = parsePlainJsonObject(value);
+  if (!source) return null;
+  const verdict = {};
+
+  for (const key of ['status', 'reason']) {
+    if (typeof source[key] === 'string') verdict[key] = source[key];
+  }
+  if (
+    Array.isArray(source.missingLabels)
+    && source.missingLabels.every((label) => typeof label === 'string')
+  ) {
+    verdict.missingLabels = source.missingLabels;
+  }
+  if (typeof source.rate_limited === 'boolean') verdict.rate_limited = source.rate_limited;
+  for (const key of ['candidateCount', 'candidate_count']) {
+    if (Number.isSafeInteger(source[key])) verdict[key] = source[key];
+  }
+
+  return redactValue(verdict);
+}
+
+function redactError(value) {
+  return value === null || value === undefined
+    ? null
+    : redactString(value, { opaque: true, longRuns: true });
 }
 
 function paramsSummary(paramsJson) {
@@ -139,7 +210,9 @@ function projectAction(row) {
     approval_expires_at: nullableString(row.approval_expires_at),
     external_id: nullableString(row.external_id),
     external_node_id: nullableString(row.external_node_id),
-    verdict: nullableString(row.verdict),
+    receipt: projectReceipt(row.receipt_json),
+    error: redactError(row.last_error),
+    verdict: projectVerdict(row.verdict),
     repair_attempts: Number.isSafeInteger(row.repair_attempts) ? row.repair_attempts : 0,
     next_reconcile_at: nullableString(row.next_reconcile_at),
     next_repair_at: nullableString(row.next_repair_at),
@@ -158,10 +231,8 @@ function projectEvent(row) {
     external_request_id: nullableString(row.external_request_id),
     candidate_external_id: nullableString(row.candidate_external_id),
     ts: nullableString(row.ts),
-    receipt: parseJsonSummary(row.receipt_json),
-    error: row.error === null || row.error === undefined
-      ? null
-      : redactString(String(row.error), { opaque: true }),
+    receipt: projectReceipt(row.receipt_json),
+    error: redactError(row.error),
   };
 }
 
@@ -197,4 +268,6 @@ module.exports = {
   createActionsRouter,
   projectAction,
   projectEvent,
+  projectReceipt,
+  projectVerdict,
 };

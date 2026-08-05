@@ -12,7 +12,28 @@ const { errorHandler } = require('../middleware/errorHandler');
 const SECRET = 'route-secret-token-123456';
 const CLIENT_SECRET = 'mauve canoe orbit lantern';
 const AWS_ACCESS_KEY_ID = 'AKIAIOSFODNN7EXAMPLE';
-const PASSPHRASE = 'correct horse battery staple';
+const BASE64_NO_DIGIT = 'A'.repeat(64);
+const ARBITRARY_BLOB = 'unclassified payload that must stay server-side';
+const BASIC_AUTH_VALUE = 'dXNlcjpwYXNz';
+const PRIVATE_KEY_VALUE = 'alpine river violet telescope';
+const COOKIE_VALUE = 'session material with spaces';
+const ACTION_COOKIE_VALUE = 'action session material';
+const LONG_OPAQUE_VALUE = 'A1'.repeat(100);
+const LONG_ERROR_PREFIX = 'context '.repeat(18);
+const RECEIPT_FIXTURE = {
+  number: 42,
+  node_id: 'NODE_42',
+  html_url: 'https://github.example/acme/widgets/issues/42',
+  state: 'accepted',
+  labels: ['P1', 'ops'],
+  label_count: 2,
+  labels_truncated: false,
+  validated_at: '2026-08-05T00:01:30.000Z',
+  clientSecret: CLIENT_SECRET,
+  credentials: { accessKeyId: AWS_ACCESS_KEY_ID },
+  data: BASE64_NO_DIGIT,
+  arbitraryBlob: ARBITRARY_BLOB,
+};
 const RAW_ACTIONS = [
   {
     id: 'action-old',
@@ -23,12 +44,21 @@ const RAW_ACTIONS = [
     status: 'succeeded',
     created_at: '2026-08-05T00:00:00.000Z',
     approved_at: '2026-08-05T00:01:00.000Z',
-    approved_by: 'operator-1',
+    approved_by: 'author',
     approval_auth_method: 'cookie',
     approval_expires_at: '2026-08-05T01:00:00.000Z',
     external_id: '42',
     external_node_id: 'NODE_42',
-    verdict: 'full_get_valid',
+    verdict: JSON.stringify({
+      status: 'verified',
+      reason: 'receipt matched',
+      missingLabels: ['docs'],
+      rate_limited: false,
+      candidateCount: 2,
+      candidate_count: 2,
+      arbitraryBlob: ARBITRARY_BLOB,
+      clientSecret: CLIENT_SECRET,
+    }),
     repair_attempts: 0,
     next_reconcile_at: null,
     next_repair_at: null,
@@ -39,8 +69,8 @@ const RAW_ACTIONS = [
       body: 'private body with ' + SECRET,
       labels: ['P1', 'ops'],
     }),
-    last_error: 'must never leak ' + SECRET,
-    receipt_json: JSON.stringify({ token: SECRET }),
+    last_error: 'cookie: ' + ACTION_COOKIE_VALUE,
+    receipt_json: JSON.stringify(RECEIPT_FIXTURE),
   },
   {
     id: 'action-new',
@@ -82,21 +112,25 @@ const EVENTS = {
       external_request_id: 'request-1',
       candidate_external_id: 'NODE_42',
       ts: '2026-08-05T00:01:30.000Z',
-      receipt_json: JSON.stringify({
-        ok: true,
-        state: 'accepted',
-        html_url: 'https://github.example/acme/widgets/issues/42',
-        authorization: 'Bearer ' + SECRET,
-        nested: {
-          provider: {
-            clientSecret: CLIENT_SECRET,
-            credentials: {
-              accessKeyId: AWS_ACCESS_KEY_ID,
-            },
-          },
-        },
-      }),
-      error: 'provider rejected passphrase: ' + PASSPHRASE,
+      receipt_json: JSON.stringify(RECEIPT_FIXTURE),
+      error: [
+        'authorization: Basic ' + BASIC_AUTH_VALUE,
+        'private key: ' + PRIVATE_KEY_VALUE,
+        'cookie: ' + COOKIE_VALUE,
+      ].join('\n'),
+    },
+    {
+      id: 2,
+      action_id: 'action-old',
+      phase: 'transport.error',
+      attempt_id: 'attempt-2',
+      transport_class: 'response',
+      request_digest: 'b'.repeat(64),
+      external_request_id: 'request-2',
+      candidate_external_id: null,
+      ts: '2026-08-05T00:01:45.000Z',
+      receipt_json: JSON.stringify(['not', 'an', 'object']),
+      error: LONG_ERROR_PREFIX + '{"long_data":"' + LONG_OPAQUE_VALUE + '"}',
     },
   ],
 };
@@ -194,9 +228,12 @@ test('GET /api/actions projects newest-first actions and filters by validated st
     title: 'Ship observability',
     label_count: 2,
   });
-  assert.equal(all.body.actions[1].approved_by, 'operator-1');
+  assert.equal(all.body.actions[1].approved_by, 'author');
   assert.equal(all.body.actions[1].external_node_id, 'NODE_42');
   assert.equal(all.body.actions[1].repair_attempts, 0);
+  assert.equal(all.body.actions[1].receipt.number, 42);
+  assert.equal(all.body.actions[1].verdict.status, 'verified');
+  assert.equal(all.body.actions[1].error, 'cookie: [redacted]');
   assert.equal('params_json' in all.body.actions[1], false);
   assert.equal('last_error' in all.body.actions[1], false);
   assert.equal('receipt_json' in all.body.actions[1], false);
@@ -215,23 +252,70 @@ test('GET /api/actions/:id returns projected evidence and redacts every raw secr
 
   assert.equal(response.status, 200);
   assert.equal(response.body.action.id, 'action-old');
-  assert.equal(response.body.events.length, 1);
+  assert.equal(response.body.action.approved_by, 'author');
+  assert.equal(response.body.action.external_id, '42');
+  assert.equal(response.body.action.status, 'succeeded');
+  assert.equal(response.body.action.params_summary.repo, 'acme/widgets');
+  assert.equal(response.body.action.params_summary.title, 'Ship observability');
+  assert.deepEqual(response.body.action.verdict, {
+    status: 'verified',
+    reason: 'receipt matched',
+    missingLabels: ['docs'],
+    rate_limited: false,
+    candidateCount: 2,
+    candidate_count: 2,
+  });
+  assert.equal(response.body.action.error, 'cookie: [redacted]');
+  assert.equal(response.body.events.length, 2);
   assert.equal(response.body.events[0].phase, 'execution.result');
-  assert.equal(response.body.events[0].receipt.ok, true);
-  assert.equal(response.body.events[0].receipt.state, 'accepted');
-  assert.equal(response.body.events[0].receipt.authorization, '[redacted]');
-  // MUTATION: removing normalized key-based redaction leaks camelCase
-  // clientSecret and makes credentials/accessKeyId depend on value heuristics.
-  assert.equal(response.body.events[0].receipt.nested.provider.clientSecret, '[redacted]');
-  assert.equal(response.body.events[0].receipt.nested.provider.credentials, '[redacted]');
-  assert.equal(JSON.stringify(response.body).includes(CLIENT_SECRET), false);
-  assert.equal(JSON.stringify(response.body).includes(AWS_ACCESS_KEY_ID), false);
-  // MUTATION: reverting marker redaction to stop at the first space leaks the
-  // remaining passphrase words ("horse battery staple").
-  assert.equal(response.body.events[0].error, 'provider rejected passphrase: [redacted]');
-  assert.equal(response.body.events[0].error.includes('horse battery staple'), false);
-  assert.equal(JSON.stringify(response.body).includes(SECRET), false);
-  assert.equal(JSON.stringify(response.body).includes('private body'), false);
+  assert.deepEqual(response.body.events[0].receipt, {
+    number: 42,
+    node_id: 'NODE_42',
+    html_url: 'https://github.example/acme/widgets/issues/42',
+    state: 'accepted',
+    labels: ['P1', 'ops'],
+    label_count: 2,
+    labels_truncated: false,
+    validated_at: '2026-08-05T00:01:30.000Z',
+  });
+  assert.equal(response.body.events[1].phase, 'transport.error');
+  assert.equal(response.body.events[1].receipt, null);
+
+  const serialized = JSON.stringify(response.body);
+  // MUTATION: projecting receipt/verdict as raw objects instead of allowlists
+  // leaks unknown clientSecret, credentials, data, and arbitraryBlob values.
+  for (const leaked of [
+    CLIENT_SECRET,
+    AWS_ACCESS_KEY_ID,
+    BASE64_NO_DIGIT,
+    ARBITRARY_BLOB,
+  ]) {
+    assert.equal(serialized.includes(leaked), false);
+  }
+  for (const unknownKey of ['clientSecret', 'credentials', 'data', 'arbitraryBlob']) {
+    assert.equal(unknownKey in response.body.events[0].receipt, false);
+  }
+
+  // MUTATION: dropping authorization from prose markers exposes the short
+  // Basic-auth payload, which is intentionally below the opaque-run threshold.
+  assert.equal(response.body.events[0].error, [
+    'authorization: [redacted]',
+    'private key: [redacted]',
+    'cookie: [redacted]',
+  ].join('\n'));
+  for (const leaked of [BASIC_AUTH_VALUE, PRIVATE_KEY_VALUE, COOKIE_VALUE]) {
+    assert.equal(serialized.includes(leaked), false);
+  }
+
+  // MUTATION: truncating before opaque detection leaves a short fragment of
+  // this long value below the 40-character detector and leaks it.
+  assert.match(response.body.events[1].error, /\[redacted\]/);
+  assert.equal(response.body.events[1].error.includes('A1A1A1A1'), false);
+  assert.ok(response.body.events[1].error.length <= 180);
+
+  assert.equal(serialized.includes(ACTION_COOKIE_VALUE), false);
+  assert.equal(serialized.includes(SECRET), false);
+  assert.equal(serialized.includes('private body'), false);
 
   const missing = await client('get', '/api/actions/missing');
   assert.equal(missing.status, 404);
