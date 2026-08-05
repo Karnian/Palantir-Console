@@ -92,6 +92,8 @@ test('happy path declares, approves, claims, creates once, and validates the mar
     html_url: 'https://github.test/acme/widgets/issues/41',
     state: 'open',
     labels: ['P1', 'security'],
+    label_count: 2,
+    labels_truncated: false,
     validated_at: START,
   });
   assert.deepEqual(JSON.parse(row.verdict), {
@@ -299,6 +301,48 @@ test('a valid maximum-size body succeeds with a bounded receipt', async (t) => {
   assert.equal(Object.hasOwn(receipt, 'title'), false);
   assert.equal(receipt.validated_at, START);
   assert.ok(Buffer.byteLength(row.receipt_json, 'utf8') < 64 * 1024);
+  assert.equal(gateway.getPostCount(), 1);
+});
+
+test('a multi-byte label receipt is bounded by total serialized bytes', async (t) => {
+  const { ledger, clock } = setup(t);
+  const claimed = claim(ledger, 'receipt-total-bytes');
+  const labels = [
+    ...BASE_PARAMS.labels,
+    ...Array.from({ length: 98 }, (_, index) => `${'한'.repeat(256)}-${index}`),
+  ];
+  const { gateway, row } = await execute(ledger, clock, claimed, {
+    createIssue: [{ kind: 'ok', issue: { labels } }],
+  });
+
+  // MUTATION: removing the total-byte bound strands a valid action in executing.
+  assert.equal(row.status, 'succeeded');
+  assert.equal(row.active_attempt_id, null);
+  assert.equal(gateway.getPostCount(), 1);
+  assert.ok(Buffer.byteLength(row.receipt_json, 'utf8') < 16_384);
+  const receipt = JSON.parse(row.receipt_json);
+  assert.equal(receipt.label_count, 100);
+  assert.equal(receipt.labels_truncated, true);
+  assert.ok(receipt.labels.length < receipt.label_count);
+});
+
+test('a null read-back settles unknown without dereferencing the receipt input', async (t) => {
+  const { ledger, clock } = setup(t);
+  const claimed = claim(ledger, 'null-readback');
+  const fake = createFakeGithubGateway({ seed: 77 });
+  const gateway = {
+    createIssue: fake.createIssue,
+    async getIssue() { return null; },
+    getPostCount: fake.getPostCount,
+  };
+  const broker = createActionBroker({ ledger, gateway, clock });
+
+  await broker.executeClaimedAction(claimed);
+  const row = ledger.getAction(claimed.action.id);
+  // MUTATION: dereferencing a null read-back issue strands the row in executing.
+  assert.equal(row.status, 'unknown');
+  assert.equal(row.active_attempt_id, null);
+  assert.equal(row.next_reconcile_at, '2026-08-05T00:01:00.000Z');
   assert.equal(gateway.getPostCount(), 1);
 });
 

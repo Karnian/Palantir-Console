@@ -10,8 +10,9 @@ const {
 const DEFAULT_RECONCILE_DELAY_MS = 60_000;
 const SENSITIVE_KEY = /^(?:authorization|token|access[_-]?token|credential|credentials|password|secret|api[_-]?key)$/i;
 const MAX_RECEIPT_LABELS = 100;
-const MAX_RECEIPT_LABEL_LENGTH = 256;
-const MAX_RECEIPT_ID_LENGTH = 2_048;
+const MAX_RECEIPT_LABEL_BYTES = 256;
+const MAX_RECEIPT_ID_BYTES = 2_048;
+const RECEIPT_BYTE_BUDGET = 16_384;
 
 function redactString(value) {
   return String(value)
@@ -48,9 +49,18 @@ function sanitizeError(error) {
   return JSON.stringify(sanitizeValue(clean));
 }
 
-function boundedString(value, maxLength) {
+function boundedString(value, maxBytes) {
   if (typeof value !== 'string') return null;
-  return redactString(value).slice(0, maxLength);
+  const redacted = redactString(value);
+  let byteLength = 0;
+  let bounded = '';
+  for (const character of redacted) {
+    const characterBytes = Buffer.byteLength(character, 'utf8');
+    if (byteLength + characterBytes > maxBytes) break;
+    bounded += character;
+    byteLength += characterBytes;
+  }
+  return bounded;
 }
 
 function receiptLabelName(label) {
@@ -60,21 +70,33 @@ function receiptLabelName(label) {
 }
 
 function sanitizeIssueReceipt(issue, validatedAt) {
-  const labels = (Array.isArray(issue && issue.labels) ? issue.labels : [])
+  const candidate = issue && typeof issue === 'object' ? issue : {};
+  const sourceLabels = Array.isArray(candidate.labels) ? candidate.labels : [];
+  const labels = sourceLabels
+    .slice(0, MAX_RECEIPT_LABELS)
     .map(receiptLabelName)
     .filter((label) => label !== null)
-    .slice(0, MAX_RECEIPT_LABELS)
-    .map((label) => boundedString(label, MAX_RECEIPT_LABEL_LENGTH));
-  return {
-    number: Number.isSafeInteger(issue && issue.number) && issue.number > 0
-      ? issue.number
+    .map((label) => boundedString(label, MAX_RECEIPT_LABEL_BYTES));
+  const receipt = {
+    number: Number.isSafeInteger(candidate.number) && candidate.number > 0
+      ? candidate.number
       : null,
-    node_id: boundedString(issue.node_id, MAX_RECEIPT_ID_LENGTH),
-    html_url: boundedString(issue.html_url, MAX_RECEIPT_ID_LENGTH),
-    state: boundedString(issue.state, 64),
+    node_id: boundedString(candidate.node_id, MAX_RECEIPT_ID_BYTES),
+    html_url: boundedString(candidate.html_url, MAX_RECEIPT_ID_BYTES),
+    state: boundedString(candidate.state, 64),
     labels,
-    validated_at: validatedAt,
+    label_count: sourceLabels.length,
+    labels_truncated: sourceLabels.length > labels.length,
+    validated_at: boundedString(validatedAt, 128),
   };
+  while (
+    receipt.labels.length > 0
+    && Buffer.byteLength(JSON.stringify(receipt), 'utf8') >= RECEIPT_BYTE_BUDGET
+  ) {
+    receipt.labels.pop();
+    receipt.labels_truncated = true;
+  }
+  return receipt;
 }
 
 function serializeVerdict(verdict) {
@@ -223,6 +245,23 @@ function createActionBroker({ ledger, gateway, clock, reconcileDelayMs = DEFAULT
         error: sanitizeError(error),
         nextReconcileAt: nextReconcileAt(),
         event: { phase: 'readback.unknown' },
+      });
+      return { status: 'unknown' };
+    }
+
+    if (!hasValidExternalIdentity(issue)) {
+      const readbackError = {
+        name: 'GatewayProtocolError',
+        kind: 'malformed',
+        message: 'getIssue returned a malformed external identity',
+      };
+      ledger.recordExecutionResult({
+        id: action.id,
+        attemptId,
+        status: 'unknown',
+        error: sanitizeError(readbackError),
+        nextReconcileAt: nextReconcileAt(),
+        event: { phase: 'readback.unknown', transportClass: 'ambiguous' },
       });
       return { status: 'unknown' };
     }
