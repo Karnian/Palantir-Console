@@ -30,34 +30,51 @@ function statusCodeOf(value) {
 
 function classifyCreateOutcome(behaviorOrError) {
   const value = behaviorOrError || {};
-  const kind = value.kind || value.code || null;
+  const typedKinds = new Set([
+    'ok',
+    'server_error',
+    'timeout',
+    'response_lost',
+    'malformed',
+    'not_found_repo',
+    'validation_error',
+    'rate_limited',
+    'abuse_denied',
+    'permission_denied',
+  ]);
+  const explicitKind = typedKinds.has(value.kind)
+    ? value.kind
+    : (value.kind == null && typedKinds.has(value.code) ? value.code : null);
   const statusCode = statusCodeOf(value);
 
-  if (kind === 'ok') {
+  if (explicitKind === 'ok') {
     return { transportClass: 'ok', issue: value.issue };
   }
   if (
-    kind === 'server_error'
-    || kind === 'timeout'
-    || kind === 'response_lost'
-    || kind === 'malformed'
+    explicitKind === 'server_error'
+    || explicitKind === 'timeout'
+    || explicitKind === 'response_lost'
+    || explicitKind === 'malformed'
   ) {
     return { transportClass: 'ambiguous' };
   }
-  if (kind === 'not_found_repo' || kind === 'validation_error') {
+  if (explicitKind === 'not_found_repo' || explicitKind === 'validation_error') {
     return { transportClass: 'permanent_no_effect' };
   }
-  if (kind === 'rate_limited' || kind === 'abuse_denied') {
+  if (explicitKind === 'rate_limited' || explicitKind === 'abuse_denied') {
     return { transportClass: 'rate_limited' };
   }
-  if (kind === 'permission_denied') {
+  if (explicitKind === 'permission_denied') {
     return { transportClass: 'permanent_no_effect' };
+  }
+  if (value.code != null && !typedKinds.has(value.code)) {
+    return { transportClass: 'ambiguous' };
   }
 
   // A successful fake response is the created issue itself. Unknown failures
   // are classified conservatively because liveness is safer to sacrifice than
   // issuing a duplicate POST.
-  if (kind === null && statusCode === null && value.number !== undefined) {
+  if (value.kind == null && value.code == null && statusCode === null && value.number !== undefined) {
     return { transportClass: 'ok', issue: value };
   }
   if (statusCode !== null && statusCode >= 500) return { transportClass: 'ambiguous' };
