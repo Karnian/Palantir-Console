@@ -924,3 +924,82 @@ test('P5-S4b: remote node + Claude preference spawns a remote Claude Operator (e
   assert.equal(thread.node_id, 'nodeA');
   assert.equal(thread.cwd, '/workspace/remote-claude');
 });
+
+test('review 1: local Claude Operator accepts active provider-only credentials', async (t) => {
+  const keys = {
+    PALANTIR_SKIP_HOST_CREDENTIALS: '1',
+    CLAUDE_CODE_USE_BEDROCK: '1',
+    AWS_REGION: 'ap-northeast-2',
+    AWS_SECRET_ACCESS_KEY: 'operator-provider-secret',
+    CLAUDE_CODE_OAUTH_TOKEN: undefined,
+    ANTHROPIC_API_KEY: undefined,
+  };
+  const previous = new Map();
+  for (const [key, value] of Object.entries(keys)) {
+    previous.set(key, Object.prototype.hasOwnProperty.call(process.env, key)
+      ? process.env[key]
+      : undefined);
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  t.after(() => {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  const db = await mkdb(t);
+  const runService = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const { createAgentProfileService } = require('../services/agentProfileService');
+  const { createEnvironmentProviderService } = require('../services/environmentProviderService');
+  const agentProfileService = createAgentProfileService(db);
+  const provider = createEnvironmentProviderService(db).createProvider({
+    name: 'operator-bedrock-auth',
+    env_keys: [
+      'CLAUDE_CODE_USE_BEDROCK',
+      'AWS_REGION',
+      'AWS_SECRET_ACCESS_KEY',
+    ],
+    gate_env_key: 'CLAUDE_CODE_USE_BEDROCK',
+  });
+  agentProfileService.updateProfile('claude-code', {
+    env_allowlist: JSON.stringify(['AWS_SECRET_ACCESS_KEY']),
+    environment_provider_ids: [provider.id],
+  });
+
+  const registry = createManagerRegistry({ runService });
+  const claudeAdapter = makeFakeManagerAdapter('claude-code');
+  const codexAdapter = makeFakeManagerAdapter('codex');
+  const spawn = createOperatorSpawnService({
+    runService,
+    managerRegistry: registry,
+    managerAdapterFactory: makeAdapterFactory({ claudeAdapter, codexAdapter }),
+    projectService,
+    projectBriefService,
+    agentProfileService,
+    authResolverOpts: {
+      hasKeychain: () => false,
+      hasCredentialsFile: () => false,
+    },
+  });
+  const project = projectService.createProject({
+    name: 'provider-only-operator',
+    preferred_pm_adapter: 'claude',
+  });
+  seedTop({
+    runService,
+    registry,
+    adapter: makeFakeManagerAdapter('claude-code'),
+  });
+
+  const result = spawn.ensureLiveOperator({ projectId: project.id });
+  assert.equal(result.spawned, true);
+  assert.equal(claudeAdapter._starts.length, 1);
+  const childEnv = claudeAdapter._starts[0].opts.env;
+  assert.equal(childEnv.CLAUDE_CODE_USE_BEDROCK, '1');
+  assert.equal(childEnv.AWS_REGION, 'ap-northeast-2');
+  assert.equal(childEnv.AWS_SECRET_ACCESS_KEY, 'operator-provider-secret');
+});

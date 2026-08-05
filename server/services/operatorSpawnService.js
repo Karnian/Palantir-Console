@@ -285,6 +285,9 @@ function createOperatorSpawnService({
   function resolveManagerProfileRuntime(adapterType, profiles, { isRemoteNode = false } = {}) {
     const managerProfile = profiles.find(p => p.type === adapterType) || null;
     let envAllowlist;
+    let providerEnv = [];
+    let allowDefaultAuth;
+    let blockedEnvKeys = [];
     let mcpTools = [];
     let tools = [];
     let disallowedTools = [];
@@ -342,7 +345,24 @@ function createOperatorSpawnService({
           else throw err;
         }
       }
-      if (managerProfile.env_allowlist) {
+      // #457: a declared environment provider supersedes the raw env_allowlist
+      // column — it is the same allowlist plus provenance (which provider
+      // approved which key) and the default-auth / blocked-key decisions. Fall
+      // back to the raw column only when the service predates the policy.
+      let policyResolved = false;
+      if (typeof agentProfileService?.resolveEnvPolicy === 'function') {
+        try {
+          const policy = agentProfileService.resolveEnvPolicy(managerProfile);
+          if (policy?.valid) {
+            envAllowlist = policy.effectiveKeys;
+            providerEnv = policy.providers;
+            allowDefaultAuth = policy.allowDefaultAuth;
+            blockedEnvKeys = policy.blockedKeys;
+            policyResolved = true;
+          }
+        } catch { /* fall through to the raw column */ }
+      }
+      if (!policyResolved && managerProfile.env_allowlist) {
         try {
           const parsed = JSON.parse(managerProfile.env_allowlist);
           if (Array.isArray(parsed)) envAllowlist = parsed;
@@ -360,6 +380,9 @@ function createOperatorSpawnService({
     }
     const authCtx = resolveManagerAuth(adapterType, {
       envAllowlist,
+      providerEnv,
+      allowDefaultAuth,
+      blockedEnvKeys,
       ...normalizedAuthResolverOpts,
       // A remote Claude Operator materializes `--bare` auth from the pod's
       // login store inside the executor. Do not read/materialize controller
@@ -370,6 +393,9 @@ function createOperatorSpawnService({
     return {
       adapterType,
       envAllowlist,
+      // #457: the declared providers behind this allowlist. buildManagerSpawnEnv
+      // needs them to pass the approved credential keys through to the child.
+      providerEnv,
       mcpTools,
       authCtx,
       tools,
@@ -639,6 +665,7 @@ function createOperatorSpawnService({
     // the same allowlist, bare flag and settings.
     const {
       envAllowlist,
+      providerEnv,
       mcpTools: pmMcpTools,
       authCtx,
       tools,
@@ -668,6 +695,7 @@ function createOperatorSpawnService({
       vendor: adapterType,
       scrubHumanToken: actorTokens.separated || goalFeatureActive(),
       diagnosticContext: 'manager:fresh:operator',
+      providerEnv,
     }));
     // A REMOTE Operator authenticates on the POD (its own ~/.codex), not the
     // control plane, and gets env:{} at runtime — so control-plane Codex auth is

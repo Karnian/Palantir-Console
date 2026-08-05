@@ -87,13 +87,32 @@ function resolveResumeAgentProfile(agentProfileService, { profileId, adapterType
   return profile;
 }
 
-function resolveResumeEnvAllowlist(agentProfileService, options = {}) {
+// #457: a declared environment provider supersedes the raw env_allowlist
+// column. The policy carries the same effective key set PLUS provenance and the
+// default-auth / blocked-key decisions the resolver needs, so boot resume must
+// read it rather than re-parsing the column.
+function resolveResumeEnvPolicy(agentProfileService, options = {}) {
   const profile = resolveResumeAgentProfile(agentProfileService, options);
-  if (!profile || !profile.env_allowlist) return undefined;
+  if (!profile) return undefined;
   try {
-    const parsed = JSON.parse(profile.env_allowlist);
+    if (typeof agentProfileService.resolveEnvPolicy === 'function') {
+      const policy = agentProfileService.resolveEnvPolicy(profile);
+      if (!policy.valid) throw new Error('env policy contains invalid JSON');
+      return {
+        envAllowlist: policy.effectiveKeys,
+        providers: policy.providers,
+        allowDefaultAuth: policy.allowDefaultAuth,
+        blockedEnvKeys: policy.blockedKeys,
+      };
+    }
+    const parsed = JSON.parse(profile.env_allowlist || '[]');
     if (!Array.isArray(parsed)) throw new Error('not an array');
-    return parsed;
+    return {
+      envAllowlist: parsed,
+      providers: [],
+      allowDefaultAuth: parsed.length === 0,
+      blockedEnvKeys: [],
+    };
   } catch (err) {
     console.warn(
       `[security] manager_env_allowlist_unreadable ${JSON.stringify({
@@ -104,6 +123,13 @@ function resolveResumeEnvAllowlist(agentProfileService, options = {}) {
     );
     return undefined;
   }
+}
+
+// The array form the rest of the resume path (and its regression test) expects.
+// A malformed allowlist degrades to undefined here exactly as before — the
+// policy resolver above already logged why.
+function resolveResumeEnvAllowlist(agentProfileService, options = {}) {
+  return resolveResumeEnvPolicy(agentProfileService, options)?.envAllowlist;
 }
 
 function resolveResumePermissionMode(agentProfileService, options = {}) {
@@ -259,10 +285,11 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
             buildManagerSystemPromptModule({ adapter, port, token: !!token, layer: 'top', adapterType, specialistAvailable: isSpecialistAvailable(), apiBaseUrl: promptApiEndpoints.local }),
             buildTopIdentitySection({ topRunId: r.id }), // MD-2a: resumed Top's own run id
           ].filter(Boolean).join('\n\n');
-          const envAllowlist = resolveResumeEnvAllowlist(agentProfileService, {
+          const envPolicy = resolveResumeEnvPolicy(agentProfileService, {
             profileId: r.agent_profile_id,
             adapterType,
           });
+          const envAllowlist = envPolicy?.envAllowlist;
           const permissionMode = resolveResumePermissionMode(agentProfileService, {
             profileId: r.agent_profile_id,
             adapterType,
@@ -275,6 +302,9 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
           });
           const authCtx = resolveManagerAuth(adapterType, {
             envAllowlist,
+            providerEnv: envPolicy?.providers,
+            allowDefaultAuth: envPolicy?.allowDefaultAuth,
+            blockedEnvKeys: envPolicy?.blockedEnvKeys,
             ...authResolverOpts,
             bare: templateOptions?.bare === true,
             settings: templateOptions?.settings,
@@ -286,6 +316,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
             vendor: adapterType,
             scrubHumanToken: actorTokens.separated,
             diagnosticContext: 'manager:resume:top',
+            providerEnv: envPolicy?.providers,
           });
           if (authCtx.canAuth) {
             const spawnEnv = applyManagerCredentialPolicy(
@@ -577,9 +608,10 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 // (P5-S4c) — resolve auth for the run's ACTUAL adapter, not a
                 // hardcoded 'codex' (a local Claude Operator would otherwise be
                 // stopped/misauthed via Codex auth). (Codex P5-S4c BLOCKER.)
-                const envAllowlist = resolveResumeEnvAllowlist(agentProfileService, {
+                const envPolicy = resolveResumeEnvPolicy(agentProfileService, {
                   adapterType,
                 });
+                const envAllowlist = envPolicy?.envAllowlist;
                 const permissionMode = resolveResumePermissionMode(agentProfileService, {
                   adapterType,
                   sessionPermissionMode: r.session_permission_mode,
@@ -593,6 +625,9 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 );
                 const authCtx = resolveManagerAuth(adapterType, {
                   envAllowlist,
+                  providerEnv: envPolicy?.providers,
+                  allowDefaultAuth: envPolicy?.allowDefaultAuth,
+                  blockedEnvKeys: envPolicy?.blockedEnvKeys,
                   ...authResolverOpts,
                   // Remote Claude resumes materialize `--bare` auth on the pod,
                   // not from the controller's credential stores.
@@ -606,6 +641,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                   vendor: adapterType,
                   scrubHumanToken: actorTokens.separated || goalActive,
                   diagnosticContext: 'manager:resume:operator',
+                  providerEnv: envPolicy?.providers,
                 });
                 // A REMOTE Operator authenticates on the pod (~/.codex), not the
                 // control plane — resume it even when control-plane Codex auth is
@@ -834,13 +870,31 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
     // Fail-closed on malformed env_allowlist: a user who hand-edits the row
     // and corrupts it must NOT silently re-enable all default credentials.
     let envAllowlist;
-    if (resolvedProfile && resolvedProfile.env_allowlist) {
+    let envPolicy;
+    if (resolvedProfile) {
       try {
-        const parsed = JSON.parse(resolvedProfile.env_allowlist);
-        if (!Array.isArray(parsed)) {
-          throw new Error('env_allowlist must be a JSON array');
+        if (
+          agentProfileService
+          && typeof agentProfileService.resolveEnvPolicy === 'function'
+        ) {
+          const policy = agentProfileService.resolveEnvPolicy(resolvedProfile);
+          if (!policy.valid) {
+            throw new Error('env policy contains invalid JSON');
+          }
+          envPolicy = policy;
+          envAllowlist = policy.effectiveKeys;
+        } else {
+          const parsed = JSON.parse(resolvedProfile.env_allowlist || '[]');
+          if (!Array.isArray(parsed)) {
+            throw new Error('env_allowlist must be a JSON array');
+          }
+          envAllowlist = parsed;
+          envPolicy = {
+            providers: [],
+            allowDefaultAuth: parsed.length === 0,
+            blockedKeys: [],
+          };
         }
-        envAllowlist = parsed;
       } catch (parseErr) {
         startingManager = false;
         return res.status(400).json({
@@ -855,8 +909,12 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       // fall through to the resolver's defaults.
       envAllowlist = undefined;
     }
+    const providerEnv = envPolicy?.providers || [];
     const authCtx = resolveManagerAuth(adapterType, {
       envAllowlist,
+      providerEnv,
+      allowDefaultAuth: envPolicy?.allowDefaultAuth,
+      blockedEnvKeys: envPolicy?.blockedKeys,
       ...authResolverOpts,
       bare: claudeTemplateOptions?.bare === true,
       settings: claudeTemplateOptions?.settings,
@@ -868,6 +926,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       vendor: adapterType,
       scrubHumanToken: actorTokens.separated,
       diagnosticContext: 'manager:fresh:top',
+      providerEnv,
     });
     if (!authCtx.canAuth) {
       startingManager = false;
