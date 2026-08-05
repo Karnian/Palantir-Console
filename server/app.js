@@ -24,6 +24,7 @@ const { createNodeSummaryService } = require('./services/nodeSummaryService');
 const { createNodeHeartbeatService } = require('./services/nodeHeartbeatService');
 const { createTaskService } = require('./services/taskService');
 const { createRunService } = require('./services/runService');
+const { createActionLedgerService } = require('./services/actionLedgerService');
 const { createAgentProfileService } = require('./services/agentProfileService');
 const { createSessionsRouter } = require('./routes/sessions');
 const { createTrashRouter } = require('./routes/trash');
@@ -33,6 +34,7 @@ const { createProjectsRouter } = require('./routes/projects');
 const { createNodesRouter } = require('./routes/nodes');
 const { createTasksRouter } = require('./routes/tasks');
 const { createRunsRouter } = require('./routes/runs');
+const { createActionsRouter } = require('./routes/actions');
 const { createAgentsRouter } = require('./routes/agents');
 const { createEventsRouter } = require('./routes/events');
 const { createAgentContextRouter } = require('./routes/agentContext');
@@ -1252,6 +1254,7 @@ function createApp(options = {}) {
     validatePresetId: (id) => presetService.getPreset(id),
   });
   const runService = createRunService(db, eventBus);
+  const actionLedger = createActionLedgerService(db);
   const resolveOperatorConversationId = createOperatorConversationIdResolver(db);
   const agentProfileService = createAgentProfileService(db);
   const nodeSummaryService = options.nodeSummaryService || createNodeSummaryService({
@@ -1873,6 +1876,7 @@ function createApp(options = {}) {
   }));
   app.use('/api/tasks', createTasksRouter({ taskService, lifecycleService, presetService, goalDeliveryService, runService, verifyCheckService }));
   app.use('/api/runs', createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService, presetService, mcpTemplateService, projectService, taskService, nodeExecutor, nodeService }));
+  app.use('/api/actions', createActionsRouter({ ledger: actionLedger }));
   // PR18: tests can pass options.authResolverOpts (e.g. a fake `hasKeychain`)
   // so /api/agents and /api/manager preflights are deterministic across CI
   // hosts that may or may not have a Claude keychain item. Production callers
