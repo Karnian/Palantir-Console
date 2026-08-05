@@ -23,10 +23,38 @@ const ACTION_STATUSES = new Set([
   'conflict',
 ]);
 
-const SENSITIVE_KEY = /(?:^|[_-])(?:authorization|cookie|password|passphrase|secret|token|api[_-]?key|private[_-]?key)(?:$|[_-])/i;
+const SENSITIVE_KEY_MARKERS = new Set([
+  'secret',
+  'token',
+  'password',
+  'passwd',
+  'passphrase',
+  'credential',
+  'authorization',
+  'auth',
+  'apikey',
+  'accesskey',
+  'accesskeyid',
+  'secretkey',
+  'privatekey',
+  'clientsecret',
+  'sessionkey',
+  'sessiontoken',
+  'bearer',
+  'cookie',
+  'signature',
+]);
 const OPAQUE_SECRET = /^(?=.{24,}$)(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9+/=_-]+$/;
 const MAX_SUMMARY_DEPTH = 4;
 const MAX_SUMMARY_ITEMS = 24;
+
+function isSensitiveKey(key) {
+  const normalized = String(key).toLowerCase().replace(/[_-]/g, '');
+  for (const marker of SENSITIVE_KEY_MARKERS) {
+    if (normalized.includes(marker)) return true;
+  }
+  return false;
+}
 
 function redactString(value, { opaque = false } = {}) {
   let text = sanitizeMessage(value);
@@ -34,8 +62,13 @@ function redactString(value, { opaque = false } = {}) {
     .replace(/\bgithub_pat_[A-Za-z0-9_]+\b/gi, '[redacted]')
     .replace(/\bgh[pousr]_[A-Za-z0-9_]+\b/g, '[redacted]')
     .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[redacted]')
+    .replace(/\b(?:AKIA|ASIA|AGPA|AIDA|AROA)[0-9A-Z]{12,}\b/g, '[redacted]')
+    // Marked free-text secrets are redacted through the end of the sanitized
+    // value, including whitespace-bearing passphrases. Arbitrary prose secrets
+    // with no marker remain best-effort; actionBroker sanitizeError is the
+    // primary gate for those values.
     .replace(
-      /(["']?(?:token|secret|password|passphrase|api[_-]?key)["']?\s*[:=]\s*["']?)[^"'\s,;}]+/gi,
+      /(["']?(?:password|passwd|passphrase|secret|token|api(?:[ _-]?key)|credentials?|bearer)["']?\s*[:=]\s*).*/i,
       '$1[redacted]',
     )
     .replace(/\b(?:token|secret)[-_:][A-Za-z0-9._~+/-]{4,}\b/gi, '[redacted]');
@@ -43,8 +76,8 @@ function redactString(value, { opaque = false } = {}) {
 }
 
 function redactValue(value, key = '', depth = 0) {
+  if (isSensitiveKey(key)) return '[redacted]';
   if (value === null || value === undefined) return null;
-  if (SENSITIVE_KEY.test(key)) return '[redacted]';
   if (typeof value === 'string') return redactString(value, { opaque: true });
   if (typeof value === 'number' || typeof value === 'boolean') return value;
   if (depth >= MAX_SUMMARY_DEPTH) return '[truncated]';

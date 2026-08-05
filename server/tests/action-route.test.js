@@ -10,6 +10,9 @@ const { createActionsRouter } = require('../routes/actions');
 const { errorHandler } = require('../middleware/errorHandler');
 
 const SECRET = 'route-secret-token-123456';
+const CLIENT_SECRET = 'mauve canoe orbit lantern';
+const AWS_ACCESS_KEY_ID = 'AKIAIOSFODNN7EXAMPLE';
+const PASSPHRASE = 'correct horse battery staple';
 const RAW_ACTIONS = [
   {
     id: 'action-old',
@@ -81,11 +84,19 @@ const EVENTS = {
       ts: '2026-08-05T00:01:30.000Z',
       receipt_json: JSON.stringify({
         ok: true,
+        state: 'accepted',
         html_url: 'https://github.example/acme/widgets/issues/42',
         authorization: 'Bearer ' + SECRET,
-        nested: { secret: SECRET },
+        nested: {
+          provider: {
+            clientSecret: CLIENT_SECRET,
+            credentials: {
+              accessKeyId: AWS_ACCESS_KEY_ID,
+            },
+          },
+        },
       }),
-      error: 'token=' + SECRET,
+      error: 'provider rejected passphrase: ' + PASSPHRASE,
     },
   ],
 };
@@ -207,9 +218,18 @@ test('GET /api/actions/:id returns projected evidence and redacts every raw secr
   assert.equal(response.body.events.length, 1);
   assert.equal(response.body.events[0].phase, 'execution.result');
   assert.equal(response.body.events[0].receipt.ok, true);
+  assert.equal(response.body.events[0].receipt.state, 'accepted');
   assert.equal(response.body.events[0].receipt.authorization, '[redacted]');
-  assert.equal(response.body.events[0].receipt.nested.secret, '[redacted]');
-  assert.match(response.body.events[0].error, /\[redacted\]/);
+  // MUTATION: removing normalized key-based redaction leaks camelCase
+  // clientSecret and makes credentials/accessKeyId depend on value heuristics.
+  assert.equal(response.body.events[0].receipt.nested.provider.clientSecret, '[redacted]');
+  assert.equal(response.body.events[0].receipt.nested.provider.credentials, '[redacted]');
+  assert.equal(JSON.stringify(response.body).includes(CLIENT_SECRET), false);
+  assert.equal(JSON.stringify(response.body).includes(AWS_ACCESS_KEY_ID), false);
+  // MUTATION: reverting marker redaction to stop at the first space leaks the
+  // remaining passphrase words ("horse battery staple").
+  assert.equal(response.body.events[0].error, 'provider rejected passphrase: [redacted]');
+  assert.equal(response.body.events[0].error.includes('horse battery staple'), false);
   assert.equal(JSON.stringify(response.body).includes(SECRET), false);
   assert.equal(JSON.stringify(response.body).includes('private body'), false);
 
