@@ -189,6 +189,30 @@ test('orphan recovery releases only expired active leases to unknown, never queu
   assert.equal(ledger.listActions().some((action) => action.status === 'queued'), false);
 });
 
+test('orphan recovery expires a lease at the exact TTL boundary', (t) => {
+  const { db, ledger } = setup(t);
+  const exact = declareApproved(ledger, 'lease-exact');
+  const younger = declareApproved(ledger, 'lease-younger');
+  db.prepare(`
+    UPDATE actions
+    SET status = 'executing', active_attempt_id = ?, claimed_at = ?
+    WHERE id = ?
+  `).run('exact-attempt', START, exact.id);
+  db.prepare(`
+    UPDATE actions
+    SET status = 'executing', active_attempt_id = ?, claimed_at = ?
+    WHERE id = ?
+  `).run('younger-attempt', '2026-08-05T00:00:01.000Z', younger.id);
+
+  // MUTATION: strict > leaves an exactly-expired lease stuck in executing.
+  assert.equal(ledger.recoverOrphans({
+    leaseTtlMs: 60 * 60 * 1000,
+    now: '2026-08-05T01:00:00.000Z',
+  }), 1);
+  assert.equal(ledger.getAction(exact.id).status, 'unknown');
+  assert.equal(ledger.getAction(younger.id).status, 'executing');
+});
+
 test('reconcile classifies valid, partial, conflicting, empty, invalid, and fault outcomes read-only', async (t) => {
   const { ledger, clock } = setup(t);
   const scenarios = [
@@ -240,6 +264,38 @@ test('reconcile classifies valid, partial, conflicting, empty, invalid, and faul
   assert.equal(fault.row.next_reconcile_at, '2026-08-05T00:01:00.000Z');
   assert.equal(faultGateway.getPostCount(), 0);
   assert.equal(faultGateway.getSearchCount(), 1);
+});
+
+test('an ambiguous marker candidate prevents a valid sibling from succeeding', async (t) => {
+  const { ledger, clock } = setup(t);
+  const action = makeUnknown(ledger, 'ambiguous-with-valid');
+  const firstCandidate = matchingIssue(action, { number: 21 });
+  const validCandidate = matchingIssue(action, { number: 22 });
+  const gateway = createFakeGithubGateway({
+    issues: [firstCandidate, validCandidate],
+    getIssue: [
+      { kind: 'ok', issue: { ...firstCandidate, node_id: null } },
+      { kind: 'ok', issue: validCandidate },
+    ],
+  });
+
+  // MUTATION: silently dropping an ambiguous candidate lets a sibling be
+  // recorded succeeded despite an unresolved marker match.
+  const malformed = await reconcile(ledger, clock, action, gateway);
+  assert.equal(malformed.row.status, 'unknown');
+  assert.equal(malformed.row.next_reconcile_at, '2026-08-05T00:01:00.000Z');
+  assert.equal(gateway.getPostCount(), 0);
+  assert.equal(gateway.getGetCount(), 2);
+
+  const mismatchedAction = makeUnknown(ledger, 'ambiguous-mismatch');
+  const mismatchGateway = createFakeGithubGateway({
+    issues: [matchingIssue(mismatchedAction, { title: 'mismatched title' })],
+  });
+  // MUTATION: dropping a validateReadback unknown candidate erases a marker match.
+  const mismatched = await reconcile(ledger, clock, mismatchedAction, mismatchGateway);
+  assert.equal(mismatched.row.status, 'unknown');
+  assert.equal(mismatched.row.next_reconcile_at, '2026-08-05T00:01:00.000Z');
+  assert.equal(mismatchGateway.getPostCount(), 0);
 });
 
 test('candidate GET faults keep reconcile unknown and read-only', async (t) => {
@@ -378,4 +434,31 @@ test('driveReconciliation recovers orphans then reconciles every eligible unknow
   assert.equal(ledger.getAction(future.id).status, 'unknown');
   assert.equal(gateway.getPostCount(), 0);
   assert.equal(gateway.getSearchCount(), 2);
+});
+
+test('driveReconciliation processes a rescheduled row at most once per pass', async (t) => {
+  const { ledger, clock, setTime } = setup(t);
+  const action = makeUnknown(ledger, 'drive-no-spin');
+  const gateway = createFakeGithubGateway();
+  const broker = createActionBroker({ ledger, gateway, clock });
+
+  // MUTATION: re-scanning eligibility mid-pass re-processes a row it just rescheduled.
+  const first = await broker.driveReconciliation({
+    leaseTtlMs: 60 * 60 * 1000,
+    now: START,
+  });
+  assert.equal(first.claimed, 1);
+  assert.equal(first.outcomes.unknown, 1);
+  assert.equal(gateway.getSearchCount(), 1);
+  assert.equal(ledger.getAction(action.id).next_reconcile_at, '2026-08-05T00:01:00.000Z');
+
+  setTime('2026-08-05T00:01:00.000Z');
+  const second = await broker.driveReconciliation({
+    leaseTtlMs: 60 * 60 * 1000,
+    now: '2026-08-05T00:01:00.000Z',
+  });
+  assert.equal(second.claimed, 1);
+  assert.equal(second.outcomes.unknown, 1);
+  assert.equal(gateway.getSearchCount(), 2);
+  assert.equal(gateway.getPostCount(), 0);
 });

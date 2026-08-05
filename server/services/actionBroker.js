@@ -9,7 +9,6 @@ const {
 } = require('./actionReadback');
 
 const DEFAULT_RECONCILE_DELAY_MS = 60_000;
-const MAX_RECONCILIATIONS_PER_DRIVE = 1_000;
 const SENSITIVE_KEY = /^(?:authorization|token|access[_-]?token|credential|credentials|password|secret|api[_-]?key)$/i;
 const MAX_RECEIPT_LABELS = 100;
 const MAX_RECEIPT_LABEL_BYTES = 256;
@@ -122,14 +121,10 @@ function createActionBroker({
   gateway,
   clock,
   reconcileDelayMs = DEFAULT_RECONCILE_DELAY_MS,
-  maxReconciliationsPerDrive = MAX_RECONCILIATIONS_PER_DRIVE,
 }) {
   const effectiveClock = clock || ledger.clock;
   if (typeof effectiveClock !== 'function') {
     throw new TypeError('action broker requires a clock or a ledger with an exposed clock');
-  }
-  if (!Number.isSafeInteger(maxReconciliationsPerDrive) || maxReconciliationsPerDrive <= 0) {
-    throw new TypeError('maxReconciliationsPerDrive must be a positive integer');
   }
 
   function nowMilliseconds() {
@@ -372,6 +367,7 @@ function createActionBroker({
     }
 
     const validMatches = [];
+    let sawAmbiguousCandidate = false;
     for (const candidate of candidates) {
       let issue;
       try {
@@ -388,10 +384,15 @@ function createActionBroker({
           event: { phase: 'reconcile.unknown', transportClass: 'ambiguous' },
         });
       }
-      if (!hasValidExternalIdentity(issue)) continue;
+      if (!hasValidExternalIdentity(issue)) {
+        sawAmbiguousCandidate = true;
+        continue;
+      }
       const verdict = validateReadback({ issue, expected });
       if (verdict.status === 'succeeded' || verdict.status === 'partially_applied') {
         validMatches.push({ issue, verdict });
+      } else {
+        sawAmbiguousCandidate = true;
       }
     }
 
@@ -403,6 +404,12 @@ function createActionBroker({
           reason: 'ambiguous_candidates',
           candidateCount: validMatches.length,
         },
+      });
+    }
+    if (sawAmbiguousCandidate) {
+      return persistResult({
+        status: 'unknown',
+        verdict: { status: 'unknown', reason: 'ambiguous_candidate' },
       });
     }
     if (validMatches.length === 1) {
@@ -440,21 +447,15 @@ function createActionBroker({
       },
     };
 
-    while (summary.claimed < maxReconciliationsPerDrive) {
-      let claimed = null;
-      for (const candidate of ledger.listActions()) {
-        if (candidate.status !== 'unknown') continue;
-        const attemptId = ledger.claimForReconcile(candidate.id, { now: driveNow });
-        if (attemptId === null) continue;
-        claimed = {
-          action: ledger.getAction(candidate.id),
-          attemptId,
-        };
-        break;
-      }
-      if (claimed === null) break;
+    const eligibleIds = ledger.listReconcilableActionIds({ now: driveNow });
+    for (const id of eligibleIds) {
+      const attemptId = ledger.claimForReconcile(id, { now: driveNow });
+      if (attemptId === null) continue;
       summary.claimed += 1;
-      const outcome = await reconcileClaimedAction(claimed);
+      const outcome = await reconcileClaimedAction({
+        action: ledger.getAction(id),
+        attemptId,
+      });
       if (Object.hasOwn(summary.outcomes, outcome.status)) {
         summary.outcomes[outcome.status] += 1;
       }
@@ -471,7 +472,6 @@ function createActionBroker({
 
 module.exports = {
   DEFAULT_RECONCILE_DELAY_MS,
-  MAX_RECONCILIATIONS_PER_DRIVE,
   createActionBroker,
   hasValidExternalIdentity,
   sanitizeIssueReceipt,

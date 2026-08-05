@@ -246,6 +246,15 @@ function createActionLedgerService(db, options = {}) {
     getAction: db.prepare('SELECT * FROM actions WHERE id = ?'),
     getByIntent: db.prepare('SELECT * FROM actions WHERE task_id = ? AND action_slot = ?'),
     listActions: db.prepare('SELECT * FROM actions ORDER BY created_at, rowid'),
+    listReconcilableActionIds: db.prepare(`
+      SELECT id FROM actions
+      WHERE status = 'unknown'
+        AND (
+          next_reconcile_at IS NULL
+          OR julianday(next_reconcile_at) <= julianday(@now)
+        )
+      ORDER BY created_at, rowid
+    `),
     listEvents: db.prepare('SELECT * FROM action_events WHERE action_id = ? ORDER BY id'),
     insertAction: db.prepare(`
       INSERT INTO actions (
@@ -358,7 +367,9 @@ function createActionLedgerService(db, options = {}) {
     orphanCandidates: db.prepare(`
       SELECT * FROM actions
       WHERE status IN ('executing', 'reconciling', 'repairing')
-        AND julianday(@now) - julianday(claimed_at) > @lease_ttl_days
+        AND ROUND(
+          (julianday(@now) - julianday(claimed_at)) * 86400000
+        ) >= @lease_ttl_ms
       ORDER BY claimed_at, rowid
     `),
     recoverOrphan: db.prepare(`
@@ -371,7 +382,9 @@ function createActionLedgerService(db, options = {}) {
         AND status = @status
         AND active_attempt_id = @attempt_id
         AND claimed_at = @claimed_at
-        AND julianday(@now) - julianday(claimed_at) > @lease_ttl_days
+        AND ROUND(
+          (julianday(@now) - julianday(claimed_at)) * 86400000
+        ) >= @lease_ttl_ms
     `),
   };
 
@@ -719,10 +732,9 @@ function createActionLedgerService(db, options = {}) {
       throw new BadRequestError('leaseTtlMs must be a non-negative number');
     }
     const recoveredAt = input.now === undefined ? nowIso() : timestamp(input.now, 'now');
-    const leaseTtlDays = leaseTtlMs / 86_400_000;
     const candidates = stmts.orphanCandidates.all({
       now: recoveredAt,
-      lease_ttl_days: leaseTtlDays,
+      lease_ttl_ms: leaseTtlMs,
     });
     let count = 0;
     for (const row of candidates) {
@@ -732,7 +744,7 @@ function createActionLedgerService(db, options = {}) {
         attempt_id: row.active_attempt_id,
         claimed_at: row.claimed_at,
         now: recoveredAt,
-        lease_ttl_days: leaseTtlDays,
+        lease_ttl_ms: leaseTtlMs,
       });
       if (info.changes !== 1) continue;
       insertEvent(row.id, {
@@ -762,6 +774,10 @@ function createActionLedgerService(db, options = {}) {
     getAction: (id) => stmts.getAction.get(id) || null,
     getActionByIntent: (taskId, actionSlot) => stmts.getByIntent.get(taskId, actionSlot) || null,
     listActions: () => stmts.listActions.all(),
+    listReconcilableActionIds: (input = {}) => {
+      const asOf = input.now === undefined ? nowIso() : timestamp(input.now, 'now');
+      return stmts.listReconcilableActionIds.all({ now: asOf }).map((row) => row.id);
+    },
     listEvents: (actionId) => stmts.listEvents.all(actionId),
   };
 }
