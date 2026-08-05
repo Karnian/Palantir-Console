@@ -70,6 +70,10 @@ function redactString(value, { opaque = false, longRuns = false } = {}) {
   // Structured receipt/verdict data avoids that class via allowlist projection.
   let text = String(value ?? '');
   text = text
+    .replace(
+      /\b(Basic|Bearer|Digest|Negotiate|Token)\s+[A-Za-z0-9+/=_.-]{8,}/gi,
+      '$1 [redacted]',
+    )
     .replace(/\bgithub_pat_[A-Za-z0-9_]+\b/gi, '[redacted]')
     .replace(/\bgh[pousr]_[A-Za-z0-9_]+\b/g, '[redacted]')
     .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[redacted]')
@@ -95,7 +99,7 @@ function redactValue(value, key = '', depth = 0) {
   if (isSensitiveKey(key)) return '[redacted]';
   if (value === null || value === undefined) return null;
   if (typeof value === 'string') {
-    return redactString(value, { opaque: true, longRuns: true });
+    return redactString(value);
   }
   if (typeof value === 'number' || typeof value === 'boolean') return value;
   if (depth >= MAX_SUMMARY_DEPTH) return '[truncated]';
@@ -125,7 +129,7 @@ function parsePlainJsonObject(value) {
   }
 }
 
-function projectReceipt(value) {
+function projectReceiptWithFields(value, { includeEventEvidence = false } = {}) {
   const source = parsePlainJsonObject(value);
   if (!source) return null;
   const receipt = {};
@@ -144,8 +148,43 @@ function projectReceipt(value) {
   if (typeof source.labels_truncated === 'boolean') {
     receipt.labels_truncated = source.labels_truncated;
   }
+  if (includeEventEvidence) {
+    for (const key of [
+      'approved_at',
+      'approved_by',
+      'approval_auth_method',
+      'approved_params_hash',
+      'approval_policy_version',
+      'approval_expires_at',
+      'status',
+      'reason',
+      'orphaned_status',
+    ]) {
+      if (typeof source[key] === 'string') receipt[key] = source[key];
+    }
+    if (
+      Array.isArray(source.missingLabels)
+      && source.missingLabels.every((label) => typeof label === 'string')
+    ) {
+      receipt.missingLabels = source.missingLabels;
+    }
+    if (typeof source.rate_limited === 'boolean') {
+      receipt.rate_limited = source.rate_limited;
+    }
+    for (const key of ['candidateCount', 'candidate_count', 'repair_attempts']) {
+      if (Number.isSafeInteger(source[key])) receipt[key] = source[key];
+    }
+  }
 
   return redactValue(receipt);
+}
+
+function projectReceipt(value) {
+  return projectReceiptWithFields(value);
+}
+
+function projectEventReceipt(value) {
+  return projectReceiptWithFields(value, { includeEventEvidence: true });
 }
 
 function projectVerdict(value) {
@@ -195,6 +234,16 @@ function nullableString(value) {
   return value === null || value === undefined ? null : redactString(String(value));
 }
 
+function credentialIdentifier(value) {
+  if (value === null || value === undefined) return null;
+  // External identifiers are opaque by nature, so generic long-base64/hex
+  // detection would destroy valid evidence (notably GitHub node IDs). Known
+  // credential formats are still removed and the result is capped. A raw
+  // high-entropy ID with no recognizable credential format is an accepted,
+  // bounded residual.
+  return redactString(String(value));
+}
+
 function projectAction(row) {
   return {
     id: nullableString(row.id),
@@ -208,8 +257,8 @@ function projectAction(row) {
     approved_by: nullableString(row.approved_by),
     approval_auth_method: nullableString(row.approval_auth_method),
     approval_expires_at: nullableString(row.approval_expires_at),
-    external_id: nullableString(row.external_id),
-    external_node_id: nullableString(row.external_node_id),
+    external_id: credentialIdentifier(row.external_id),
+    external_node_id: credentialIdentifier(row.external_node_id),
     receipt: projectReceipt(row.receipt_json),
     error: redactError(row.last_error),
     verdict: projectVerdict(row.verdict),
@@ -228,10 +277,10 @@ function projectEvent(row) {
     attempt_id: nullableString(row.attempt_id),
     transport_class: nullableString(row.transport_class),
     request_digest: nullableString(row.request_digest),
-    external_request_id: nullableString(row.external_request_id),
-    candidate_external_id: nullableString(row.candidate_external_id),
+    external_request_id: credentialIdentifier(row.external_request_id),
+    candidate_external_id: credentialIdentifier(row.candidate_external_id),
     ts: nullableString(row.ts),
-    receipt: projectReceipt(row.receipt_json),
+    receipt: projectEventReceipt(row.receipt_json),
     error: redactError(row.error),
   };
 }
@@ -268,6 +317,7 @@ module.exports = {
   createActionsRouter,
   projectAction,
   projectEvent,
+  projectEventReceipt,
   projectReceipt,
   projectVerdict,
 };

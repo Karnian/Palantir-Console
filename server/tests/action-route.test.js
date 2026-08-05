@@ -12,17 +12,20 @@ const { errorHandler } = require('../middleware/errorHandler');
 const SECRET = 'route-secret-token-123456';
 const CLIENT_SECRET = 'mauve canoe orbit lantern';
 const AWS_ACCESS_KEY_ID = 'AKIAIOSFODNN7EXAMPLE';
+const GITHUB_TOKEN = 'github_pat_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456';
+const BARE_BEARER_VALUE = 'abcdefgh12345678';
+const REAL_NODE_ID = 'MDU6SXNzdWUxMjM0NTY3';
+const APPROVED_PARAMS_HASH = 'c'.repeat(64);
 const BASE64_NO_DIGIT = 'A'.repeat(64);
 const ARBITRARY_BLOB = 'unclassified payload that must stay server-side';
 const BASIC_AUTH_VALUE = 'dXNlcjpwYXNz';
 const PRIVATE_KEY_VALUE = 'alpine river violet telescope';
 const COOKIE_VALUE = 'session material with spaces';
-const ACTION_COOKIE_VALUE = 'action session material';
 const LONG_OPAQUE_VALUE = 'A1'.repeat(100);
 const LONG_ERROR_PREFIX = 'context '.repeat(18);
 const RECEIPT_FIXTURE = {
   number: 42,
-  node_id: 'NODE_42',
+  node_id: REAL_NODE_ID,
   html_url: 'https://github.example/acme/widgets/issues/42',
   state: 'accepted',
   labels: ['P1', 'ops'],
@@ -47,8 +50,8 @@ const RAW_ACTIONS = [
     approved_by: 'author',
     approval_auth_method: 'cookie',
     approval_expires_at: '2026-08-05T01:00:00.000Z',
-    external_id: '42',
-    external_node_id: 'NODE_42',
+    external_id: GITHUB_TOKEN,
+    external_node_id: REAL_NODE_ID,
     verdict: JSON.stringify({
       status: 'verified',
       reason: 'receipt matched',
@@ -69,7 +72,7 @@ const RAW_ACTIONS = [
       body: 'private body with ' + SECRET,
       labels: ['P1', 'ops'],
     }),
-    last_error: 'cookie: ' + ACTION_COOKIE_VALUE,
+    last_error: 'Bearer ' + BARE_BEARER_VALUE,
     receipt_json: JSON.stringify(RECEIPT_FIXTURE),
   },
   {
@@ -110,7 +113,7 @@ const EVENTS = {
       transport_class: 'response',
       request_digest: 'a'.repeat(64),
       external_request_id: 'request-1',
-      candidate_external_id: 'NODE_42',
+      candidate_external_id: REAL_NODE_ID,
       ts: '2026-08-05T00:01:30.000Z',
       receipt_json: JSON.stringify(RECEIPT_FIXTURE),
       error: [
@@ -127,10 +130,66 @@ const EVENTS = {
       transport_class: 'response',
       request_digest: 'b'.repeat(64),
       external_request_id: 'request-2',
-      candidate_external_id: null,
+      candidate_external_id: AWS_ACCESS_KEY_ID,
       ts: '2026-08-05T00:01:45.000Z',
       receipt_json: JSON.stringify(['not', 'an', 'object']),
       error: LONG_ERROR_PREFIX + '{"long_data":"' + LONG_OPAQUE_VALUE + '"}',
+    },
+    {
+      id: 3,
+      action_id: 'action-old',
+      phase: 'approval.queued',
+      attempt_id: null,
+      transport_class: null,
+      request_digest: APPROVED_PARAMS_HASH,
+      external_request_id: null,
+      candidate_external_id: null,
+      ts: '2026-08-05T00:02:00.000Z',
+      receipt_json: JSON.stringify({
+        approved_at: '2026-08-05T00:02:00.000Z',
+        approved_by: 'author',
+        approval_auth_method: 'cookie',
+        approved_params_hash: APPROVED_PARAMS_HASH,
+        approval_policy_version: 'policy-v1',
+        approval_expires_at: '2026-08-05T01:02:00.000Z',
+        clientSecret: CLIENT_SECRET,
+      }),
+      error: 'Basic ' + BASIC_AUTH_VALUE,
+    },
+    {
+      id: 4,
+      action_id: 'action-old',
+      phase: 'repair.blocked',
+      attempt_id: 'attempt-3',
+      transport_class: 'permanent_no_effect',
+      request_digest: APPROVED_PARAMS_HASH,
+      external_request_id: null,
+      candidate_external_id: REAL_NODE_ID,
+      ts: '2026-08-05T00:03:00.000Z',
+      receipt_json: JSON.stringify({
+        status: 'repair_blocked',
+        reason: 'max_attempts',
+        missingLabels: ['docs'],
+        rate_limited: false,
+        candidateCount: 1,
+        candidate_count: 1,
+        repair_attempts: 2,
+        arbitraryBlob: ARBITRARY_BLOB,
+      }),
+      error: 'Bearer ' + BARE_BEARER_VALUE,
+    },
+    {
+      id: 5,
+      action_id: 'action-old',
+      phase: 'orphan.recovered',
+      attempt_id: 'attempt-orphan',
+      transport_class: null,
+      request_digest: APPROVED_PARAMS_HASH,
+      external_request_id: null,
+      candidate_external_id: REAL_NODE_ID,
+      ts: '2026-08-05T00:04:00.000Z',
+      receipt_json: JSON.stringify({ orphaned_status: 'repairing' }),
+      error: null,
     },
   ],
 };
@@ -229,11 +288,12 @@ test('GET /api/actions projects newest-first actions and filters by validated st
     label_count: 2,
   });
   assert.equal(all.body.actions[1].approved_by, 'author');
-  assert.equal(all.body.actions[1].external_node_id, 'NODE_42');
+  assert.equal(all.body.actions[1].external_id, '[redacted]');
+  assert.equal(all.body.actions[1].external_node_id, REAL_NODE_ID);
   assert.equal(all.body.actions[1].repair_attempts, 0);
   assert.equal(all.body.actions[1].receipt.number, 42);
   assert.equal(all.body.actions[1].verdict.status, 'verified');
-  assert.equal(all.body.actions[1].error, 'cookie: [redacted]');
+  assert.equal(all.body.actions[1].error, 'Bearer [redacted]');
   assert.equal('params_json' in all.body.actions[1], false);
   assert.equal('last_error' in all.body.actions[1], false);
   assert.equal('receipt_json' in all.body.actions[1], false);
@@ -253,7 +313,10 @@ test('GET /api/actions/:id returns projected evidence and redacts every raw secr
   assert.equal(response.status, 200);
   assert.equal(response.body.action.id, 'action-old');
   assert.equal(response.body.action.approved_by, 'author');
-  assert.equal(response.body.action.external_id, '42');
+  // MUTATION: applying generic long-run detection to opaque IDs would hide a
+  // legitimate GitHub node ID, while skipping credential formats leaks tokens.
+  assert.equal(response.body.action.external_id, '[redacted]');
+  assert.equal(response.body.action.external_node_id, REAL_NODE_ID);
   assert.equal(response.body.action.status, 'succeeded');
   assert.equal(response.body.action.params_summary.repo, 'acme/widgets');
   assert.equal(response.body.action.params_summary.title, 'Ship observability');
@@ -265,12 +328,13 @@ test('GET /api/actions/:id returns projected evidence and redacts every raw secr
     candidateCount: 2,
     candidate_count: 2,
   });
-  assert.equal(response.body.action.error, 'cookie: [redacted]');
-  assert.equal(response.body.events.length, 2);
+  assert.equal(response.body.action.error, 'Bearer [redacted]');
+  assert.equal(response.body.events.length, 5);
   assert.equal(response.body.events[0].phase, 'execution.result');
+  assert.equal(response.body.events[0].candidate_external_id, REAL_NODE_ID);
   assert.deepEqual(response.body.events[0].receipt, {
     number: 42,
-    node_id: 'NODE_42',
+    node_id: REAL_NODE_ID,
     html_url: 'https://github.example/acme/widgets/issues/42',
     state: 'accepted',
     labels: ['P1', 'ops'],
@@ -279,7 +343,30 @@ test('GET /api/actions/:id returns projected evidence and redacts every raw secr
     validated_at: '2026-08-05T00:01:30.000Z',
   });
   assert.equal(response.body.events[1].phase, 'transport.error');
+  assert.equal(response.body.events[1].candidate_external_id, '[redacted]');
   assert.equal(response.body.events[1].receipt, null);
+  // MUTATION: narrowing event receipts to issue-only keys destroys approval
+  // provenance and repair evidence in the append-only timeline.
+  assert.deepEqual(response.body.events[2].receipt, {
+    approved_at: '2026-08-05T00:02:00.000Z',
+    approved_by: 'author',
+    approval_auth_method: 'cookie',
+    approved_params_hash: APPROVED_PARAMS_HASH,
+    approval_policy_version: 'policy-v1',
+    approval_expires_at: '2026-08-05T01:02:00.000Z',
+  });
+  assert.deepEqual(response.body.events[3].receipt, {
+    status: 'repair_blocked',
+    reason: 'max_attempts',
+    missingLabels: ['docs'],
+    rate_limited: false,
+    candidateCount: 1,
+    candidate_count: 1,
+    repair_attempts: 2,
+  });
+  assert.deepEqual(response.body.events[4].receipt, {
+    orphaned_status: 'repairing',
+  });
 
   const serialized = JSON.stringify(response.body);
   // MUTATION: projecting receipt/verdict as raw objects instead of allowlists
@@ -287,6 +374,7 @@ test('GET /api/actions/:id returns projected evidence and redacts every raw secr
   for (const leaked of [
     CLIENT_SECRET,
     AWS_ACCESS_KEY_ID,
+    GITHUB_TOKEN,
     BASE64_NO_DIGIT,
     ARBITRARY_BLOB,
   ]) {
@@ -306,6 +394,11 @@ test('GET /api/actions/:id returns projected evidence and redacts every raw secr
   for (const leaked of [BASIC_AUTH_VALUE, PRIVATE_KEY_VALUE, COOKIE_VALUE]) {
     assert.equal(serialized.includes(leaked), false);
   }
+  // MUTATION: removing bare auth-scheme redaction leaks Basic/Bearer payloads
+  // that have no marker ':' or '=' delimiter.
+  assert.equal(response.body.events[2].error, 'Basic [redacted]');
+  assert.equal(response.body.events[3].error, 'Bearer [redacted]');
+  assert.equal(serialized.includes(BARE_BEARER_VALUE), false);
 
   // MUTATION: truncating before opaque detection leaves a short fragment of
   // this long value below the 40-character detector and leaks it.
@@ -313,7 +406,6 @@ test('GET /api/actions/:id returns projected evidence and redacts every raw secr
   assert.equal(response.body.events[1].error.includes('A1A1A1A1'), false);
   assert.ok(response.body.events[1].error.length <= 180);
 
-  assert.equal(serialized.includes(ACTION_COOKIE_VALUE), false);
   assert.equal(serialized.includes(SECRET), false);
   assert.equal(serialized.includes('private body'), false);
 
