@@ -132,21 +132,33 @@ function classifyRepairOutcome(value) {
   const candidate = value || {};
   const kind = candidate.kind || candidate.code || null;
   const statusCode = statusCodeOf(candidate);
+  if (kind === 'ok') return { transportClass: 'ok', issue: candidate.issue };
+  if (
+    kind === 'server_error'
+    || kind === 'timeout'
+    || kind === 'response_lost'
+    || kind === 'malformed'
+  ) {
+    return { transportClass: 'ambiguous' };
+  }
+  if (kind === 'not_found_repo' || kind === 'validation_error') {
+    return { transportClass: 'permanent_no_effect' };
+  }
+  if (kind === 'rate_limited' || kind === 'abuse_denied') {
+    return { transportClass: 'rate_limited' };
+  }
+  if (kind === 'permission_denied') {
+    return { transportClass: 'permanent_no_effect' };
+  }
   if (kind === null && statusCode === null && candidate.number !== undefined) {
     return { transportClass: 'ok', issue: candidate };
   }
-  if (kind === 'ok') return { transportClass: 'ok', issue: candidate.issue };
-  if (kind === 'rate_limited' || statusCode === 429) {
-    return { transportClass: 'rate_limited' };
-  }
-  if (
-    kind === 'permission_denied'
-    || kind === 'validation_error'
-    || statusCode === 403
-    || statusCode === 422
-  ) {
+  if (statusCode !== null && statusCode >= 500) return { transportClass: 'ambiguous' };
+  if (statusCode === 404 || statusCode === 422) {
     return { transportClass: 'permanent_no_effect' };
   }
+  if (statusCode === 429) return { transportClass: 'rate_limited' };
+  if (statusCode === 403) return { transportClass: 'permanent_no_effect' };
   return { transportClass: 'ambiguous' };
 }
 
@@ -217,7 +229,7 @@ function createActionBroker({
     backoffMs = configuredRepairBackoffMs,
   }) {
     const current = typeof ledger.getAction === 'function' ? ledger.getAction(action.id) : action;
-    if (current && (current.status !== 'repairing' || current.active_attempt_id !== attemptId)) {
+    if (!current || current.status !== 'repairing' || current.active_attempt_id !== attemptId) {
       return { status: 'stale' };
     }
     const limit = Number(maxRepairAttempts);
@@ -233,9 +245,12 @@ function createActionBroker({
     const reconcileAt = () => delayedIso(repairNow, reconcileDelayMs);
     const retryAt = () => delayedIso(repairNow, delay);
     const expected = repairExpected(action, params);
+    const recordOutcome = (status, input) => ({
+      status: ledger.recordRepairResult(input) ? status : 'stale',
+    });
 
     const recordUnknown = (error, receipt, reason = 'ambiguous_repair') => {
-      ledger.recordRepairResult({
+      return recordOutcome('unknown', {
         id: action.id,
         attemptId,
         status: 'unknown',
@@ -245,7 +260,6 @@ function createActionBroker({
         verdict: serializeVerdict({ status: 'unknown', reason }),
         event: { phase: 'repair.unknown', transportClass: 'ambiguous' },
       });
-      return { status: 'unknown' };
     };
 
     if (locator === null) return recordUnknown(null, undefined, 'invalid_external_identity');
@@ -261,7 +275,7 @@ function createActionBroker({
       return recordUnknown(null, initialReceipt, initialVerdict.reason);
     }
     if (initialVerdict.status === 'succeeded') {
-      ledger.recordRepairResult({
+      return recordOutcome('succeeded', {
         id: action.id,
         attemptId,
         status: 'succeeded',
@@ -269,7 +283,6 @@ function createActionBroker({
         verdict: serializeVerdict(initialVerdict),
         event: { phase: 'repair.succeeded', transportClass: 'ok' },
       });
-      return { status: 'succeeded' };
     }
 
     let updatedIssue;
@@ -285,7 +298,7 @@ function createActionBroker({
     }
     const addOutcome = classifyRepairOutcome(addError || updatedIssue);
     if (addOutcome.transportClass === 'permanent_no_effect') {
-      ledger.recordRepairResult({
+      return recordOutcome('repair_blocked', {
         id: action.id,
         attemptId,
         status: 'repair_blocked',
@@ -294,10 +307,9 @@ function createActionBroker({
         verdict: serializeVerdict({ status: 'repair_blocked', reason: 'permanent_denial' }),
         event: { phase: 'repair.blocked', transportClass: addOutcome.transportClass },
       });
-      return { status: 'repair_blocked' };
     }
     if (addOutcome.transportClass === 'rate_limited') {
-      ledger.recordRepairResult({
+      return recordOutcome('repair_retry_wait', {
         id: action.id,
         attemptId,
         status: 'repair_retry_wait',
@@ -307,7 +319,6 @@ function createActionBroker({
         verdict: serializeVerdict({ status: 'repair_retry_wait', reason: 'rate_limited' }),
         event: { phase: 'repair.retry_wait', transportClass: addOutcome.transportClass },
       });
-      return { status: 'repair_retry_wait' };
     }
     if (addOutcome.transportClass === 'ambiguous') return recordUnknown(addError, initialReceipt);
 
@@ -320,7 +331,7 @@ function createActionBroker({
     const receipt = sanitizeIssueReceipt(readback, nowIso());
     const verdict = validateReadback({ issue: readback, expected });
     if (verdict.status === 'succeeded') {
-      ledger.recordRepairResult({
+      return recordOutcome('succeeded', {
         id: action.id,
         attemptId,
         status: 'succeeded',
@@ -328,13 +339,12 @@ function createActionBroker({
         verdict: serializeVerdict(verdict),
         event: { phase: 'repair.succeeded', transportClass: 'ok' },
       });
-      return { status: 'succeeded' };
     }
     if (verdict.status === 'partially_applied') {
-      const targetStatus = Number(action.repair_attempts) < limit
+      const targetStatus = Number(current.repair_attempts) < limit
         ? 'repair_retry_wait'
         : 'repair_blocked';
-      ledger.recordRepairResult({
+      return recordOutcome(targetStatus, {
         id: action.id,
         attemptId,
         status: targetStatus,
@@ -350,7 +360,6 @@ function createActionBroker({
           transportClass: 'ok',
         },
       });
-      return { status: targetStatus };
     }
     return recordUnknown(null, receipt, verdict.reason);
   }

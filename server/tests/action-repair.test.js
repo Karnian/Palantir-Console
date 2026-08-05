@@ -157,6 +157,30 @@ test('rate limit waits on the repair timer and a later bounded pass reclaims onc
   assert.equal(ledger.getAction(partial.action.id).repair_attempts, 2);
 });
 
+test('retry-wait requires a non-null due repair timer while partial is immediately eligible', (t) => {
+  const { db, ledger } = setup(t);
+  const partial = makePartial(ledger, 'timer-eligibility');
+  assert.deepEqual(ledger.listRepairableActionIds({ now: START }), [partial.action.id]);
+
+  db.prepare(
+    "UPDATE actions SET status = 'repair_retry_wait', next_repair_at = NULL WHERE id = ?",
+  ).run(partial.action.id);
+  // MUTATION: treating a NULL retry timer as due causes an immediate unbounded re-claim.
+  assert.deepEqual(ledger.listRepairableActionIds({ now: START }), []);
+  assert.equal(ledger.claimForRepair(partial.action.id, {
+    now: START,
+    maxRepairAttempts: 3,
+  }), null);
+
+  db.prepare('UPDATE actions SET next_repair_at = ? WHERE id = ?')
+    .run(START, partial.action.id);
+  assert.deepEqual(ledger.listRepairableActionIds({ now: START }), [partial.action.id]);
+  assert.equal(typeof ledger.claimForRepair(partial.action.id, {
+    now: START,
+    maxRepairAttempts: 3,
+  }), 'string');
+});
+
 test('max attempts and expired approval block before repairing', (t) => {
   const { db, ledger } = setup(t);
   const maximum = makePartial(ledger, 'maximum');
@@ -194,6 +218,104 @@ test('ambiguous label writes become reconcileable unknown without create', async
     assert.equal(result.row.next_reconcile_at, '2026-08-05T00:01:00.000Z');
     assert.equal(gateway.getPostCount(), 0);
   }
+});
+
+test('explicit repair fault kinds dominate conflicting HTTP statuses', async (t) => {
+  const { ledger, clock } = setup(t);
+  const scenarios = [
+    {
+      behavior: { kind: 'timeout', statusCode: 403 },
+      expected: 'unknown',
+    },
+    {
+      behavior: { kind: 'abuse_denied' },
+      expected: 'repair_retry_wait',
+    },
+    {
+      behavior: { kind: 'validation_error' },
+      expected: 'repair_blocked',
+    },
+  ];
+  for (const [index, scenario] of scenarios.entries()) {
+    const partial = makePartial(ledger, 'classification-' + index);
+    const gateway = createFakeGithubGateway({
+      issues: [partial.issue],
+      addLabels: [scenario.behavior],
+    });
+    const result = await claimAndRepair(ledger, clock, partial, gateway);
+    // MUTATION: status-first classification lets a conflicting status override the typed fault.
+    assert.equal(result.row.status, scenario.expected);
+    assert.equal(gateway.getPostCount(), 0);
+  }
+
+  const partial = makePartial(ledger, 'classification-plain-5xx');
+  const stored = createFakeGithubGateway({ issues: [partial.issue] });
+  const gateway = {
+    ...stored,
+    async addLabels() {
+      throw { statusCode: 503, message: 'server unavailable' };
+    },
+  };
+  const result = await claimAndRepair(ledger, clock, partial, gateway);
+  assert.equal(result.row.status, 'unknown');
+  assert.equal(stored.getPostCount(), 0);
+});
+
+test('final-attempt bounding uses the authoritative post-claim repair count', async (t) => {
+  const { ledger, clock } = setup(t);
+  const partial = makePartial(ledger, 'authoritative-attempts');
+  const stalePreClaimSnapshot = partial.action;
+  const attemptId = ledger.claimForRepair(partial.action.id, {
+    now: START,
+    maxRepairAttempts: 1,
+  });
+  assert.equal(ledger.getAction(partial.action.id).repair_attempts, 1);
+  const gateway = {
+    async getIssue() {
+      return { ...partial.issue, labels: ['P1'] };
+    },
+    async addLabels() {
+      return { ...partial.issue, labels: ['P1', 'security'] };
+    },
+  };
+  const broker = createActionBroker({ ledger, gateway, clock });
+  // MUTATION: bounding on the caller's stale repair_attempts permits a MAX+1'th repair.
+  const outcome = await broker.repairClaimedAction({
+    action: stalePreClaimSnapshot,
+    attemptId,
+    now: START,
+    maxRepairAttempts: 1,
+  });
+  assert.equal(outcome.status, 'repair_blocked');
+  assert.equal(ledger.getAction(partial.action.id).status, 'repair_blocked');
+});
+
+test('a repair result that loses its fence is reported as stale', async (t) => {
+  const { ledger, clock } = setup(t);
+  const partial = makePartial(ledger, 'stale-result');
+  const attemptId = ledger.claimForRepair(partial.action.id, {
+    now: START,
+    maxRepairAttempts: 3,
+  });
+  const stored = createFakeGithubGateway({ issues: [partial.issue] });
+  const gateway = {
+    ...stored,
+    async addLabels(input) {
+      const updated = await stored.addLabels(input);
+      ledger.recoverOrphans({ now: LATER, leaseTtlMs: 0 });
+      return updated;
+    },
+  };
+  const broker = createActionBroker({ ledger, gateway, clock });
+  // MUTATION: ignoring the fenced boolean reports success after orphan recovery won.
+  const outcome = await broker.repairClaimedAction({
+    action: ledger.getAction(partial.action.id),
+    attemptId,
+    now: START,
+  });
+  assert.equal(outcome.status, 'stale');
+  assert.equal(ledger.getAction(partial.action.id).status, 'unknown');
+  assert.equal(ledger.listEvents(partial.action.id).at(-1).phase, 'repair.result.stale');
 });
 
 test('repair fencing rejects stale results but appends evidence', (t) => {

@@ -266,10 +266,8 @@ function createActionLedgerService(db, options = {}) {
       WHERE status = 'partially_applied'
         OR (
           status = 'repair_retry_wait'
-          AND (
-            next_repair_at IS NULL
-            OR julianday(next_repair_at) <= julianday(@now)
-          )
+          AND next_repair_at IS NOT NULL
+          AND julianday(next_repair_at) <= julianday(@now)
         )
       ORDER BY created_at, rowid
     `),
@@ -354,10 +352,8 @@ function createActionLedgerService(db, options = {}) {
           status = 'partially_applied'
           OR (
             status = 'repair_retry_wait'
-            AND (
-              next_repair_at IS NULL
-              OR julianday(next_repair_at) <= julianday(@claimed_at)
-            )
+            AND next_repair_at IS NOT NULL
+            AND julianday(next_repair_at) <= julianday(@claimed_at)
           )
         )
     `),
@@ -373,10 +369,8 @@ function createActionLedgerService(db, options = {}) {
           status = 'partially_applied'
           OR (
             status = 'repair_retry_wait'
-            AND (
-              next_repair_at IS NULL
-              OR julianday(next_repair_at) <= julianday(@claimed_at)
-            )
+            AND next_repair_at IS NOT NULL
+            AND julianday(next_repair_at) <= julianday(@claimed_at)
           )
         )
         AND repair_attempts < @max_repair_attempts
@@ -668,15 +662,15 @@ function createActionLedgerService(db, options = {}) {
       throw new BadRequestError('maxRepairAttempts must be a non-negative integer');
     }
     const current = stmts.getAction.get(id);
-    const retryAt = current && current.next_repair_at === null
-      ? null
-      : new Date(current && current.next_repair_at).getTime();
+    const retryAt = new Date(current && current.next_repair_at).getTime();
     const claimTime = new Date(claimedAt).getTime();
     const eligible = current && (
       current.status === 'partially_applied'
       || (
         current.status === 'repair_retry_wait'
-        && (retryAt === null || (Number.isFinite(retryAt) && retryAt <= claimTime))
+        && current.next_repair_at !== null
+        && Number.isFinite(retryAt)
+        && retryAt <= claimTime
       )
     );
     if (!eligible) return null;
