@@ -13,7 +13,9 @@ const SECRET = 'route-secret-token-123456';
 const CLIENT_SECRET = 'mauve canoe orbit lantern';
 const AWS_ACCESS_KEY_ID = 'AKIAIOSFODNN7EXAMPLE';
 const GITHUB_TOKEN = 'github_pat_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456';
-const BARE_BEARER_VALUE = 'abcdefgh12345678';
+const SHORT_BASIC_VALUE = 'dTpw';
+const TILDE_BEARER_VALUE = 'a~b~c~d~e~f';
+const PW_VALUE = 'hunter2secret';
 const REAL_NODE_ID = 'MDU6SXNzdWUxMjM0NTY3';
 const APPROVED_PARAMS_HASH = 'c'.repeat(64);
 const BASE64_NO_DIGIT = 'A'.repeat(64);
@@ -23,13 +25,18 @@ const PRIVATE_KEY_VALUE = 'alpine river violet telescope';
 const COOKIE_VALUE = 'session material with spaces';
 const LONG_OPAQUE_VALUE = 'A1'.repeat(100);
 const LONG_ERROR_PREFIX = 'context '.repeat(18);
+const HUNDRED_LABELS = Array.from(
+  { length: 100 },
+  (_, index) => 'label-' + String(index + 1).padStart(3, '0'),
+);
+const ONE_HUNDRED_ONE_LABELS = [...HUNDRED_LABELS, 'label-101'];
 const RECEIPT_FIXTURE = {
   number: 42,
   node_id: REAL_NODE_ID,
   html_url: 'https://github.example/acme/widgets/issues/42',
   state: 'accepted',
-  labels: ['P1', 'ops'],
-  label_count: 2,
+  labels: HUNDRED_LABELS,
+  label_count: 100,
   labels_truncated: false,
   validated_at: '2026-08-05T00:01:30.000Z',
   clientSecret: CLIENT_SECRET,
@@ -72,7 +79,7 @@ const RAW_ACTIONS = [
       body: 'private body with ' + SECRET,
       labels: ['P1', 'ops'],
     }),
-    last_error: 'Bearer ' + BARE_BEARER_VALUE,
+    last_error: 'pw: ' + PW_VALUE,
     receipt_json: JSON.stringify(RECEIPT_FIXTURE),
   },
   {
@@ -154,7 +161,7 @@ const EVENTS = {
         approval_expires_at: '2026-08-05T01:02:00.000Z',
         clientSecret: CLIENT_SECRET,
       }),
-      error: 'Basic ' + BASIC_AUTH_VALUE,
+      error: 'Basic ' + SHORT_BASIC_VALUE,
     },
     {
       id: 4,
@@ -176,7 +183,7 @@ const EVENTS = {
         repair_attempts: 2,
         arbitraryBlob: ARBITRARY_BLOB,
       }),
-      error: 'Bearer ' + BARE_BEARER_VALUE,
+      error: 'Bearer ' + TILDE_BEARER_VALUE,
     },
     {
       id: 5,
@@ -189,6 +196,24 @@ const EVENTS = {
       candidate_external_id: REAL_NODE_ID,
       ts: '2026-08-05T00:04:00.000Z',
       receipt_json: JSON.stringify({ orphaned_status: 'repairing' }),
+      error: null,
+    },
+    {
+      id: 6,
+      action_id: 'action-old',
+      phase: 'receipt.oversized',
+      attempt_id: null,
+      transport_class: null,
+      request_digest: APPROVED_PARAMS_HASH,
+      external_request_id: null,
+      candidate_external_id: null,
+      ts: '2026-08-05T00:05:00.000Z',
+      receipt_json: JSON.stringify({
+        ...RECEIPT_FIXTURE,
+        labels: ONE_HUNDRED_ONE_LABELS,
+        label_count: 101,
+        labels_truncated: false,
+      }),
       error: null,
     },
   ],
@@ -292,8 +317,11 @@ test('GET /api/actions projects newest-first actions and filters by validated st
   assert.equal(all.body.actions[1].external_node_id, REAL_NODE_ID);
   assert.equal(all.body.actions[1].repair_attempts, 0);
   assert.equal(all.body.actions[1].receipt.number, 42);
+  assert.equal(all.body.actions[1].receipt.labels.length, 100);
+  assert.equal(all.body.actions[1].receipt.label_count, 100);
+  assert.equal(all.body.actions[1].receipt.labels_truncated, false);
   assert.equal(all.body.actions[1].verdict.status, 'verified');
-  assert.equal(all.body.actions[1].error, 'Bearer [redacted]');
+  assert.equal(all.body.actions[1].error, 'pw: [redacted]');
   assert.equal('params_json' in all.body.actions[1], false);
   assert.equal('last_error' in all.body.actions[1], false);
   assert.equal('receipt_json' in all.body.actions[1], false);
@@ -328,20 +356,28 @@ test('GET /api/actions/:id returns projected evidence and redacts every raw secr
     candidateCount: 2,
     candidate_count: 2,
   });
-  assert.equal(response.body.action.error, 'Bearer [redacted]');
-  assert.equal(response.body.events.length, 5);
+  // MUTATION: omitting pw/pwd from prose markers leaks short password aliases.
+  assert.equal(response.body.action.error, 'pw: [redacted]');
+  assert.equal(JSON.stringify(response.body).includes(PW_VALUE), false);
+  assert.equal(response.body.events.length, 6);
   assert.equal(response.body.events[0].phase, 'execution.result');
   assert.equal(response.body.events[0].candidate_external_id, REAL_NODE_ID);
-  assert.deepEqual(response.body.events[0].receipt, {
-    number: 42,
-    node_id: REAL_NODE_ID,
-    html_url: 'https://github.example/acme/widgets/issues/42',
-    state: 'accepted',
-    labels: ['P1', 'ops'],
-    label_count: 2,
-    labels_truncated: false,
-    validated_at: '2026-08-05T00:01:30.000Z',
-  });
+  assert.equal(response.body.events[0].receipt.number, 42);
+  assert.equal(response.body.events[0].receipt.node_id, REAL_NODE_ID);
+  assert.equal(
+    response.body.events[0].receipt.html_url,
+    'https://github.example/acme/widgets/issues/42',
+  );
+  assert.equal(response.body.events[0].receipt.state, 'accepted');
+  // MUTATION: keeping the old 24-item summary cap silently drops legitimate
+  // broker labels while label_count still claims the full evidence.
+  assert.deepEqual(response.body.events[0].receipt.labels, HUNDRED_LABELS);
+  assert.equal(response.body.events[0].receipt.label_count, 100);
+  assert.equal(response.body.events[0].receipt.labels_truncated, false);
+  assert.equal(
+    response.body.events[0].receipt.validated_at,
+    '2026-08-05T00:01:30.000Z',
+  );
   assert.equal(response.body.events[1].phase, 'transport.error');
   assert.equal(response.body.events[1].candidate_external_id, '[redacted]');
   assert.equal(response.body.events[1].receipt, null);
@@ -367,6 +403,9 @@ test('GET /api/actions/:id returns projected evidence and redacts every raw secr
   assert.deepEqual(response.body.events[4].receipt, {
     orphaned_status: 'repairing',
   });
+  assert.deepEqual(response.body.events[5].receipt.labels, HUNDRED_LABELS);
+  assert.equal(response.body.events[5].receipt.label_count, 101);
+  assert.equal(response.body.events[5].receipt.labels_truncated, true);
 
   const serialized = JSON.stringify(response.body);
   // MUTATION: projecting receipt/verdict as raw objects instead of allowlists
@@ -394,11 +433,12 @@ test('GET /api/actions/:id returns projected evidence and redacts every raw secr
   for (const leaked of [BASIC_AUTH_VALUE, PRIVATE_KEY_VALUE, COOKIE_VALUE]) {
     assert.equal(serialized.includes(leaked), false);
   }
-  // MUTATION: removing bare auth-scheme redaction leaks Basic/Bearer payloads
-  // that have no marker ':' or '=' delimiter.
+  // MUTATION: retaining the old 8-character scheme minimum leaks short Basic
+  // credentials; omitting '~' from the charset leaks valid Bearer values.
   assert.equal(response.body.events[2].error, 'Basic [redacted]');
   assert.equal(response.body.events[3].error, 'Bearer [redacted]');
-  assert.equal(serialized.includes(BARE_BEARER_VALUE), false);
+  assert.equal(serialized.includes(SHORT_BASIC_VALUE), false);
+  assert.equal(serialized.includes(TILDE_BEARER_VALUE), false);
 
   // MUTATION: truncating before opaque detection leaves a short fragment of
   // this long value below the 40-character detector and leaks it.

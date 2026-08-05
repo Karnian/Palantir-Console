@@ -46,7 +46,8 @@ const EXACT_SENSITIVE_KEYS = new Set(['pw', 'pwd', 'pass', 'sig']);
 const OPAQUE_SECRET = /^(?=.{24,}$)(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9+/=_-]+$/;
 const MAX_SUMMARY_STRING_LENGTH = 180;
 const MAX_SUMMARY_DEPTH = 4;
-const MAX_SUMMARY_ITEMS = 24;
+const MAX_PROJECTED_LABELS = 100;
+const MAX_SUMMARY_ITEMS = 100;
 
 function isSensitiveKey(key) {
   const normalized = String(key).toLowerCase().replace(/[\s_-]/g, '');
@@ -71,7 +72,7 @@ function redactString(value, { opaque = false, longRuns = false } = {}) {
   let text = String(value ?? '');
   text = text
     .replace(
-      /\b(Basic|Bearer|Digest|Negotiate|Token)\s+[A-Za-z0-9+/=_.-]{8,}/gi,
+      /\b(Basic|Bearer|Digest|Negotiate|Token)\s+[A-Za-z0-9+/=_.~\-]{3,}/gi,
       '$1 [redacted]',
     )
     .replace(/\bgithub_pat_[A-Za-z0-9_]+\b/gi, '[redacted]')
@@ -87,7 +88,7 @@ function redactString(value, { opaque = false, longRuns = false } = {}) {
     // Redact each marked value through its line ending. The global flag keeps
     // later lines independently protected without consuming them wholesale.
     .replace(
-      /(["']?\b(?:password|passwd|passphrase|secret|token|api[ \t_-]?key|access[ \t_-]?key|private[ \t_-]?key|secret[ \t_-]?key|client[ \t_-]?secret|credentials?|authorization|bearer|cookie|signature|basic)\b["']?[ \t]*[:=][ \t]*)[^\r\n]*/gim,
+      /(["']?\b(?:password|passwd|passphrase|pw|pwd|secret|token|api[ \t_-]?key|access[ \t_-]?key|private[ \t_-]?key|secret[ \t_-]?key|client[ \t_-]?secret|credentials?|authorization|bearer|cookie|signature|basic)\b["']?[ \t]*[:=][ \t]*)[^\r\n]*/gim,
       '$1[redacted]',
     )
     .replace(/\b(?:token|secret)[-_:][A-Za-z0-9._~+/-]{4,}\b/gi, '[redacted]');
@@ -138,15 +139,27 @@ function projectReceiptWithFields(value, { includeEventEvidence = false } = {}) 
   for (const key of ['node_id', 'html_url', 'state', 'validated_at']) {
     if (typeof source[key] === 'string') receipt[key] = source[key];
   }
-  if (
-    Array.isArray(source.labels)
-    && source.labels.every((label) => typeof label === 'string')
-  ) {
-    receipt.labels = source.labels;
-  }
-  if (Number.isSafeInteger(source.label_count)) receipt.label_count = source.label_count;
-  if (typeof source.labels_truncated === 'boolean') {
-    receipt.labels_truncated = source.labels_truncated;
+  const hasValidLabels = Array.isArray(source.labels)
+    && source.labels.every((label) => typeof label === 'string');
+  const hasValidLabelCount = Number.isSafeInteger(source.label_count)
+    && source.label_count >= 0;
+  if (hasValidLabels) {
+    receipt.labels = source.labels.slice(0, MAX_PROJECTED_LABELS);
+    receipt.label_count = Math.max(
+      source.labels.length,
+      hasValidLabelCount ? source.label_count : 0,
+    );
+    receipt.labels_truncated = source.labels_truncated === true
+      || receipt.label_count > receipt.labels.length;
+  } else {
+    if (hasValidLabelCount) receipt.label_count = source.label_count;
+    if (
+      typeof source.labels_truncated === 'boolean'
+      || (hasValidLabelCount && source.label_count > 0)
+    ) {
+      receipt.labels_truncated = source.labels_truncated === true
+        || (hasValidLabelCount && source.label_count > 0);
+    }
   }
   if (includeEventEvidence) {
     for (const key of [
@@ -166,7 +179,7 @@ function projectReceiptWithFields(value, { includeEventEvidence = false } = {}) 
       Array.isArray(source.missingLabels)
       && source.missingLabels.every((label) => typeof label === 'string')
     ) {
-      receipt.missingLabels = source.missingLabels;
+      receipt.missingLabels = source.missingLabels.slice(0, MAX_PROJECTED_LABELS);
     }
     if (typeof source.rate_limited === 'boolean') {
       receipt.rate_limited = source.rate_limited;
@@ -199,7 +212,7 @@ function projectVerdict(value) {
     Array.isArray(source.missingLabels)
     && source.missingLabels.every((label) => typeof label === 'string')
   ) {
-    verdict.missingLabels = source.missingLabels;
+    verdict.missingLabels = source.missingLabels.slice(0, MAX_PROJECTED_LABELS);
   }
   if (typeof source.rate_limited === 'boolean') verdict.rate_limited = source.rate_limited;
   for (const key of ['candidateCount', 'candidate_count']) {
