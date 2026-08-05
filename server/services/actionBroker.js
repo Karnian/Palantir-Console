@@ -9,6 +9,8 @@ const {
 } = require('./actionReadback');
 
 const DEFAULT_RECONCILE_DELAY_MS = 60_000;
+const DEFAULT_MAX_REPAIR_ATTEMPTS = 3;
+const DEFAULT_REPAIR_BACKOFF_MS = 60_000;
 const SENSITIVE_KEY = /^(?:authorization|token|access[_-]?token|credential|credentials|password|secret|api[_-]?key)$/i;
 const MAX_RECEIPT_LABELS = 100;
 const MAX_RECEIPT_LABEL_BYTES = 256;
@@ -116,11 +118,45 @@ function hasValidExternalIdentity(issue) {
   );
 }
 
+function statusCodeOf(value) {
+  const status = value && (
+    value.statusCode
+    ?? value.status
+    ?? (value.response && value.response.status)
+  );
+  const number = Number(status);
+  return Number.isInteger(number) ? number : null;
+}
+
+function classifyRepairOutcome(value) {
+  const candidate = value || {};
+  const kind = candidate.kind || candidate.code || null;
+  const statusCode = statusCodeOf(candidate);
+  if (kind === null && statusCode === null && candidate.number !== undefined) {
+    return { transportClass: 'ok', issue: candidate };
+  }
+  if (kind === 'ok') return { transportClass: 'ok', issue: candidate.issue };
+  if (kind === 'rate_limited' || statusCode === 429) {
+    return { transportClass: 'rate_limited' };
+  }
+  if (
+    kind === 'permission_denied'
+    || kind === 'validation_error'
+    || statusCode === 403
+    || statusCode === 422
+  ) {
+    return { transportClass: 'permanent_no_effect' };
+  }
+  return { transportClass: 'ambiguous' };
+}
+
 function createActionBroker({
   ledger,
   gateway,
   clock,
   reconcileDelayMs = DEFAULT_RECONCILE_DELAY_MS,
+  maxRepairAttempts: configuredMaxRepairAttempts = DEFAULT_MAX_REPAIR_ATTEMPTS,
+  repairBackoffMs: configuredRepairBackoffMs = DEFAULT_REPAIR_BACKOFF_MS,
 }) {
   const effectiveClock = clock || ledger.clock;
   if (typeof effectiveClock !== 'function') {
@@ -140,6 +176,183 @@ function createActionBroker({
 
   function nextReconcileAt() {
     return new Date(nowMilliseconds() + reconcileDelayMs).toISOString();
+  }
+
+  function delayedIso(baseNow, delayMs) {
+    const baseMs = baseNow === undefined ? nowMilliseconds() : new Date(baseNow).getTime();
+    if (!Number.isFinite(baseMs)) throw new TypeError('repair base time is invalid');
+    return new Date(baseMs + delayMs).toISOString();
+  }
+
+  function repairExpected(action, params) {
+    return {
+      actionId: action.id,
+      repo: params.repo,
+      title: params.title,
+      userBody: params.body,
+      labels: params.labels,
+    };
+  }
+
+  function repairIssueLocator(action, params) {
+    let external = null;
+    try {
+      external = JSON.parse(action.external_id);
+    } catch {
+      return null;
+    }
+    if (!external || !Number.isSafeInteger(external.number) || external.number <= 0) return null;
+    return {
+      repo: typeof external.repo === 'string' ? external.repo : params.repo,
+      number: external.number,
+      node_id: action.external_node_id || undefined,
+    };
+  }
+
+  async function repairClaimedAction({
+    action,
+    attemptId,
+    now: repairNow,
+    maxRepairAttempts = configuredMaxRepairAttempts,
+    backoffMs = configuredRepairBackoffMs,
+  }) {
+    const current = typeof ledger.getAction === 'function' ? ledger.getAction(action.id) : action;
+    if (current && (current.status !== 'repairing' || current.active_attempt_id !== attemptId)) {
+      return { status: 'stale' };
+    }
+    const limit = Number(maxRepairAttempts);
+    const delay = Number(backoffMs);
+    if (!Number.isSafeInteger(limit) || limit < 0) {
+      throw new TypeError('maxRepairAttempts must be a non-negative integer');
+    }
+    if (!Number.isFinite(delay) || delay < 0) {
+      throw new TypeError('backoffMs must be a non-negative number');
+    }
+    const params = JSON.parse(action.params_json);
+    const locator = repairIssueLocator(action, params);
+    const reconcileAt = () => delayedIso(repairNow, reconcileDelayMs);
+    const retryAt = () => delayedIso(repairNow, delay);
+    const expected = repairExpected(action, params);
+
+    const recordUnknown = (error, receipt, reason = 'ambiguous_repair') => {
+      ledger.recordRepairResult({
+        id: action.id,
+        attemptId,
+        status: 'unknown',
+        receipt,
+        error: error ? sanitizeError(error) : undefined,
+        nextReconcileAt: reconcileAt(),
+        verdict: serializeVerdict({ status: 'unknown', reason }),
+        event: { phase: 'repair.unknown', transportClass: 'ambiguous' },
+      });
+      return { status: 'unknown' };
+    };
+
+    if (locator === null) return recordUnknown(null, undefined, 'invalid_external_identity');
+    let initialIssue;
+    try {
+      initialIssue = await gateway.getIssue(locator);
+    } catch (error) {
+      return recordUnknown(error);
+    }
+    const initialReceipt = sanitizeIssueReceipt(initialIssue, nowIso());
+    const initialVerdict = validateReadback({ issue: initialIssue, expected });
+    if (initialVerdict.status === 'unknown') {
+      return recordUnknown(null, initialReceipt, initialVerdict.reason);
+    }
+    if (initialVerdict.status === 'succeeded') {
+      ledger.recordRepairResult({
+        id: action.id,
+        attemptId,
+        status: 'succeeded',
+        receipt: initialReceipt,
+        verdict: serializeVerdict(initialVerdict),
+        event: { phase: 'repair.succeeded', transportClass: 'ok' },
+      });
+      return { status: 'succeeded' };
+    }
+
+    let updatedIssue;
+    let addError = null;
+    try {
+      updatedIssue = await gateway.addLabels({
+        repo: locator.repo,
+        number: locator.number,
+        labels: initialVerdict.missingLabels,
+      });
+    } catch (error) {
+      addError = error;
+    }
+    const addOutcome = classifyRepairOutcome(addError || updatedIssue);
+    if (addOutcome.transportClass === 'permanent_no_effect') {
+      ledger.recordRepairResult({
+        id: action.id,
+        attemptId,
+        status: 'repair_blocked',
+        receipt: initialReceipt,
+        error: sanitizeError(addError),
+        verdict: serializeVerdict({ status: 'repair_blocked', reason: 'permanent_denial' }),
+        event: { phase: 'repair.blocked', transportClass: addOutcome.transportClass },
+      });
+      return { status: 'repair_blocked' };
+    }
+    if (addOutcome.transportClass === 'rate_limited') {
+      ledger.recordRepairResult({
+        id: action.id,
+        attemptId,
+        status: 'repair_retry_wait',
+        receipt: initialReceipt,
+        error: sanitizeError(addError),
+        nextRepairAt: retryAt(),
+        verdict: serializeVerdict({ status: 'repair_retry_wait', reason: 'rate_limited' }),
+        event: { phase: 'repair.retry_wait', transportClass: addOutcome.transportClass },
+      });
+      return { status: 'repair_retry_wait' };
+    }
+    if (addOutcome.transportClass === 'ambiguous') return recordUnknown(addError, initialReceipt);
+
+    let readback;
+    try {
+      readback = await gateway.getIssue(locator);
+    } catch (error) {
+      return recordUnknown(error, initialReceipt);
+    }
+    const receipt = sanitizeIssueReceipt(readback, nowIso());
+    const verdict = validateReadback({ issue: readback, expected });
+    if (verdict.status === 'succeeded') {
+      ledger.recordRepairResult({
+        id: action.id,
+        attemptId,
+        status: 'succeeded',
+        receipt,
+        verdict: serializeVerdict(verdict),
+        event: { phase: 'repair.succeeded', transportClass: 'ok' },
+      });
+      return { status: 'succeeded' };
+    }
+    if (verdict.status === 'partially_applied') {
+      const targetStatus = Number(action.repair_attempts) < limit
+        ? 'repair_retry_wait'
+        : 'repair_blocked';
+      ledger.recordRepairResult({
+        id: action.id,
+        attemptId,
+        status: targetStatus,
+        receipt,
+        nextRepairAt: targetStatus === 'repair_retry_wait' ? retryAt() : undefined,
+        verdict: serializeVerdict({
+          ...verdict,
+          status: targetStatus,
+          reason: targetStatus === 'repair_blocked' ? 'max_attempts' : 'still_missing_labels',
+        }),
+        event: {
+          phase: targetStatus === 'repair_blocked' ? 'repair.blocked' : 'repair.retry_wait',
+          transportClass: 'ok',
+        },
+      });
+      return { status: targetStatus };
+    }
+    return recordUnknown(null, receipt, verdict.reason);
   }
 
   async function executeClaimedAction({ action, attemptId }) {
@@ -463,15 +676,62 @@ function createActionBroker({
     return summary;
   }
 
+  async function driveRepair({
+    now,
+    maxRepairAttempts = configuredMaxRepairAttempts,
+    backoffMs = configuredRepairBackoffMs,
+  } = {}) {
+    const driveNow = now === undefined ? nowIso() : new Date(now).toISOString();
+    const ids = ledger.listRepairableActionIds({ now: driveNow });
+    const summary = {
+      scanned: ids.length,
+      claimed: 0,
+      blocked: 0,
+      outcomes: {
+        succeeded: 0,
+        repair_blocked: 0,
+        repair_retry_wait: 0,
+        unknown: 0,
+        stale: 0,
+      },
+    };
+    for (const id of ids) {
+      const claim = ledger.claimForRepair(id, { now: driveNow, maxRepairAttempts });
+      if (claim && typeof claim === 'object' && claim.blocked === true) {
+        summary.blocked += 1;
+        summary.outcomes.repair_blocked += 1;
+        continue;
+      }
+      if (claim === null) continue;
+      summary.claimed += 1;
+      const outcome = await repairClaimedAction({
+        action: ledger.getAction(id),
+        attemptId: claim,
+        now: driveNow,
+        maxRepairAttempts,
+        backoffMs,
+      });
+      if (Object.hasOwn(summary.outcomes, outcome.status)) {
+        summary.outcomes[outcome.status] += 1;
+      }
+    }
+    return summary;
+  }
+
   return {
+    driveRepair,
     driveReconciliation,
     executeClaimedAction,
+    repairClaimedAction,
     reconcileClaimedAction,
   };
 }
 
 module.exports = {
+  DEFAULT_MAX_REPAIR_ATTEMPTS,
   DEFAULT_RECONCILE_DELAY_MS,
+  DEFAULT_REPAIR_BACKOFF_MS,
+  classifyRepairOutcome,
   createActionBroker,
   hasValidExternalIdentity,
   sanitizeIssueReceipt,

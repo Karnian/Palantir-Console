@@ -5,6 +5,7 @@ const STATUS_BY_KIND = Object.freeze({
   validation_error: 422,
   rate_limited: 429,
   abuse_denied: 403,
+  permission_denied: 403,
   server_error: 500,
 });
 
@@ -37,6 +38,7 @@ function createFakeGithubGateway(script = {}) {
   const queues = {
     createIssue: Array.isArray(script.createIssue) ? [...script.createIssue] : [],
     getIssue: Array.isArray(script.getIssue) ? [...script.getIssue] : [],
+    addLabels: Array.isArray(script.addLabels) ? [...script.addLabels] : [],
     searchIssuesByMarker: Array.isArray(script.searchIssuesByMarker)
       ? [...script.searchIssuesByMarker]
       : [],
@@ -44,6 +46,7 @@ function createFakeGithubGateway(script = {}) {
   let nextNumber = Number.isSafeInteger(script.seed) ? script.seed : 1;
   let postCount = 0;
   let getCount = 0;
+  let labelWriteCount = 0;
   let searchCount = 0;
   const byRepoAndNumber = new Map();
   const byNodeId = new Map();
@@ -108,6 +111,30 @@ function createFakeGithubGateway(script = {}) {
     return cloneIssue(stored);
   }
 
+  async function addLabels(input) {
+    labelWriteCount += 1;
+    const behavior = nextBehavior('addLabels');
+    const kind = behavior.kind || 'ok';
+    if (kind !== 'ok') throw new FakeGithubGatewayError(kind, 'addLabels', behavior);
+    const stored = byRepoAndNumber.get(issueKey(input.repo, input.number));
+    if (!stored) {
+      throw new FakeGithubGatewayError('not_found_repo', 'addLabels', {
+        message: 'fake GitHub issue not found',
+      });
+    }
+    const labels = Array.isArray(stored.labels) ? [...stored.labels] : [];
+    const names = new Set(labels.map((label) => (
+      typeof label === 'string' ? label : label && label.name
+    )).filter((label) => typeof label === 'string').map((label) => label.toLowerCase()));
+    for (const label of Array.isArray(input.labels) ? input.labels : []) {
+      const normalized = String(label).toLowerCase();
+      if (names.has(normalized)) continue;
+      labels.push(label);
+      names.add(normalized);
+    }
+    return storeIssue({ ...stored, ...(behavior.issue || {}), labels });
+  }
+
   for (const issue of Array.isArray(script.issues) ? script.issues : []) {
     storeIssue(issue);
   }
@@ -134,9 +161,11 @@ function createFakeGithubGateway(script = {}) {
   return {
     createIssue,
     getIssue,
+    addLabels,
     searchIssuesByMarker,
     getPostCount: () => postCount,
     getGetCount: () => getCount,
+    getLabelWriteCount: () => labelWriteCount,
     getSearchCount: () => searchCount,
   };
 }
