@@ -13,6 +13,7 @@ const {
   ConflictError,
   ForbiddenError,
 } = require('../utils/errors');
+const { assertBodyHasNoReservedMarker } = require('./actionReadback');
 
 const CONNECTOR = 'github';
 const OPERATION = 'github.create_issue';
@@ -342,6 +343,7 @@ function createActionLedgerService(db, options = {}) {
     if (operation !== OPERATION) throw new BadRequestError(`unsupported operation: ${operation}`);
 
     const paramsJson = canonicalParamsJson(input.params);
+    assertBodyHasNoReservedMarker(JSON.parse(paramsJson).body);
     const hash = paramsHash(paramsJson);
     const rawReissuesActionId = input.reissuesActionId ?? input.reissues_action_id ?? null;
     if (
@@ -548,6 +550,7 @@ function createActionLedgerService(db, options = {}) {
   });
 
   return {
+    clock,
     declareAction: (input) => publicMutation(() => declareTx(input)),
     approveAction: (id, approval) => publicMutation(() => approveTx(id, approval || {})),
     claimForExecution: (id) => publicMutation(() => claimTx(id)),
