@@ -102,3 +102,49 @@ test('schedule mutation blocks cross-origin cookie requests', async (t) => {
     .send({ profile_id: 'op_api_scheduler' })
     .expect(403);
 });
+
+test('schedule API validates grace and misfire policy while allowing null grace', async (t) => {
+  const app = await appHarness(t);
+  const project = app.services.projectService.createProject({ name: 'Policy folder', directory: '/srv/policy' });
+  const created = await request(app)
+    .post('/api/operator-instances')
+    .set(...cookie)
+    .send({ profile_id: 'op_api_scheduler', primary_project_id: project.id })
+    .expect(201);
+  const base = {
+    name: 'Policy schedule', prompt: 'Inspect', rule: { kind: 'interval', minutes: 60 },
+  };
+
+  // MUTATION: coercing or omitting grace validation would accept this payload.
+  await request(app)
+    .post(`/api/operator-instances/${created.body.instance.id}/schedules`)
+    .set(...cookie)
+    .send({ ...base, grace_seconds: -1 })
+    .expect(400);
+
+  // MUTATION: accepting an unknown policy would defer failure to SQLite or persist invalid state.
+  await request(app)
+    .post(`/api/operator-instances/${created.body.instance.id}/schedules`)
+    .set(...cookie)
+    .send({ ...base, misfire_policy: 'fire_all' })
+    .expect(400);
+
+  const schedule = await request(app)
+    .post(`/api/operator-instances/${created.body.instance.id}/schedules`)
+    .set(...cookie)
+    .send({ ...base, grace_seconds: null, misfire_policy: 'skip' })
+    .expect(201);
+  assert.equal(schedule.body.schedule.grace_seconds, null);
+  assert.equal(schedule.body.schedule.misfire_policy, 'skip');
+
+  await request(app)
+    .patch(`/api/operator-schedules/${schedule.body.schedule.id}`)
+    .set(...cookie)
+    .send({ expected_revision: schedule.body.schedule.revision, grace_seconds: -1 })
+    .expect(400);
+  await request(app)
+    .patch(`/api/operator-schedules/${schedule.body.schedule.id}`)
+    .set(...cookie)
+    .send({ expected_revision: schedule.body.schedule.revision, misfire_policy: 'latest' })
+    .expect(400);
+});
