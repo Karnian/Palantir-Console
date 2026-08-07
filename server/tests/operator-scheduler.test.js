@@ -141,7 +141,10 @@ test('due materialization coalesces missed intervals and a newer period supersed
   const schedule = h.scheduleService.createSchedule(instance.id, {
     name: 'Hourly', prompt: 'Check', rule: { kind: 'interval', minutes: 60 }, timezone: 'UTC',
   }, new Date('2026-07-23T00:00:00.000Z'));
+  assert.equal(schedule.grace_seconds, null);
+  assert.equal(schedule.misfire_policy, 'coalesce_latest');
 
+  // MUTATION: applying grace to NULL-grace rows changes legacy behavior.
   const created = h.scheduleService.materializeDue(new Date('2026-07-23T04:30:00.000Z'));
   assert.equal(created.length, 1);
   assert.equal(created[0].scheduled_for, '2026-07-23T04:00:00.000Z');
@@ -153,6 +156,65 @@ test('due materialization coalesces missed intervals and a newer period supersed
   const first = h.db.prepare('SELECT status, waiting_reason FROM operator_invocations WHERE id=?').get(created[0].id);
   assert.deepEqual(first, { status: 'cancelled', waiting_reason: 'superseded' });
   assert.equal(h.scheduleService.getSchedule(schedule.id).next_fire_at, '2026-07-23T07:00:00.000Z');
+});
+
+test('due materialization records occurrences beyond grace without firing', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Grace bounded', prompt: 'Check', rule: { kind: 'interval', minutes: 60 },
+    timezone: 'UTC', grace_seconds: 10 * 60,
+  }, new Date('2026-07-23T00:00:00.000Z'));
+
+  // MUTATION: ignoring finite grace would create a pending manager-bound invocation.
+  const created = h.scheduleService.materializeDue(new Date('2026-07-23T04:30:00.000Z'));
+  assert.deepEqual(created, []);
+  assert.equal(h.scheduleService.getSchedule(schedule.id).next_fire_at, '2026-07-23T05:00:00.000Z');
+  const invocations = h.scheduleService.listInvocations(schedule.id);
+  assert.equal(invocations.length, 1);
+  assert.equal(invocations[0].scheduled_for, '2026-07-23T04:00:00.000Z');
+  assert.equal(invocations[0].status, 'cancelled');
+  assert.equal(invocations[0].waiting_reason, 'missed_grace');
+});
+
+test('coalesce_latest fires a backlogged occurrence that remains within grace', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Within grace', prompt: 'Check', rule: { kind: 'interval', minutes: 60 },
+    timezone: 'UTC', grace_seconds: 60 * 60, misfire_policy: 'coalesce_latest',
+  }, new Date('2026-07-23T00:00:00.000Z'));
+
+  // MUTATION: treating every finite-grace backlog as missed suppresses this fire.
+  const created = h.scheduleService.materializeDue(new Date('2026-07-23T04:30:00.000Z'));
+  assert.equal(created.length, 1);
+  assert.equal(created[0].scheduled_for, '2026-07-23T04:00:00.000Z');
+  assert.equal(created[0].status, 'pending');
+  assert.equal(h.scheduleService.getSchedule(schedule.id).next_fire_at, '2026-07-23T05:00:00.000Z');
+});
+
+test('skip policy records a backlog but fires an exactly-on-time occurrence', (t) => {
+  const h = harness(t);
+  const { instance } = createMappedOperator(h);
+  const schedule = h.scheduleService.createSchedule(instance.id, {
+    name: 'Skip backlog', prompt: 'Check', rule: { kind: 'interval', minutes: 60 },
+    timezone: 'UTC', grace_seconds: null, misfire_policy: 'skip',
+  }, new Date('2026-07-23T00:00:00.000Z'));
+
+  // MUTATION: checking only grace (or treating one due occurrence as backlog) breaks these branches.
+  assert.deepEqual(h.scheduleService.materializeDue(new Date('2026-07-23T03:30:00.000Z')), []);
+  const missed = h.scheduleService.listInvocations(schedule.id);
+  assert.equal(missed.length, 1);
+  assert.equal(missed[0].scheduled_for, '2026-07-23T03:00:00.000Z');
+  assert.equal(missed[0].status, 'cancelled');
+  assert.equal(missed[0].waiting_reason, 'missed_skip');
+  assert.equal(h.scheduleService.getSchedule(schedule.id).next_fire_at, '2026-07-23T04:00:00.000Z');
+
+  const onTime = h.scheduleService.materializeDue(new Date('2026-07-23T04:00:00.000Z'));
+  assert.equal(onTime.length, 1);
+  assert.equal(onTime[0].scheduled_for, '2026-07-23T04:00:00.000Z');
+  assert.equal(onTime[0].status, 'pending');
+  assert.equal(h.scheduleService.getSchedule(schedule.id).next_fire_at, '2026-07-23T05:00:00.000Z');
 });
 
 test('one Operator materializes at most one active invocation across schedules', (t) => {

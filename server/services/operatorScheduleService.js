@@ -17,6 +17,7 @@ const TERMINAL_INVOCATION_STATUSES = new Set(['completed', 'failed', 'cancelled'
 const MIN_INTERVAL_MINUTES = 15;
 const MAX_INTERVAL_MINUTES = 7 * 24 * 60;
 const DEFAULT_TIMEZONE = 'UTC';
+const MISFIRE_POLICIES = new Set(['coalesce_latest', 'skip']);
 const MAX_PROMPT_LENGTH = 12000;
 const MIN_EXPIRY_AGE_MS = 24 * 60 * 60 * 1000;
 const CLAIM_LEASE_MS = 5 * 60 * 1000;
@@ -55,6 +56,23 @@ function normalizeEnabled(value, fallback) {
   if (value === true || value === 1) return 1;
   if (value === false || value === 0) return 0;
   throw new BadRequestError('enabled must be boolean or 0|1');
+}
+
+function normalizeGraceSeconds(value, fallback) {
+  if (value === undefined) return fallback;
+  if (value === null) return null;
+  if (!Number.isInteger(value) || value < 0) {
+    throw new BadRequestError('grace_seconds must be a non-negative integer or null');
+  }
+  return value;
+}
+
+function normalizeMisfirePolicy(value, fallback = 'coalesce_latest') {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'string' || !MISFIRE_POLICIES.has(value)) {
+    throw new BadRequestError('misfire_policy must be one of coalesce_latest|skip');
+  }
+  return value;
 }
 
 function normalizeRule(input) {
@@ -250,10 +268,12 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     insert: db.prepare(`
       INSERT INTO operator_schedules (
         id, operator_instance_id, name, prompt, codebase_project_id,
-        rule_json, timezone, enabled, next_fire_at, max_runs_per_day
+        rule_json, timezone, enabled, next_fire_at, max_runs_per_day,
+        grace_seconds, misfire_policy
       ) VALUES (
         @id, @operator_instance_id, @name, @prompt, @codebase_project_id,
-        @rule_json, @timezone, @enabled, @next_fire_at, @max_runs_per_day
+        @rule_json, @timezone, @enabled, @next_fire_at, @max_runs_per_day,
+        @grace_seconds, @misfire_policy
       )
     `),
     update: db.prepare(`
@@ -261,6 +281,7 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
          SET name=@name, prompt=@prompt, codebase_project_id=@codebase_project_id,
              rule_json=@rule_json, timezone=@timezone, enabled=@enabled,
              next_fire_at=@next_fire_at, max_runs_per_day=@max_runs_per_day,
+             grace_seconds=@grace_seconds, misfire_policy=@misfire_policy,
              revision=revision+1, updated_at=datetime('now')
        WHERE id=@id AND revision=@expected_revision AND archived_at IS NULL
     `),
@@ -709,6 +730,8 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     const rule = normalizeRule(input.rule || input.rule_json);
     const timezone = normalizeTimezone(input.timezone);
     const enabled = normalizeEnabled(input.enabled, 1);
+    const graceSeconds = normalizeGraceSeconds(input.grace_seconds, null);
+    const misfirePolicy = normalizeMisfirePolicy(input.misfire_policy);
     const maxRuns = input.max_runs_per_day == null ? 24 : Number(input.max_runs_per_day);
     if (!Number.isInteger(maxRuns) || maxRuns < 1 || maxRuns > 96) {
       throw new BadRequestError('max_runs_per_day must be an integer between 1 and 96');
@@ -726,6 +749,8 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
       enabled,
       next_fire_at: next ? next.toISOString() : null,
       max_runs_per_day: maxRuns,
+      grace_seconds: graceSeconds,
+      misfire_policy: misfirePolicy,
     };
     stmts.insert.run(row);
     const schedule = getSchedule(row.id);
@@ -748,6 +773,8 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
       : normalizeRule(input.rule ?? input.rule_json);
     const timezone = input.timezone === undefined ? current.timezone : normalizeTimezone(input.timezone);
     const enabled = normalizeEnabled(input.enabled, Number(current.enabled));
+    const graceSeconds = normalizeGraceSeconds(input.grace_seconds, current.grace_seconds);
+    const misfirePolicy = normalizeMisfirePolicy(input.misfire_policy, current.misfire_policy);
     const projectId = input.codebase_project_id === undefined ? current.codebase_project_id : input.codebase_project_id;
     const mapped = assertMappedProject(current.operator_instance_id, projectId || null);
     const maxRuns = input.max_runs_per_day === undefined ? current.max_runs_per_day : Number(input.max_runs_per_day);
@@ -767,6 +794,8 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
       enabled,
       next_fire_at: next ? next.toISOString() : null,
       max_runs_per_day: maxRuns,
+      grace_seconds: graceSeconds,
+      misfire_policy: misfirePolicy,
     });
     if (info.changes !== 1) throw new ConflictError('Schedule changed; reload and retry');
     if (!enabled) stmts.cancelPending.run(id);
@@ -877,14 +906,14 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
   function advancePastNow(schedule, now) {
     let cursor = new Date(schedule.next_fire_at);
     let scheduledFor = null;
-    let guard = 0;
+    let skipped = 0;
     while (cursor && cursor.getTime() <= now.getTime()) {
       scheduledFor = cursor;
       cursor = nextFireForRule(schedule.rule, schedule.timezone, cursor);
-      guard += 1;
-      if (guard > 10000) throw new Error(`schedule ${schedule.id} advance guard exceeded`);
+      skipped += 1;
+      if (skipped > 10000) throw new Error(`schedule ${schedule.id} advance guard exceeded`);
     }
-    return { scheduledFor, next: cursor };
+    return { scheduledFor, next: cursor, skipped };
   }
 
   function recurrencePeriodMs(invocation) {
@@ -933,12 +962,24 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
         const result = db.transaction(() => {
           const fresh = parseSchedule(stmts.get.get(raw.id));
           if (!fresh || !fresh.enabled || fresh.archived_at || !fresh.next_fire_at || fresh.next_fire_at > nowIso) return null;
-          const { scheduledFor, next } = advancePastNow(fresh, now);
+          const { scheduledFor, next, skipped } = advancePastNow(fresh, now);
           if (!scheduledFor) return null;
           const nextEnabled = fresh.rule.kind === 'once' ? 0 : 1;
           stmts.updateNextFire.run(next ? next.toISOString() : null, nextEnabled, fresh.id, fresh.revision);
           const scheduledForIso = scheduledFor.toISOString();
           const changed = [];
+          const beyondGrace = fresh.grace_seconds !== null
+            && now.getTime() - scheduledFor.getTime() > fresh.grace_seconds * 1000;
+          const skippedByPolicy = fresh.misfire_policy === 'skip' && skipped > 1;
+          if (beyondGrace || skippedByPolicy) {
+            const missed = insertTerminalInvocationFromSchedule(fresh, {
+              scheduledFor: scheduledForIso,
+              runAfter: nowIso,
+              waitingReason: beyondGrace ? 'missed_grace' : 'missed_skip',
+            });
+            if (missed.inserted) changed.push(missed.invocation);
+            return { invocation: null, changed };
+          }
           // The daily cap is decided BEFORE touching the active invocation.
           // Superseding first and then returning on the cap commits the
           // cancellation without a replacement: the older occurrence is
