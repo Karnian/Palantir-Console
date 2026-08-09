@@ -4,6 +4,7 @@ const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
 const {
   BadRequestError,
+  ForbiddenError,
   NotFoundError,
 } = require('../utils/errors');
 
@@ -298,8 +299,42 @@ function projectEvent(row) {
   };
 }
 
-function createActionsRouter({ ledger }) {
+const DECLARE_BODY_KEYS = new Set(['task_id', 'action_slot', 'params', 'reissues_action_id']);
+const PROVENANCE_BODY_KEYS = new Set([
+  'declared_by_method', 'declaredByMethod', 'auth_method', 'authMethod',
+  'provenance', 'actor', 'approved_by', 'approval_auth_method',
+]);
+
+function createActionsRouter({ ledger, taskService }) {
   const router = express.Router();
+
+  router.post('/', asyncHandler(async (req, res) => {
+    const body = req.body || {};
+    for (const key of Object.keys(body)) {
+      if (PROVENANCE_BODY_KEYS.has(key)) {
+        throw new BadRequestError(`request body must not supply provenance field: ${key}`);
+      }
+      if (!DECLARE_BODY_KEYS.has(key)) throw new BadRequestError(`unknown action declaration field: ${key}`);
+    }
+    const method = req.auth?.method || 'none';
+    if (!['bearer', 'cookie'].includes(method)) {
+      throw new ForbiddenError('Action declaration requires bearer or cookie authentication');
+    }
+    if (!taskService) throw new Error('taskService is required for action declaration');
+    const task = taskService.getTask(body.task_id);
+    if (task.goal_kind !== 'action') {
+      throw new BadRequestError("actions may only be declared for goal_kind='action' tasks");
+    }
+    const existing = ledger.getActionByIntent(body.task_id, body.action_slot);
+    const action = ledger.declareAction({
+      taskId: body.task_id,
+      actionSlot: body.action_slot,
+      params: body.params,
+      reissuesActionId: body.reissues_action_id,
+      declaredByMethod: method,
+    });
+    res.status(existing ? 200 : 201).json({ action: projectAction(action) });
+  }));
 
   router.get('/', asyncHandler(async (req, res) => {
     const { status } = req.query;

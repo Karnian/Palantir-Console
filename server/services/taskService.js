@@ -6,6 +6,7 @@ const VALID_PRIORITIES = ['low', 'medium', 'high', 'critical'];
 const VALID_RECURRENCE = ['daily', 'weekly', 'monthly'];
 // v3 Phase 1: task_kind classification for dispatch routing
 const VALID_TASK_KINDS = ['code_change', 'investigation', 'review', 'docs', 'refactor', 'other'];
+const VALID_GOAL_KINDS = ['deliverable', 'action'];
 const DUE_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 // v3 Phase 1: requires_capabilities accepts array of strings or null.
@@ -31,6 +32,20 @@ function normalizeTaskKind(value) {
     throw new BadRequestError(`Invalid task_kind: ${value} (valid: ${VALID_TASK_KINDS.join(', ')})`);
   }
   return value;
+}
+
+function normalizeGoalKind(value) {
+  if (value === undefined) return undefined;
+  if (!VALID_GOAL_KINDS.includes(value)) {
+    throw new BadRequestError(`Invalid goal_kind: ${value} (valid: ${VALID_GOAL_KINDS.join(', ')})`);
+  }
+  return value;
+}
+
+function validateGoalKindCombination(goalKind, goalEnabled) {
+  if (goalKind === 'action' && !(goalEnabled === true || goalEnabled === 1)) {
+    throw new BadRequestError("goal_kind='action' requires goal_enabled=1");
+  }
 }
 
 // Compute the next due_date for a recurring task. Always advances strictly
@@ -101,13 +116,13 @@ function createTaskService(db, eventBus, opts = {}) {
         id, project_id, title, description, status, priority, sort_order,
         due_date, recurrence, parent_task_id,
         task_kind, requires_capabilities, suggested_agent_profile_id, acceptance_criteria,
-        preferred_preset_id
+        preferred_preset_id, goal_kind, goal_enabled
       )
       VALUES (
         @id, @project_id, @title, @description, @status, @priority, @sort_order,
         @due_date, @recurrence, @parent_task_id,
         @task_kind, @requires_capabilities, @suggested_agent_profile_id, @acceptance_criteria,
-        @preferred_preset_id
+        @preferred_preset_id, @goal_kind, @goal_enabled
       )
     `),
     // update: dynamic — see dynamicUpdate() below
@@ -164,6 +179,8 @@ function createTaskService(db, eventBus, opts = {}) {
       suggested_agent_profile_id: args.suggested_agent_profile_id ?? null,
       acceptance_criteria: args.acceptance_criteria ?? null,
       preferred_preset_id: args.preferred_preset_id ?? null,
+      goal_kind: args.goal_kind ?? 'deliverable',
+      goal_enabled: args.goal_enabled ? 1 : 0,
     });
     return parseRow(stmts.getById.get(args.id));
   });
@@ -181,7 +198,7 @@ function createTaskService(db, eventBus, opts = {}) {
     const {
       project_id, title, description, status, priority, due_date, recurrence, parent_task_id,
       task_kind, requires_capabilities, suggested_agent_profile_id, acceptance_criteria,
-      preferred_preset_id,
+      preferred_preset_id, goal_kind, goal_enabled,
     } = input;
     if (!title) throw new BadRequestError('Task title is required');
     if (status && !VALID_STATUSES.includes(status)) {
@@ -194,6 +211,8 @@ function createTaskService(db, eventBus, opts = {}) {
     const normalizedRec = normalizeRecurrence(recurrence);
     // v3 Phase 1: new field validations
     const normalizedKind = normalizeTaskKind(task_kind);
+    const normalizedGoalKind = normalizeGoalKind(goal_kind);
+    validateGoalKindCombination(normalizedGoalKind ?? 'deliverable', goal_enabled ?? 0);
     const normalizedCaps = normalizeRequiresCapabilities(requires_capabilities);
     // D2c defense-in-depth: validate preferred_preset_id at service layer (same as updateTask)
     if (preferred_preset_id !== null && preferred_preset_id !== undefined) {
@@ -216,6 +235,8 @@ function createTaskService(db, eventBus, opts = {}) {
       suggested_agent_profile_id: suggested_agent_profile_id || null,
       acceptance_criteria: acceptance_criteria ?? null,
       preferred_preset_id: preferred_preset_id ?? null,
+      goal_kind: normalizedGoalKind ?? 'deliverable',
+      goal_enabled: goal_enabled ?? 0,
     });
     if (eventBus) eventBus.emit('task:created', { task });
     return task;
@@ -227,14 +248,23 @@ function createTaskService(db, eventBus, opts = {}) {
     'task_kind', 'requires_capabilities', 'suggested_agent_profile_id', 'acceptance_criteria',
     // v3 Phase 10E (worker preset linkage)
     'preferred_preset_id',
-    // G1/G2 goal knobs — Operator-settable (§6). verify_check_id is DELIBERATELY
+    // goal_kind belongs here because operators must be able to choose the goal's
+    // execution semantics; its value and its merged relationship to goal_enabled
+    // are validated below. verify_check_id is DELIBERATELY
     // excluded: its assignment is command-kind gated + project-matched via the
     // dedicated assignVerifyCheck path, so the generic PATCH cannot bypass §6.
-    'goal_enabled', 'goal_max_attempts', 'goal_judge_enabled',
+    'goal_enabled', 'goal_max_attempts', 'goal_judge_enabled', 'goal_kind',
   ];
 
   function updateTask(id, fields, { actor = null } = {}) {
     const before = getTask(id);
+    if ('goal_kind' in fields) {
+      fields = { ...fields, goal_kind: normalizeGoalKind(fields.goal_kind) };
+    }
+    // Validate the resulting row so changing either half of the invariant cannot
+    // bypass service-level validation and surface a database error as a 500.
+    const goalAfter = { ...before, ...fields };
+    validateGoalKindCombination(goalAfter.goal_kind, goalAfter.goal_enabled);
     // #436: the same authority rule as updateTaskStatus, stated as an invariant
     // on the RESULT rather than on one field. Guarding only the status route was
     // bypassable in two ways, both reproduced in review:

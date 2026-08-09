@@ -120,11 +120,11 @@ const operations = [
     id: 'tasks.create', method: 'POST', path_template: '/api/tasks', layers: [...LAYERS], availability: 'always',
     path_params: [], query: [],
     request_body: body({
-      required: ['title'], optional: ['description', 'priority', 'project_id'],
-      types: { title: 'string', description: 'string', priority: 'string', project_id: 'string' },
+      required: ['title'], optional: ['description', 'priority', 'project_id', 'goal_kind', 'goal_enabled'],
+      types: { title: 'string', description: 'string', priority: 'string', project_id: 'string', goal_kind: 'deliverable|action', goal_enabled: 'boolean' },
       examples: {
         top: { rest: { title: '...', description: '...', priority: 'medium', project_id: 'PROJECT_ID' }, curl: { title: '...', project_id: '...' } },
-        operator: { rest: { title: '...', description: '...', priority: 'medium', project_id: 'PROJECT_ID' }, curl: { title: '...', project_id: '...' } },
+        operator: { rest: { title: '...', description: '...', priority: 'medium', project_id: 'PROJECT_ID', goal_kind: 'deliverable' }, curl: { title: '...', project_id: '...' } },
       },
     }),
     constraints: [{ id: 'project_assignment', critical: false, rule: 'Include project_id only for a clearly matching existing project.' }],
@@ -138,8 +138,8 @@ const operations = [
     id: 'tasks.update', method: 'PATCH', path_template: '/api/tasks/{task_id}', layers: [...LAYERS], availability: 'always',
     path_params: [{ name: 'task_id', type: 'string', prompt_value: 'TASK_ID' }], query: [],
     request_body: body({
-      required: [], optional: ['title', 'description', 'priority', 'project_id', 'goal_enabled', 'goal_max_attempts', 'goal_judge_enabled'],
-      types: { title: 'string', description: 'string', priority: 'string', project_id: 'string|null', goal_enabled: 'boolean', goal_max_attempts: 'number', goal_judge_enabled: 'boolean' },
+      required: [], optional: ['title', 'description', 'priority', 'project_id', 'goal_enabled', 'goal_max_attempts', 'goal_judge_enabled', 'goal_kind'],
+      types: { title: 'string', description: 'string', priority: 'string', project_id: 'string|null', goal_enabled: 'boolean', goal_max_attempts: 'number', goal_judge_enabled: 'boolean', goal_kind: 'deliverable|action' },
       examples: { top: { rest: { title: '...', description: '...', priority: 'high' } }, operator: { rest: { title: '...', description: '...', priority: 'high' } } },
     }),
     constraints: [
@@ -148,6 +148,26 @@ const operations = [
     ],
     canonical_cases: ['/api/tasks/task-1'],
     prompt: prompt({ visible: true, section: 'tasks', order: 30, lines: [{ label: 'Update task', body_example: 'rest' }] }),
+  },
+  {
+    id: 'actions.declare', method: 'POST', path_template: '/api/actions', layers: ['operator'], availability: 'always',
+    path_params: [], query: [],
+    request_body: body({
+      required: ['task_id', 'action_slot', 'params'], optional: ['reissues_action_id'],
+      types: { task_id: 'string', action_slot: 'string', params: 'object', reissues_action_id: 'string' },
+      examples: { operator: { declare: { task_id: 'TASK_ID', action_slot: 'primary-issue', params: { repo: 'owner/repo', title: 'Issue title', body: 'Issue body', labels: [] } } } },
+      replay: { mode: 'real_service_database' },
+    }),
+    constraints: [
+      { id: 'action_task_only', critical: false, rule: "The target task must have goal_kind='action' and goal_enabled=true." },
+      { id: 'human_approval_only', critical: false, rule: 'Only a human may approve a declared action; declaration does not execute it.' },
+      { id: 'idempotent_redeclare', critical: false, rule: 'Redeclaring the same task_id/action_slot with identical params returns the same action; changed params conflict.' },
+    ],
+    canonical_cases: ['/api/actions'],
+    prompt: prompt({ visible: true, section: 'tasks', order: 35, lines: [{
+      label: 'Declare action intent for an action task', body_example: 'declare',
+      after: '  Only a human can approve it. Declaration never executes it. Re-declare the same task_id/action_slot with identical params to get the same action; changed params conflict.',
+    }], layer_variants: { operator: 'visible' } }),
   },
   {
     id: 'tasks.update_status', method: 'PATCH', path_template: '/api/tasks/{task_id}/status', layers: [...LAYERS], availability: 'always',

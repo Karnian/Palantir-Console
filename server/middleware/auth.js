@@ -83,6 +83,7 @@ function managerCapabilityRequestAllowed(req, grant = null) {
       return false;
     }
     return rawPath === '/api/tasks'
+      || (grant?.layer !== 'top' && rawPath === '/api/actions')
       || rawPath === '/api/dispatch-audit'
       || (
         grant?.layer !== 'top'

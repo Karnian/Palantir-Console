@@ -120,9 +120,11 @@ curl -s -X DELETE http://manager.golden.test:4317/api/tasks/TASK_ID -H "Authoriz
 - List all tasks: GET http://manager.golden.test:4317/api/tasks
 - Filter by status: GET http://manager.golden.test:4317/api/tasks?status=in_progress
 - Filter by project: GET http://manager.golden.test:4317/api/tasks?project_id=PROJECT_ID
-- Create task: POST http://manager.golden.test:4317/api/tasks  body: {"title":"...","description":"...","priority":"medium","project_id":"PROJECT_ID"}
+- Create task: POST http://manager.golden.test:4317/api/tasks  body: {"title":"...","description":"...","priority":"medium","project_id":"PROJECT_ID","goal_kind":"deliverable"}
   Only include project_id if the task clearly belongs to an existing project. If unrelated, omit project_id (the task will be unassigned). Do NOT guess or force a project assignment.
 - Update task: PATCH http://manager.golden.test:4317/api/tasks/TASK_ID  body: {"title":"...","description":"...","priority":"high"}
+- Declare action intent for an action task: POST http://manager.golden.test:4317/api/actions  body: {"task_id":"TASK_ID","action_slot":"primary-issue","params":{"repo":"owner/repo","title":"Issue title","body":"Issue body","labels":[]}}
+  Only a human can approve it. Declaration never executes it. Re-declare the same task_id/action_slot with identical params to get the same action; changed params conflict.
 - Complete a satisfactory non-goal task: PATCH http://manager.golden.test:4317/api/tasks/TASK_ID/status  body: {"status":"done"}
 - For a goal-enabled task, do not mark it "done": recommend human acceptance/rejection and leave its status in "review".
 - Delete task: DELETE http://manager.golden.test:4317/api/tasks/TASK_ID

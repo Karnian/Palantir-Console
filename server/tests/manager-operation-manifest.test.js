@@ -33,6 +33,8 @@ const { createOperatorSchedulesRouter } = require('../routes/operatorSchedules')
 const { createMemoryProposalsRouter } = require('../routes/memoryProposals');
 const { createVerifyChecksRouter } = require('../routes/verifyChecks');
 const { createDispatchAuditRouter } = require('../routes/dispatchAudit');
+const { createActionsRouter } = require('../routes/actions');
+const { createActionLedgerService } = require('../services/actionLedgerService');
 const { createOperatorSpecialistRouter } = require('../routes/operatorSpecialist');
 const { invokeApp } = require('./helpers/invokeApp');
 
@@ -506,7 +508,7 @@ test('verify-check manifest examples replay through the real router, service, an
 
 test('every request-body example declares its executable replay boundary', () => {
   const replayedOperations = new Set([
-    'runs.send_input', 'tasks.create', 'tasks.update', 'tasks.update_status', 'tasks.execute',
+    'actions.declare', 'runs.send_input', 'tasks.create', 'tasks.update', 'tasks.update_status', 'tasks.execute',
     'conversations.message', 'conversations.memory_propose', 'dispatch_audit.create',
     'operator_specialist.invoke', 'verify_checks.create', 'verify_checks.assign', 'verify_checks.update',
   ]);
@@ -574,6 +576,10 @@ async function replayBodyExample(operation, layer, name, example) {
         taskService,
         lifecycleService: { executeTask: async id => ({ id: `run-for-${id}` }) },
       });
+    } else if (operation.id === 'actions.declare') {
+      taskService.updateTask(task.id, { goal_enabled: 1, goal_kind: 'action' });
+      mountPath = '/api/actions';
+      router = createActionsRouter({ ledger: createActionLedgerService(db), taskService });
     } else if (operation.id === 'conversations.memory_propose') {
       mountPath = '/api';
       const resolvedKind = layer === 'operator' ? 'pm' : 'top';
@@ -690,6 +696,7 @@ test('availability metadata equals gates on production createApp instances', asy
     specialistBackend: { runSpecialistTurn: async () => ({ text: 'ok' }) },
   }));
   try {
+    assert.equal(gatedApp.services.actionBroker, undefined, 'createApp must not construct an action broker');
     assert.equal((await invokeApp(gatedApp, { method: 'GET', path: '/api/verify-checks' })).status, 503);
     assert.equal((await invokeApp(availableApp, { method: 'GET', path: '/api/verify-checks' })).status, 200);
     assert.equal((await invokeApp(gatedApp, { method: 'GET', path: '/api/tasks' })).status, 200);

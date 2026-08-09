@@ -453,9 +453,9 @@ test('GET /api/actions/:id returns projected evidence and redacts every raw secr
   assert.equal(missing.status, 404);
 });
 
-test('actions router exposes no mutating verb', async (t) => {
+test('actions router only exposes authenticated declaration as a mutating verb', async (t) => {
   const client = await createTestClient(t);
-  assert.equal((await client('post', '/api/actions', {})).status, 404);
+  assert.equal((await client('post', '/api/actions', {})).status, 403);
   assert.equal((await client('patch', '/api/actions/action-old', {})).status, 404);
   assert.equal((await client('delete', '/api/actions/action-old')).status, 404);
 });

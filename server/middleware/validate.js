@@ -162,6 +162,8 @@ function validateCreateTask(req, res, next) {
   optionalString(body, 'due_date', 'due_date');
   optionalString(body, 'recurrence', 'recurrence');
   optionalString(body, 'task_kind', 'task_kind');
+  optionalString(body, 'goal_kind', 'goal_kind');
+  optionalBoolish(body, 'goal_enabled', 'goal_enabled');
   optionalString(body, 'acceptance_criteria', 'acceptance_criteria');
   optionalString(body, 'suggested_agent_profile_id', 'suggested_agent_profile_id');
   // requires_capabilities: array or null
@@ -197,6 +199,8 @@ function validateUpdateTask(req, res, next) {
   optionalString(body, 'due_date', 'due_date');
   optionalString(body, 'recurrence', 'recurrence');
   optionalString(body, 'task_kind', 'task_kind');
+  optionalString(body, 'goal_kind', 'goal_kind');
+  optionalBoolish(body, 'goal_enabled', 'goal_enabled');
   optionalString(body, 'acceptance_criteria', 'acceptance_criteria');
   optionalString(body, 'suggested_agent_profile_id', 'suggested_agent_profile_id');
   if ('requires_capabilities' in body) {

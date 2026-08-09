@@ -1876,7 +1876,7 @@ function createApp(options = {}) {
   }));
   app.use('/api/tasks', createTasksRouter({ taskService, lifecycleService, presetService, goalDeliveryService, runService, verifyCheckService }));
   app.use('/api/runs', createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService, presetService, mcpTemplateService, projectService, taskService, nodeExecutor, nodeService }));
-  app.use('/api/actions', createActionsRouter({ ledger: actionLedger }));
+  app.use('/api/actions', createActionsRouter({ ledger: actionLedger, taskService }));
   // PR18: tests can pass options.authResolverOpts (e.g. a fake `hasKeychain`)
   // so /api/agents and /api/manager preflights are deterministic across CI
   // hosts that may or may not have a Claude keychain item. Production callers
@@ -2051,6 +2051,7 @@ function createApp(options = {}) {
   app.services = {
     runService,
     taskService,
+    actionLedger,
     projectService,
     presetService,
     nodeService,

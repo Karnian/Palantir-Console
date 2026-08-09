@@ -275,8 +275,8 @@ function createActionLedgerService(db, options = {}) {
     insertAction: db.prepare(`
       INSERT INTO actions (
         id, task_id, action_slot, connector, operation,
-        params_json, params_hash, status, created_at, reissues_action_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'awaiting_approval', ?, ?)
+        params_json, params_hash, status, created_at, reissues_action_id, declared_by_method
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'awaiting_approval', ?, ?, ?)
     `),
     insertEvent: db.prepare(`
       INSERT INTO action_events (
@@ -484,6 +484,10 @@ function createActionLedgerService(db, options = {}) {
     const operation = input.operation ?? OPERATION;
     if (connector !== CONNECTOR) throw new BadRequestError(`unsupported connector: ${connector}`);
     if (operation !== OPERATION) throw new BadRequestError(`unsupported operation: ${operation}`);
+    const declaredByMethod = input.declaredByMethod ?? input.declared_by_method ?? 'cookie';
+    if (!['bearer', 'cookie'].includes(declaredByMethod)) {
+      throw new BadRequestError('declaredByMethod must be bearer or cookie');
+    }
 
     const paramsJson = canonicalParamsJson(input.params);
     assertBodyHasNoReservedMarker(JSON.parse(paramsJson).body);
@@ -521,6 +525,7 @@ function createActionLedgerService(db, options = {}) {
       hash,
       createdAt,
       reissuesActionId,
+      declaredByMethod,
     );
     insertEvent(id, { phase: 'action.declared', requestDigest: hash }, createdAt);
     return stmts.getAction.get(id);
