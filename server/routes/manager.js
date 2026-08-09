@@ -78,15 +78,20 @@ function invalidResumePolicy(message, cause) {
 
 function resolveResumeAgentProfile(
   agentProfileService,
-  { profileId, adapterType, requireProfile = false } = {},
+  { profileId, adapterType } = {},
 ) {
-  if (!agentProfileService) return null;
-  try {
-    if (profileId && typeof agentProfileService.getProfile === 'function') {
-      return agentProfileService.getProfile(profileId);
+  if (!agentProfileService) {
+    if (profileId) {
+      throw invalidResumePolicy(`persisted profile ${profileId} cannot be resolved`);
     }
-    if (requireProfile) {
-      throw invalidResumePolicy('persisted agent_profile_id is missing');
+    return null;
+  }
+  try {
+    if (profileId) {
+      if (typeof agentProfileService.getProfile !== 'function') {
+        throw new Error('profile service cannot resolve a persisted profile id');
+      }
+      return agentProfileService.getProfile(profileId);
     }
     if (typeof agentProfileService.listProfiles === 'function') {
       return agentProfileService.listProfiles()
@@ -632,10 +637,27 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 // (P5-S4c) — resolve auth for the run's ACTUAL adapter, not a
                 // hardcoded 'codex' (a local Claude Operator would otherwise be
                 // stopped/misauthed via Codex auth). (Codex P5-S4c BLOCKER.)
+                // Runs created before #457 have no pinned profile id. Preserve
+                // their pre-existing adapter fallback so upgrades do not stop
+                // every live Operator, but make that mutable legacy state
+                // observable. New runs persist agent_profile_id; when present,
+                // resolveResumeAgentProfile uses only that exact profile and a
+                // missing/poisoned row remains a hard failure.
+                if (!r.agent_profile_id) {
+                  try {
+                    runService.addRunEvent(
+                      r.id,
+                      'operator:resume_profile_unpinned',
+                      JSON.stringify({
+                        operator_instance_id: operatorInstanceId || r.operator_instance_id || null,
+                        adapter: adapterType,
+                      }),
+                    );
+                  } catch { /* best-effort legacy-state diagnostic */ }
+                }
                 const envPolicy = resolveResumeEnvPolicy(agentProfileService, {
                   profileId: r.agent_profile_id,
                   adapterType,
-                  requireProfile: true,
                 });
                 if (
                   isRemoteNode
@@ -651,7 +673,6 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 const permissionMode = resolveResumePermissionMode(agentProfileService, {
                   profileId: r.agent_profile_id,
                   adapterType,
-                  requireProfile: true,
                   sessionPermissionMode: r.session_permission_mode,
                 });
                 const templateOptions = resolveResumeClaudeTemplateOptions(
@@ -659,7 +680,6 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                   {
                     profileId: r.agent_profile_id,
                     adapterType,
-                    requireProfile: true,
                     sessionClaudeOptionsJson: r.session_claude_options_json,
                   },
                 );

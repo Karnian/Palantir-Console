@@ -570,9 +570,9 @@ test('boot resume: canonical operator:oi_* Operator is resumed, not stopped (A0)
       strictMcpConfig: true,
     },
   });
-  // Operator runs intentionally have no agent_profile_id. Changing the
-  // name-sorted fallback profile after the fresh spawn must not escalate the
-  // resumed session to that mutable value.
+  // MUTATION: this models an Operator created before agent_profile_id was
+  // persisted. It must retain the adapter fallback while the immutable session
+  // snapshot prevents mutable profile options from changing the resumed CLI.
   agentProfileService.updateProfile('claude-code', {
     permission_mode: 'bypassPermissions',
     args_template: '-p {prompt}',
@@ -633,4 +633,11 @@ test('boot resume: canonical operator:oi_* Operator is resumed, not stopped (A0)
   assert.equal(opResume.opts.mcpConfig, 'locked.json');
   assert.equal(opResume.opts.strictMcpConfig, true);
   assert.equal(rs.getRun(opRun.id).status, 'running', 'canonical Operator stays running (not stopped)');
+  const unpinnedEvent = rs.getRunEvents(opRun.id)
+    .find((row) => row.event_type === 'operator:resume_profile_unpinned');
+  assert.ok(unpinnedEvent, 'legacy profile fallback must be observable');
+  assert.deepEqual(JSON.parse(unpinnedEvent.payload_json), {
+    operator_instance_id: instanceId,
+    adapter: 'claude-code',
+  });
 });
