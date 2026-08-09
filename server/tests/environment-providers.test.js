@@ -16,6 +16,10 @@ function request(app) {
     const chain = {
       set(name, value) {
         state.headers[name] = value;
+        if (String(name).toLowerCase() === 'cookie') {
+          state.headers.Host ||= 'console.test';
+          state.headers.Origin ||= 'http://console.test';
+        }
         return chain;
       },
       send(body) {
@@ -237,7 +241,10 @@ test('manager dropped-env diagnostic annotates provider ownership without values
 });
 
 test('secret classification is not defeated by case or by missing separators', () => {
-  const { isProviderSecretEnvKey } = require('../services/providerEnvPolicy');
+  const {
+    isProviderSecretEnvKey,
+    resolveProviderEnvPolicy,
+  } = require('../services/providerEnvPolicy');
   // The names an operator types are not constrained to UPPER_SNAKE_CASE, and
   // ENV_VAR_NAME_RE accepts any case. A classifier that only recognises the
   // tidy spelling waves through the untidy spelling of the same credential.
@@ -251,13 +258,69 @@ test('secret classification is not defeated by case or by missing separators', (
     'my_api_key',
     'VaultPassword',
     'CLIENT_PRIVATE_CERT',
+    'DOCKER_AUTH_CONFIG',
+    'HTTP_AUTHORIZATION',
+    'GITHUB_PAT',
+    'REGISTRY_CREDENTIALS',
+    'LOGIN_SESSION',
+    'REQUEST_COOKIE',
+    'WEBHOOK_SIGNATURE',
+    'SSH_PRIVATE_KEY',
+    'AWS_ACCESS_KEY',
+    'AWS_SECRET_KEY',
+    'OAUTH_REFRESH',
   ]) {
     assert.equal(isProviderSecretEnvKey(key), true, `${key} must require explicit approval`);
   }
   // Still lets ordinary configuration through, or the feature is pointless.
-  for (const key of ['CLAUDE_CODE_USE_BEDROCK', 'AWS_REGION', 'HTTP_PROXY', 'MODEL_NAME']) {
+  for (const key of [
+    'CLAUDE_CODE_USE_BEDROCK',
+    'AWS_REGION',
+    'HTTP_PROXY',
+    'MODEL_NAME',
+    'CACHE_KEYS_DIR',
+    'AUTHOR',
+    'PATH',
+    'PATTERN',
+    'KEYBOARD_LAYOUT',
+  ]) {
     assert.equal(isProviderSecretEnvKey(key), false, `${key} must not need approval`);
   }
+
+  // MUTATION: an AUTH-shaped credential is withheld from an empty profile
+  // allowlist and reaches the spawn boundary only after explicit approval.
+  const provider = {
+    id: 'envp_registry',
+    name: 'registry',
+    env_keys: JSON.stringify(['DOCKER_AUTH_CONFIG']),
+  };
+  const withheld = resolveProviderEnvPolicy('[]', [provider], {
+    DOCKER_AUTH_CONFIG: '{"auths":{"registry":{"auth":"BASE64_USER_PASS"}}}',
+  });
+  assert.equal(withheld.effectiveKeys.includes('DOCKER_AUTH_CONFIG'), false);
+  assert.deepEqual(withheld.providers[0].withheldSecretKeys, ['DOCKER_AUTH_CONFIG']);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(buildManagerSpawnEnv({
+      baseEnv: { DOCKER_AUTH_CONFIG: 'must-not-forward' },
+      envAllowlist: withheld.effectiveKeys,
+      providerEnv: withheld.providers,
+      vendor: 'codex',
+    }), 'DOCKER_AUTH_CONFIG'),
+    false,
+  );
+
+  const approved = resolveProviderEnvPolicy(
+    '["DOCKER_AUTH_CONFIG"]',
+    [provider],
+    { DOCKER_AUTH_CONFIG: 'approved-registry-auth' },
+  );
+  assert.ok(approved.effectiveKeys.includes('DOCKER_AUTH_CONFIG'));
+  assert.equal(buildManagerSpawnEnv({
+    baseEnv: { DOCKER_AUTH_CONFIG: 'approved-registry-auth' },
+    envAllowlist: approved.effectiveKeys,
+    providerEnv: approved.providers,
+    vendor: 'codex',
+  }).DOCKER_AUTH_CONFIG, 'approved-registry-auth');
 });
 
 test('declaring a provider is a human action, not something a bearer token can do', async (t) => {
@@ -280,6 +343,19 @@ test('declaring a provider is a human action, not something a bearer token can d
     .set('Origin', 'http://evil.example')
     .send(body);
   assert.equal(crossOrigin.status, 403);
+
+  // MUTATION: cookie provenance alone is insufficient; provider writes require
+  // a positive same-origin Origin header.
+  const noOrigin = await invokeApp(app, {
+    method: 'POST',
+    path: '/api/environment-providers',
+    headers: {
+      Cookie: 'palantir_token=secret-token',
+      Host: 'console.test',
+    },
+    body,
+  });
+  assert.equal(noOrigin.status, 403, JSON.stringify(noOrigin.body));
 
   assert.equal(
     (await request(app).get('/api/environment-providers').set(...COOKIE)).body.providers.length,
@@ -410,4 +486,32 @@ test('MUTATION: a secret-shaped gate is presence-only and its value is never sto
       .getProvider('envp_legacy_secret_gate').gate_env_value,
     null,
   );
+
+  const previousGate = process.env.LEGACY_API_KEY;
+  process.env.LEGACY_API_KEY = 'present-but-not-the-poisoned-value';
+  t.after(() => {
+    if (previousGate === undefined) delete process.env.LEGACY_API_KEY;
+    else process.env.LEGACY_API_KEY = previousGate;
+  });
+  app.services.agentProfileService.updateProfile('claude-code', {
+    env_allowlist: JSON.stringify(['LEGACY_API_KEY']),
+    environment_provider_ids: ['envp_legacy_secret_gate'],
+  });
+  const policy = app.services.agentProfileService.resolveEnvPolicy('claude-code');
+  assert.equal(policy.providers[0].active, true, 'secret gate falls back to presence');
+  assert.equal(policy.providers[0].gateEnvValue, null);
+
+  const providerRoute = await request(app)
+    .get('/api/environment-providers/envp_legacy_secret_gate')
+    .set(...COOKIE);
+  assert.equal(providerRoute.status, 200);
+  assert.equal(providerRoute.body.provider.gate_env_value, null);
+  assert.doesNotMatch(JSON.stringify(providerRoute.body), /legacy-secret-value/);
+
+  const agentsRoute = await request(app).get('/api/agents').set(...COOKIE);
+  assert.equal(agentsRoute.status, 200);
+  assert.doesNotMatch(JSON.stringify(agentsRoute.body), /legacy-secret-value/);
+  const hydrated = agentsRoute.body.agents.find((agent) => agent.id === 'claude-code');
+  assert.equal(hydrated.environment_providers[0].gate_env_value, null);
+  assert.equal(hydrated.environment_providers[0].active, true);
 });

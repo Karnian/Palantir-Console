@@ -192,7 +192,9 @@ test('null PM preference falls back to the locally authenticated Claude profile 
   };
   const agentProfileService = {
     listProfiles: () => [{
-      id: 'claude-only',
+      // Persisted Operator runs reference this id, so the stub must model a
+      // real row present in the migrated agent_profiles table.
+      id: 'claude-code',
       type: 'claude-code',
       // agent_profiles.command is NOT NULL, and the spawn path rejects a
       // profile whose command vendor contradicts its adapter type. Keep the
@@ -271,6 +273,7 @@ test('P5-S4c: Claude operator spawn persists local claude_session_id affinity fr
   const result = spawn.ensureLiveOperator({ projectId: project.id });
   assert.equal(result.spawned, true);
   assert.equal(result.run.manager_adapter, 'claude-code');
+  assert.equal(result.run.agent_profile_id, 'claude-code');
   assert.equal(adapterCalls[0], 'claude-code');
   assert.equal(claudeAdapter._starts.length, 1);
   const start = claudeAdapter._starts[0];
@@ -317,6 +320,17 @@ test('P5-S4c: Claude operator spawn persists local claude_session_id affinity fr
   assert.equal(thread.cwd, null);
 
   runService.updateClaudeSessionId(topRun.id, 'sess_top_restart');
+  db.prepare('UPDATE runs SET agent_profile_id = ? WHERE id = ?')
+    .run('claude-code', topRun.id);
+  const decoyProfile = agentProfileService.createProfile({
+    name: 'AAA Claude resume decoy',
+    type: 'claude-code',
+    command: 'claude',
+    args_template: '-p {prompt}',
+    env_allowlist: '[]',
+  });
+  db.prepare('UPDATE agent_profiles SET env_allowlist = ? WHERE id = ?')
+    .run('{poisoned decoy policy', decoyProfile.id);
   agentProfileService.updateProfile('claude-code', {
     args_template: '-p {prompt}',
   });
@@ -350,6 +364,11 @@ test('P5-S4c: Claude operator spawn persists local claude_session_id affinity fr
     (entry) => entry.runId === result.run.id,
   );
   assert.ok(resumedOperator);
+  assert.equal(
+    runService.getRun(result.run.id).agent_profile_id,
+    'claude-code',
+    'resume reuses the persisted profile instead of the first adapter profile',
+  );
   assert.equal(resumedOperator.opts.resumeSessionId, 'sess_claude_1');
   assert.deepEqual(resumedOperator.opts.tools, ['Read,Grep']);
   assert.deepEqual(resumedOperator.opts.disallowedTools, ['Bash']);
@@ -360,6 +379,84 @@ test('P5-S4c: Claude operator spawn persists local claude_session_id affinity fr
   assert.equal(resumedOperator.opts.disableSlashCommands, true);
   assert.equal(resumedOperator.opts.noChrome, true);
   assert.equal(resumedOperator.opts.settings, 'locked.json');
+});
+
+test('MUTATION: Operator resume fails closed when its persisted profile is poisoned', async (t) => {
+  const db = await mkdb(t);
+  const runService = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const agentProfileService = createAgentProfileService(db);
+  const selectedProfile = agentProfileService.createProfile({
+    name: 'AAA selected Claude profile',
+    type: 'claude-code',
+    command: 'claude',
+    args_template: '-p {prompt}',
+    env_allowlist: '[]',
+  });
+  const registry = createManagerRegistry({ runService });
+  const claudeAdapter = makeFakeManagerAdapter('claude-code');
+  const codexAdapter = makeFakeManagerAdapter('codex');
+  const factory = makeAdapterFactory({ claudeAdapter, codexAdapter });
+  const spawn = createOperatorSpawnService({
+    runService,
+    managerRegistry: registry,
+    managerAdapterFactory: factory,
+    projectService,
+    projectBriefService,
+    agentProfileService,
+    resolveManagerAuth: authOk,
+  });
+  const project = projectService.createProject({
+    name: 'poisoned-persisted-operator-profile',
+    preferred_pm_adapter: 'claude',
+  });
+  const topRun = seedTop({ runService, registry, adapter: claudeAdapter });
+  const fresh = spawn.ensureLiveOperator({ projectId: project.id });
+  assert.equal(fresh.run.agent_profile_id, selectedProfile.id);
+  claudeAdapter._starts[0].opts.onSessionStarted('sess_poisoned_profile');
+
+  runService.updateClaudeSessionId(topRun.id, 'sess_top_poisoned_profile');
+  db.prepare('UPDATE runs SET agent_profile_id = ? WHERE id = ?')
+    .run('claude-code', topRun.id);
+  db.prepare('UPDATE agent_profiles SET env_allowlist = ? WHERE id = ?')
+    .run('{poisoned selected policy', selectedProfile.id);
+
+  const resumeRegistry = createManagerRegistry({ runService });
+  const resumeClaude = makeFakeManagerAdapter('claude-code');
+  const resumeFactory = makeAdapterFactory({
+    claudeAdapter: resumeClaude,
+    codexAdapter: makeFakeManagerAdapter('codex'),
+  });
+  const conversationService = createConversationService({
+    runService,
+    managerRegistry: resumeRegistry,
+    managerAdapterFactory: resumeFactory,
+    lifecycleService: null,
+  });
+  createManagerRouter({
+    runService,
+    projectService,
+    projectBriefService,
+    managerAdapterFactory: resumeFactory,
+    managerRegistry: resumeRegistry,
+    conversationService,
+    agentProfileService,
+    authResolverOpts: {
+      hasKeychain: () => true,
+      readKeychainTokenSync: () => 'operator-resume-token',
+    },
+  });
+
+  assert.equal(
+    resumeClaude._starts.some((entry) => entry.runId === fresh.run.id),
+    false,
+  );
+  assert.equal(runService.getRun(fresh.run.id).status, 'stopped');
+  assert.ok(
+    runService.getRunEvents(fresh.run.id)
+      .some((event) => event.event_type === 'manager:resume_env_policy_invalid'),
+  );
 });
 
 test('Claude operator rejects malformed template options instead of falling back to bypass', async (t) => {

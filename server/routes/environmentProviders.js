@@ -15,7 +15,10 @@ function assertHumanWrite(req) {
     throw new ForbiddenError('cookie auth required');
   }
   const origin = req.headers.origin;
-  if (!origin) return;
+  // Cookie mutations require a positive same-origin signal. Browsers normally
+  // send Origin for these methods; accepting an absent header makes CSRF
+  // enforcement depend on browser heuristics instead of this boundary.
+  if (!origin) throw new ForbiddenError('same-origin Origin header required');
   let originHost;
   try {
     originHost = new URL(origin).host;

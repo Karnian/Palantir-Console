@@ -566,14 +566,13 @@ function resolveClaudeAuth({
   const credentialsFile = hasCredentialsFile();
   if (credentialsFile) sources.push('file:~/.claude/.credentials.json');
 
-  // Two distinct notions of "provider" coexist here and both count as auth:
-  //   hasProviderAuth       — a cloud auth MODE (Bedrock/Vertex/Foundry) picked
-  //                           up from the ambient environment, above.
-  //   declaredProviderAuth  — an operator-DECLARED provider whose approved
-  //                           secret keys are present and allowlisted (#457).
-  // A declaration is provenance, not an adapter contract. Only the direct
-  // Claude credentials the Claude path actually consumes may count here;
-  // cloud mode selectors are handled by resolveClaudeProviderAuthEnv above.
+  // Claude's adapter contract has exactly two credential forms:
+  //   1. a direct CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY; or
+  //   2. an allowlisted cloud mode selector (Bedrock/Vertex/Foundry), whose
+  //      provider credential chain Claude resolves inside the child.
+  // Provider declaration is provenance, not a third auth form. It may confirm
+  // one of the two direct keys above, but an arbitrary approved secret never
+  // flips canAuth. Cloud selectors are exact-key matched above.
   const declaredProviderAuth = resolveProviderAuthSources(
     providerEnv,
     allow,
@@ -761,9 +760,9 @@ async function readClaudeKeychainToken() {
  * allowlisted cloud-provider mode instead keeps its provider credential chain
  * child-resolved and needs no Anthropic token materialization.
  *
- * Token source priority (first hit wins) — normative per
+ * Direct-token source priority (first hit wins) — normative per
  * docs/specs/worker-preset-and-plugin-injection.md §6.9:
- *   1. env `ANTHROPIC_API_KEY`
+ *   1. env `ANTHROPIC_API_KEY`, then `CLAUDE_CODE_OAUTH_TOKEN`
  *   2. `.claude-auth.json` — `ANTHROPIC_API_KEY` if present, else OAuth
  *      token (API accepts OAuth access tokens in the API-key slot —
  *      confirmed by Phase 10A spike, PR #87).
@@ -831,15 +830,31 @@ async function resolveClaudeAuthForIsolated({
     token = process.env.ANTHROPIC_API_KEY;
     sources.push('env:ANTHROPIC_API_KEY');
   }
+  if (
+    !token
+    && process.env.CLAUDE_CODE_OAUTH_TOKEN
+    && allow.has('CLAUDE_CODE_OAUTH_TOKEN')
+  ) {
+    token = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    sources.push('env:CLAUDE_CODE_OAUTH_TOKEN');
+  }
+
+  // Consume provider provenance under the same adapter-specific contract as
+  // resolveClaudeAuth. The ambient value above is the credential; this only
+  // records that the resolved policy explicitly approved and activated it.
+  const declaredProviderAuth = resolveProviderAuthSources(
+    providerEnv,
+    allow,
+    ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY'],
+  );
+  sources.push(...declaredProviderAuth.map((entry) => entry.source));
 
   if (!token) {
-    // Read the on-disk file directly with the broadest allowlist — once we
-    // are in the isolated path we WILL materialize the token, and the
-    // allowlist exists to restrict what leaks into the child env, not to
-    // constrain which on-disk fields we may read.
+    // The normal resolver also reads only fields admitted by the resolved
+    // policy. Isolated presets must not recover an excluded file credential.
     let fileEnv = {};
     try {
-      fileEnv = readClaudeAuthFile(new Set(CLAUDE_AUTH_KEYS));
+      fileEnv = readClaudeAuthFile(allow);
     } catch { /* ignore */ }
     if (fileEnv.ANTHROPIC_API_KEY) {
       token = fileEnv.ANTHROPIC_API_KEY;
@@ -878,7 +893,7 @@ async function resolveClaudeAuthForIsolated({
 
   if (!token) {
     diagnostics.push(
-      'Isolated preset requires Claude auth. Set ANTHROPIC_API_KEY, run Palantir from a Claude Code session to seed .claude-auth.json, run `claude login` (macOS keychain, or ~/.claude/.credentials.json on Linux/Windows).',
+      'Isolated preset requires an allowlisted ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN or Claude cloud-provider auth mode. Alternatively seed .claude-auth.json or run `claude login` (macOS keychain, or ~/.claude/.credentials.json on Linux/Windows).',
     );
     return { canAuth: false, env: {}, sources, diagnostics };
   }

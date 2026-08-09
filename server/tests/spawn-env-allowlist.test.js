@@ -11,7 +11,11 @@ const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
 const express = require('express');
 
-const { buildManagerSpawnEnv } = require('../services/authResolver');
+const {
+  buildManagerSpawnEnv,
+  resolveClaudeAuth,
+  resolveClaudeAuthForIsolated,
+} = require('../services/authResolver');
 const {
   PROCESS_BASE_ENV_KEYS,
   WORKER_BASE_ENV_KEYS,
@@ -743,7 +747,7 @@ test('fresh Top and boot-resumed Top/Operator use the same profile env_allowlist
   });
 });
 
-test('MUTATION: custom Claude/Codex secrets are forwarded but do not satisfy adapter auth', async (t) => {
+test('MUTATION: Claude auth contract accepts an allowlisted cloud mode, while arbitrary Claude/Codex secrets only forward', async (t) => {
   await withProcessEnv({
     PALANTIR_SKIP_HOST_CREDENTIALS: '1',
     CLAUDE_CODE_USE_BEDROCK: '1',
@@ -924,6 +928,80 @@ test('MUTATION: custom Claude/Codex secrets are forwarded but do not satisfy ada
       'bedrock-approved-secret',
     );
   });
+});
+
+test('MUTATION: normal and isolated Claude auth use the same provider policy contract', async () => {
+  const baseEnv = {
+    PALANTIR_SKIP_HOST_CREDENTIALS: '1',
+    CLAUDE_CODE_OAUTH_TOKEN: undefined,
+    ANTHROPIC_API_KEY: undefined,
+    CLAUDE_CODE_USE_BEDROCK: undefined,
+    CLAUDE_CODE_USE_VERTEX: undefined,
+    CLAUDE_CODE_USE_FOUNDRY: undefined,
+  };
+  const cases = [
+    {
+      name: 'approved OAuth token',
+      env: { CLAUDE_CODE_OAUTH_TOKEN: 'oauth-canary' },
+      envAllowlist: ['CLAUDE_CODE_OAUTH_TOKEN'],
+      providerEnv: [{
+        id: 'envp_oauth',
+        active: true,
+        approvedSecretKeys: ['CLAUDE_CODE_OAUTH_TOKEN'],
+      }],
+      expected: true,
+    },
+    {
+      name: 'approved Anthropic API key',
+      env: { ANTHROPIC_API_KEY: 'api-canary' },
+      envAllowlist: ['ANTHROPIC_API_KEY'],
+      providerEnv: [{
+        id: 'envp_api',
+        active: true,
+        approvedSecretKeys: ['ANTHROPIC_API_KEY'],
+      }],
+      expected: true,
+    },
+    {
+      name: 'provider-only allowlisted Bedrock cloud mode',
+      env: { CLAUDE_CODE_USE_BEDROCK: '1' },
+      envAllowlist: ['CLAUDE_CODE_USE_BEDROCK'],
+      providerEnv: [{
+        id: 'envp_bedrock',
+        active: true,
+        inheritedKeys: ['CLAUDE_CODE_USE_BEDROCK'],
+      }],
+      expected: true,
+    },
+    {
+      name: 'nothing available',
+      env: {},
+      envAllowlist: ['CUSTOM_NON_AUTH_CONFIG'],
+      providerEnv: [],
+      expected: false,
+    },
+  ];
+
+  for (const entry of cases) {
+    await withProcessEnv({ ...baseEnv, ...entry.env }, async () => {
+      const options = {
+        envAllowlist: entry.envAllowlist,
+        providerEnv: entry.providerEnv,
+        allowDefaultAuth: false,
+        hasKeychain: () => false,
+        hasCredentialsFile: () => false,
+      };
+      const normal = resolveClaudeAuth({ ...options, bare: true });
+      const isolated = await resolveClaudeAuthForIsolated({
+        ...options,
+        prefer: 'env',
+      });
+      assert.equal(normal.canAuth, entry.expected, `${entry.name}: normal`);
+      assert.equal(isolated.canAuth, entry.expected, `${entry.name}: isolated`);
+      assert.equal(isolated.canAuth, normal.canAuth, `${entry.name}: parity`);
+      if (isolated.apiKeyHelperSettings) isolated.apiKeyHelperSettings.cleanup();
+    });
+  }
 });
 
 test('review 2: binding a config-only provider preserves empty-allowlist default auth for Claude and Codex', async (t) => {
@@ -1250,9 +1328,13 @@ test('MUTATION: a malformed profile env_allowlist fails closed on resume', () =>
         `malformed allowlist ${broken} must fail closed`,
       );
     }
-    // A profile whose row cannot even be read must not throw either.
+    // MUTATION: a profile whose row cannot be read is a hard resume failure;
+    // returning undefined here would restore adapter defaults.
     const throwing = { listProfiles: () => { throw new Error('db gone'); } };
-    assert.equal(resolveResumeEnvAllowlist(throwing, { adapterType: 'codex' }), undefined);
+    assert.throws(
+      () => resolveResumeEnvAllowlist(throwing, { adapterType: 'codex' }),
+      (err) => err.code === 'PROVIDER_ENV_POLICY_INVALID',
+    );
 
     // Degradation is observable, and never echoes an allowlist value.
     assert.ok(

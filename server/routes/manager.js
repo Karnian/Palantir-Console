@@ -69,17 +69,37 @@ function parseMcpTools(capabilitiesJson) {
 //
 // A malformed provider policy is a hard spawn failure. Falling back to an
 // undefined allowlist would re-enable adapter defaults and widen the boundary.
-function resolveResumeAgentProfile(agentProfileService, { profileId, adapterType } = {}) {
+function invalidResumePolicy(message, cause) {
+  const policyError = new Error(`invalid provider env policy: ${message}`);
+  policyError.code = 'PROVIDER_ENV_POLICY_INVALID';
+  if (cause) policyError.cause = cause;
+  return policyError;
+}
+
+function resolveResumeAgentProfile(
+  agentProfileService,
+  { profileId, adapterType, requireProfile = false } = {},
+) {
   if (!agentProfileService) return null;
-  let profile = null;
   try {
     if (profileId && typeof agentProfileService.getProfile === 'function') {
-      profile = agentProfileService.getProfile(profileId);
-    } else if (typeof agentProfileService.listProfiles === 'function') {
-      profile = agentProfileService.listProfiles().find((candidate) => candidate.type === adapterType) || null;
+      return agentProfileService.getProfile(profileId);
     }
-  } catch { /* treat an unreadable profile as "no allowlist" */ }
-  return profile;
+    if (requireProfile) {
+      throw invalidResumePolicy('persisted agent_profile_id is missing');
+    }
+    if (typeof agentProfileService.listProfiles === 'function') {
+      return agentProfileService.listProfiles()
+        .find((candidate) => candidate.type === adapterType) || null;
+    }
+    return null;
+  } catch (err) {
+    if (err?.code === 'PROVIDER_ENV_POLICY_INVALID') throw err;
+    throw invalidResumePolicy(
+      `profile ${profileId || adapterType || 'unknown'} is missing or unreadable: ${err.message}`,
+      err,
+    );
+  }
 }
 
 // #457: a declared environment provider supersedes the raw env_allowlist
@@ -87,9 +107,10 @@ function resolveResumeAgentProfile(agentProfileService, { profileId, adapterType
 // default-auth / blocked-key decisions the resolver needs, so boot resume must
 // read it rather than re-parsing the column.
 function resolveResumeEnvPolicy(agentProfileService, options = {}) {
-  const profile = resolveResumeAgentProfile(agentProfileService, options);
-  if (!profile) return undefined;
+  let profile = null;
   try {
+    profile = resolveResumeAgentProfile(agentProfileService, options);
+    if (!profile) return undefined;
     if (typeof agentProfileService.resolveEnvPolicy === 'function') {
       const policy = agentProfileService.resolveEnvPolicy(profile);
       if (!policy.valid) throw new Error('env policy contains invalid JSON');
@@ -111,14 +132,12 @@ function resolveResumeEnvPolicy(agentProfileService, options = {}) {
   } catch (err) {
     console.warn(
       `[security] manager_env_allowlist_unreadable ${JSON.stringify({
-        profile_id: profile.id,
+        profile_id: profile?.id || options.profileId || null,
         adapter: options.adapterType,
         reason: err && err.message,
       })}`
     );
-    const policyError = new Error(`invalid provider env policy: ${err && err.message}`);
-    policyError.code = 'PROVIDER_ENV_POLICY_INVALID';
-    throw policyError;
+    throw invalidResumePolicy(err && err.message, err);
   }
 }
 
@@ -614,7 +633,9 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 // hardcoded 'codex' (a local Claude Operator would otherwise be
                 // stopped/misauthed via Codex auth). (Codex P5-S4c BLOCKER.)
                 const envPolicy = resolveResumeEnvPolicy(agentProfileService, {
+                  profileId: r.agent_profile_id,
                   adapterType,
+                  requireProfile: true,
                 });
                 if (
                   isRemoteNode
@@ -628,13 +649,17 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 }
                 const envAllowlist = envPolicy?.envAllowlist;
                 const permissionMode = resolveResumePermissionMode(agentProfileService, {
+                  profileId: r.agent_profile_id,
                   adapterType,
+                  requireProfile: true,
                   sessionPermissionMode: r.session_permission_mode,
                 });
                 const templateOptions = resolveResumeClaudeTemplateOptions(
                   agentProfileService,
                   {
+                    profileId: r.agent_profile_id,
                     adapterType,
+                    requireProfile: true,
                     sessionClaudeOptionsJson: r.session_claude_options_json,
                   },
                 );

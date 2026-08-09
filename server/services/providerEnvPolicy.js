@@ -12,45 +12,26 @@ const MAX_ENV_KEYS_JSON_BYTES = 16 * 1024;
 // they can be forwarded. These patterns are intentionally provider-agnostic:
 // adding a provider name must never imply a vendor-specific credential set.
 //
-// The suffixes mirror the credential portion of envDenylist.js. The token
-// forms additionally catch canaries such as AWS_SECRET_ACCESS_KEY and names
-// where SECRET / API_KEY are not the final component.
-//
-// Two deliberate widenings over envDenylist.js, because that list guards names
-// this codebase chose while these names are whatever an operator types:
-//
-//   1. Matching is case-INSENSITIVE. ENV_VAR_NAME_RE admits any case, so an
-//      uppercase-only rule would wave through `stripeSecretKey` — a real
-//      spelling for a real credential.
-//   2. The word forms do not require an underscore boundary. `SECRETKEY` and
-//      `MY_SECRETKEY` are the same secret as `SECRET_KEY`; only the separator
-//      differs, and a classifier that turns on punctuation is not a classifier.
-//
-// Over-blocking is the safe direction here: a false positive costs one explicit
-// env_allowlist entry, a false negative forwards a credential automatically.
+// Match credential WORDS, not substrings: DOCKER_AUTH_CONFIG is secret, while
+// AUTHOR, PATH, PATTERN and KEYBOARD are ordinary configuration. camelCase is
+// normalized to the same delimiter-bounded form before testing. A small set of
+// joined compounds retains the existing APIKEY/SECRETKEY spellings without
+// turning every word containing KEY or PAT into a credential.
 const PROVIDER_SECRET_ENV_PATTERNS = [
-  /SECRET/i,
-  /API_?KEY/i,
-  /ACCESS_?KEY/i,
-  /_?KEY$/i,
-  /_?TOKEN$/i,
-  /PASSWORD/i,
-  /PASSWD/i,
-  /CREDENTIALS?/i,
-  /_?CERT$/i,
-  /PRIVATE/i,
-  /_?PASS$/i,
+  /^(?:AUTH|AUTHORIZATION|PAT|CREDENTIAL|CREDENTIALS|SESSION|COOKIE|SIGNATURE|REFRESH)$/,
+  /^(?:PRIVATE|ACCESS|SECRET|REFRESH)_(?:KEY|TOKEN)$/,
+  /^(?:TOKEN|SECRET|PASSWORD|PASSWD|PASS|KEY|APIKEY|ACCESSKEY|SECRETKEY|PRIVATEKEY|REFRESHTOKEN|CERT)$/,
 ];
 
 function isProviderSecretEnvKey(key) {
-  const text = String(key);
-  // `stripeSecretKey` has no separators at all, so also test the camelCase
-  // boundaries as if they were underscores — otherwise the anchored patterns
-  // (`_KEY$`) never see a boundary to anchor to.
-  const snakeCased = text.replace(/([a-z0-9])([A-Z])/g, '$1_$2');
-  return PROVIDER_SECRET_ENV_PATTERNS.some(
-    (pattern) => pattern.test(text) || pattern.test(snakeCased),
-  );
+  const normalized = String(key)
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .toUpperCase();
+  const segments = normalized.split('_').filter(Boolean);
+  if (segments.some((segment) => PROVIDER_SECRET_ENV_PATTERNS.some(
+    (pattern) => pattern.test(segment),
+  ))) return true;
+  return PROVIDER_SECRET_ENV_PATTERNS.some((pattern) => pattern.test(normalized));
 }
 
 function normalizeProviderEnvKeys(value) {
@@ -134,15 +115,24 @@ function parseProviderGate(provider) {
       value: null,
     };
   }
-  const presenceOnly = gateEnvValue == null && isProviderSecretEnvKey(gateEnvKey);
-  if (
-    typeof gateEnvKey !== 'string'
-    || !ENV_VAR_NAME_RE.test(gateEnvKey)
-    || (!presenceOnly && (
-      typeof gateEnvValue !== 'string'
-      || gateEnvValue.length === 0
-    ))
-  ) {
+  if (typeof gateEnvKey !== 'string' || !ENV_VAR_NAME_RE.test(gateEnvKey)) {
+    return {
+      valid: false,
+      key: null,
+      value: null,
+    };
+  }
+  // Legacy/raw-SQL rows may contain a secret comparison value from before the
+  // write guard. Resolution treats every secret-shaped gate as presence-only
+  // and all projections consume this sanitized value, so it can never escape.
+  if (isProviderSecretEnvKey(gateEnvKey)) {
+    return {
+      valid: true,
+      key: gateEnvKey,
+      value: null,
+    };
+  }
+  if (typeof gateEnvValue !== 'string' || gateEnvValue.length === 0) {
     return {
       valid: false,
       key: null,

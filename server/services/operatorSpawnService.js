@@ -418,6 +418,7 @@ function createOperatorSpawnService({
     });
     return {
       adapterType,
+      agentProfileId: managerProfile ? managerProfile.id : null,
       envAllowlist,
       // #457: the declared providers behind this allowlist. buildManagerSpawnEnv
       // needs them to pass the approved credential keys through to the child.
@@ -702,6 +703,7 @@ function createOperatorSpawnService({
     // time so the null-preference fallback and the eventual spawn use exactly
     // the same allowlist, bare flag and settings.
     const {
+      agentProfileId,
       envAllowlist,
       providerEnv,
       mcpTools: pmMcpTools,
@@ -871,6 +873,7 @@ function createOperatorSpawnService({
       operator_instance_id: operatorInstanceId,
       parent_run_id: activeTopRunId,
       manager_adapter: adapterType,
+      agent_profile_id: agentProfileId,
       prompt: `PM ${project.name}`,
       node_id: nodeId,
     });
