@@ -1139,6 +1139,42 @@ test('MUTATION: Operator spawn fails closed and records an event for invalid pro
   );
 });
 
+test('MUTATION: fresh Operator spawn fails closed when its adapter has no profile to pin', async (t) => {
+  const db = await mkdb(t);
+  const runService = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const agentProfileService = createAgentProfileService(db);
+  agentProfileService.deleteProfile('codex');
+  const registry = createManagerRegistry({ runService });
+  const claudeAdapter = makeFakeManagerAdapter('claude-code');
+  const codexAdapter = makeFakeManagerAdapter('codex');
+  const spawn = createOperatorSpawnService({
+    runService,
+    managerRegistry: registry,
+    managerAdapterFactory: makeAdapterFactory({ claudeAdapter, codexAdapter }),
+    projectService,
+    projectBriefService,
+    agentProfileService,
+    resolveManagerAuth: authOk,
+  });
+  const project = projectService.createProject({
+    name: 'missing-codex-profile',
+    preferred_pm_adapter: 'codex',
+  });
+  seedTop({ runService, registry, adapter: claudeAdapter });
+
+  assert.throws(
+    () => spawn.ensureLiveOperator({ projectId: project.id }),
+    (err) => err.code === 'OPERATOR_PROFILE_REQUIRED' && err.httpStatus === 400,
+  );
+  assert.equal(codexAdapter._starts.length, 0);
+  assert.equal(
+    runService.listRuns().some((run) => run.manager_layer === 'operator'),
+    false,
+  );
+});
+
 test('MUTATION: remote Operator rejects controller-scoped provider gates', async (t) => {
   const db = await mkdb(t);
   const runService = createRunService(db, null);

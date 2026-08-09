@@ -307,6 +307,13 @@ function createOperatorSpawnService({
     // This covers vendor mismatch AND a malformed args_template — both are 400s
     // that used to be raised only for the already-selected adapter.
     let profileError = null;
+    if (!managerProfile && agentProfileService) {
+      profileError = new Error(
+        `Operator requires a ${adapterType} agent profile so the run can persist an exact resume policy`,
+      );
+      profileError.httpStatus = 400;
+      profileError.code = 'OPERATOR_PROFILE_REQUIRED';
+    }
     if (managerProfile) {
       const expectedVendor = adapterType === 'claude-code' ? 'claude' : 'codex';
       const commandVendor = resolveAgentVendor(managerProfile.command);
@@ -677,7 +684,9 @@ function createOperatorSpawnService({
       // profile allowlist and pick the first one that can actually start.
       const candidates = ['codex', 'claude-code']
         .map(type => resolveManagerProfileRuntime(type, profiles, { isRemoteNode }));
-      managerRuntime = candidates.find(candidate => candidate.authCtx.canAuth) || candidates[0];
+      managerRuntime = candidates.find(
+        candidate => !candidate.profileError && candidate.authCtx.canAuth,
+      ) || candidates.find(candidate => !candidate.profileError) || candidates[0];
       adapterType = managerRuntime.adapterType;
       // A rejected profile on a candidate we did NOT select is not fatal (that
       // is the point of the deferred throw), but silently dropping it leaves the

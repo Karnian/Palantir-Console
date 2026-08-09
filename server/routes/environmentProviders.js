@@ -19,14 +19,16 @@ function assertHumanWrite(req) {
   // send Origin for these methods; accepting an absent header makes CSRF
   // enforcement depend on browser heuristics instead of this boundary.
   if (!origin) throw new ForbiddenError('same-origin Origin header required');
-  let originHost;
+  if (!req.headers.host) throw new ForbiddenError('cross-origin write blocked');
+  let requestOrigin;
+  let suppliedOrigin;
   try {
-    originHost = new URL(origin).host;
+    suppliedOrigin = new URL(origin).origin;
+    requestOrigin = new URL(`${req.protocol}://${req.headers.host}`).origin;
   } catch {
     throw new ForbiddenError('cross-origin write blocked');
   }
-  const requestHost = req.headers.host;
-  if (!requestHost || originHost.toLowerCase() !== String(requestHost).toLowerCase()) {
+  if (suppliedOrigin.toLowerCase() !== requestOrigin.toLowerCase()) {
     throw new ForbiddenError('cross-origin write blocked');
   }
 }

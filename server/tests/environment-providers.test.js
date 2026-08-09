@@ -262,13 +262,17 @@ test('secret classification is not defeated by case or by missing separators', (
     'HTTP_AUTHORIZATION',
     'GITHUB_PAT',
     'REGISTRY_CREDENTIALS',
-    'LOGIN_SESSION',
     'REQUEST_COOKIE',
     'WEBHOOK_SIGNATURE',
     'SSH_PRIVATE_KEY',
     'AWS_ACCESS_KEY',
     'AWS_SECRET_KEY',
-    'OAUTH_REFRESH',
+    'PGPASSWORD',
+    'MYSQL_PWD',
+    'PGPASSFILE',
+    'NPM_TOKEN',
+    'GH_TOKEN',
+    'GITHUB_TOKEN',
   ]) {
     assert.equal(isProviderSecretEnvKey(key), true, `${key} must require explicit approval`);
   }
@@ -283,6 +287,13 @@ test('secret classification is not defeated by case or by missing separators', (
     'PATH',
     'PATTERN',
     'KEYBOARD_LAYOUT',
+    'KEYS_DIR',
+    'MY_TOOL_REGION',
+    'REFRESH_INTERVAL',
+    'SESSION_TIMEOUT',
+    'AUTH_MODE',
+    'LOGIN_SESSION',
+    'OAUTH_REFRESH',
   ]) {
     assert.equal(isProviderSecretEnvKey(key), false, `${key} must not need approval`);
   }
@@ -321,6 +332,57 @@ test('secret classification is not defeated by case or by missing separators', (
     providerEnv: approved.providers,
     vendor: 'codex',
   }).DOCKER_AUTH_CONFIG, 'approved-registry-auth');
+
+  // MUTATION: joined and suffixed credential nouns are withheld until the
+  // profile explicitly approves them, while ambiguous config words inherit.
+  const compoundSecretKeys = [
+    'PGPASSWORD',
+    'MYSQL_PWD',
+    'PGPASSFILE',
+    'NPM_TOKEN',
+    'GH_TOKEN',
+    'GITHUB_TOKEN',
+  ];
+  const benignKeys = [
+    'REFRESH_INTERVAL',
+    'SESSION_TIMEOUT',
+    'AUTH_MODE',
+    'AUTHOR',
+    'PATTERN',
+    'KEYBOARD',
+    'KEYS_DIR',
+    'MY_TOOL_REGION',
+  ];
+  const compoundProvider = {
+    id: 'envp_compound_secrets',
+    name: 'database-and-package-auth',
+    env_keys: JSON.stringify([...compoundSecretKeys, ...benignKeys]),
+  };
+  const compoundWithheld = resolveProviderEnvPolicy('[]', [compoundProvider], {
+    PGPASSWORD: 'db-secret',
+  });
+  assert.deepEqual(
+    compoundWithheld.providers[0].withheldSecretKeys,
+    compoundSecretKeys,
+  );
+  assert.deepEqual(compoundWithheld.providers[0].inheritedKeys, benignKeys);
+  for (const key of compoundSecretKeys) {
+    assert.equal(compoundWithheld.effectiveKeys.includes(key), false, key);
+  }
+  for (const key of benignKeys) {
+    assert.equal(compoundWithheld.effectiveKeys.includes(key), true, key);
+  }
+  const pgApproved = resolveProviderEnvPolicy(
+    '["PGPASSWORD"]',
+    [compoundProvider],
+    { PGPASSWORD: 'db-secret' },
+  );
+  assert.equal(buildManagerSpawnEnv({
+    baseEnv: { PGPASSWORD: 'db-secret' },
+    envAllowlist: pgApproved.effectiveKeys,
+    providerEnv: pgApproved.providers,
+    vendor: 'codex',
+  }).PGPASSWORD, 'db-secret');
 });
 
 test('declaring a provider is a human action, not something a bearer token can do', async (t) => {
@@ -343,6 +405,14 @@ test('declaring a provider is a human action, not something a bearer token can d
     .set('Origin', 'http://evil.example')
     .send(body);
   assert.equal(crossOrigin.status, 403);
+
+  // MUTATION: same host is still cross-origin when the scheme differs.
+  const wrongScheme = await request(app)
+    .post('/api/environment-providers')
+    .set(...COOKIE)
+    .set('Origin', 'https://console.test')
+    .send(body);
+  assert.equal(wrongScheme.status, 403);
 
   // MUTATION: cookie provenance alone is insufficient; provider writes require
   // a positive same-origin Origin header.
@@ -451,6 +521,17 @@ test('MUTATION: a secret-shaped gate is presence-only and its value is never sto
     });
   assert.equal(rejected.status, 400, JSON.stringify(rejected.body));
 
+  const rejectedPgPassword = await request(app)
+    .post('/api/environment-providers')
+    .set(...COOKIE)
+    .send({
+      name: 'pgpassword-valued-gate',
+      env_keys: ['PGPASSWORD'],
+      gate_env_key: 'PGPASSWORD',
+      gate_env_value: 'db-secret-canary',
+    });
+  assert.equal(rejectedPgPassword.status, 400, JSON.stringify(rejectedPgPassword.body));
+
   const created = await request(app)
     .post('/api/environment-providers')
     .set(...COOKIE)
@@ -476,10 +557,10 @@ test('MUTATION: a secret-shaped gate is presence-only and its value is never sto
     ) VALUES (?, ?, ?, ?, ?)
   `).run(
     'envp_legacy_secret_gate',
-    'legacy-secret-gate',
-    JSON.stringify(['LEGACY_API_KEY']),
-    'LEGACY_API_KEY',
-    'legacy-secret-value',
+    'legacy-pgpassword-gate',
+    JSON.stringify(['PGPASSWORD']),
+    'PGPASSWORD',
+    'db-secret-canary',
   );
   assert.equal(
     app.services.environmentProviderService
@@ -487,14 +568,14 @@ test('MUTATION: a secret-shaped gate is presence-only and its value is never sto
     null,
   );
 
-  const previousGate = process.env.LEGACY_API_KEY;
-  process.env.LEGACY_API_KEY = 'present-but-not-the-poisoned-value';
+  const previousGate = process.env.PGPASSWORD;
+  process.env.PGPASSWORD = 'present-but-not-the-poisoned-value';
   t.after(() => {
-    if (previousGate === undefined) delete process.env.LEGACY_API_KEY;
-    else process.env.LEGACY_API_KEY = previousGate;
+    if (previousGate === undefined) delete process.env.PGPASSWORD;
+    else process.env.PGPASSWORD = previousGate;
   });
   app.services.agentProfileService.updateProfile('claude-code', {
-    env_allowlist: JSON.stringify(['LEGACY_API_KEY']),
+    env_allowlist: JSON.stringify(['PGPASSWORD']),
     environment_provider_ids: ['envp_legacy_secret_gate'],
   });
   const policy = app.services.agentProfileService.resolveEnvPolicy('claude-code');
@@ -506,11 +587,11 @@ test('MUTATION: a secret-shaped gate is presence-only and its value is never sto
     .set(...COOKIE);
   assert.equal(providerRoute.status, 200);
   assert.equal(providerRoute.body.provider.gate_env_value, null);
-  assert.doesNotMatch(JSON.stringify(providerRoute.body), /legacy-secret-value/);
+  assert.doesNotMatch(JSON.stringify(providerRoute.body), /db-secret-canary/);
 
   const agentsRoute = await request(app).get('/api/agents').set(...COOKIE);
   assert.equal(agentsRoute.status, 200);
-  assert.doesNotMatch(JSON.stringify(agentsRoute.body), /legacy-secret-value/);
+  assert.doesNotMatch(JSON.stringify(agentsRoute.body), /db-secret-canary/);
   const hydrated = agentsRoute.body.agents.find((agent) => agent.id === 'claude-code');
   assert.equal(hydrated.environment_providers[0].gate_env_value, null);
   assert.equal(hydrated.environment_providers[0].active, true);

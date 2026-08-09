@@ -12,15 +12,17 @@ const MAX_ENV_KEYS_JSON_BYTES = 16 * 1024;
 // they can be forwarded. These patterns are intentionally provider-agnostic:
 // adding a provider name must never imply a vendor-specific credential set.
 //
-// Match credential WORDS, not substrings: DOCKER_AUTH_CONFIG is secret, while
-// AUTHOR, PATH, PATTERN and KEYBOARD are ordinary configuration. camelCase is
-// normalized to the same delimiter-bounded form before testing. A small set of
-// joined compounds retains the existing APIKEY/SECRETKEY spellings without
-// turning every word containing KEY or PAT into a credential.
+// Match credential NOUNS, not ambiguous modifiers: REFRESH_INTERVAL,
+// SESSION_TIMEOUT and AUTH_MODE are configuration, while REFRESH_TOKEN and
+// SESSION_SECRET contain an actual credential noun. camelCase is normalized to
+// the same delimiter-bounded form. The final suffix rule also catches canonical
+// joined names such as PGPASSWORD without turning AUTHOR/PATTERN/KEYBOARD into
+// credentials.
 const PROVIDER_SECRET_ENV_PATTERNS = [
-  /^(?:AUTH|AUTHORIZATION|PAT|CREDENTIAL|CREDENTIALS|SESSION|COOKIE|SIGNATURE|REFRESH)$/,
-  /^(?:PRIVATE|ACCESS|SECRET|REFRESH)_(?:KEY|TOKEN)$/,
-  /^(?:TOKEN|SECRET|PASSWORD|PASSWD|PASS|KEY|APIKEY|ACCESSKEY|SECRETKEY|PRIVATEKEY|REFRESHTOKEN|CERT)$/,
+  /^(?:AUTHORIZATION|PAT|CREDENTIAL|CREDENTIALS|COOKIE|SIGNATURE|TOKEN|SECRET|PASSWORD|PASSWD|PWD|PASS|KEY|APIKEY|CERT)$/,
+  /^(?:PRIVATE|ACCESS|SECRET|API|REFRESH|SESSION)_(?:KEY|TOKEN|SECRET)$/,
+  /^(?:DOCKER_AUTH_CONFIG|PGPASSFILE|ACCESSKEY|SECRETKEY|PRIVATEKEY|REFRESHTOKEN|SESSIONTOKEN|SESSIONSECRET)$/,
+  /(?:PASSWORD|PASSWD|PWD|TOKEN|SECRET|APIKEY|CREDENTIALS?)$/,
 ];
 
 function isProviderSecretEnvKey(key) {
