@@ -430,6 +430,8 @@ function createOperatorSpawnService({
       // #457: the declared providers behind this allowlist. buildManagerSpawnEnv
       // needs them to pass the approved credential keys through to the child.
       providerEnv,
+      allowDefaultAuth,
+      blockedEnvKeys,
       mcpTools,
       authCtx,
       tools,
@@ -715,6 +717,8 @@ function createOperatorSpawnService({
       agentProfileId,
       envAllowlist,
       providerEnv,
+      allowDefaultAuth,
+      blockedEnvKeys,
       mcpTools: pmMcpTools,
       authCtx,
       tools,
@@ -1069,6 +1073,12 @@ function createOperatorSpawnService({
             sessionModel: opEff.model,
             sessionEffort: opEff.effort,
             sessionPermissionMode: permissionMode || null,
+            sessionEnvPolicy: {
+              effectiveKeys: Array.isArray(envAllowlist) ? envAllowlist : null,
+              providers: providerEnv,
+              allowDefaultAuth: allowDefaultAuth === true,
+              blockedKeys: blockedEnvKeys,
+            },
             sessionClaudeOptions: adapterType === 'claude-code'
               ? {
                   tools,

@@ -1,5 +1,5 @@
 const crypto = require('node:crypto');
-const { BadRequestError, ConflictError, NotFoundError } = require('../utils/errors');
+const { BadRequestError, NotFoundError } = require('../utils/errors');
 const { resolveAgentVendor } = require('../utils/agentVendor');
 const { resolveProviderEnvPolicy } = require('./providerEnvPolicy');
 
@@ -477,14 +477,6 @@ function createAgentProfileService(db) {
       SELECT COUNT(*) as count FROM runs
       WHERE agent_profile_id = ? AND status = 'running'
     `),
-    getResumablePinnedManagers: db.prepare(`
-      SELECT id, status, manager_layer, conversation_id
-      FROM runs
-      WHERE agent_profile_id = ?
-        AND is_manager = 1
-        AND status IN ('running', 'queued', 'needs_input')
-      ORDER BY created_at ASC, id ASC
-    `),
     getEnvironmentProviders: db.prepare(`
       SELECT ep.*
       FROM environment_providers ep
@@ -735,12 +727,6 @@ function createAgentProfileService(db) {
 
   function deleteProfile(id) {
     getProfile(id);
-    const blockingRuns = stmts.getResumablePinnedManagers.all(id);
-    if (blockingRuns.length > 0) {
-      throw new ConflictError(
-        `cannot delete agent profile ${id}; pinned by resumable manager run(s): ${blockingRuns.map((run) => run.id).join(', ')}`,
-      );
-    }
     stmts.delete.run(id);
   }
 

@@ -2043,14 +2043,49 @@ function createRunService(db, eventBus) {
       sessionEffort = null,
       sessionPermissionMode = null,
       sessionClaudeOptions = null,
+      sessionEnvPolicy,
     } = {},
   ) {
     getRun(id);
+    let persistedOptions = sessionClaudeOptions;
+    if (sessionEnvPolicy !== undefined) {
+      const effectiveKeys = sessionEnvPolicy && sessionEnvPolicy.effectiveKeys;
+      const providers = sessionEnvPolicy && sessionEnvPolicy.providers;
+      const blockedKeys = sessionEnvPolicy && sessionEnvPolicy.blockedKeys;
+      if (
+        (effectiveKeys !== null && !Array.isArray(effectiveKeys))
+        || !Array.isArray(providers)
+        || !Array.isArray(blockedKeys)
+      ) {
+        throw new BadRequestError('session env policy snapshot has an invalid shape');
+      }
+      for (const [label, values] of [
+        ['effectiveKeys', effectiveKeys || []],
+        ['blockedKeys', blockedKeys],
+      ]) {
+        if (values.some((value) => typeof value !== 'string')) {
+          throw new BadRequestError(`session env policy ${label} must contain strings`);
+        }
+      }
+      if (providers.some((provider) => !provider || typeof provider !== 'object' || Array.isArray(provider))) {
+        throw new BadRequestError('session env policy providers must contain objects');
+      }
+      persistedOptions = {
+        ...(sessionClaudeOptions || {}),
+        envPolicy: {
+          version: 1,
+          effectiveKeys: effectiveKeys === null ? null : [...effectiveKeys],
+          providers: JSON.parse(JSON.stringify(providers)),
+          allowDefaultAuth: sessionEnvPolicy.allowDefaultAuth === true,
+          blockedKeys: [...blockedKeys],
+        },
+      };
+    }
     stmts.setSessionSnapshot.run(
       sessionModel,
       sessionEffort,
       sessionPermissionMode,
-      sessionClaudeOptions == null ? null : JSON.stringify(sessionClaudeOptions),
+      persistedOptions == null ? null : JSON.stringify(persistedOptions),
       id,
     );
     return stmts.getById.get(id);

@@ -306,6 +306,17 @@ test('P5-S4c: Claude operator spawn persists local claude_session_id affinity fr
       disableSlashCommands: true,
       noChrome: true,
       settings: 'locked.json',
+      envPolicy: {
+        version: 1,
+        effectiveKeys: [
+          'CLAUDE_CODE_OAUTH_TOKEN',
+          'ANTHROPIC_API_KEY',
+          'ANTHROPIC_BASE_URL',
+        ],
+        providers: [],
+        allowDefaultAuth: false,
+        blockedKeys: [],
+      },
     },
   );
   assert.equal(runService.getRun(result.run.id).status, 'queued');

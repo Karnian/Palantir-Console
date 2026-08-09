@@ -392,6 +392,17 @@ test('Top Manager snapshots and resumes Claude runtime options after profile rem
     noChrome: true,
     settingSources: '',
     settings: 'locked.json',
+    envPolicy: {
+      version: 1,
+      effectiveKeys: [
+        'CLAUDE_CODE_OAUTH_TOKEN',
+        'ANTHROPIC_API_KEY',
+        'ANTHROPIC_BASE_URL',
+      ],
+      providers: [],
+      allowDefaultAuth: false,
+      blockedKeys: [],
+    },
   });
 
   runService.updateClaudeSessionId(run.id, 'sess-profile-options');

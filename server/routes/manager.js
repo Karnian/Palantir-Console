@@ -114,6 +114,14 @@ function resolveResumeAgentProfile(
 function resolveResumeEnvPolicy(agentProfileService, options = {}) {
   let profile = null;
   try {
+    const snapshot = resolveSessionEnvPolicySnapshot(options.sessionClaudeOptionsJson);
+    if (snapshot) {
+      // The snapshot is the env authority. A still-present pinned profile is
+      // inspected only to preserve the fail-closed poisoned-row guard; none of
+      // its current keys are used to recompute or widen the saved decision.
+      validatePersistedResumeProfile(agentProfileService, options.profileId);
+      return snapshot;
+    }
     profile = resolveResumeAgentProfile(agentProfileService, options);
     if (!profile) return undefined;
     if (typeof agentProfileService.resolveEnvPolicy === 'function') {
@@ -146,6 +154,85 @@ function resolveResumeEnvPolicy(agentProfileService, options = {}) {
   }
 }
 
+function resolveSessionEnvPolicySnapshot(sessionClaudeOptionsJson) {
+  if (sessionClaudeOptionsJson == null) return null;
+  let options;
+  try {
+    options = JSON.parse(sessionClaudeOptionsJson);
+  } catch (err) {
+    throw invalidResumePolicy(`invalid session options snapshot: ${err.message}`, err);
+  }
+  if (!options || typeof options !== 'object' || Array.isArray(options)) {
+    throw invalidResumePolicy('invalid session options snapshot');
+  }
+  if (!Object.prototype.hasOwnProperty.call(options, 'envPolicy')) return null;
+  const snapshot = options.envPolicy;
+  if (
+    !snapshot
+    || typeof snapshot !== 'object'
+    || Array.isArray(snapshot)
+    || snapshot.version !== 1
+    || (snapshot.effectiveKeys !== null && !Array.isArray(snapshot.effectiveKeys))
+    || !Array.isArray(snapshot.providers)
+    || typeof snapshot.allowDefaultAuth !== 'boolean'
+    || !Array.isArray(snapshot.blockedKeys)
+    || (snapshot.effectiveKeys || []).some((key) => typeof key !== 'string')
+    || snapshot.blockedKeys.some((key) => typeof key !== 'string')
+  ) {
+    throw invalidResumePolicy('invalid session env policy snapshot');
+  }
+  for (const provider of snapshot.providers) {
+    if (
+      !provider
+      || typeof provider !== 'object'
+      || Array.isArray(provider)
+      || typeof provider.active !== 'boolean'
+      || !Array.isArray(provider.envKeys)
+      || !Array.isArray(provider.approvedSecretKeys)
+      || provider.envKeys.some((key) => typeof key !== 'string')
+      || provider.approvedSecretKeys.some((key) => typeof key !== 'string')
+    ) {
+      throw invalidResumePolicy('invalid provider entry in session env policy snapshot');
+    }
+  }
+  return {
+    envAllowlist: snapshot.effectiveKeys === null
+      ? undefined
+      : [...snapshot.effectiveKeys],
+    providers: JSON.parse(JSON.stringify(snapshot.providers)),
+    allowDefaultAuth: snapshot.allowDefaultAuth,
+    blockedEnvKeys: [...snapshot.blockedKeys],
+    fromSnapshot: true,
+  };
+}
+
+function validatePersistedResumeProfile(agentProfileService, profileId) {
+  if (!profileId) return;
+  if (!agentProfileService || typeof agentProfileService.getProfile !== 'function') {
+    throw invalidResumePolicy(`persisted profile ${profileId} cannot be validated`);
+  }
+  let profile;
+  try {
+    profile = agentProfileService.getProfile(profileId);
+  } catch (err) {
+    // ON DELETE SET NULL normally removes the id. Still accept a raw/imported
+    // stale id whose row is gone when an authoritative snapshot exists.
+    if (err?.status === 404) return;
+    throw invalidResumePolicy(`persisted profile ${profileId} is unreadable: ${err.message}`, err);
+  }
+  try {
+    if (typeof agentProfileService.resolveEnvPolicy === 'function') {
+      const policy = agentProfileService.resolveEnvPolicy(profile);
+      if (!policy?.valid) throw new Error('env policy contains invalid JSON');
+      return;
+    }
+    const parsed = JSON.parse(profile.env_allowlist || '[]');
+    if (!Array.isArray(parsed)) throw new Error('env_allowlist must be an array');
+  } catch (err) {
+    throw invalidResumePolicy(`persisted profile ${profileId} is poisoned: ${err.message}`, err);
+  }
+}
+
 // The array form the rest of the resume path (and its regression test) expects.
 // Kept for the narrow resume regression tests and legacy callers. Invalid
 // policy now throws so no caller can silently regain default auth.
@@ -156,6 +243,7 @@ function resolveResumeEnvAllowlist(agentProfileService, options = {}) {
 function resolveResumePermissionMode(agentProfileService, options = {}) {
   if (options.adapterType !== 'claude-code') return undefined;
   if (options.sessionPermissionMode) return options.sessionPermissionMode;
+  if (options.hasEnvPolicySnapshot) return 'bypassPermissions';
   const profile = resolveResumeAgentProfile(agentProfileService, options);
   return profile
     ? resolveClaudePermissionMode(profile)
@@ -309,12 +397,14 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
           const envPolicy = resolveResumeEnvPolicy(agentProfileService, {
             profileId: r.agent_profile_id,
             adapterType,
+            sessionClaudeOptionsJson: r.session_claude_options_json,
           });
           const envAllowlist = envPolicy?.envAllowlist;
           const permissionMode = resolveResumePermissionMode(agentProfileService, {
             profileId: r.agent_profile_id,
             adapterType,
             sessionPermissionMode: r.session_permission_mode,
+            hasEnvPolicySnapshot: envPolicy?.fromSnapshot === true,
           });
           const templateOptions = resolveResumeClaudeTemplateOptions(agentProfileService, {
             profileId: r.agent_profile_id,
@@ -640,10 +730,15 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 // Runs created before #457 have no pinned profile id. Preserve
                 // their pre-existing adapter fallback so upgrades do not stop
                 // every live Operator, but make that mutable legacy state
-                // observable. New runs persist agent_profile_id; when present,
-                // resolveResumeAgentProfile uses only that exact profile and a
-                // missing/poisoned row remains a hard failure.
-                if (!r.agent_profile_id) {
+                // observable. New runs persist the complete env decision; a
+                // deleted profile is then safe, while an existing poisoned row
+                // remains a hard failure.
+                const envPolicy = resolveResumeEnvPolicy(agentProfileService, {
+                  profileId: r.agent_profile_id,
+                  adapterType,
+                  sessionClaudeOptionsJson: r.session_claude_options_json,
+                });
+                if (!r.agent_profile_id && !envPolicy?.fromSnapshot) {
                   try {
                     runService.addRunEvent(
                       r.id,
@@ -655,10 +750,6 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                     );
                   } catch { /* best-effort legacy-state diagnostic */ }
                 }
-                const envPolicy = resolveResumeEnvPolicy(agentProfileService, {
-                  profileId: r.agent_profile_id,
-                  adapterType,
-                });
                 if (
                   isRemoteNode
                   && envPolicy?.providers?.some((provider) => provider.gateEnvKey)
@@ -674,6 +765,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                   profileId: r.agent_profile_id,
                   adapterType,
                   sessionPermissionMode: r.session_permission_mode,
+                  hasEnvPolicySnapshot: envPolicy?.fromSnapshot === true,
                 });
                 const templateOptions = resolveResumeClaudeTemplateOptions(
                   agentProfileService,
@@ -741,7 +833,8 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                       ? templateOptions.disallowedTools
                       : undefined,
                     maxBudgetUsd: templateOptions?.maxBudgetUsd || undefined,
-                    mcpConfig: r.session_claude_options_json != null
+                    mcpConfig: adapterType === 'claude-code'
+                      && r.session_claude_options_json != null
                       ? (templateOptions?.mcpConfig || undefined)
                       : mergeClaudeMcpConfigs(
                         templateOptions?.mcpConfig,
@@ -1134,6 +1227,12 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
           sessionModel: eff.model,
           sessionEffort: eff.effort,
           sessionPermissionMode: permissionMode || null,
+          sessionEnvPolicy: {
+            effectiveKeys: Array.isArray(envAllowlist) ? envAllowlist : null,
+            providers: providerEnv,
+            allowDefaultAuth: envPolicy?.allowDefaultAuth === true,
+            blockedKeys: envPolicy?.blockedKeys || [],
+          },
           sessionClaudeOptions: claudeTemplateOptions
             ? {
                 tools: claudeTemplateOptions.tools,

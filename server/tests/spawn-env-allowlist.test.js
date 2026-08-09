@@ -626,6 +626,74 @@ async function startFreshManager(harness, {
   };
 }
 
+test('MUTATION: deleted pinned profile resumes from its env-policy snapshot without fallback widening', async (t) => {
+  await withProcessEnv({
+    PIN_ONLY: 'pinned-value',
+    FALLBACK_ONLY: 'fallback-value',
+  }, async () => {
+    const harness = await createManagerDbHarness(t, 'palantir-env-snapshot-delete');
+    harness.agentProfileService.updateProfile('claude-code', {
+      name: 'ZZZ pinned Claude',
+      env_allowlist: JSON.stringify(['PIN_ONLY']),
+    });
+    const fresh = await startFreshManager(harness, {
+      authResolverOpts: {
+        hasKeychain: () => true,
+        hasCredentialsFile: () => false,
+      },
+    });
+    assert.equal(fresh.response.status, 201, JSON.stringify(fresh.response.body));
+    assert.equal(fresh.call.opts.env.PIN_ONLY, 'pinned-value');
+    assert.equal(hasOwn(fresh.call.opts.env, 'FALLBACK_ONLY'), false);
+
+    const runId = harness.managerRegistry.getActiveRunId('top');
+    const freshRun = harness.runService.getRun(runId);
+    const snapshot = JSON.parse(freshRun.session_claude_options_json).envPolicy;
+    assert.deepEqual(snapshot.effectiveKeys, ['PIN_ONLY']);
+    harness.runService.updateClaudeSessionId(runId, 'resume-pinned-env-snapshot');
+    harness.agentProfileService.deleteProfile('claude-code');
+    assert.equal(harness.runService.getRun(runId).agent_profile_id, null);
+    harness.agentProfileService.createProfile({
+      name: 'AAA fallback Claude',
+      type: 'claude-code',
+      command: 'claude',
+      args_template: '-p {prompt}',
+      env_allowlist: JSON.stringify(['FALLBACK_ONLY']),
+    });
+
+    const { createManagerRouter } = require('../routes/manager');
+    const { createManagerRegistry } = require('../services/managerRegistry');
+    const { createConversationService } = require('../services/conversationService');
+    const resumeCalls = [];
+    const resumeAdapter = createMockManagerAdapter(resumeCalls);
+    const resumeFactory = { getAdapter: () => resumeAdapter };
+    const resumeRegistry = createManagerRegistry({ runService: harness.runService });
+    const resumeConversationService = createConversationService({
+      runService: harness.runService,
+      managerRegistry: resumeRegistry,
+      managerAdapterFactory: resumeFactory,
+      lifecycleService: null,
+    });
+    createManagerRouter({
+      runService: harness.runService,
+      managerAdapterFactory: resumeFactory,
+      managerRegistry: resumeRegistry,
+      conversationService: resumeConversationService,
+      agentProfileService: harness.agentProfileService,
+      authResolverOpts: {
+        hasKeychain: () => true,
+        hasCredentialsFile: () => false,
+      },
+    });
+
+    const resumed = resumeCalls.find((call) => call.runId === runId);
+    assert.ok(resumed, 'deleted-profile run must resume from its own snapshot');
+    assert.deepEqual(resumed.opts.envAllowlist, ['PIN_ONLY']);
+    assert.equal(resumed.opts.env.PIN_ONLY, 'pinned-value');
+    assert.equal(hasOwn(resumed.opts.env, 'FALLBACK_ONLY'), false);
+  });
+});
+
 test('fresh Top and boot-resumed Top/Operator use the same profile env_allowlist', async (t) => {
   await withProcessEnv({
     PROFILE_RESUME_ENV: 'profile-visible',
