@@ -14,6 +14,7 @@ const { createManagerRegistry } = require('../services/managerRegistry');
 const { createNodeService } = require('../services/nodeService');
 const { createOperatorSpawnService } = require('../services/operatorSpawnService');
 const { createAgentProfileService } = require('../services/agentProfileService');
+const { createEnvironmentProviderService } = require('../services/environmentProviderService');
 const { createConversationService } = require('../services/conversationService');
 const { createManagerRouter } = require('../routes/manager');
 
@@ -923,4 +924,178 @@ test('P5-S4b: remote node + Claude preference spawns a remote Claude Operator (e
   assert.equal(thread.pm_adapter, 'claude');
   assert.equal(thread.node_id, 'nodeA');
   assert.equal(thread.cwd, '/workspace/remote-claude');
+});
+
+test('review 1: local Claude Operator accepts active provider-only credentials', async (t) => {
+  const keys = {
+    PALANTIR_SKIP_HOST_CREDENTIALS: '1',
+    CLAUDE_CODE_USE_BEDROCK: '1',
+    AWS_REGION: 'ap-northeast-2',
+    AWS_SECRET_ACCESS_KEY: 'operator-provider-secret',
+    CLAUDE_CODE_OAUTH_TOKEN: undefined,
+    ANTHROPIC_API_KEY: undefined,
+  };
+  const previous = new Map();
+  for (const [key, value] of Object.entries(keys)) {
+    previous.set(key, Object.prototype.hasOwnProperty.call(process.env, key)
+      ? process.env[key]
+      : undefined);
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  t.after(() => {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  const db = await mkdb(t);
+  const runService = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const { createAgentProfileService } = require('../services/agentProfileService');
+  const { createEnvironmentProviderService } = require('../services/environmentProviderService');
+  const agentProfileService = createAgentProfileService(db);
+  const provider = createEnvironmentProviderService(db).createProvider({
+    name: 'operator-bedrock-auth',
+    env_keys: [
+      'CLAUDE_CODE_USE_BEDROCK',
+      'AWS_REGION',
+      'AWS_SECRET_ACCESS_KEY',
+    ],
+    gate_env_key: 'CLAUDE_CODE_USE_BEDROCK',
+  });
+  agentProfileService.updateProfile('claude-code', {
+    env_allowlist: JSON.stringify(['AWS_SECRET_ACCESS_KEY']),
+    environment_provider_ids: [provider.id],
+  });
+
+  const registry = createManagerRegistry({ runService });
+  const claudeAdapter = makeFakeManagerAdapter('claude-code');
+  const codexAdapter = makeFakeManagerAdapter('codex');
+  const spawn = createOperatorSpawnService({
+    runService,
+    managerRegistry: registry,
+    managerAdapterFactory: makeAdapterFactory({ claudeAdapter, codexAdapter }),
+    projectService,
+    projectBriefService,
+    agentProfileService,
+    authResolverOpts: {
+      hasKeychain: () => false,
+      hasCredentialsFile: () => false,
+    },
+  });
+  const project = projectService.createProject({
+    name: 'provider-only-operator',
+    preferred_pm_adapter: 'claude',
+  });
+  seedTop({
+    runService,
+    registry,
+    adapter: makeFakeManagerAdapter('claude-code'),
+  });
+
+  const result = spawn.ensureLiveOperator({ projectId: project.id });
+  assert.equal(result.spawned, true);
+  assert.equal(claudeAdapter._starts.length, 1);
+  const childEnv = claudeAdapter._starts[0].opts.env;
+  assert.equal(childEnv.CLAUDE_CODE_USE_BEDROCK, '1');
+  assert.equal(childEnv.AWS_REGION, 'ap-northeast-2');
+  assert.equal(childEnv.AWS_SECRET_ACCESS_KEY, 'operator-provider-secret');
+});
+
+test('MUTATION: Operator spawn fails closed and records an event for invalid provider policy', async (t) => {
+  const db = await mkdb(t);
+  const runService = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const agentProfileService = createAgentProfileService(db);
+  db.prepare('UPDATE agent_profiles SET env_allowlist = ? WHERE id = ?')
+    .run('{invalid policy', 'claude-code');
+  const registry = createManagerRegistry({ runService });
+  const claudeAdapter = makeFakeManagerAdapter('claude-code');
+  const codexAdapter = makeFakeManagerAdapter('codex');
+  const spawn = createOperatorSpawnService({
+    runService,
+    managerRegistry: registry,
+    managerAdapterFactory: makeAdapterFactory({ claudeAdapter, codexAdapter }),
+    projectService,
+    projectBriefService,
+    agentProfileService,
+    resolveManagerAuth: authOk,
+  });
+  const project = projectService.createProject({
+    name: 'invalid-policy-operator',
+    preferred_pm_adapter: 'claude',
+  });
+  const top = seedTop({ runService, registry, adapter: claudeAdapter });
+
+  assert.throws(
+    () => spawn.ensureLiveOperator({ projectId: project.id }),
+    (err) => err.code === 'PROVIDER_ENV_POLICY_INVALID' && err.httpStatus === 400,
+  );
+  assert.equal(claudeAdapter._starts.length, 0);
+  assert.ok(
+    runService.getRunEvents(top.id)
+      .some((event) => event.event_type === 'operator:provider_env_policy_invalid'),
+  );
+});
+
+test('MUTATION: remote Operator rejects controller-scoped provider gates', async (t) => {
+  const db = await mkdb(t);
+  const runService = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const agentProfileService = createAgentProfileService(db);
+  const providers = createEnvironmentProviderService(db);
+  const previousGate = process.env.REMOTE_PROVIDER_ENABLED;
+  process.env.REMOTE_PROVIDER_ENABLED = '1';
+  t.after(() => {
+    if (previousGate === undefined) delete process.env.REMOTE_PROVIDER_ENABLED;
+    else process.env.REMOTE_PROVIDER_ENABLED = previousGate;
+  });
+  const provider = providers.createProvider({
+    name: 'remote-controller-gated-provider',
+    env_keys: ['REMOTE_PROVIDER_ENABLED', 'REMOTE_PROVIDER_REGION'],
+    gate_env_key: 'REMOTE_PROVIDER_ENABLED',
+  });
+  agentProfileService.updateProfile('claude-code', {
+    args_template: '-p {prompt} --bare',
+    environment_provider_ids: [provider.id],
+  });
+  const registry = createManagerRegistry({ runService });
+  const claudeAdapter = makeFakeManagerAdapter('claude-code');
+  const codexAdapter = makeFakeManagerAdapter('codex');
+  const nodeService = createNodeService(db, { localExecutor: { local: true } });
+  createSshNode(nodeService, 'node-gated');
+  const spawn = createOperatorSpawnService({
+    runService,
+    managerRegistry: registry,
+    managerAdapterFactory: makeAdapterFactory({ claudeAdapter, codexAdapter }),
+    projectService,
+    projectBriefService,
+    agentProfileService,
+    nodeService,
+    managerApiEndpoints: TEST_MANAGER_API_ENDPOINTS,
+    resolveManagerAuth: authOk,
+  });
+  const project = projectService.createProject({
+    name: 'remote-gated-operator',
+    preferred_pm_adapter: 'claude',
+    node_id: 'node-gated',
+    directory: '/workspace/remote-gated',
+  });
+  const top = seedTop({ runService, registry, adapter: claudeAdapter });
+
+  assert.throws(
+    () => spawn.ensureLiveOperator({ projectId: project.id }),
+    (err) => err.code === 'REMOTE_PROVIDER_GATE_UNSUPPORTED'
+      && /controller-scoped/.test(err.message),
+  );
+  assert.equal(claudeAdapter._starts.length, 0);
+  assert.ok(
+    runService.getRunEvents(top.id)
+      .some((event) => event.event_type === 'operator:provider_env_policy_invalid'),
+  );
 });

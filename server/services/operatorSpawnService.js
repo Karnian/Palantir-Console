@@ -285,6 +285,9 @@ function createOperatorSpawnService({
   function resolveManagerProfileRuntime(adapterType, profiles, { isRemoteNode = false } = {}) {
     const managerProfile = profiles.find(p => p.type === adapterType) || null;
     let envAllowlist;
+    let providerEnv = [];
+    let allowDefaultAuth;
+    let blockedEnvKeys = [];
     let mcpTools = [];
     let tools = [];
     let disallowedTools = [];
@@ -342,11 +345,54 @@ function createOperatorSpawnService({
           else throw err;
         }
       }
-      if (managerProfile.env_allowlist) {
+      // #457: when the policy service exists, invalid policy is terminal. A
+      // fallback to the raw column/default resolver would silently widen auth.
+      let policyResolved = false;
+      if (typeof agentProfileService?.resolveEnvPolicy === 'function') {
+        try {
+          const policy = agentProfileService.resolveEnvPolicy(managerProfile);
+          if (!policy?.valid) {
+            throw new Error('env policy contains invalid or denied provider keys');
+          }
+          if (
+            isRemoteNode
+            && policy.providers.some((provider) => provider.gateEnvKey)
+          ) {
+            const err = new Error(
+              'remote provider gate rejected: gates are controller-scoped and cannot authorize node-sourced credentials',
+            );
+            err.code = 'REMOTE_PROVIDER_GATE_UNSUPPORTED';
+            throw err;
+          }
+          envAllowlist = policy.effectiveKeys;
+          providerEnv = policy.providers;
+          allowDefaultAuth = policy.allowDefaultAuth;
+          blockedEnvKeys = policy.blockedKeys;
+          policyResolved = true;
+        } catch (err) {
+          if (!profileError) {
+            profileError = new Error(`Operator provider env policy invalid: ${err.message}`);
+            profileError.httpStatus = 400;
+            profileError.code = err.code || 'PROVIDER_ENV_POLICY_INVALID';
+          }
+        }
+      }
+      if (
+        typeof agentProfileService?.resolveEnvPolicy !== 'function'
+        && !policyResolved
+        && managerProfile.env_allowlist
+      ) {
         try {
           const parsed = JSON.parse(managerProfile.env_allowlist);
-          if (Array.isArray(parsed)) envAllowlist = parsed;
-        } catch { /* use resolver defaults */ }
+          if (!Array.isArray(parsed)) throw new Error('env_allowlist must be an array');
+          envAllowlist = parsed;
+        } catch (err) {
+          if (!profileError) {
+            profileError = new Error(`Operator env policy invalid: ${err.message}`);
+            profileError.httpStatus = 400;
+            profileError.code = 'PROVIDER_ENV_POLICY_INVALID';
+          }
+        }
       }
       // P3-4: extract mcp_tools for PM adapter startup
       if (managerProfile.capabilities_json) {
@@ -360,6 +406,9 @@ function createOperatorSpawnService({
     }
     const authCtx = resolveManagerAuth(adapterType, {
       envAllowlist,
+      providerEnv,
+      allowDefaultAuth,
+      blockedEnvKeys,
       ...normalizedAuthResolverOpts,
       // A remote Claude Operator materializes `--bare` auth from the pod's
       // login store inside the executor. Do not read/materialize controller
@@ -370,6 +419,9 @@ function createOperatorSpawnService({
     return {
       adapterType,
       envAllowlist,
+      // #457: the declared providers behind this allowlist. buildManagerSpawnEnv
+      // needs them to pass the approved credential keys through to the child.
+      providerEnv,
       mcpTools,
       authCtx,
       tools,
@@ -571,7 +623,19 @@ function createOperatorSpawnService({
     let profiles = [];
     try {
       if (agentProfileService) profiles = agentProfileService.listProfiles();
-    } catch { /* use resolver defaults */ }
+    } catch (err) {
+      try {
+        runService.addRunEvent(activeTopRunId, 'operator:provider_env_policy_invalid', JSON.stringify({
+          project_id: projectId,
+          node_id: nodeId,
+          reason: `profile policy unreadable: ${err.message}`,
+        }));
+      } catch { /* best-effort pre-spawn diagnostic */ }
+      const policyError = new Error(`Operator profile policy unreadable: ${err.message}`);
+      policyError.httpStatus = 400;
+      policyError.code = 'PROVIDER_ENV_POLICY_INVALID';
+      throw policyError;
+    }
 
     const configuredPreference = Boolean(
       adapterPreferenceInstance?.preferred_adapter
@@ -639,6 +703,7 @@ function createOperatorSpawnService({
     // the same allowlist, bare flag and settings.
     const {
       envAllowlist,
+      providerEnv,
       mcpTools: pmMcpTools,
       authCtx,
       tools,
@@ -658,7 +723,22 @@ function createOperatorSpawnService({
     // Same contract as before the null-preference probe: a profile that
     // contradicts the adapter we are about to spawn (wrong command vendor, or a
     // malformed args_template) is a 400 — but only for the SELECTED adapter.
-    if (profileError) throw profileError;
+    if (profileError) {
+      if (
+        profileError.code === 'PROVIDER_ENV_POLICY_INVALID'
+        || profileError.code === 'REMOTE_PROVIDER_GATE_UNSUPPORTED'
+      ) {
+        try {
+          runService.addRunEvent(activeTopRunId, 'operator:provider_env_policy_invalid', JSON.stringify({
+            adapter: adapterType,
+            project_id: projectId,
+            node_id: nodeId,
+            reason: profileError.message,
+          }));
+        } catch { /* best-effort pre-spawn diagnostic */ }
+      }
+      throw profileError;
+    }
     // Resolve before the auth gate so migration diagnostics are observable
     // even when a legacy ambient auth mode is no longer sufficient.
     const spawnEnv = applyManagerCredentialPolicy(isRemoteNode ? {} : buildManagerSpawnEnv({
@@ -668,6 +748,7 @@ function createOperatorSpawnService({
       vendor: adapterType,
       scrubHumanToken: actorTokens.separated || goalFeatureActive(),
       diagnosticContext: 'manager:fresh:operator',
+      providerEnv,
     }));
     // A REMOTE Operator authenticates on the POD (its own ~/.codex), not the
     // control plane, and gets env:{} at runtime — so control-plane Codex auth is

@@ -15,6 +15,8 @@ const { createRunService } = require('../services/runService');
 const { createTaskService } = require('../services/taskService');
 const { createProjectService } = require('../services/projectService');
 const { createAgentProfileService } = require('../services/agentProfileService');
+const { createEnvironmentProviderService } = require('../services/environmentProviderService');
+const { createPresetService } = require('../services/presetService');
 const { createLifecycleService } = require('../services/lifecycleService');
 const { createEventBus } = require('../services/eventBus');
 
@@ -413,6 +415,160 @@ test('executeTask: env_allowlist is filtered from process.env', async (t) => {
 
   // Cleanup
   delete process.env._PALANTIR_TEST_VAR;
+});
+
+test('executeTask: provider env reaches the child but provider-only secrets stay blocked until profile approval', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const ts = createTaskService(db);
+  const ps = createProjectService(db);
+  const aps = createAgentProfileService(db);
+  const environmentProviders = createEnvironmentProviderService(db);
+  const execEngine = makeStubExecutionEngine();
+  const sje = makeStubStreamJsonEngine();
+  const lc = createLifecycleService({
+    runService: rs,
+    taskService: ts,
+    agentProfileService: aps,
+    projectService: ps,
+    executionEngine: execEngine,
+    streamJsonEngine: sje,
+    worktreeService: null,
+    eventBus: null,
+  });
+
+  const previous = {
+    PROVIDER_REGION_CANARY: process.env.PROVIDER_REGION_CANARY,
+    AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
+    CUSTOM_PROVIDER_API_KEY: process.env.CUSTOM_PROVIDER_API_KEY,
+  };
+  process.env.PROVIDER_REGION_CANARY = 'ap-northeast-test';
+  process.env.AWS_SECRET_ACCESS_KEY = 'aws-secret-value';
+  process.env.CUSTOM_PROVIDER_API_KEY = 'custom-secret-value';
+  t.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  const provider = environmentProviders.createProvider({
+    name: 'operator-declared-provider',
+    env_keys: [
+      'PROVIDER_REGION_CANARY',
+      'AWS_SECRET_ACCESS_KEY',
+      'CUSTOM_PROVIDER_API_KEY',
+    ],
+  });
+  const project = seedProject(db);
+  const firstTask = seedTask(db, project.id);
+  const profile = seedProfile(db, { command: 'codex' });
+  aps.updateProfile(profile.id, {
+    environment_provider_ids: [provider.id],
+  });
+
+  await lc.executeTask(firstTask.id, {
+    agentProfileId: profile.id,
+    prompt: 'provider env test',
+  });
+
+  const providerOnlyEnv = execEngine.spawned[0].opts.env;
+  assert.equal(providerOnlyEnv.PROVIDER_REGION_CANARY, 'ap-northeast-test');
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(providerOnlyEnv, 'AWS_SECRET_ACCESS_KEY'),
+    false,
+  );
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(providerOnlyEnv, 'CUSTOM_PROVIDER_API_KEY'),
+    false,
+  );
+
+  aps.updateProfile(profile.id, {
+    env_allowlist: JSON.stringify([
+      'AWS_SECRET_ACCESS_KEY',
+      'CUSTOM_PROVIDER_API_KEY',
+    ]),
+  });
+  const secondTask = seedTask(db, project.id);
+  await lc.executeTask(secondTask.id, {
+    agentProfileId: profile.id,
+    prompt: 'explicit secret approval test',
+  });
+
+  const explicitlyApprovedEnv = execEngine.spawned[1].opts.env;
+  assert.equal(explicitlyApprovedEnv.PROVIDER_REGION_CANARY, 'ap-northeast-test');
+  assert.equal(explicitlyApprovedEnv.AWS_SECRET_ACCESS_KEY, 'aws-secret-value');
+  assert.equal(explicitlyApprovedEnv.CUSTOM_PROVIDER_API_KEY, 'custom-secret-value');
+});
+
+test('MUTATION: isolated preset spawn consumes the same resolved provider policy as normal spawn', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const ts = createTaskService(db);
+  const ps = createProjectService(db);
+  const aps = createAgentProfileService(db);
+  const providers = createEnvironmentProviderService(db);
+  const presetService = createPresetService(db);
+  const sje = makeStubStreamJsonEngine();
+  const previous = {
+    ISOLATED_PROVIDER_REGION: process.env.ISOLATED_PROVIDER_REGION,
+    ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+  };
+  process.env.ISOLATED_PROVIDER_REGION = 'isolated-region';
+  process.env.ANTHROPIC_API_KEY = 'isolated-default-auth';
+  t.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  const provider = providers.createProvider({
+    name: 'isolated-config-provider',
+    env_keys: ['ISOLATED_PROVIDER_REGION'],
+  });
+  const preset = presetService.createPreset({
+    name: 'isolated-provider-parity',
+    isolated: true,
+    plugin_refs: [],
+    mcp_server_ids: [],
+  });
+  const project = seedProject(db);
+  const task = seedTask(db, project.id);
+  const profile = seedProfile(db, { command: 'claude', env_allowlist: '[]' });
+  aps.updateProfile(profile.id, {
+    type: 'claude-code',
+    environment_provider_ids: [provider.id],
+  });
+  const lc = createLifecycleService({
+    runService: rs,
+    taskService: ts,
+    agentProfileService: aps,
+    projectService: ps,
+    presetService,
+    executionEngine: makeStubExecutionEngine(),
+    streamJsonEngine: sje,
+    worktreeService: null,
+    eventBus: null,
+    authResolverOpts: {
+      prefer: 'env',
+      hasKeychain: () => false,
+      hasCredentialsFile: () => false,
+    },
+  });
+
+  await lc.executeTask(task.id, {
+    agentProfileId: profile.id,
+    prompt: 'isolated provider parity',
+    presetId: preset.id,
+  });
+
+  assert.equal(sje.spawned.length, 1);
+  const opts = sje.spawned[0].opts;
+  assert.equal(opts.isolated, true);
+  assert.equal(opts.env.ISOLATED_PROVIDER_REGION, 'isolated-region');
+  assert.equal(opts.env.ANTHROPIC_API_KEY, 'isolated-default-auth');
+  assert.ok(opts.envAllowlist.includes('ISOLATED_PROVIDER_REGION'));
 });
 
 test('executeTask: worker receives only a run-bound memory proposal capability', async (t) => {

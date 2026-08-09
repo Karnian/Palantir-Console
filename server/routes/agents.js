@@ -2,6 +2,7 @@ const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
 const { resolveManagerAuth } = require('../services/authResolver');
 const { validateCreateAgent, validateUpdateAgent } = require('../middleware/validate');
+const { assertHumanWrite } = require('./environmentProviders');
 
 /**
  * Agent routes. Per-agent usage dispatch goes through the provider registry,
@@ -17,10 +18,11 @@ const MANAGER_PROFILE_TYPES = {
   'codex': 'codex',
 };
 
-function computeAuthForProfile(profile, resolverOpts = {}) {
+function computeAuthForProfile(profile, resolverOpts = {}, agentProfileService = null) {
   const adapterType = MANAGER_PROFILE_TYPES[profile && profile.type];
   if (!adapterType) return null;
   let envAllowlist;
+  let envPolicy;
   if (profile.env_allowlist) {
     // D7 fail-closed: must match the strict parse in routes/manager.js
     // /api/manager/start. Both syntax errors AND non-array JSON must
@@ -45,7 +47,28 @@ function computeAuthForProfile(profile, resolverOpts = {}) {
     }
     envAllowlist = parsed;
   }
-  const ctx = resolveManagerAuth(adapterType, { envAllowlist, ...resolverOpts });
+  if (
+    agentProfileService
+    && typeof agentProfileService.resolveEnvPolicy === 'function'
+  ) {
+    const policy = agentProfileService.resolveEnvPolicy(profile);
+    if (!policy.valid) {
+      return {
+        canAuth: false,
+        sources: [],
+        diagnostics: ['environment provider policy is invalid or contains denied env keys'],
+      };
+    }
+    envPolicy = policy;
+    envAllowlist = policy.effectiveKeys;
+  }
+  const ctx = resolveManagerAuth(adapterType, {
+    envAllowlist,
+    providerEnv: envPolicy?.providers,
+    allowDefaultAuth: envPolicy?.allowDefaultAuth,
+    blockedEnvKeys: envPolicy?.blockedKeys,
+    ...resolverOpts,
+  });
   return {
     canAuth: !!ctx.canAuth,
     sources: ctx.sources || [],
@@ -64,7 +87,10 @@ function createAgentsRouter({ agentProfileService, providerRegistry, authResolve
     // PR5: attach per-profile manager auth preflight so the frontend picker
     // can render a green/red status dot without N+1 probing. Non-manager
     // profiles get `auth: null` and stay untouched.
-    const enriched = agents.map(a => ({ ...a, auth: computeAuthForProfile(a, authResolverOpts) }));
+    const enriched = agents.map(a => ({
+      ...a,
+      auth: computeAuthForProfile(a, authResolverOpts, agentProfileService),
+    }));
     res.json({ agents: enriched });
   }));
 
@@ -88,16 +114,22 @@ function createAgentsRouter({ agentProfileService, providerRegistry, authResolve
     const runningCount = agentProfileService.getRunningCount(req.params.id);
     // PR5: include auth preflight so a targeted fetch (e.g. picker refresh
     // after credentials are added) doesn't need a second round-trip.
-    const auth = computeAuthForProfile(agent, authResolverOpts);
+    const auth = computeAuthForProfile(agent, authResolverOpts, agentProfileService);
     res.json({ agent: { ...agent, auth }, runningCount });
   }));
 
   router.post('/', validateCreateAgent, asyncHandler(async (req, res) => {
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'environment_provider_ids')) {
+      assertHumanWrite(req);
+    }
     const agent = agentProfileService.createProfile(req.body || {});
     res.status(201).json({ agent });
   }));
 
   router.patch('/:id', validateUpdateAgent, asyncHandler(async (req, res) => {
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'environment_provider_ids')) {
+      assertHumanWrite(req);
+    }
     const agent = agentProfileService.updateProfile(req.params.id, req.body || {});
     res.json({ agent });
   }));
