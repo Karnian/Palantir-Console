@@ -1,4 +1,20 @@
-# Action Control Plane — 구현 brief (LOCKED)
+# Action Control Plane — 구현 brief (⏸ 보류 2026-08-10)
+
+> **⏸ 이 트랙은 보류(shelve) 상태다. 정본은 이슈 #522.**
+>
+> 사용자 방향 확정(2026-08-10): "GitHub 연계 제외, 독자적 제품" + 커넥터는 **옵션 2(어댑터는 생태계,
+> 계약은 제품)**. 그 방향으로 벤더 중립화를 설계했으나 codex 적대검토 **BLOCKER 4건**이 전부 코드로
+> 확인됐다 — ①아래 §1~§12 가 실제로는 벤더 중립이 아니다(§5 issue 본문 marker, §10 GitHub token/PAT/App,
+> §2/6/7/11/12) ②임의 MCP 서버는 §10 의 trusted credential gateway 가 아니다 ③MCP 경계가 §4 fencing 을
+> 보장하지 못한다(이미 전달된 side effect 는 fence 불가) ④capability 계약이 자기선언뿐이고 검증자가 없다.
+>
+> **핵심**: 검증된 at-most-once 불변식은 **우리가 gateway 를 직접 썼기 때문에** 성립했다. 실행을 제3자에게
+> 넘기면 강제 불가능해지고, 되살리려면 "신뢰된 구현+서명+코드리뷰" = 사용자가 거부한 공식 어댑터 프로그램과
+> 운영 부담이 같아진다. 여기에 더해 **dogfood 대상이 없다**(Notion→GitHub automation 이관은 제외됨).
+>
+> 머지된 코드(#509~#513)는 **삭제하지 않고 휴면** — 선언 라우트 없음·broker 미기동이라 런타임 비용 0.
+> **PR2(실 GitHub gateway) 취소, PR4(#521) 종료.** 재개 선결 조건 9항목과 재개 트리거는 **#522** 참조.
+> 아래 원문은 재개 시 출발점으로 보존한다. **원문의 §0·§13 rollout 은 더 이상 유효하지 않다.**
 
 OP 트랙 §4 2단계 ★본체. `orca-parity-and-action-plane-brief.md` 는 방향만 lock 했고 이 문서가 구현
 spec 이다. **codex 4라운드 적대 설계검토 GO** (R1 4B+8S → R2 1B+4S → R3 1B+1S → R4 GO). 사용자
