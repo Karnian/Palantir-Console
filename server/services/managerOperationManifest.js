@@ -311,17 +311,17 @@ const operations = [
     prompt: prompt({ visible: true, section: 'specialist', order: 20, lines: [], adapter_variants: { codex: 'visible' } }),
   },
   {
-    id: 'verify_checks.list', method: 'GET', path_template: '/api/verify-checks', layers: ['operator'], availability: 'goal_mode',
+    id: 'verify_checks.list', method: 'GET', path_template: '/api/verify-checks', layers: ['operator'], availability: 'always',
     path_params: [], query: [{ name: 'project_id', required: false, type: 'string', example: 'PROJECT_ID' }], request_body: NO_BODY,
     constraints: [], canonical_cases: ['/api/verify-checks'], prompt: prompt(),
   },
   {
-    id: 'verify_checks.get', method: 'GET', path_template: '/api/verify-checks/{check_id}', layers: ['operator'], availability: 'goal_mode',
+    id: 'verify_checks.get', method: 'GET', path_template: '/api/verify-checks/{check_id}', layers: ['operator'], availability: 'always',
     path_params: [{ name: 'check_id', type: 'number', prompt_value: 'CHECK_ID' }], query: [], request_body: NO_BODY,
     constraints: [], canonical_cases: ['/api/verify-checks/1'], prompt: prompt(),
   },
   {
-    id: 'verify_checks.create', method: 'POST', path_template: '/api/verify-checks', layers: ['operator'], availability: 'goal_mode',
+    id: 'verify_checks.create', method: 'POST', path_template: '/api/verify-checks', layers: ['operator'], availability: 'always',
     path_params: [], query: [],
     request_body: body({
       required: ['name', 'kind'], optional: ['project_id', 'is_default', 'spec', 'spec_json'],
@@ -333,11 +333,12 @@ const operations = [
     }),
     request_examples: {
       artifact_success: { body_example: ['operator', 'artifact'], target: 'new', expected_status: 201 },
-      command_forbidden: { body_example: ['operator', 'command_forbidden'], target: 'new', expected_status: 403, note: 'Manager bearer auth cannot create shell-command checks.' },
+      command_forbidden: { body_example: ['operator', 'command_forbidden'], target: 'new', expected_status: 403, note: 'Manager bearer auth cannot create/edit/delete shell-command checks (goal mode active).' },
     },
     constraints: [
       { id: 'spec_object', critical: false, rule: 'Provide spec or spec_json as an object; artifact specs use files[].glob and/or report.' },
       { id: 'artifact_only', critical: true, rule: 'Operator managers may create artifact checks only; command checks require human cookie auth.' },
+      { id: 'kind_gated_availability', critical: false, rule: 'The route is always mounted (availability: always) but the CONTRACT is kind-level: artifact is open, command needs goal mode (503 when off) plus human cookie (403 otherwise).' },
     ],
     canonical_cases: ['/api/verify-checks'], prompt: prompt(),
   },
@@ -356,11 +357,11 @@ const operations = [
     canonical_cases: ['/api/verify-checks/assign'], prompt: prompt(),
   },
   {
-    id: 'verify_checks.update', method: 'PATCH', path_template: '/api/verify-checks/{check_id}', layers: ['operator'], availability: 'goal_mode',
+    id: 'verify_checks.update', method: 'PATCH', path_template: '/api/verify-checks/{check_id}', layers: ['operator'], availability: 'always',
     path_params: [{ name: 'check_id', type: 'number', prompt_value: 'CHECK_ID' }], query: [],
     request_body: body({
-      required: [], optional: ['name', 'spec', 'spec_json', 'is_default'],
-      types: { name: 'string', spec: 'object', spec_json: 'object', is_default: 'boolean' },
+      required: [], optional: ['name', 'spec', 'spec_json', 'is_default', 'attest', 'spec_hash'],
+      types: { name: 'string', spec: 'object', spec_json: 'object', is_default: 'boolean', attest: 'boolean', spec_hash: 'string' },
       examples: { operator: {
         artifact: { name: 'updated artifact check', spec: { files: [{ glob: 'dist/revised/**', must_exist: true }] } },
         command_forbidden: { name: 'command edit forbidden', spec: { command: 'false' } },
@@ -368,19 +369,26 @@ const operations = [
     }),
     request_examples: {
       artifact_success: { body_example: ['operator', 'artifact'], target: 'artifact', expected_status: 200 },
-      command_forbidden: { body_example: ['operator', 'command_forbidden'], target: 'command', expected_status: 403, note: 'Manager bearer auth cannot edit shell-command checks.' },
+      command_forbidden: { body_example: ['operator', 'command_forbidden'], target: 'command', expected_status: 403, note: 'Manager bearer auth cannot create/edit/delete shell-command checks (goal mode active).' },
     },
-    constraints: [{ id: 'artifact_only', critical: true, rule: 'Operator managers may edit artifact checks only; command checks require human cookie auth.' }],
+    constraints: [
+      { id: 'artifact_only', critical: true, rule: 'Operator managers may edit artifact checks only; command checks require human cookie auth.' },
+      { id: 'kind_gated_availability', critical: false, rule: 'The route is always mounted (availability: always) but the CONTRACT is kind-level: artifact is open, command needs goal mode (503 when off) plus human cookie (403 otherwise).' },
+      { id: 'attest_promotion', critical: false, rule: 'attest:true with spec_hash of the reviewed canonical spec is the ONLY metadata-only path that promotes provenance to human; a mismatched or stale hash is 409.' },
+    ],
     canonical_cases: ['/api/verify-checks/1'], prompt: prompt(),
   },
   {
-    id: 'verify_checks.delete', method: 'DELETE', path_template: '/api/verify-checks/{check_id}', layers: ['operator'], availability: 'goal_mode',
+    id: 'verify_checks.delete', method: 'DELETE', path_template: '/api/verify-checks/{check_id}', layers: ['operator'], availability: 'always',
     path_params: [{ name: 'check_id', type: 'number', prompt_value: 'CHECK_ID' }], query: [], request_body: NO_BODY,
     request_examples: {
       artifact_success: { target: 'artifact', expected_status: 200 },
-      command_forbidden: { target: 'command', expected_status: 403, note: 'Manager bearer auth cannot delete shell-command checks.' },
+      command_forbidden: { target: 'command', expected_status: 403, note: 'Manager bearer auth cannot create/edit/delete shell-command checks (goal mode active).' },
     },
-    constraints: [{ id: 'artifact_only', critical: true, rule: 'Operator managers may delete artifact checks only; command checks require human cookie auth.' }],
+    constraints: [
+      { id: 'artifact_only', critical: true, rule: 'Operator managers may delete artifact checks only; command checks require human cookie auth.' },
+      { id: 'kind_gated_availability', critical: false, rule: 'The route is always mounted (availability: always) but the CONTRACT is kind-level: artifact is open, command needs goal mode (503 when off) plus human cookie (403 otherwise).' },
+    ],
     canonical_cases: ['/api/verify-checks/1'], prompt: prompt(),
   },
 ];

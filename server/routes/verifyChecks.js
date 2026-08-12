@@ -24,39 +24,52 @@ function requireAuth(req) {
 }
 function actorFor(method) { return method === 'cookie' ? 'human' : 'operator'; }
 
+const GOAL_INACTIVE_ERROR = 'goal mode not active — set PALANTIR_GOAL_MODE=1 with a separated PALANTIR_PM_TOKEN';
+
 function createVerifyChecksRouter({ verifyCheckService, taskService, goalFeatureActive = require('../services/goalMode').goalFeatureActive }) {
   const router = express.Router();
 
-  // G2 §6 (Codex BLOCKER-1): the whole verify_check surface is inert unless goal
-  // mode is active (PALANTIR_GOAL_MODE=1 + separated PALANTIR_PM_TOKEN). The
-  // command-check cookie gate is only spoof-proof once the Operator no longer
-  // holds PALANTIR_TOKEN, which only happens when goalFeatureActive() — so gate
-  // the entire router on it to keep the security boundary consistent.
-  router.use((req, res, next) => {
+  // A2 §1.1: the two failures are DISTINCT and must stay distinct.
+  //   goal mode off  -> 503 (the feature is not available in this deployment)
+  //   goal mode on, non-cookie caller -> 403 (the caller lacks authority; the
+  //   pre-G2 human-only contract). Collapsing 403 into 503 tells an Operator
+  //   "come back when goal mode is on" for a request that will NEVER be allowed
+  //   to it, and erases the human-only signal G2 established.
+  function requireCommandWrite(res, method) {
     if (!goalFeatureActive()) {
-      return res.status(503).json({ error: 'goal mode not active — set PALANTIR_GOAL_MODE=1 with a separated PALANTIR_PM_TOKEN' });
+      res.status(503).json({ error: GOAL_INACTIVE_ERROR });
+      return false;
     }
-    next();
-  });
+    if (method !== 'cookie') {
+      res.status(403).json({ error: 'command verify_check requires human (cookie) auth' });
+      return false;
+    }
+    return true;
+  }
 
   router.get('/', asyncHandler(async (req, res) => {
     const projectId = req.query.project_id;
-    const checks = projectId ? verifyCheckService.listForProject(projectId) : verifyCheckService.listChecks();
+    let checks = projectId ? verifyCheckService.listForProject(projectId) : verifyCheckService.listChecks();
+    if (!goalFeatureActive()) checks = checks.filter((check) => check.kind !== 'command');
     res.json({ checks });
   }));
 
   router.get('/:id', asyncHandler(async (req, res) => {
-    res.json({ check: verifyCheckService.getCheck(Number(req.params.id)) });
+    const check = verifyCheckService.getCheck(Number(req.params.id));
+    if (check.kind === 'command' && !goalFeatureActive()) {
+      throw new NotFoundError(`verify_check not found: ${req.params.id}`);
+    }
+    res.json({ check });
   }));
 
   router.post('/', asyncHandler(async (req, res) => {
     const method = requireAuth(req);
     const body = req.body || {};
-    // command checks are a shell-execution gate → human (cookie) only (§6).
-    if (body.kind === 'command' && method !== 'cookie') {
-      return res.status(403).json({ error: 'command verify_check requires human (cookie) auth' });
-    }
-    const check = verifyCheckService.createCheck(body, { actor: actorFor(method) });
+    if (body.kind === 'command' && !requireCommandWrite(res, method)) return;
+    const check = verifyCheckService.createCheck(body, {
+      actor: actorFor(method),
+      commandWritable: goalFeatureActive() && method === 'cookie',
+    });
     res.status(201).json({ check });
   }));
 
@@ -64,10 +77,14 @@ function createVerifyChecksRouter({ verifyCheckService, taskService, goalFeature
     const method = requireAuth(req);
     const id = Number(req.params.id);
     const existing = verifyCheckService.getCheck(id);
-    if (existing.kind === 'command' && method !== 'cookie') {
-      return res.status(403).json({ error: 'editing a command verify_check requires human (cookie) auth' });
+    if (existing.kind === 'command' && !requireCommandWrite(res, method)) return;
+    if (req.body && req.body.attest === true && method !== 'cookie') {
+      return res.status(403).json({ error: 'attesting a verify_check requires human (cookie) auth' });
     }
-    const check = verifyCheckService.updateCheck(id, req.body || {}, { actor: actorFor(method) });
+    const check = verifyCheckService.updateCheck(id, req.body || {}, {
+      actor: actorFor(method),
+      commandWritable: goalFeatureActive() && method === 'cookie',
+    });
     res.json({ check });
   }));
 
@@ -75,10 +92,8 @@ function createVerifyChecksRouter({ verifyCheckService, taskService, goalFeature
     const method = requireAuth(req);
     const id = Number(req.params.id);
     const existing = verifyCheckService.getCheck(id);
-    if (existing.kind === 'command' && method !== 'cookie') {
-      return res.status(403).json({ error: 'deleting a command verify_check requires human (cookie) auth' });
-    }
-    res.json(verifyCheckService.deleteCheck(id));
+    if (existing.kind === 'command' && !requireCommandWrite(res, method)) return;
+    res.json(verifyCheckService.deleteCheck(id, { actor: actorFor(method) }));
   }));
 
   // POST /assign  { task_id, check_id|null } — assign (or clear) a task's Gate 1
@@ -86,6 +101,14 @@ function createVerifyChecksRouter({ verifyCheckService, taskService, goalFeature
   // match the task's project (no cross-project command execution).
   router.post('/assign', asyncHandler(async (req, res) => {
     const method = requireAuth(req);
+    // §1.1: assign is goal-territory (Gate 1) — the WHOLE operation stays behind
+    // the goal gate for every kind. The per-kind cookie rule below is unchanged
+    // from G2: only COMMAND assignment is human-only. Requiring cookie for
+    // artifact assignment too would silently remove an Operator capability that
+    // A2 never set out to touch.
+    if (!goalFeatureActive()) {
+      return res.status(503).json({ error: GOAL_INACTIVE_ERROR });
+    }
     if (!taskService) return res.status(501).json({ error: 'taskService unavailable' });
     const { task_id: taskId, check_id: checkId } = req.body || {};
     if (!taskId) throw new BadRequestError('task_id is required');
