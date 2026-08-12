@@ -7,7 +7,11 @@ const path = require('node:path');
 const os = require('node:os');
 
 const { createDatabase } = require('../db/database');
-const { createVerifyCheckService, validateSpec } = require('../services/verifyCheckService');
+const {
+  createVerifyCheckService,
+  validateSpec,
+  canonicalSpecHash,
+} = require('../services/verifyCheckService');
 
 function db(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-vcs-'));
@@ -17,6 +21,21 @@ function db(t) {
   db.prepare("INSERT INTO projects (id, name) VALUES ('p2', 'P2')").run();
   t.after(() => { try { close(); } catch { /* */ } fs.rmSync(dir, { recursive: true, force: true }); });
   return db;
+}
+
+function attachSchedule(d, checkId, suffix = '1') {
+  const profileId = `op_precheck_${suffix}`;
+  const instanceId = `oi_precheck_${suffix}`;
+  const scheduleId = `os_precheck_${suffix}`;
+  d.prepare('INSERT INTO operator_profiles (id, name) VALUES (?, ?)').run(profileId, `Precheck ${suffix}`);
+  d.prepare('INSERT INTO operator_instances (id, profile_id) VALUES (?, ?)').run(instanceId, profileId);
+  d.prepare(`
+    INSERT INTO operator_schedules (
+      id, operator_instance_id, name, prompt, codebase_project_id,
+      rule_json, timezone, precheck_verify_check_id
+    ) VALUES (?, ?, 'Precheck', 'Inspect', 'p1', ?, 'UTC', ?)
+  `).run(scheduleId, instanceId, JSON.stringify({ kind: 'interval', minutes: 60 }), checkId);
+  return scheduleId;
 }
 
 test('validateSpec: command requires command; timeout bounds', () => {
@@ -64,6 +83,98 @@ test('updateCheck: operator editing spec downgrades human→operator; rename pre
   // human edit vouches → restore human
   const restored = svc.updateCheck(c.id, { spec_json: { report: { min_chars: 1 } } }, { actor: 'human' });
   assert.equal(restored.created_by, 'human', 'human edit restores human provenance');
+});
+
+test('provenance: human metadata preserves operator; spec edit and explicit attest promote', (t) => {
+  const svc = createVerifyCheckService(db(t));
+  const originalSpec = { report: { min_chars: 10 } };
+  const c = svc.createCheck({
+    kind: 'artifact', project_id: 'p1', name: 'operator-check', spec_json: originalSpec,
+  }, { actor: 'operator' });
+
+  const renamed = svc.updateCheck(c.id, { name: 'human-renamed' }, { actor: 'human' });
+  assert.equal(renamed.created_by, 'operator', 'human rename must not launder provenance');
+
+  const edited = svc.updateCheck(c.id, {
+    spec_json: { report: { min_chars: 20 } },
+  }, { actor: 'human' });
+  assert.equal(edited.created_by, 'human', 'a real human spec edit vouches for the new spec');
+
+  const attestTarget = svc.createCheck({
+    kind: 'artifact', project_id: 'p1', name: 'attest-target', spec_json: originalSpec,
+  }, { actor: 'operator' });
+  assert.throws(
+    () => svc.updateCheck(attestTarget.id, { attest: true, spec_hash: '0'.repeat(64) }, { actor: 'human' }),
+    /review the current spec/i,
+  );
+  assert.equal(svc.getCheck(attestTarget.id).created_by, 'operator');
+
+  const attested = svc.updateCheck(attestTarget.id, {
+    attest: true,
+    spec_hash: canonicalSpecHash(validateSpec('artifact', originalSpec)),
+  }, { actor: 'human' });
+  assert.equal(attested.created_by, 'human');
+});
+
+test('migration 089 makes verify_check kind and project_id immutable', (t) => {
+  const d = db(t);
+  const svc = createVerifyCheckService(d);
+  const c = svc.createCheck({
+    kind: 'artifact', project_id: 'p1', name: 'immutable',
+    spec_json: { report: { min_chars: 1 } },
+  }, { actor: 'human' });
+
+  assert.throws(
+    () => d.prepare("UPDATE verify_checks SET kind = 'command' WHERE id = ?").run(c.id),
+    /kind\/project_id are immutable/,
+  );
+  assert.throws(
+    () => d.prepare("UPDATE verify_checks SET project_id = 'p2' WHERE id = ?").run(c.id),
+    /kind\/project_id are immutable/,
+  );
+});
+
+test('attached checks reject operator update/delete; human update passes the actor gate', (t) => {
+  const d = db(t);
+  const svc = createVerifyCheckService(d);
+  const attached = svc.createCheck({
+    kind: 'artifact', project_id: 'p1', name: 'attached',
+    spec_json: { report: { min_chars: 1 } },
+  }, { actor: 'human' });
+  const scheduleId = attachSchedule(d, attached.id, 'actor_gate');
+
+  assert.throws(
+    () => svc.updateCheck(attached.id, { name: 'operator-rename' }, { actor: 'operator' }),
+    /attached verify_check requires human/i,
+  );
+  assert.throws(
+    () => svc.deleteCheck(attached.id, { actor: 'operator' }),
+    /attached verify_check requires human/i,
+  );
+  const humanUpdated = svc.updateCheck(attached.id, { name: 'human-rename' }, { actor: 'human' });
+  assert.equal(humanUpdated.name, 'human-rename');
+
+  d.prepare('UPDATE operator_schedules SET precheck_verify_check_id = NULL WHERE id = ?').run(scheduleId);
+  const operatorUpdated = svc.updateCheck(attached.id, { name: 'detached-rename' }, { actor: 'operator' });
+  assert.equal(operatorUpdated.name, 'detached-rename');
+  assert.deepEqual(svc.deleteCheck(attached.id, { actor: 'operator' }), { status: 'ok' });
+});
+
+test('attached check delete maps FK restriction to 409 and succeeds after detach', (t) => {
+  const d = db(t);
+  const svc = createVerifyCheckService(d);
+  const c = svc.createCheck({
+    kind: 'artifact', project_id: 'p1', name: 'fk-restrict',
+    spec_json: { report: { min_chars: 1 } },
+  }, { actor: 'human' });
+  const scheduleId = attachSchedule(d, c.id, 'fk');
+
+  assert.throws(
+    () => svc.deleteCheck(c.id, { actor: 'human' }),
+    (err) => err.status === 409 && /detach.*schedule/i.test(err.message),
+  );
+  d.prepare('UPDATE operator_schedules SET precheck_verify_check_id = NULL WHERE id = ?').run(scheduleId);
+  assert.deepEqual(svc.deleteCheck(c.id, { actor: 'human' }), { status: 'ok' });
 });
 
 test('createCheck: command without project_id blocked by DB trigger too (defense-in-depth)', (t) => {

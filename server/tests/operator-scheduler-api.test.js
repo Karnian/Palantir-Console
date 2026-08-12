@@ -8,6 +8,7 @@ const path = require('node:path');
 const request = require('supertest');
 
 const { createApp } = require('../app');
+const { assertHumanSameOrigin } = require('../routes/operatorSchedules');
 
 async function appHarness(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-schedule-api-'));
@@ -101,6 +102,29 @@ test('schedule mutation blocks cross-origin cookie requests', async (t) => {
     .set('Origin', 'https://evil.example')
     .send({ profile_id: 'op_api_scheduler' })
     .expect(403);
+});
+
+test('assertHumanSameOrigin compares scheme, host, and port while allowing absent Origin', () => {
+  function req(origin, { protocol = 'http', host = 'console.local' } = {}) {
+    const headers = { host };
+    if (origin !== undefined) headers.origin = origin;
+    return { auth: { method: 'cookie' }, protocol, headers };
+  }
+
+  assert.doesNotThrow(() => assertHumanSameOrigin(req('http://console.local')));
+  assert.throws(
+    () => assertHumanSameOrigin(req('https://console.local')),
+    /cross-origin write blocked/,
+  );
+  assert.throws(
+    () => assertHumanSameOrigin(req('http://console.local:4178', { host: 'console.local:4177' })),
+    /cross-origin write blocked/,
+  );
+  assert.doesNotThrow(() => assertHumanSameOrigin(req(
+    'https://console.local:4177',
+    { protocol: 'https', host: 'console.local:4177' },
+  )));
+  assert.doesNotThrow(() => assertHumanSameOrigin(req(undefined)));
 });
 
 test('schedule API validates grace and misfire policy while allowing null grace', async (t) => {

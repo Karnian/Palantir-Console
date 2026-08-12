@@ -8,9 +8,15 @@ function assertHumanSameOrigin(req) {
   if (!req.auth || req.auth.method !== 'cookie') throw new ForbiddenError('cookie auth required');
   const origin = req.headers.origin;
   if (!origin) return;
-  let originHost;
-  try { originHost = new URL(origin).host; } catch { throw new ForbiddenError('cross-origin write blocked'); }
-  if (!req.headers.host || originHost.toLowerCase() !== String(req.headers.host).toLowerCase()) {
+  let requestOrigin;
+  let suppliedOrigin;
+  try {
+    suppliedOrigin = new URL(origin).origin;
+    requestOrigin = new URL(`${req.protocol}://${req.headers.host}`).origin;
+  } catch {
+    throw new ForbiddenError('cross-origin write blocked');
+  }
+  if (!req.headers.host || suppliedOrigin.toLowerCase() !== requestOrigin.toLowerCase()) {
     throw new ForbiddenError('cross-origin write blocked');
   }
 }

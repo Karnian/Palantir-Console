@@ -678,7 +678,11 @@ function productionRouterMounts(app) {
 }
 
 test('availability metadata equals gates on production createApp instances', async () => {
-  const expectedGoalMode = ['verify_checks.assign', 'verify_checks.create', 'verify_checks.delete', 'verify_checks.get', 'verify_checks.list', 'verify_checks.update'];
+  // A2 §1.1: the gate moved from router-level to kind-level. The verify-check
+  // CRUD routes are now mounted unconditionally (artifact is open; command rows
+  // are hidden on read and 503 on write), so only `assign` — which stays wholly
+  // inside goal territory — is still a goal_mode operation.
+  const expectedGoalMode = ['verify_checks.assign'];
   assert.deepEqual(managerOperationManifest.operations.filter(item => item.availability === 'goal_mode').map(item => item.id).sort(), expectedGoalMode);
   assert.deepEqual(managerOperationManifest.operations.filter(item => item.availability === 'specialist_mounted').map(item => item.id), ['operator_specialist.invoke']);
 
@@ -690,8 +694,19 @@ test('availability metadata equals gates on production createApp instances', asy
     specialistBackend: { runSpecialistTurn: async () => ({ text: 'ok' }) },
   }));
   try {
-    assert.equal((await invokeApp(gatedApp, { method: 'GET', path: '/api/verify-checks' })).status, 503);
+    // Reads are open on both apps now (command rows are filtered, not 503).
+    assert.equal((await invokeApp(gatedApp, { method: 'GET', path: '/api/verify-checks' })).status, 200);
     assert.equal((await invokeApp(availableApp, { method: 'GET', path: '/api/verify-checks' })).status, 200);
+    // ...but the goal gate must still be provably ALIVE, or "availability moved
+    // to always" would be indistinguishable from "the gate was deleted".
+    assert.equal((await invokeApp(gatedApp, {
+      method: 'POST',
+      path: '/api/verify-checks',
+      body: { kind: 'command', project_id: 'p1', name: 'gated', spec_json: { command: 'true' } },
+    })).status, 503);
+    assert.equal((await invokeApp(gatedApp, {
+      method: 'POST', path: '/api/verify-checks/assign', body: { task_id: 't1', check_id: null },
+    })).status, 503);
     assert.equal((await invokeApp(gatedApp, { method: 'GET', path: '/api/tasks' })).status, 200);
     assert.equal(productionRouterMounts(gatedApp).some(([path]) => path === '/api/operator/specialist'), false);
     assert.equal(productionRouterMounts(specialistApp).some(([path]) => path === '/api/operator/specialist'), true);
@@ -864,7 +879,7 @@ test('required hostile regressions are rejected by executable witnesses', async 
   ));
   assert.throws(() => assert.deepEqual(
     mutatedAvailability.filter(item => item.availability === 'goal_mode').map(item => item.id).sort(),
-    ['verify_checks.assign', 'verify_checks.create', 'verify_checks.delete', 'verify_checks.get', 'verify_checks.list', 'verify_checks.update'],
+    ['verify_checks.assign'],
   ));
 
   // A static route on the second /api/tasks router is captured by GET /:id and

@@ -168,13 +168,33 @@ test('agent context projection and runtime gates cannot drift from production ro
       try {
         const mounts = productionRouterMounts(app);
         const mountedIds = mountedOperationIds(app);
-        const goalGateResponse = await invokeApp(app, { method: 'GET', path: '/api/verify-checks' });
-        const runtimeGoalActive = goalGateResponse.status === 200;
+        // A2: the gate moved to kind level, so a 200 on GET /api/verify-checks no
+        // longer signals goal mode — artifact reads are open in both modes.
+        const verifyChecksResponse = await invokeApp(app, { method: 'GET', path: '/api/verify-checks' });
+        assert.equal(verifyChecksResponse.status, 200, 'artifact verify-check reads stay available');
+        // The drift guard must still PROBE the runtime, never copy the expectation
+        // (`runtimeGoalActive = goalActive` would make this test assert nothing).
+        // `POST /assign` is the operation that stayed wholly goal-gated, so it is
+        // the honest runtime signal now.
+        const goalGateResponse = await invokeApp(app, {
+          method: 'POST', path: '/api/verify-checks/assign', body: { task_id: 'probe', check_id: null },
+        });
+        // `/assign` runs requireAuth BEFORE the goal check, so an unauthenticated
+        // probe against an auth-enabled app would 401 and be misread as "goal
+        // active". Fail loudly instead of judging on a response that never
+        // reached the gate we are probing.
+        assert.notEqual(goalGateResponse.status, 401,
+          'goal-gate probe must reach the goal check, not stop at the auth gate');
+        const runtimeGoalActive = goalGateResponse.status !== 503;
         const runtimeSpecialistAvailable = mounts.some(([mountPath]) => (
           mountPath === '/api/operator/specialist'
         ));
 
-        assert.equal(runtimeGoalActive, goalActive, 'goal manifest gate must equal the mounted route gate');
+        assert.equal(
+          runtimeGoalActive,
+          goalActive,
+          'goal manifest gate must equal the mounted route gate',
+        );
         assert.equal(
           runtimeSpecialistAvailable,
           specialistAvailable,

@@ -35,7 +35,12 @@ goal-delegation-brief §6 은 `goalFeatureActive()` 를 "모든 goal 표면의 �
 
 **쓰기는 게이트를 알리고, 읽기는 은닉한다** (codex R7-2 — 초안은 command 조회도 503 이라 해놓고 동시에 "goal OFF 면 GET 에서 command 행을 필터"라고 적어 단건 조회 결과가 503 인지 404 인지 모순이었다. 혼합 목록에서 행별 503 은 애초에 성립하지 않는다):
 
-- `command` **쓰기**(생성·수정·삭제·태스크 할당) = `goalFeatureActive()` AND cookie. 미충족 시 **503** (기존과 동일).
+- `command` **쓰기**(생성·수정·삭제) = `goalFeatureActive()` AND cookie. **두 실패는 코드가 다르다**:
+  - goal 모드 OFF → **503** (이 배포에 기능이 없다)
+  - goal 모드 ON + 비-cookie 호출자 → **403** (권한이 없다 — G2 가 세운 human-only 계약 그대로)
+
+  > 초안은 "미충족 시 503" 이라고 한 덩어리로 적었고, 구현이 그대로 따라가 **기존 테스트 `command check: cookie creates it; bearer is 403` 이 503 으로 약화**됐다. 503 은 Operator 에게 "goal 모드 켜지면 다시 오라"는 뜻인데, command 쓰기는 Operator 에게 **영원히** 허용되지 않는다. 두 코드를 분리해 유지한다.
+- `POST /assign` 은 **전체가 goal 게이트**(OFF → 503). 그 안에서 kind 별 규칙은 **G2 그대로** — command 할당만 cookie 전용(403), artifact 할당은 Operator 도 가능. A2 는 assign 의 권한 범위를 건드리지 않는다.
 - `command` **읽기** = goal OFF 면 존재를 숨긴다 — 목록은 행 필터, 단건 GET 은 **404**. (command 문자열 노출 방지. 503 이면 "여기 command check 가 있다"는 사실 자체가 새는데, 이 표면은 goal OFF 에서 아무 의미가 없다.)
 - `artifact` 생성·수정·삭제·조회 = goal 게이트 없음. actor 도출(`created_by`) 규칙은 기존 그대로.
 - `POST /assign` (태스크 Gate 1 할당) 은 **goal 영역이므로 전면 goal 게이트 유지**. 스케줄 precheck 할당은 별도 경로(§4.3).
