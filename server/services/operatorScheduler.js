@@ -6,6 +6,12 @@ const {
   parseTerminalEventPayload,
   isTerminalEventForInvocation,
 } = require('./terminalEventReconciliation');
+const { evaluateArtifactPrecheck } = require('./precheckEvaluator');
+const {
+  cwdFromWorkspacePath,
+  repoSourceHash,
+  resolveMaterializedRepoCwd,
+} = require('../utils/repoOperatorThread');
 
 const DEFAULT_INTERVAL_MS = 20000;
 const DEFAULT_MAX_JOBS = 20;
@@ -19,6 +25,7 @@ const DEFAULT_MAX_JOBS = 20;
 // the only bound on concurrent clones/CLI spawns from the scheduler. 2 matches
 // the per-node worker default.
 const DEFAULT_MAX_CONCURRENT_DELIVERIES = 2;
+const DEFAULT_MAX_CONCURRENT_PRECHECKS = 2;
 const DEFAULT_RUNNING_STALE_MS = RUNNING_RECONCILE_MIN_AGE_MS;
 const RETRY_BASE_MS = 60 * 1000;
 const RETRY_CAP_MS = 15 * 60 * 1000;
@@ -38,15 +45,18 @@ function createOperatorScheduler({
   managerRegistry,
   projectService,
   nodeService,
+  verifyCheckService,
   runService,
   eventBus,
   logger,
   intervalMs = DEFAULT_INTERVAL_MS,
   maxJobs = DEFAULT_MAX_JOBS,
   maxConcurrentDeliveries = DEFAULT_MAX_CONCURRENT_DELIVERIES,
+  maxConcurrentPrechecks = DEFAULT_MAX_CONCURRENT_PRECHECKS,
   runningStaleMs = DEFAULT_RUNNING_STALE_MS,
   clock = () => new Date(),
   random = Math.random,
+  artifactPrecheckEvaluator = evaluateArtifactPrecheck,
 } = {}) {
   if (!operatorScheduleService) throw new Error('operatorScheduleService is required');
   const log = logger || ((message) => console.warn(`[operator-scheduler] ${message}`));
@@ -63,6 +73,145 @@ function createOperatorScheduler({
   const deliveryConcurrency = Number.isInteger(configuredConcurrency) && configuredConcurrency > 0
     ? configuredConcurrency
     : DEFAULT_MAX_CONCURRENT_DELIVERIES;
+  const configuredPrecheckConcurrency = Number(maxConcurrentPrechecks);
+  const precheckConcurrency = Number.isInteger(configuredPrecheckConcurrency)
+    && configuredPrecheckConcurrency > 0
+    ? configuredPrecheckConcurrency
+    : DEFAULT_MAX_CONCURRENT_PRECHECKS;
+
+  // Returns { cwd, generation } for the workspace the evaluation will ACTUALLY
+  // read, never the project row's idea of it: reporting project.source_generation
+  // while reading a thread workspace built from an older generation would let a
+  // mid-flight workspace swap pass the three-way commit check (§4.2).
+  function workspaceForPrecheck(project, occurrence, nodeId) {
+    if (project.source_type !== 'git') {
+      return project.directory ? { cwd: project.directory, generation: null } : null;
+    }
+    if (!runService || typeof runService.getOperatorInstance !== 'function') return null;
+    const thread = runService.getOperatorInstance(occurrence.operator_instance_id);
+    if (!thread?.workspace_path || !thread.source_hash) return null;
+    if ((thread.node_id || 'local') !== nodeId) return null;
+    if (thread.source_hash !== repoSourceHash(project)) return null;
+
+    // Operator thread state stores the durable materialized workspace fields,
+    // while resolveMaterializedRepoCwd accepts their run-row equivalents. Use
+    // the shared resolver so generation and repo_subdir semantics cannot drift.
+    const cwd = resolveMaterializedRepoCwd({
+      workspace_path: thread.workspace_path,
+      resolved_commit: thread.source_hash,
+      workspace_generation: thread.source_generation,
+      repo_subdir_snapshot: project.repo_subdir || null,
+    }, project);
+    if (!cwd) return null;
+    const expectedCwd = cwdFromWorkspacePath(thread.workspace_path, project);
+    if (thread.cwd && thread.cwd !== expectedCwd) return null;
+    return { cwd, generation: thread.source_generation == null ? null : String(thread.source_generation) };
+  }
+
+  async function evaluateOccurrence(occurrence) {
+    let check;
+    let project;
+    try {
+      if (!verifyCheckService || typeof verifyCheckService.getCheck !== 'function') {
+        throw new Error('verify check service is unavailable');
+      }
+      check = verifyCheckService.getCheck(occurrence.precheck_check_id_snapshot);
+      if (check.kind !== 'artifact') throw new Error('unsupported precheck kind');
+      const spec = verifyCheckService.validateSpec(check.kind, JSON.parse(check.spec_json));
+      project = projectService.getProject(check.project_id);
+      const nodeId = project.node_id || 'local';
+
+      if (!nodeService || typeof nodeService.pickExecutor !== 'function') {
+        throw new Error('node executor service is unavailable');
+      }
+      let node = null;
+      if (nodeId !== 'local') {
+        if (typeof nodeService.getNode !== 'function') throw new Error('node service is unavailable');
+        node = nodeService.getNode(nodeId);
+        if (!node) throw new Error('precheck node is unavailable');
+        if (Number(node.cordoned) === 1) throw new Error('precheck node is cordoned');
+        if (Number(node.reachable) !== 1) throw new Error('precheck node is unreachable');
+      }
+      const executor = nodeService.pickExecutor(nodeId);
+      if (!executor) throw new Error('precheck executor is unavailable');
+      const workspace = workspaceForPrecheck(project, occurrence, nodeId);
+      if (!workspace) throw new Error('precheck workspace is not materialized');
+      const workspaceRoot = workspace.cwd;
+      const workspaceGeneration = workspace.generation;
+      const evaluated = await artifactPrecheckEvaluator({
+        checkId: check.id,
+        spec,
+        nodeId,
+        workspaceGeneration,
+        workspaceRoot,
+        executor,
+        remote: node?.kind === 'ssh',
+      });
+      return operatorScheduleService.commitPrecheck(
+        occurrence.id,
+        occurrence.claim_token,
+        evaluated.passed,
+        {
+          ...evaluated.evaluated,
+          evaluator: evaluated.detail.evaluator,
+          detail: evaluated.detail,
+          now: clock(),
+        },
+      );
+    } catch {
+      // Every failure before a completed declarative evaluation is retryable.
+      // releaseOccurrence owns durable backoff/deadline handling and fencing.
+      try {
+        return operatorScheduleService.releaseOccurrence(
+          occurrence.id,
+          occurrence.claim_token,
+          { now: clock() },
+        );
+      } catch {
+        return null;
+      }
+    }
+  }
+
+  async function evaluateOccurrenceGuarded(occurrence) {
+    try {
+      return await evaluateOccurrence(occurrence);
+    } catch {
+      // A single occurrence may never reject the tick or a sibling lane.
+      try {
+        return operatorScheduleService.releaseOccurrence(
+          occurrence.id,
+          occurrence.claim_token,
+          { now: clock() },
+        );
+      } catch {
+        return null;
+      }
+    }
+  }
+
+  async function drainPrechecks() {
+    const results = [];
+    let claimed = 0;
+    const lane = async () => {
+      for (;;) {
+        if (claimed >= maxJobs) return;
+        let occurrence;
+        try {
+          occurrence = operatorScheduleService.claimNextOccurrence(clock());
+        } catch {
+          return;
+        }
+        if (!occurrence) return;
+        claimed += 1;
+        results.push(await evaluateOccurrenceGuarded(occurrence));
+      }
+    };
+    await Promise.allSettled(
+      Array.from({ length: Math.min(precheckConcurrency, maxJobs) }, () => lane()),
+    );
+    return results;
+  }
 
   function wait(invocation, reason, error) {
     // Top/node/operator recovery intentionally has no immediate wake-up in
@@ -246,8 +395,19 @@ function createOperatorScheduler({
     operatorScheduleService.reconcilePersistedTerminalEvents();
     operatorScheduleService.sweepTerminalRunning(now, runningReconcileAgeMs);
     operatorScheduleService.sweepExpired(now);
+    operatorScheduleService.sweepStaleOccurrences(now);
     operatorScheduleService.materializeDue(now);
-    return drainAll();
+    // Concurrent, not sequential: a precheck that hangs (an unresponsive node,
+    // a slow filesystem) must never starve every Operator's delivery — and
+    // because tick() holds `inflight`, a starved tick also blocks all later
+    // ticks. The cost is that an occurrence passing in THIS tick has its
+    // invocation claimed by the NEXT one; both drains are DB-CAS'd, so running
+    // them together is safe.
+    const [, deliveries] = await Promise.all([
+      drainPrechecks().catch((err) => { log(`precheck drain: ${err.message}`); return []; }),
+      drainAll(),
+    ]);
+    return deliveries;
   }
 
   function tick() {
@@ -305,12 +465,13 @@ function createOperatorScheduler({
     return inflight;
   }
 
-  return { start, stop, tick, awaitDrain, drainAll, deliver };
+  return { start, stop, tick, awaitDrain, drainPrechecks, drainAll, deliver };
 }
 
 module.exports = {
   DEFAULT_INTERVAL_MS,
   DEFAULT_MAX_CONCURRENT_DELIVERIES,
+  DEFAULT_MAX_CONCURRENT_PRECHECKS,
   DEFAULT_RUNNING_STALE_MS,
   RETRY_BASE_MS,
   RETRY_CAP_MS,

@@ -278,6 +278,17 @@ test('expiry sweep runs before materialization in every scheduler tick', async (
       assert.equal(now.toISOString(), '2026-07-02T01:00:00.000Z');
       calls.push('sweep');
     },
+    // A2 PR2b: occurrence recovery joins the recovery block and must run BEFORE
+    // materialization, for the same reason sweepExpired does — a stale in-flight
+    // occurrence has to be reclaimed before this tick decides what to create.
+    sweepStaleOccurrences(now) {
+      assert.equal(now.toISOString(), '2026-07-02T01:00:00.000Z');
+      calls.push('occurrence-sweep');
+    },
+    claimNextOccurrence() {
+      calls.push('claim-occurrence');
+      return null;
+    },
     materializeDue(now) {
       assert.equal(now.toISOString(), '2026-07-02T01:00:00.000Z');
       calls.push('materialize');
@@ -294,9 +305,9 @@ test('expiry sweep runs before materialization in every scheduler tick', async (
   await scheduler.tick();
   // Recovery/materialization order is the contract; the trailing claims are one
   // per delivery lane (each lane polls claimNext until it comes back empty).
-  assert.deepEqual(calls.slice(0, 4), ['events', 'terminal', 'sweep', 'materialize']);
-  assert.ok(calls.length > 4, 'the tick must go on to claim work');
-  assert.deepEqual([...new Set(calls.slice(4))], ['claim']);
+  assert.deepEqual(calls.slice(0, 5), ['events', 'terminal', 'sweep', 'occurrence-sweep', 'materialize']);
+  assert.ok(calls.length > 5, 'the tick must go on to claim work');
+  assert.deepEqual([...new Set(calls.slice(5))].sort(), ['claim', 'claim-occurrence']);
 });
 
 test('scheduler forwards the configured running staleness threshold during restart recovery', async () => {

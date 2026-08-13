@@ -1521,12 +1521,15 @@ function createApp(options = {}) {
     managerRegistry,
     projectService,
     nodeService,
+    verifyCheckService,
     runService,
     eventBus,
     intervalMs: options.operatorSchedulerIntervalMs
       ?? (Number.parseInt(process.env.PALANTIR_OPERATOR_SCHEDULER_INTERVAL_MS, 10) || 20000),
     maxConcurrentDeliveries: options.operatorSchedulerMaxConcurrentDeliveries
       ?? (Number.parseInt(process.env.PALANTIR_OPERATOR_SCHEDULER_MAX_CONCURRENT_DELIVERIES, 10) || undefined),
+    maxConcurrentPrechecks: options.operatorSchedulerMaxConcurrentPrechecks
+      ?? (Number.parseInt(process.env.PALANTIR_OPERATOR_SCHEDULER_MAX_CONCURRENT_PRECHECKS, 10) || undefined),
     runningStaleMs: options.operatorSchedulerRunningStaleMs
       ?? (Number.parseInt(process.env.PALANTIR_OPERATOR_SCHEDULER_RUNNING_STALE_MS, 10) || undefined),
   });
