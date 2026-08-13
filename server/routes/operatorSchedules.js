@@ -44,6 +44,24 @@ function createOperatorSchedulesRouter({ operatorScheduleService, operatorSchedu
     res.json({ schedule });
   }));
 
+  router.put('/operator-schedules/:id/precheck', asyncHandler(async (req, res) => {
+    assertHumanSameOrigin(req);
+    const body = req.body || {};
+    const schedule = operatorScheduleService.attachPrecheck(req.params.id, {
+      checkId: body.check_id,
+      expectedRevision: body.expected_revision,
+    });
+    res.json({ schedule });
+  }));
+
+  router.delete('/operator-schedules/:id/precheck', asyncHandler(async (req, res) => {
+    assertHumanSameOrigin(req);
+    const schedule = operatorScheduleService.detachPrecheck(req.params.id, {
+      expectedRevision: req.body?.expected_revision,
+    });
+    res.json({ schedule });
+  }));
+
   router.delete('/operator-schedules/:id', asyncHandler(async (req, res) => {
     assertHumanSameOrigin(req);
     const schedule = operatorScheduleService.archiveSchedule(req.params.id);
@@ -60,6 +78,11 @@ function createOperatorSchedulesRouter({ operatorScheduleService, operatorSchedu
   router.get('/operator-schedules/:id/invocations', asyncHandler(async (req, res) => {
     const invocations = operatorScheduleService.listInvocations(req.params.id, req.query.limit);
     res.json({ invocations });
+  }));
+
+  router.get('/operator-schedules/:id/occurrences', asyncHandler(async (req, res) => {
+    const occurrences = operatorScheduleService.listOccurrences(req.params.id, req.query.limit);
+    res.json({ occurrences });
   }));
 
   return router;
