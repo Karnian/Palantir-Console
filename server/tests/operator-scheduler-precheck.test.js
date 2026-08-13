@@ -68,6 +68,7 @@ function fixture(h, {
   directory,
   nodeId = null,
   spec = { files: [{ glob: 'ready.txt', must_exist: true }], report: null },
+  attached = true,
 } = {}) {
   const project = h.projectService.createProject({
     name: `Precheck ${Math.random()}`,
@@ -90,8 +91,10 @@ function fixture(h, {
     name: `Artifact ${Math.random()}`,
     spec,
   }, { actor: 'human' });
-  h.db.prepare('UPDATE operator_schedules SET precheck_verify_check_id=? WHERE id=?')
-    .run(check.id, schedule.id);
+  if (attached) {
+    h.db.prepare('UPDATE operator_schedules SET precheck_verify_check_id=? WHERE id=?')
+      .run(check.id, schedule.id);
+  }
   return { project, instance, schedule, check, spec };
 }
 
@@ -141,6 +144,118 @@ test('§7 #21a pass creates no invocation before commit and exactly one afterwar
   assert.equal(occurrence.invocation_id, invocations[0].id);
   assert.equal(occurrence.evaluator, 'local');
   assert.ok(Buffer.byteLength(occurrence.detail_json, 'utf8') <= 2 * 1024);
+});
+
+test('dedicated attach -> tick -> passed occurrence -> one invocation end to end', async (t) => {
+  const h = harness(t);
+  fs.writeFileSync(path.join(h.dir, 'ready.txt'), 'ready');
+  const { schedule, check } = fixture(h, { attached: false });
+
+  const attached = h.scheduleService.attachPrecheck(schedule.id, {
+    checkId: check.id,
+    expectedRevision: schedule.revision,
+  });
+  assert.equal(attached.precheck_verify_check_id, check.id);
+  assert.equal(attached.revision, schedule.revision + 1);
+
+  await schedulerFor(h).tick();
+
+  const occurrences = h.scheduleService.listOccurrences(schedule.id);
+  const invocations = h.scheduleService.listInvocations(schedule.id);
+  assert.equal(occurrences.length, 1);
+  assert.equal(occurrences[0].status, 'passed');
+  assert.equal(invocations.length, 1);
+  assert.equal(occurrences[0].invocation_id, invocations[0].id);
+});
+
+test('attach/detach use revision CAS and an attached precheck blocks project changes', (t) => {
+  const h = harness(t);
+  const { project, instance, schedule, check } = fixture(h, { attached: false });
+  const otherProject = h.projectService.createProject({
+    name: 'Other mapped project',
+    directory: path.join(h.dir, 'other'),
+  });
+  h.instanceService.addRef(instance.id, { project_id: otherProject.id, role: 'reference' });
+  const changedEvents = [];
+  h.eventBus.subscribe((event) => {
+    if (
+      event.channel === 'operator:schedule'
+      && event.data.kind === 'schedule_changed'
+      && event.data.schedule_id === schedule.id
+    ) changedEvents.push(event.data);
+  });
+
+  const attached = h.scheduleService.attachPrecheck(schedule.id, {
+    checkId: check.id,
+    expectedRevision: schedule.revision,
+  });
+  assert.throws(
+    () => h.scheduleService.attachPrecheck(schedule.id, {
+      checkId: check.id,
+      expectedRevision: schedule.revision,
+    }),
+    (err) => err.status === 409,
+  );
+  assert.throws(
+    () => h.scheduleService.detachPrecheck(schedule.id, { expectedRevision: schedule.revision }),
+    (err) => err.status === 409,
+  );
+  assert.throws(
+    () => h.scheduleService.updateSchedule(schedule.id, {
+      expected_revision: attached.revision,
+      codebase_project_id: otherProject.id,
+    }, ONE),
+    (err) => err.status === 409,
+  );
+  assert.equal(h.scheduleService.getSchedule(schedule.id).codebase_project_id, project.id);
+
+  const detached = h.scheduleService.detachPrecheck(schedule.id, {
+    expectedRevision: attached.revision,
+  });
+  assert.equal(detached.precheck_verify_check_id, null);
+  assert.equal(detached.revision, attached.revision + 1);
+  assert.equal(changedEvents.length, 2, 'only successful attach and detach emit schedule_changed');
+});
+
+test('attach rejects command, operator provenance, global scope, and project mismatch with fixed statuses', (t) => {
+  const h = harness(t);
+  const { project, schedule } = fixture(h, { attached: false });
+  const otherProject = h.projectService.createProject({
+    name: 'Mismatched check project',
+    directory: path.join(h.dir, 'mismatch'),
+  });
+  const command = h.verifyCheckService.createCheck({
+    kind: 'command', project_id: project.id, name: 'Command precheck',
+    spec: { command: 'true' },
+  }, { actor: 'human' });
+  const operator = h.verifyCheckService.createCheck({
+    kind: 'artifact', project_id: project.id, name: 'Operator artifact',
+    spec: { files: [], report: { min_chars: 0 } },
+  }, { actor: 'operator' });
+  const global = h.verifyCheckService.createCheck({
+    kind: 'artifact', project_id: null, name: 'Global artifact',
+    spec: { files: [], report: { min_chars: 0 } },
+  }, { actor: 'human' });
+  const mismatch = h.verifyCheckService.createCheck({
+    kind: 'artifact', project_id: otherProject.id, name: 'Mismatched artifact',
+    spec: { files: [], report: { min_chars: 0 } },
+  }, { actor: 'human' });
+
+  for (const [checkId, expectedStatus] of [
+    [command.id, 400],
+    [operator.id, 403],
+    [global.id, 400],
+    [mismatch.id, 400],
+  ]) {
+    assert.throws(
+      () => h.scheduleService.attachPrecheck(schedule.id, {
+        checkId,
+        expectedRevision: schedule.revision,
+      }),
+      (err) => err.status === expectedStatus,
+    );
+  }
+  assert.equal(h.scheduleService.getSchedule(schedule.id).revision, schedule.revision);
 });
 
 test('§7 #21b failed artifact evaluation creates zero invocations', async (t) => {

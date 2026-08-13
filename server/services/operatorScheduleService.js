@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const {
   BadRequestError,
   ConflictError,
+  ForbiddenError,
   NotFoundError,
 } = require('../utils/errors');
 const {
@@ -298,6 +299,12 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
              rule_json=@rule_json, timezone=@timezone, enabled=@enabled,
              next_fire_at=@next_fire_at, max_runs_per_day=@max_runs_per_day,
              grace_seconds=@grace_seconds, misfire_policy=@misfire_policy,
+             revision=revision+1, updated_at=datetime('now')
+       WHERE id=@id AND revision=@expected_revision AND archived_at IS NULL
+    `),
+    updatePrecheck: db.prepare(`
+      UPDATE operator_schedules
+         SET precheck_verify_check_id=@check_id,
              revision=revision+1, updated_at=datetime('now')
        WHERE id=@id AND revision=@expected_revision AND archived_at IS NULL
     `),
@@ -904,7 +911,7 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     return schedule;
   }
 
-  function updateSchedule(id, input = {}, now = new Date()) {
+  const updateScheduleTx = db.transaction((id, input = {}, now = new Date()) => {
     const current = getSchedule(id);
     assertInstance(current.operator_instance_id);
     if (current.archived_at) throw new ConflictError('Archived schedules cannot be updated');
@@ -923,6 +930,21 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     const misfirePolicy = normalizeMisfirePolicy(input.misfire_policy, current.misfire_policy);
     const projectId = input.codebase_project_id === undefined ? current.codebase_project_id : input.codebase_project_id;
     const mapped = assertMappedProject(current.operator_instance_id, projectId || null);
+    if (
+      mapped.project.id !== current.codebase_project_id
+      && current.precheck_verify_check_id !== null
+    ) {
+      const check = stmts.getVerifyCheck.get(current.precheck_verify_check_id);
+      if (
+        !check
+        || check.kind !== 'artifact'
+        || check.created_by !== 'human'
+        || check.project_id === null
+        || check.project_id !== mapped.project.id
+      ) {
+        throw new ConflictError('Attached precheck is not valid for the requested project; detach it before changing projects');
+      }
+    }
     const maxRuns = input.max_runs_per_day === undefined ? current.max_runs_per_day : Number(input.max_runs_per_day);
     if (!Number.isInteger(maxRuns) || maxRuns < 1 || maxRuns > 96) {
       throw new BadRequestError('max_runs_per_day must be an integer between 1 and 96');
@@ -945,7 +967,78 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     });
     if (info.changes !== 1) throw new ConflictError('Schedule changed; reload and retry');
     if (!enabled) stmts.cancelPending.run(id);
+    return getSchedule(id);
+  });
+
+  function updateSchedule(id, input = {}, now = new Date()) {
+    const schedule = updateScheduleTx.immediate(id, input, now);
+    emit('schedule_changed', schedule, null);
+    return schedule;
+  }
+
+  function normalizeExpectedRevision(value) {
+    const revision = Number(value);
+    if (!Number.isInteger(revision) || revision < 1) {
+      throw new BadRequestError('expected_revision is required');
+    }
+    return revision;
+  }
+
+  const attachPrecheckTx = db.transaction((id, { checkId, expectedRevision } = {}) => {
     const schedule = getSchedule(id);
+    if (schedule.archived_at) throw new ConflictError('Archived schedules cannot be updated');
+    const revision = normalizeExpectedRevision(expectedRevision);
+    if (schedule.revision !== revision) {
+      throw new ConflictError('Schedule changed; reload and retry');
+    }
+    const normalizedCheckId = Number(checkId);
+    if (!Number.isInteger(normalizedCheckId) || normalizedCheckId < 1) {
+      throw new BadRequestError('check_id is required');
+    }
+    const check = stmts.getVerifyCheck.get(normalizedCheckId);
+    if (!check) throw new NotFoundError(`verify_check not found: ${normalizedCheckId}`);
+    if (check.kind !== 'artifact') {
+      throw new BadRequestError('Only artifact checks can be attached as schedule prechecks');
+    }
+    if (check.project_id === null || check.project_id !== schedule.codebase_project_id) {
+      throw new BadRequestError('check project_id must exactly match the schedule project_id');
+    }
+    if (check.created_by !== 'human') {
+      throw new ForbiddenError('schedule precheck must be created by a human');
+    }
+    const info = stmts.updatePrecheck.run({
+      id,
+      check_id: check.id,
+      expected_revision: revision,
+    });
+    if (info.changes !== 1) throw new ConflictError('Schedule changed; reload and retry');
+    return getSchedule(id);
+  });
+
+  function attachPrecheck(id, { checkId, expectedRevision } = {}) {
+    const schedule = attachPrecheckTx.immediate(id, { checkId, expectedRevision });
+    emit('schedule_changed', schedule, null);
+    return schedule;
+  }
+
+  const detachPrecheckTx = db.transaction((id, { expectedRevision } = {}) => {
+    const schedule = getSchedule(id);
+    if (schedule.archived_at) throw new ConflictError('Archived schedules cannot be updated');
+    const revision = normalizeExpectedRevision(expectedRevision);
+    if (schedule.revision !== revision) {
+      throw new ConflictError('Schedule changed; reload and retry');
+    }
+    const info = stmts.updatePrecheck.run({
+      id,
+      check_id: null,
+      expected_revision: revision,
+    });
+    if (info.changes !== 1) throw new ConflictError('Schedule changed; reload and retry');
+    return getSchedule(id);
+  });
+
+  function detachPrecheck(id, { expectedRevision } = {}) {
+    const schedule = detachPrecheckTx.immediate(id, { expectedRevision });
     emit('schedule_changed', schedule, null);
     return schedule;
   }
@@ -1783,6 +1876,8 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     getSchedule,
     createSchedule,
     updateSchedule,
+    attachPrecheck,
+    detachPrecheck,
     archiveSchedule,
     archiveForProjectDeletion,
     notifySchedulesChanged,

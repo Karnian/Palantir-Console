@@ -60,6 +60,7 @@ function installRosterStubs(env, {
         iterations: 1,
       };
     }
+    if (operatorInstancesHandler) return operatorInstancesHandler({ calls, opts, url });
     throw new Error(`unexpected url ${url}`);
   };
   env.context.apiFetchWithToast = async (url, opts = {}) => {
@@ -1093,6 +1094,118 @@ test('OperatorsView supports Operator-first create then hourly schedule registra
   });
   const scheduleCall = apiCalls.find((call) => call.url === '/api/operator-instances/oi_hourly/schedules' && call.opts.method === 'POST');
   assert.deepEqual(JSON.parse(scheduleCall.opts.body).rule, { kind: 'interval', minutes: 60 });
+});
+
+test('OperatorsView attaches and detaches a schedule precheck and shows recent occurrences', async (t) => {
+  const env = createPreactEnv();
+  t.after(env.cleanup);
+
+  const instance = {
+    id: 'oi_precheck_ui',
+    display_name: 'Precheck UI Operator',
+    profile_id: 'op_precheck_ui',
+    profile_name: 'Precheck profile',
+    refs: [{
+      instance_id: 'oi_precheck_ui', project_id: 'proj_precheck_ui', role: 'primary',
+      project: { id: 'proj_precheck_ui', name: 'Precheck folder', node_id: 'local' },
+    }],
+  };
+  let schedule = {
+    id: 'os_precheck_ui',
+    operator_instance_id: instance.id,
+    name: 'Guarded schedule',
+    prompt: 'Run after the report exists',
+    codebase_project_id: 'proj_precheck_ui',
+    rule: { kind: 'interval', minutes: 60 },
+    enabled: true,
+    revision: 1,
+    next_fire_at: '2026-08-01T01:00:00.000Z',
+    precheck_verify_check_id: null,
+  };
+  const apiCalls = installRosterStubs(env, {
+    managerStatus: { active: false, top: null, pms: [] },
+    profiles: [{ id: 'op_precheck_ui', name: 'Precheck profile', capabilities: [] }],
+    instances: [instance],
+    operatorInstancesHandler: ({ url, opts }) => {
+      if (url === '/api/operator-instances/oi_precheck_ui/schedules') {
+        return { schedules: [schedule] };
+      }
+      if (url === '/api/verify-checks?project_id=proj_precheck_ui') {
+        return { checks: [
+          { id: 41, name: 'Human artifact', kind: 'artifact', created_by: 'human', project_id: 'proj_precheck_ui' },
+          { id: 42, name: 'Operator artifact', kind: 'artifact', created_by: 'operator', project_id: 'proj_precheck_ui' },
+          { id: 43, name: 'Global artifact', kind: 'artifact', created_by: 'human', project_id: null },
+        ] };
+      }
+      if (url === '/api/operator-schedules/os_precheck_ui/occurrences?limit=10') {
+        return { occurrences: [{
+          id: 'osocc_ui_1', schedule_id: schedule.id, status: 'passed',
+          scheduled_for: '2026-08-01T00:00:00.000Z',
+          precheck_check_name: 'Human artifact', outcome_reason: 'passed',
+        }] };
+      }
+      if (url === '/api/operator-schedules/os_precheck_ui/precheck' && opts.method === 'PUT') {
+        const body = JSON.parse(opts.body);
+        schedule = { ...schedule, precheck_verify_check_id: body.check_id, revision: schedule.revision + 1 };
+        return { schedule };
+      }
+      if (url === '/api/operator-schedules/os_precheck_ui/precheck' && opts.method === 'DELETE') {
+        schedule = { ...schedule, precheck_verify_check_id: null, revision: schedule.revision + 1 };
+        return { schedule };
+      }
+      return {};
+    },
+  });
+  loadOperatorsComponents(env);
+  const root = renderOperatorsView(env, {
+    projects: [{ id: 'proj_precheck_ui', name: 'Precheck folder', node_id: 'local' }],
+  });
+
+  const card = await waitFor(() => {
+    const el = root.querySelector('[data-role="operator-configured-card"]');
+    assert.ok(el);
+    return el;
+  });
+  card.click();
+  const detail = await waitFor(() => {
+    const el = root.querySelector('#operator-roster-detail-title')?.closest('[role="dialog"]');
+    assert.ok(el);
+    return el;
+  });
+  detail.querySelector('[data-role="operator-schedule-button"]').click();
+  const dialog = await waitFor(() => {
+    const el = root.querySelector('#operator-roster-schedules-title')?.closest('[role="dialog"]');
+    assert.ok(el?.querySelector('[data-role="operator-schedule-precheck"]'));
+    return el;
+  });
+  const dropdown = await waitFor(() => {
+    const el = dialog.querySelector('#operator-schedule-precheck-os_precheck_ui');
+    assert.ok(el);
+    return el;
+  });
+  assert.deepEqual((await readDropdownOptions(env, dropdown)).map((option) => option.value), ['41']);
+  assert.match(dialog.textContent, /최근 precheck 실행 \(1\)/);
+  assert.match(dialog.textContent, /passed/);
+
+  dialog.querySelector('[data-role="operator-schedule-precheck-attach"]').click();
+  await waitFor(() => assert.match(
+    dialog.querySelector('[data-role="operator-schedule-precheck-current"]').textContent,
+    /Human artifact/,
+  ));
+  const attachCall = apiCalls.find((call) => (
+    call.url === '/api/operator-schedules/os_precheck_ui/precheck' && call.opts.method === 'PUT'
+  ));
+  assert.deepEqual(JSON.parse(attachCall.opts.body), { check_id: 41, expected_revision: 1 });
+
+  dialog.querySelector('[data-role="operator-schedule-precheck-detach"]').click();
+  await waitFor(() => assert.match(
+    dialog.querySelector('[data-role="operator-schedule-precheck-current"]').textContent,
+    /부착 안 됨/,
+  ));
+  const detachCall = apiCalls.find((call) => (
+    call.url === '/api/operator-schedules/os_precheck_ui/precheck' && call.opts.method === 'DELETE'
+  ));
+  assert.deepEqual(JSON.parse(detachCall.opts.body), { expected_revision: 2 });
 });
 
 test('OperatorsView only offers scheduled folders on the Operator primary node', async (t) => {
