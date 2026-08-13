@@ -173,13 +173,17 @@ precheck 부착됨
 
 ### 4.2 Phase 2 — 평가 (모든 tx 밖)
 
-`operatorScheduler.runTick` 에 `drainPrechecks()` 를 **`drainAll()` 앞**에 추가.
+`operatorScheduler.runTick` 의 recovery 블록에 `sweepStaleOccurrences` 를 (`sweepExpired` 옆, **materialize 앞**) 넣고, `drainPrechecks()` 를 **`drainAll()` 과 동시에** 실행한다.
+
+> **직렬 → 동시 (PR2b codex 리뷰 S1-4).** 초안은 "`drainAll()` 앞"이라 적었으나, 그러면 응답 없는 노드 하나가 그 tick 의 **모든 Operator 배달을 굶긴다**. `tick()` 이 `inflight` 를 잡고 있어 이후 tick 까지 통째로 건너뛴다. 대가는 이 tick 에서 통과한 occurrence 의 invocation 이 **다음 tick** 에 claim 된다는 것뿐이고(≤20s), 두 drain 은 각각 DB CAS 라 동시 실행이 안전하다.
 
 - `claimNextOccurrence(now)` — `claimNext` 와 동형의 동기 CAS. **predicate 전부**: `status='pending' AND next_attempt_at <= now AND deadline_at > now`. 성공 시 `status='prechecking'`, 새 `claim_token`, `leased_until=now+LEASE`, `attempts++`.
 - 평가는 tx 밖에서:
   - 노드 해석 → executor (로컬 `nodeExecutor` / 원격 `remoteSshExecutor`)
-  - `artifact` → `artifactCheck` 의 경계(walk entries / depth / per-file byte cap)를 그대로 유지한 **executor 백엔드 평가**. 원격은 `listDirectoryEntries` + `readFileCapped`. **v1 의 유일한 평가 경로다** — command 분기는 구현하지 않는다(§2.1; 만들면 §2.1 이 배제 근거로 든 "휴면 실행 표면"을 그대로 만드는 자기모순이다).
-  - 평가 루트 = 해당 codebase 프로젝트의 materialized 작업 디렉터리. git 프로젝트는 기존 `resolveMaterializedRepoCwd` 규약을 따르고, 미materialize 상태는 **일시적 unavailable** 로 취급(재시도 대상)한다.
+  - `artifact` → `artifactCheck` 의 경계(walk entries / depth / per-file byte cap)를 그대로 유지한 **executor 백엔드 평가**. 원격은 **`listFilesWithSizes(root, {maxEntries: MAX_WALK_ENTRIES})` 한 번**(재귀 `%y\t%s\t%P` — 타입·크기·상대경로를 단일 왕복으로) + `readFileCapped`. 초안은 `listDirectoryEntries` 를 적었으나 그건 디렉터리당 왕복이라 walk 에 부적합하다. `find` 에 `-maxdepth` 가 없으므로 **상대경로 세그먼트 수로 `MAX_DEPTH` 를 직접 강제**하고, entry cap 은 타입 필터 **이전의 raw record** 에 적용해 로컬 walker 의 예산 의미(디렉터리·심링크도 예산을 소비)와 맞춘다. 타입 필드가 없는 레코드는 **fail-closed**(정규파일로 간주하지 않음). **v1 의 유일한 평가 경로다** — command 분기는 구현하지 않는다(§2.1; 만들면 §2.1 이 배제 근거로 든 "휴면 실행 표면"을 그대로 만드는 자기모순이다).
+  - **평가에 실제로 쓴 workspace 의 generation 을 반환한다** — 프로젝트 행의 값이 아니라 operator thread 의 것. 전자를 보고하면 평가 중 workspace 가 교체돼도 3자 대조를 통과한다.
+- **로컬 루트가 없거나 디렉터리가 아니면 조건 불충족이 아니라 일시적 장애**다. 로컬 walker 는 readdir 오류를 삼키고 `[]` 를 돌려주므로, 루트를 먼저 stat 하지 않으면 미마운트·미materialize 가 "no file matched" 로 읽혀 종결된다(원격은 executor 예외로 재시도되므로 분류까지 갈린다).
+- 평가 루트 = 해당 codebase 프로젝트의 materialized 작업 디렉터리. git 프로젝트는 기존 `resolveMaterializedRepoCwd` 규약을 따르고, 미materialize 상태는 **일시적 unavailable** 로 취급(재시도 대상)한다.
 - **평가자는 자기가 실제로 사용한 입력을 반환한다** — `evaluated_spec_hash`(R7) + `evaluated_node_id` + `evaluated_workspace_generation`(R3-3). 커밋은 **스냅샷 == 평가값 == 현재값** 3자 일치를 요구한다(NULL-safe 비교, §4.3). 이 3자 대조가 잡는 것과 못 잡는 것을 구분해 적는다:
 
 - **잡는다** — spec 의 A→B→A 되돌림(hash 만 대조하면 B 로 평가한 결과가 승인된다), 그리고 같은 node id 를 유지한 채 materialized workspace 가 교체되는 경우(git 프로젝트는 `source_generation`).

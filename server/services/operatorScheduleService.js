@@ -474,6 +474,7 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     finishOccurrence: db.prepare(`
       UPDATE operator_schedule_occurrences
          SET status=@status, outcome_reason=@outcome_reason,
+             evaluator=@evaluator, detail_json=@detail_json,
              invocation_id=@invocation_id, claim_token=NULL, leased_until=NULL,
              finished_at=@finished_at, updated_at=@finished_at
        WHERE id=@id AND status='prechecking' AND claim_token=@claim_token
@@ -1341,12 +1342,23 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     return outcome.occurrence;
   }
 
-  function finishOwnedOccurrence(occurrence, token, status, outcomeReason, invocationId, nowIso) {
+  function finishOwnedOccurrence(
+    occurrence,
+    token,
+    status,
+    outcomeReason,
+    invocationId,
+    nowIso,
+    evaluator = null,
+    detailJson = null,
+  ) {
     const info = stmts.finishOccurrence.run({
       id: occurrence.id,
       claim_token: token,
       status,
       outcome_reason: outcomeReason,
+      evaluator,
+      detail_json: detailJson,
       invocation_id: invocationId,
       finished_at: nowIso,
     });
@@ -1358,9 +1370,20 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     evaluatedSpecHash,
     evaluatedNodeId,
     evaluatedWorkspaceGeneration,
+    evaluator = null,
+    detail = null,
     now = new Date(),
   } = {}) {
     const nowIso = now.toISOString();
+    let detailJson = null;
+    if (detail !== null && detail !== undefined) {
+      const candidate = JSON.stringify(detail);
+      // The evaluator normally guarantees this bound. Keep the durable write
+      // fail-closed if another caller bypasses it.
+      detailJson = Buffer.byteLength(candidate, 'utf8') <= 2 * 1024
+        ? candidate
+        : JSON.stringify({ reason_code: 'detail_omitted' });
+    }
     const result = db.transaction(() => {
       // Phase 1: loss of ownership is a complete no-op. In particular, an old
       // claimant may not terminalize a row that a newer claimant now owns.
@@ -1493,6 +1516,8 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
         reason,
         invocationId,
         nowIso,
+        typeof evaluator === 'string' ? evaluator.slice(0, 80) : null,
+        detailJson,
       );
       if (!finished) return null;
       if (health === 'increment') stmts.incrementPrecheckErrors.run(occurrence.schedule_id);
