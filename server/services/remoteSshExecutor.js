@@ -266,6 +266,40 @@ function normalizeEnv(env) {
     });
 }
 
+function normalizeMaterializedEnv(env) {
+  if (!env) return [];
+  return Object.entries(env)
+    .filter(([, value]) => value !== undefined)
+    .map(([key, value]) => {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw envKeyInvalidError(key);
+      const normalized = value === null ? '' : String(value);
+      // The clean-shell bootstrap uses command substitution to read mode-0600
+      // files. POSIX command substitution strips trailing newlines, so reject
+      // every line break (and NUL, which cannot survive shell variables) rather
+      // than silently changing a controller-materialized value.
+      if (/[\r\n\x00]/.test(normalized)) {
+        const err = new Error(`${key} must not contain CR, LF, or NUL`);
+        err.code = 'ENV_MATERIALIZATION_INVALID';
+        throw err;
+      }
+      return [key, normalized];
+    });
+}
+
+function buildMaterializedEnvBootstrap(envFiles) {
+  return Object.entries(envFiles || {}).flatMap(([key, file], index) => {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw envKeyInvalidError(key);
+    const rc = `materialized_env_${index}_rc`;
+    return [
+      `${key}=$(cat -- ${shq(file)})`,
+      `${rc}=$?`,
+      `rm -f -- ${shq(file)}`,
+      `[ "$${rc}" -eq 0 ] || exit 78`,
+      `export ${key}`,
+    ];
+  });
+}
+
 function normalizeEnvKeyList(keys, { allowPath = false } = {}) {
   if (keys === undefined || keys === null) return [];
   if (!Array.isArray(keys)) {
@@ -384,6 +418,7 @@ function buildCommandScript(command, args = [], {
   runBoundTokenKey = null,
   runBoundApiBase = false,
   claudeBareAuth = false,
+  materializedEnvFiles = {},
 } = {}) {
   const explicitEnv = cleanEnv && !cleanEnvAllowExplicitPath
     // The pod owns PATH. A controller PATH must never override it; pathPrefix
@@ -411,7 +446,8 @@ function buildCommandScript(command, args = [], {
       ...(runBoundTokenKey ? [runBoundTokenKey] : []),
       ...(runBoundApiBase ? ['PALANTIR_API_BASE'] : []),
     ];
-    if (stdinEnvKeys.length > 0 || claudeBareAuth) {
+    const materializedBootstrap = buildMaterializedEnvBootstrap(materializedEnvFiles);
+    if (stdinEnvKeys.length > 0 || claudeBareAuth || materializedBootstrap.length > 0) {
       normalizeEnvKeyList(stdinEnvKeys);
       // Run-bound values are read from stdin INSIDE the clean shell, never
       // passed as arguments. `env -i ... KEY="$KEY"` would expand a value
@@ -422,6 +458,9 @@ function buildCommandScript(command, args = [], {
         `IFS= read -r ${key} || exit 126`,
         `export ${key}`,
       ]);
+      // Keep controller materialization after the pod allowlist loop. It is the
+      // final explicit override, but its value is never an env/SSH argv item.
+      bootstrap.push(...materializedBootstrap);
       if (claudeBareAuth) bootstrap.push(buildClaudeBareAuthShell(args));
       bootstrap.push('exec "$@"');
       cleanParts.push(
@@ -441,6 +480,10 @@ function buildCommandScript(command, args = [], {
       : `${prefix}; ${commandScript}`;
   }
   const parts = ['exec'];
+  // This legacy branch is used only by executor-owned filesystem primitives;
+  // its sole explicit environment value is the fixed, non-secret LC_ALL=C.
+  // Profile/provider materialization always selects cleanEnv and mode-0600
+  // files, so those credentials cannot reach this argv assignment path.
   if (pathAssign || envParts.length > 0) {
     parts.push('env');
     if (pathAssign) parts.push(pathAssign);
@@ -1036,10 +1079,18 @@ function createRemoteSshNodeExecutor(node, {
         if (isWorkerApiBaseKey(key)) delete explicitEnv[key];
       }
     }
+    // buildCommandScript historically drops a controller PATH for interactive
+    // agents; do so before materialization as well, preserving the single pod
+    // PATH assembly contract.
+    delete explicitEnv.PATH;
     const processEnvKeys = [
       ...(worker ? REMOTE_WORKER_BASE_ENV_KEYS : remoteManagerBaseEnvKeys(commandName)),
       ...normalizeEnvKeyList(envAllowlist),
     ];
+    const materialized = await materializeControllerEnv(
+      explicitEnv,
+      new Set(normalizeEnvKeyList(envAllowlist)),
+    );
     const script = buildCommandScript(commandName, args, {
       cwd: safeCwd,
       // The remote login shell may have controller credentials configured.
@@ -1052,7 +1103,7 @@ function createRemoteSshNodeExecutor(node, {
         PALANTIR_PM_TOKEN: null,
         ...(worker && runBoundToken ? {} : { PALANTIR_WORKER_TOKEN: null }),
         ...(!worker && runBoundToken ? {} : { PALANTIR_MANAGER_TOKEN: null }),
-        ...explicitEnv,
+        ...materialized.argvEnv,
       },
       pathPrefix,
       cleanEnv: true,
@@ -1060,16 +1111,25 @@ function createRemoteSshNodeExecutor(node, {
       runBoundTokenKey: runBoundToken ? runBoundTokenKey : null,
       runBoundApiBase: !!workerApiBase,
       claudeBareAuth,
+      materializedEnvFiles: materialized.envFiles,
     });
     // The run-bound reads happen INSIDE the clean shell (buildCommandScript):
     // reading values out here would require re-injecting them as env -i
     // arguments, which puts them in the real /usr/bin/env argv.
     const bootstrapScript = script;
-    const child = spawnFn(
-      'ssh',
-      sshArgsFor(bootstrapScript, { keepAlive: true }),
-      { stdio: ['pipe', 'pipe', 'pipe'] },
-    );
+    let child;
+    try {
+      child = spawnFn(
+        'ssh',
+        sshArgsFor(bootstrapScript, { keepAlive: true }),
+        { stdio: ['pipe', 'pipe', 'pipe'] },
+      );
+    } catch (err) {
+      if (materialized.files.length > 0) {
+        try { await runRemoteCommand('rm', ['-f', ...materialized.files]); } catch {}
+      }
+      throw err;
+    }
     if (runBoundToken) {
       if (!child || !child.stdin || typeof child.stdin.write !== 'function') {
         try { child?.kill?.('SIGTERM'); } catch { /* best-effort */ }
@@ -1223,6 +1283,33 @@ function createRemoteSshNodeExecutor(node, {
     validateBareFilename(name);
     const prefix = path.posix.join(exposedRoots[0], '.palantir-secret-');
     return writeTempFile(prefix, name, content, mode);
+  }
+
+  async function materializeControllerEnv(env, materializedKeys) {
+    const entries = normalizeMaterializedEnv(env);
+    const argvEnv = {};
+    const envFiles = {};
+    const files = [];
+    try {
+      for (const [key, value] of entries) {
+        // Empty defense-in-depth assignments and non-profile command settings
+        // keep their established form. Non-empty allowlisted profile values
+        // use the file channel.
+        if (value === '' || !materializedKeys.has(key)) {
+          argvEnv[key] = value === '' ? null : value;
+          continue;
+        }
+        const file = await putSecretFile('controller-env', value, 0o600);
+        envFiles[key] = file;
+        files.push(file);
+      }
+      return { argvEnv, envFiles, files };
+    } catch (err) {
+      if (files.length > 0) {
+        try { await runRemoteCommand('rm', ['-f', ...files]); } catch {}
+      }
+      throw err;
+    }
   }
 
   async function resolveNodeRuntime({ pathPrefix = node.node_prefix || undefined } = {}) {
@@ -1523,6 +1610,7 @@ function createRemoteSshNodeExecutor(node, {
   }, {
     workerTokenFile = null,
     workerApiBaseFile = null,
+    materializedEnvFiles = {},
   } = {}) {
     // env -i is the primary ambient-credential boundary. Empty actor
     // assignments remain as defense in depth; the server-selected run
@@ -1540,12 +1628,15 @@ function createRemoteSshNodeExecutor(node, {
     for (const key of Object.keys(workerEnv)) {
       if (isWorkerApiBaseKey(key)) delete workerEnv[key];
     }
+    const materializedKeys = new Set(Object.keys(materializedEnvFiles));
     const envParts = normalizeEnv({
       PALANTIR_TOKEN: null,
       PALANTIR_PM_TOKEN: null,
       ...(workerTokenFile ? {} : { PALANTIR_WORKER_TOKEN: null }),
       PALANTIR_MANAGER_TOKEN: null,
-      ...workerEnv,
+      ...Object.fromEntries(
+        Object.entries(workerEnv).filter(([key]) => !materializedKeys.has(key)),
+      ),
     });
     const list = Array.isArray(args) ? args : [];
     const argv = [shq(command), ...list.map((arg) => shq(arg))];
@@ -1562,8 +1653,11 @@ function createRemoteSshNodeExecutor(node, {
     // assignment application and would otherwise discard workerPath.
     cleanParts.push(workerPath ? `PATH=${shq(workerPath)}:"$PATH"` : 'PATH="$PATH"');
     cleanParts.push(...envParts);
-    if (workerTokenFile || workerApiBaseFile || claudeBareAuth) {
-      const bootstrap = [];
+    const materializedBootstrap = buildMaterializedEnvBootstrap(materializedEnvFiles);
+    if (workerTokenFile || workerApiBaseFile || claudeBareAuth || materializedBootstrap.length > 0) {
+      // This bootstrap is intentionally after buildCleanEnvPrefix's allowlist
+      // loop, preserving controller materialization as the final override.
+      const bootstrap = [...materializedBootstrap];
       if (workerTokenFile) {
         bootstrap.push(
           // Capture the read status, clean up UNCONDITIONALLY, and only then
@@ -1768,16 +1862,37 @@ function createRemoteSshNodeExecutor(node, {
             ],
           }
         : spec;
+      const materializedWorkerKeys = new Set(normalizeEnvKeyList(effectiveSpec.envAllowlist));
+      const controllerEnvEntries = normalizeMaterializedEnv(
+        Object.fromEntries(
+          Object.entries(effectiveSpec.env || {}).filter(([key, value]) => (
+            value !== undefined
+            && value !== null
+            && value !== ''
+            && !isActorCredentialKey(key)
+            && !isWorkerApiBaseKey(key)
+            && key !== 'PATH'
+            && materializedWorkerKeys.has(key)
+          )),
+        ),
+      );
+      const materializedEnvFiles = Object.fromEntries(controllerEnvEntries.map(([key]) => [
+        key,
+        path.posix.join(paths.statusDir, `controller-env-${key}`),
+      ]));
       const workerInvocation = buildWorkerInvocation(effectiveSpec, {
         workerTokenFile,
         workerApiBaseFile,
+        materializedEnvFiles,
       });
+      const controllerEnvFiles = Object.values(materializedEnvFiles);
       const materializedFiles = [
         canonicalStdin,
         canonicalSystemPrompt,
         workerTokenFile,
         workerApiBaseFile,
         canonicalUploadBundle,
+        ...controllerEnvFiles,
       ].filter(Boolean);
       const stdinRedirect = canonicalStdin ? ` < ${shq(canonicalStdin)}` : '';
       const cleanupPromptCommand = materializedFiles.length > 0
@@ -1809,6 +1924,10 @@ function createRemoteSshNodeExecutor(node, {
         workerApiBaseFile
           ? { path: workerApiBaseFile, content: workerApiBase }
           : null,
+        ...controllerEnvEntries.map(([key, content]) => ({
+          path: materializedEnvFiles[key],
+          content,
+        })),
         canonicalSystemPrompt
           ? { path: canonicalSystemPrompt, content: spec.systemPrompt }
           : null,

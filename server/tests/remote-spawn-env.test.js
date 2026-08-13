@@ -194,18 +194,21 @@ test('manager spawn builds a pod-derived clean env with one PATH and reference-o
   const cwd = `/srv/root/project dir/'quoted" $cash *glob*`;
   const prefix = `/opt/agent bin/'quoted" $cash/*glob*`;
   const explicitValue = `space ' " $HOME * ? [abc]`;
+  const providerSecret = `provider space ' " $HOME * ? [abc]`;
   const hostileArg = `arg ' " $HOME * ? [abc]`;
   const managerToken = 'manager-capability-literal-must-not-enter-argv';
-  const spawn = rootAwareSpawn({ cwd });
+  const secretPath = '/srv/root/.palantir-secret-manager/controller-env';
+  const spawn = rootAwareSpawn({ cwd, secretPath });
   const executor = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
 
   await executor.spawnInteractive('codex', ['exec', hostileArg], {
     cwd,
     pathPrefix: prefix,
-    envAllowlist: ['POD_ONLY_PROVIDER_KEY', 'PALANTIR_TOKEN'],
+    envAllowlist: ['POD_ONLY_PROVIDER_KEY', 'GITHUB_TOKEN', 'PALANTIR_TOKEN'],
     env: {
       PATH: '/controller/path/must-not-win',
       CUSTOM_ENV: explicitValue,
+      GITHUB_TOKEN: providerSecret,
       PALANTIR_TOKEN: 'human-global-secret',
       PALANTIR_PM_TOKEN: 'pm-global-secret',
       PALANTIR_WORKER_TOKEN: 'wrong-run-secret',
@@ -219,6 +222,14 @@ test('manager spawn builds a pod-derived clean env with one PATH and reference-o
   assertSingleInnerPath(script, prefix);
   assertBaselineLoop(script);
   assert.ok(script.includes(shq('POD_ONLY_PROVIDER_KEY')));
+  assert.ok(script.includes(shq('GITHUB_TOKEN')));
+  assert.equal(script.includes(`GITHUB_TOKEN=${shq(providerSecret)}`), false);
+  assert.ok(script.includes('GITHUB_TOKEN=$(cat --'));
+  assert.ok(script.includes('export GITHUB_TOKEN'));
+  assert.ok(
+    script.indexOf(shq('GITHUB_TOKEN')) < script.indexOf('GITHUB_TOKEN=$(cat --'),
+    'controller materialisation must remain the final explicit override',
+  );
   for (const key of NETWORK_KEYS) assert.ok(script.includes(shq(key)), `manager lost ${key}`);
   for (const key of ['CODEX_HOME', 'CODEX_CA_CERTIFICATE', 'SSL_CERT_FILE']) {
     assert.ok(script.includes(shq(key)), `codex manager lost ${key}`);
@@ -232,9 +243,16 @@ test('manager spawn builds a pod-derived clean env with one PATH and reference-o
   // live pod: zero process argv contained the value while the child env did.
   assert.equal(script.includes(`PALANTIR_MANAGER_TOKEN="$PALANTIR_MANAGER_TOKEN"`), false);
   assert.ok(script.includes('IFS= read -r PALANTIR_MANAGER_TOKEN || exit 126'));
-  assert.ok(script.includes('export PALANTIR_MANAGER_TOKEN; exec "$@"'));
+  assert.ok(script.includes('export PALANTIR_MANAGER_TOKEN'));
+  assert.ok(
+    script.indexOf('export PALANTIR_MANAGER_TOKEN') < script.indexOf('exec "$@"'),
+    'manager capability must be exported before exec',
+  );
   assert.ok(script.includes('/bin/sh -c '), 'clean shell must be an absolute path under env -i');
   assert.equal(script.includes(managerToken), false);
+  for (const spawnCall of spawn.calls) {
+    assert.equal(JSON.stringify(spawnCall.args).includes(providerSecret), false);
+  }
   for (const secret of ['human-global-secret', 'pm-global-secret', 'wrong-run-secret']) {
     assert.equal(script.includes(secret), false);
   }
@@ -290,9 +308,11 @@ test('worker spawn preserves pod allowlist names without manager network/vendor 
   assertBaselineLoop(inner);
   assert.ok(inner.includes(shq('POD_ONLY_PROVIDER_KEY')));
   assert.ok(inner.includes(shq('GITHUB_TOKEN')));
-  assert.ok(inner.includes(`GITHUB_TOKEN=${shq(explicitValue)}`));
+  assert.equal(inner.includes(`GITHUB_TOKEN=${shq(explicitValue)}`), false);
+  assert.ok(inner.includes('GITHUB_TOKEN=$(cat --'));
+  assert.ok(inner.includes('export GITHUB_TOKEN'));
   assert.ok(
-    inner.indexOf(shq('GITHUB_TOKEN')) < inner.indexOf(`GITHUB_TOKEN=${shq(explicitValue)}`),
+    inner.indexOf(shq('GITHUB_TOKEN')) < inner.indexOf('GITHUB_TOKEN=$(cat --'),
     'controller materialisation must remain the final explicit override',
   );
   for (const key of [
@@ -318,17 +338,41 @@ test('worker spawn preserves pod allowlist names without manager network/vendor 
   for (const secret of ['human-global-secret', 'pm-global-secret', 'wrong-run-secret']) {
     assert.equal(inner.includes(secret), false);
   }
-  const bundleWrite = spawn.calls.find((call) => call.stdin === workerToken + apiBase);
+  const bundleWrite = spawn.calls.find(
+    (call) => call.stdin === workerToken + apiBase + explicitValue,
+  );
   assert.ok(bundleWrite, 'worker capability and API base share one stdin bundle write');
   for (const call of spawn.calls) {
     assert.equal(JSON.stringify(call.args).includes(workerToken), false);
     assert.equal(JSON.stringify(call.args).includes(apiBase), false);
+    assert.equal(JSON.stringify(call.args).includes(explicitValue), false);
   }
   assert.equal(
     spawn.calls.reduce((count, call) => count + call.stdin.split(apiBase).length - 1, 0),
     1,
     'the API base value appears exactly once, in upload stdin',
   );
+});
+
+test('worker spawn rejects multiline controller materialization without changing it', async () => {
+  const cwd = '/srv/root/project';
+  const spawn = rootAwareSpawn({ cwd });
+  const executor = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await assert.rejects(
+    executor.spawnWorker('multiline_env', {
+      command: 'codex',
+      args: ['exec'],
+      cwd,
+      env: { GITHUB_TOKEN: 'line one\nline two' },
+      envAllowlist: ['GITHUB_TOKEN'],
+    }),
+    (err) => err && err.code === 'ENV_MATERIALIZATION_INVALID'
+      && /GITHUB_TOKEN/.test(err.message),
+  );
+  for (const call of spawn.calls) {
+    assert.equal(JSON.stringify(call.args).includes('line one\nline two'), false);
+  }
 });
 
 test('git/materialize exec filters pod env with the shared policy while filesystem primitives stay separate', async () => {
