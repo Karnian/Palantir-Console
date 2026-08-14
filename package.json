@@ -2,6 +2,9 @@
   "name": "palantir_console",
   "version": "1.0.0",
   "main": "server/index.js",
+  "bin": {
+    "palantir": "bin/palantir.mjs"
+  },
   "scripts": {
     "prestart": "npm rebuild better-sqlite3 --silent 2>/dev/null || true",
     "predev": "npm rebuild better-sqlite3 --silent 2>/dev/null || true",
