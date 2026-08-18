@@ -215,9 +215,24 @@ function simpleSpawn(response = { code: 0, stdout: '', stderr: '' }) {
 }
 
 function rootGuardSpawn(routes = {}) {
+  let uploadSequence = 0;
+  const uploadedPaths = new Set();
   return makeSpawn((call, child) => {
     const script = scriptOf(call);
     if (script === "exec 'realpath' '/srv/root'") return complete(child, { stdout: '/real/root\n' });
+    if (script.startsWith("exec 'realpath' ")) {
+      const candidate = script.slice("exec 'realpath' ".length);
+      const matchedPath = [...uploadedPaths].find((remotePath) => shq(remotePath) === candidate);
+      if (matchedPath) return complete(child, { stdout: `${matchedPath}\n` });
+    }
+    if (script.includes("tmpdir=$(mktemp -d '/srv/root/.palantir-secret-XXXXXX')")) {
+      uploadSequence += 1;
+      const controllerEnvPath = `/real/root/.palantir-secret-test-${uploadSequence}/controller-env`;
+      uploadedPaths.add(controllerEnvPath);
+      call.uploadPath = controllerEnvPath;
+      child.stdin.once('finish', () => complete(child, { stdout: `${controllerEnvPath}\n` }));
+      return undefined;
+    }
     if (routes[script]) return complete(child, routes[script]);
     complete(child, { code: 0 });
   });
@@ -896,15 +911,71 @@ test('spawnInteractive builds piped ssh child with canonical cwd explicit env an
       `cd ${shq('/real/root/project')} && exec env -i "$@" PATH="$PATH" `
       + `PALANTIR_TOKEN=${shq('')} PALANTIR_PM_TOKEN=${shq('')} `
       + `PALANTIR_WORKER_TOKEN=${shq('')} PALANTIR_MANAGER_TOKEN=${shq('')} `
-      + `LC_ALL=${shq('C')} TOKEN=${shq("a'b")} `
-      + `${shq('codex')} ${shq('exec')} ${shq(hostileArg)}`,
+      + '/bin/sh -c ',
     ),
   );
+  assert.equal((script.match(/PATH="\$PATH"/g) || []).length, 1);
+  assert.ok(script.endsWith(`${shq('sh')} ${shq('codex')} ${shq('exec')} ${shq(hostileArg)}`));
+  assert.ok(script.includes('LC_ALL=$(cat --'));
+  assert.ok(script.includes('export LC_ALL'));
+  assert.ok(script.includes('TOKEN=$(cat --'));
+  assert.ok(script.includes('export TOKEN'));
+  const uploads = spawn.calls.filter((entry) => entry.uploadPath);
+  assert.equal(uploads.length, 2);
+  const uploadByValue = new Map(uploads.map((entry) => [entry.stdin, entry.uploadPath]));
+  assert.deepEqual([...uploadByValue.keys()].sort(), ['C', "a'b"].sort());
+  assert.equal(uploads.filter((entry) => entry.stdin === 'C').length, 1);
+  assert.equal(uploads.filter((entry) => entry.stdin === "a'b").length, 1);
+  for (const [key, value] of [['LC_ALL', 'C'], ['TOKEN', "a'b"]]) {
+    const readStart = script.indexOf(`${key}=$(cat --`);
+    const read = script.slice(readStart, script.indexOf(';', readStart));
+    assert.ok(readStart >= 0, `${key} must be read from a materialized file`);
+    assert.ok(read.includes(uploadByValue.get(value)), `${key} must read the file containing its own value`);
+  }
+  assert.equal(JSON.stringify(call.args).includes("'C'"), false);
+  assert.equal(JSON.stringify(call.args).includes("a'b"), false);
+  assert.doesNotMatch(script, /SKIP=/);
   assert.ok(script.includes(shq(hostileArg)));
   assert.doesNotMatch(script, /REMOTE_SSH_EXECUTOR_INTERACTIVE_SECRET_SHOULD_NOT_APPEAR/);
   assert.equal(child.stdin.writable, true);
   assert.equal(typeof child.stdout.on, 'function');
   assert.equal(typeof child.stderr.on, 'function');
+});
+
+test('spawnInteractive cleans earlier materialized files when a later upload fails', async () => {
+  const firstPath = '/real/root/.palantir-secret-test-1/controller-env';
+  let uploadCount = 0;
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    if (script === "exec 'realpath' '/srv/root'") {
+      return complete(child, { stdout: '/real/root\n' });
+    }
+    if (script === `exec 'realpath' ${shq(firstPath)}`) {
+      return complete(child, { stdout: `${firstPath}\n` });
+    }
+    if (script.includes("tmpdir=$(mktemp -d '/srv/root/.palantir-secret-XXXXXX')")) {
+      uploadCount += 1;
+      child.stdin.once('finish', () => complete(child, uploadCount === 1
+        ? { stdout: `${firstPath}\n` }
+        : { code: 1, stderr: 'injected upload failure' }));
+      return undefined;
+    }
+    if (script === `exec 'rm' '-f' ${shq(firstPath)}`) return complete(child);
+    return complete(child, { code: 255, stderr: `unexpected script: ${script}` });
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await assert.rejects(
+    () => exec.spawnInteractive('codex', ['exec'], {
+      env: { KEY_A: 'first-secret', KEY_B: 'second-secret' },
+    }),
+    /injected upload failure/,
+  );
+  assert.equal(uploadCount, 2);
+  assert.ok(
+    spawn.calls.some((call) => scriptOf(call) === `exec 'rm' '-f' ${shq(firstPath)}`),
+    'the successfully uploaded credential must be removed after the later upload fails',
+  );
 });
 
 test('spawnInteractive bootstraps a manager capability through stdin, never SSH argv', async () => {
@@ -933,12 +1004,15 @@ test('spawnInteractive bootstraps a manager capability through stdin, never SSH 
   assert.doesNotMatch(script, /^IFS= read -r PALANTIR_MANAGER_TOKEN/);
   assert.match(
     script,
-    /\/bin\/sh -c 'IFS= read -r PALANTIR_MANAGER_TOKEN \|\| exit 126; export PALANTIR_MANAGER_TOKEN; exec "\$@"'/,
+    /\/bin\/sh -c 'IFS= read -r PALANTIR_MANAGER_TOKEN \|\| exit 126; export PALANTIR_MANAGER_TOKEN; .*exec "\$@"'/,
   );
   assert.doesNotMatch(script, /PALANTIR_MANAGER_TOKEN="\$PALANTIR_MANAGER_TOKEN"/);
   assert.match(script, /PALANTIR_TOKEN=''/);
   assert.doesNotMatch(script, /PALANTIR_MANAGER_TOKEN=''/);
   assert.doesNotMatch(script, /must-be-scrubbed/);
+  assert.ok(script.includes('LC_ALL=$(cat --'));
+  assert.ok(script.includes('export LC_ALL'));
+  assert.equal(JSON.stringify(call.args).includes("'C'"), false);
   assert.equal(call.stdin, `${managerToken}\nmanager prompt`);
   for (const entry of spawn.calls) {
     assert.doesNotMatch(JSON.stringify(entry.args), new RegExp(managerToken));
@@ -1521,7 +1595,7 @@ test('spawnWorker builds file-backed tmux script through the internal runner', a
   };
   const spawn = makeSpawn((call, child) => {
     const script = scriptOf(call);
-    if (script.startsWith("cd '/real/root/project' && tmux new-session -d -s 'palantir-run-run_1' ")) {
+    if (script.startsWith('umask 077 && cleanup()')) {
       complete(child, { code: 0 });
       return;
     }
@@ -1543,21 +1617,15 @@ test('spawnWorker builds file-backed tmux script through the internal runner', a
 
   assert.deepEqual(result, { sessionName: 'palantir-run-run_1' });
   const workerScript = spawn.calls.map(scriptOf).find((script) => script.includes('tmux new-session'));
-  const prefix = "cd '/real/root/project' && tmux new-session -d -s 'palantir-run-run_1' ";
-  assert.ok(workerScript.startsWith(prefix), workerScript);
-  const inner = unshq(workerScript.slice(prefix.length));
-  assert.ok(inner.startsWith('umask 077; set --; for k in '), inner);
-  assert.ok(
-    inner.includes(
-      `env -i "$@" PATH=${shq('/home/karnian/.npm-global/bin')}:"$PATH" `
-      + `PALANTIR_TOKEN=${shq('')} PALANTIR_PM_TOKEN=${shq('')} `
-      + `PALANTIR_WORKER_TOKEN=${shq('')} PALANTIR_MANAGER_TOKEN=${shq('')} `
-      + `LC_ALL=${shq('C')} QUOTE=${shq("a'b")} ${shq('codex')} `
-      + `${shq('--version')} ${shq(hostile)} ${shq('$(literal)')} `
-      + `> ${shq(stdoutLog)} 2>&1; echo $? > ${shq(exitSentinel)}`,
-    ),
-    inner,
-  );
+  const inner = tmuxInnerScript(workerScript, runId);
+  assert.ok(inner.includes(`env -i "$@" PATH=${shq('/home/karnian/.npm-global/bin')}:"$PATH"`), inner);
+  assert.ok(inner.includes('LC_ALL=$(cat --'));
+  assert.ok(inner.includes('QUOTE=$(cat --'));
+  assert.ok(inner.includes('export LC_ALL'));
+  assert.ok(inner.includes('export QUOTE'));
+  assert.ok(inner.includes(`${shq('codex')} ${shq('--version')} ${shq(hostile)} ${shq('$(literal)')}`));
+  assert.equal(JSON.stringify(spawn.calls.map((call) => call.args)).includes("a'b"), false);
+  assert.equal(spawn.calls.find((call) => scriptOf(call).startsWith('umask 077')).stdin, "Ca'b");
   assert.ok(spawn.calls.some((call) => scriptOf(call) === "exec 'mkdir' '-p' '/srv/root/.palantir-runs'"));
   assert.ok(spawn.calls.some((call) => scriptOf(call) === `exec 'mkdir' '-p' ${shq(statusDir)}`));
 });
@@ -1606,11 +1674,11 @@ test('spawnWorker file-backs a scoped capability and keeps it out of SSH command
 
   assert.deepEqual(result, { sessionName: `palantir-run-${runId}` });
   const writeCall = spawn.calls.find((call) => scriptOf(call).startsWith('umask 077'));
-  assert.equal(writeCall.stdin, workerToken + apiBase);
+  assert.equal(writeCall.stdin, workerToken + apiBase + 'C');
   const handoffScript = scriptOf(writeCall);
   const inner = tmuxInnerScript(handoffScript, runId);
   assert.ok(handoffScript.includes(
-    `head -c ${Buffer.byteLength(workerToken + apiBase)} > ${shq(bundlePath)}`,
+    `head -c ${Buffer.byteLength(workerToken + apiBase + 'C')} > ${shq(bundlePath)}`,
   ));
   assert.ok(inner.includes(
     `head -c ${Buffer.byteLength(workerToken)} ${shq(bundlePath)} > ${shq(secretPath)}`,

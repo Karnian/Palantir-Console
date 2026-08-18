@@ -184,6 +184,7 @@ function rootAwareSpawn({ cwd = '/srv/root/project', secretPath = null } = {}) {
       child.stdin.once('finish', () => complete(child, { stdout: `${secretPath}\n` }));
       return undefined;
     }
+    if (/^exec 'rm' '-f' /.test(script)) return complete(child);
     if (script.includes('tmux new-session -d -s ')) return complete(child);
     return undefined;
   });
@@ -204,7 +205,7 @@ test('manager spawn builds a pod-derived clean env with one PATH and reference-o
   await executor.spawnInteractive('codex', ['exec', hostileArg], {
     cwd,
     pathPrefix: prefix,
-    envAllowlist: ['POD_ONLY_PROVIDER_KEY', 'GITHUB_TOKEN', 'PALANTIR_TOKEN'],
+    envAllowlist: ['POD_ONLY_PROVIDER_KEY', 'GITHUB_TOKEN', 'PALANTIR_TOKEN', 'CUSTOM_ENV'],
     env: {
       PATH: '/controller/path/must-not-win',
       CUSTOM_ENV: explicitValue,
@@ -258,7 +259,8 @@ test('manager spawn builds a pod-derived clean env with one PATH and reference-o
   }
   assert.equal(call.stdin, `${managerToken}\n`);
   assert.ok(script.includes(`cd ${shq(cwd.replace('/srv/root', '/real/root'))} &&`));
-  assert.ok(script.includes(`CUSTOM_ENV=${shq(explicitValue)}`));
+  assert.equal(script.includes(`CUSTOM_ENV=${shq(explicitValue)}`), false);
+  assert.ok(script.includes('CUSTOM_ENV=$(cat --'));
   assert.ok(script.endsWith(`${shq('codex')} ${shq('exec')} ${shq(hostileArg)}`));
   assert.equal(script.includes('/controller/path/must-not-win'), false);
   for (const key of ACTOR_KEYS) {
@@ -277,6 +279,7 @@ test('worker spawn preserves pod allowlist names without manager network/vendor 
   const workerToken = 'worker-capability-literal-must-not-enter-argv';
   const apiBase = 'https://argv-zero.example:8443/proxy-prefix';
   const explicitValue = `controller ' " $HOME * ? [abc]`;
+  const unlistedSecret = 'unlisted-worker-secret-must-use-file-channel';
   const spawn = rootAwareSpawn({ cwd });
   const executor = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
 
@@ -288,6 +291,7 @@ test('worker spawn preserves pod allowlist names without manager network/vendor 
     envAllowlist: ['POD_ONLY_PROVIDER_KEY', 'GITHUB_TOKEN', 'PALANTIR_PM_TOKEN'],
     env: {
       GITHUB_TOKEN: explicitValue,
+      UNLISTED_WORKER_SECRET: unlistedSecret,
       PALANTIR_TOKEN: 'human-global-secret',
       PALANTIR_PM_TOKEN: 'pm-global-secret',
       PALANTIR_MANAGER_TOKEN: 'wrong-run-secret',
@@ -311,6 +315,16 @@ test('worker spawn preserves pod allowlist names without manager network/vendor 
   assert.equal(inner.includes(`GITHUB_TOKEN=${shq(explicitValue)}`), false);
   assert.ok(inner.includes('GITHUB_TOKEN=$(cat --'));
   assert.ok(inner.includes('export GITHUB_TOKEN'));
+  const unlistedRead = inner.slice(
+    inner.indexOf('UNLISTED_WORKER_SECRET=$(cat --'),
+    inner.indexOf(';', inner.indexOf('UNLISTED_WORKER_SECRET=$(cat --')),
+  );
+  assert.ok(unlistedRead.startsWith('UNLISTED_WORKER_SECRET=$(cat --'), inner);
+  assert.ok(
+    unlistedRead.includes(`/srv/root/.palantir-runs/${runId}/controller-env-UNLISTED_WORKER_SECRET`),
+    unlistedRead,
+  );
+  assert.ok(inner.includes('export UNLISTED_WORKER_SECRET'));
   assert.ok(
     inner.indexOf(shq('GITHUB_TOKEN')) < inner.indexOf('GITHUB_TOKEN=$(cat --'),
     'controller materialisation must remain the final explicit override',
@@ -339,14 +353,20 @@ test('worker spawn preserves pod allowlist names without manager network/vendor 
     assert.equal(inner.includes(secret), false);
   }
   const bundleWrite = spawn.calls.find(
-    (call) => call.stdin === workerToken + apiBase + explicitValue,
+    (call) => call.stdin === workerToken + apiBase + explicitValue + unlistedSecret,
   );
-  assert.ok(bundleWrite, 'worker capability and API base share one stdin bundle write');
+  assert.ok(bundleWrite, 'worker capability, API base, and controller env share one stdin bundle write');
   for (const call of spawn.calls) {
     assert.equal(JSON.stringify(call.args).includes(workerToken), false);
     assert.equal(JSON.stringify(call.args).includes(apiBase), false);
     assert.equal(JSON.stringify(call.args).includes(explicitValue), false);
+    assert.equal(JSON.stringify(call.args).includes(unlistedSecret), false);
   }
+  assert.equal(
+    spawn.calls.reduce((count, call) => count + call.stdin.split(unlistedSecret).length - 1, 0),
+    1,
+    'the non-allowlisted worker value appears exactly once, in upload stdin',
+  );
   assert.equal(
     spawn.calls.reduce((count, call) => count + call.stdin.split(apiBase).length - 1, 0),
     1,
@@ -373,6 +393,41 @@ test('worker spawn rejects multiline controller materialization without changing
   for (const call of spawn.calls) {
     assert.equal(JSON.stringify(call.args).includes('line one\nline two'), false);
   }
+});
+
+test('manager spawn sends non-empty controller env outside the allowlist through files, never argv', async () => {
+  const cwd = '/srv/root/project';
+  const secretPath = '/srv/root/.palantir-secret-manager/controller-env';
+  const secret = 'non-allowlisted-secret-must-not-enter-argv';
+  const spawn = rootAwareSpawn({ cwd, secretPath });
+  const executor = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await executor.spawnInteractive('codex', ['exec'], {
+    cwd,
+    envAllowlist: ['GITHUB_TOKEN'],
+    env: { UNLISTED_SECRET: secret },
+  });
+  for (const call of spawn.calls) {
+    assert.equal(JSON.stringify(call.args).includes(secret), false);
+  }
+  const script = logicalScriptOf(spawn.calls.at(-1));
+  assert.ok(script.includes('UNLISTED_SECRET=$(cat --'));
+  assert.ok(script.includes('export UNLISTED_SECRET'));
+});
+
+test('manager spawn keeps empty non-allowlisted controller env as argv blanking', async () => {
+  const cwd = '/srv/root/project';
+  const spawn = rootAwareSpawn({ cwd });
+  const executor = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await executor.spawnInteractive('codex', ['exec'], {
+    cwd,
+    envAllowlist: [],
+    env: { UNLISTED_BLANK: '' },
+  });
+
+  const script = logicalScriptOf(spawn.calls.at(-1));
+  assert.ok(script.includes(`UNLISTED_BLANK=${shq('')}`));
 });
 
 test('git/materialize exec filters pod env with the shared policy while filesystem primitives stay separate', async () => {

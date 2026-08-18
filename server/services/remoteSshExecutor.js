@@ -1110,10 +1110,7 @@ function createRemoteSshNodeExecutor(node, {
       ...(worker ? REMOTE_WORKER_BASE_ENV_KEYS : remoteManagerBaseEnvKeys(commandName)),
       ...normalizeEnvKeyList(envAllowlist),
     ];
-    const materialized = await materializeControllerEnv(
-      explicitEnv,
-      new Set(normalizeEnvKeyList(envAllowlist)),
-    );
+    const materialized = await materializeControllerEnv(explicitEnv);
     const script = buildCommandScript(commandName, args, {
       cwd: safeCwd,
       // The remote login shell may have controller credentials configured.
@@ -1331,18 +1328,17 @@ function createRemoteSshNodeExecutor(node, {
     return writeTempFile(prefix, name, content, mode);
   }
 
-  async function materializeControllerEnv(env, materializedKeys) {
+  async function materializeControllerEnv(env) {
     const entries = normalizeMaterializedEnv(env);
     const argvEnv = {};
     const envFiles = {};
     const files = [];
     try {
       for (const [key, value] of entries) {
-        // Empty defense-in-depth assignments and non-profile command settings
-        // keep their established form. Non-empty allowlisted profile values
-        // use the file channel.
-        if (value === '' || !materializedKeys.has(key)) {
-          argvEnv[key] = value === '' ? null : value;
+        // No non-empty controller value reaches argv through any path. Only an
+        // empty value remains as argv-level defense-in-depth blanking.
+        if (value === '') {
+          argvEnv[key] = null;
           continue;
         }
         const file = await putSecretFile('controller-env', value, 0o600);
@@ -1908,7 +1904,6 @@ function createRemoteSshNodeExecutor(node, {
             ],
           }
         : spec;
-      const materializedWorkerKeys = new Set(normalizeEnvKeyList(effectiveSpec.envAllowlist));
       const controllerEnvEntries = normalizeMaterializedEnv(
         Object.fromEntries(
           Object.entries(effectiveSpec.env || {}).filter(([key, value]) => (
@@ -1918,10 +1913,11 @@ function createRemoteSshNodeExecutor(node, {
             && !isActorCredentialKey(key)
             && !isWorkerApiBaseKey(key)
             && key !== 'PATH'
-            && materializedWorkerKeys.has(key)
           )),
         ),
       );
+      // No non-empty controller value reaches argv through any path. The
+      // allowlist below controls pod-process env references, not value transport.
       const materializedEnvFiles = Object.fromEntries(controllerEnvEntries.map(([key]) => [
         key,
         path.posix.join(paths.statusDir, `controller-env-${key}`),
