@@ -374,6 +374,65 @@ test('worker spawn preserves pod allowlist names without manager network/vendor 
   );
 });
 
+test('worker spawn with only controller env uploads, slices, exports, and cleans its bundle', async () => {
+  const runId = 'controller_env_only';
+  const cwd = '/srv/root/project';
+  const firstSecret = 'secret';
+  const secondSecret = 'longer-secret';
+  const spawn = rootAwareSpawn({ cwd });
+  const executor = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await executor.spawnWorker(runId, {
+    command: 'codex',
+    cwd,
+    env: {
+      CUSTOM_SECRET: firstSecret,
+      SECOND_SECRET: secondSecret,
+    },
+    envAllowlist: [],
+  });
+
+  for (const call of spawn.calls) {
+    const argv = JSON.stringify(call.args);
+    assert.equal(argv.includes(firstSecret), false);
+    assert.equal(argv.includes(secondSecret), false);
+  }
+
+  const bundleWrite = spawn.calls.find(
+    (call) => call.stdin === firstSecret + secondSecret,
+  );
+  assert.ok(bundleWrite, 'controller env-only values must create one upload bundle');
+  const script = logicalScriptOf(bundleWrite);
+  const tmuxPrefix = `tmux new-session -d -s ${shq(`palantir-run-${runId}`)} `;
+  const tmuxIndex = script.indexOf(tmuxPrefix);
+  assert.notEqual(tmuxIndex, -1);
+  const inner = unshq(firstShqWord(script.slice(tmuxIndex + tmuxPrefix.length)));
+  const bundle = `/real/root/.palantir-runs/${runId}/worker-input.bundle`;
+  const firstFile = `/srv/root/.palantir-runs/${runId}/controller-env-CUSTOM_SECRET`;
+  const secondFile = `/srv/root/.palantir-runs/${runId}/controller-env-SECOND_SECRET`;
+  assert.ok(inner.includes(`head -c ${Buffer.byteLength(firstSecret)} ${shq(bundle)} > ${shq(firstFile)}`), inner);
+  assert.ok(
+    inner.includes(
+      `tail -c +${Buffer.byteLength(firstSecret) + 1} ${shq(bundle)} | head -c ${Buffer.byteLength(secondSecret)} > ${shq(secondFile)}`,
+    ),
+    inner,
+  );
+  const firstRead = inner.slice(
+    inner.indexOf('CUSTOM_SECRET=$(cat --'),
+    inner.indexOf(';', inner.indexOf('CUSTOM_SECRET=$(cat --')),
+  );
+  assert.ok(firstRead.includes(firstFile), firstRead);
+  assert.ok(inner.includes('export CUSTOM_SECRET'), inner);
+  const secondRead = inner.slice(
+    inner.indexOf('SECOND_SECRET=$(cat --'),
+    inner.indexOf(';', inner.indexOf('SECOND_SECRET=$(cat --')),
+  );
+  assert.ok(secondRead.includes(secondFile), secondRead);
+  assert.ok(inner.includes('export SECOND_SECRET'), inner);
+  const cleanup = `rm -f -- ${shq(bundle)} ${shq(firstFile)} ${shq(secondFile)}`;
+  assert.ok(script.includes(cleanup), script);
+});
+
 test('worker spawn rejects multiline controller materialization without changing it', async () => {
   const cwd = '/srv/root/project';
   const spawn = rootAwareSpawn({ cwd });

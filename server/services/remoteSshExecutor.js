@@ -1882,18 +1882,6 @@ function createRemoteSshNodeExecutor(node, {
           path.posix.basename(paths.systemPromptFile),
         );
       }
-      let canonicalUploadBundle = null;
-      if (workerTokenFile || workerApiBaseFile || canonicalSystemPrompt || canonicalStdin) {
-        const bundleParent = await assertWithinRoots(
-          paths.uploadBundle,
-          { parentOnly: true },
-        );
-        canonicalUploadBundle = path.posix.join(
-          bundleParent.canonical,
-          path.posix.basename(paths.uploadBundle),
-        );
-      }
-
       const effectiveSpec = canonicalSystemPrompt
         ? {
             ...spec,
@@ -1916,6 +1904,23 @@ function createRemoteSshNodeExecutor(node, {
           )),
         ),
       );
+      let canonicalUploadBundle = null;
+      if (
+        workerTokenFile
+        || workerApiBaseFile
+        || canonicalSystemPrompt
+        || canonicalStdin
+        || controllerEnvEntries.length > 0
+      ) {
+        const bundleParent = await assertWithinRoots(
+          paths.uploadBundle,
+          { parentOnly: true },
+        );
+        canonicalUploadBundle = path.posix.join(
+          bundleParent.canonical,
+          path.posix.basename(paths.uploadBundle),
+        );
+      }
       // No non-empty controller value reaches argv through any path. The
       // allowlist below controls pod-process env references, not value transport.
       const materializedEnvFiles = Object.fromEntries(controllerEnvEntries.map(([key]) => [
