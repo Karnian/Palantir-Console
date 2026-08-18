@@ -2845,6 +2845,392 @@ test('remote worker getOutput caps remote tail lines and applies maxBuffer', asy
   assert.equal(tailCall.killed, 'SIGTERM');
 });
 
+function outputRangeStatFormats(script) {
+  return [...script.matchAll(/stat -c '([^']+)'/g)].map((match) => match[1]);
+}
+
+function renderOutputRangeStat(format, { sourceId, size }) {
+  if (sourceId === null) return 'MISSING';
+  if (format === '%d:%i %s') return `${sourceId} ${size}`;
+  if (format === '%d:%i') return sourceId;
+  throw new Error(`unexpected stat format: ${format}`);
+}
+
+function outputRangeHarness(runId, responses, { canonicalDir } = {}) {
+  const statusDir = `/srv/root/.palantir-runs/${runId}`;
+  const safeDir = canonicalDir || `/real/root/.palantir-runs/${runId}`;
+  let frameIndex = 0;
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    if (script === "exec 'realpath' '/srv/root'") return complete(child, { stdout: '/real/root\n' });
+    if (script === `exec 'realpath' ${shq(statusDir)}`) {
+      return complete(child, { stdout: `${safeDir}\n` });
+    }
+    if (script.includes('stat -c ')) {
+      const response = responses[Math.min(frameIndex, responses.length - 1)];
+      frameIndex += 1;
+      const formats = outputRangeStatFormats(script);
+      const first = renderOutputRangeStat(formats[0], response.first);
+      const last = renderOutputRangeStat(formats[1], response.last);
+      const stdout = `${first}\n${response.sealed ? 1 : 0}\n${response.encoded}\n${last}\n`;
+      return complete(child, { stdout });
+    }
+    return complete(child, { code: 255, stderr: `unexpected script: ${script}` });
+  });
+  return { spawn, statusDir };
+}
+
+async function realShellOutputRangeHarness(runId, initialBytes, {
+  sealed = false,
+  appendAfterFirstStat = '',
+  omitStdout = false,
+  malformedFirstStat = false,
+} = {}) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-output-range-'));
+  const statusDir = path.join(root, '.palantir-runs', runId);
+  const binDir = path.join(root, 'bin');
+  const stdoutLog = path.join(statusDir, 'stdout.log');
+  await fs.mkdir(statusDir, { recursive: true });
+  await fs.mkdir(binDir);
+  if (!omitStdout) await fs.writeFile(stdoutLog, initialBytes);
+  if (sealed) await fs.writeFile(path.join(statusDir, 'exit.code'), '0\n');
+
+  const nativeStat = process.platform === 'darwin'
+    ? `dev=$(/usr/bin/stat -f '%d' -- "$file") || exit $?\nino=$(/usr/bin/stat -f '%i' -- "$file") || exit $?\nsize=$(/usr/bin/stat -f '%z' -- "$file") || exit $?`
+    : `dev=$(/usr/bin/stat -c '%d' -- "$file") || exit $?\nino=$(/usr/bin/stat -c '%i' -- "$file") || exit $?\nsize=$(/usr/bin/stat -c '%s' -- "$file") || exit $?`;
+  const statShim = `#!/bin/sh
+test "$1" = -c || exit 64
+format=$2
+test "$3" = -- || exit 64
+file=$4
+${nativeStat}
+if [ -n "$STAT_APPEND_PATH" ] && [ "$file" = "$STAT_APPEND_PATH" ] && [ ! -e "$STAT_APPEND_MARKER" ]; then
+  : > "$STAT_APPEND_MARKER"
+  printf '%s' "$STAT_APPEND_DATA" >> "$file"
+fi
+case "$format" in
+  '%d:%i %s') if [ -n "$STAT_MALFORMED_FIRST" ]; then printf 'garbage\n'; else printf '%s:%s %s\n' "$dev" "$ino" "$size"; fi ;;
+  '%d:%i') printf '%s:%s\n' "$dev" "$ino" ;;
+  *) exit 65 ;;
+esac
+`;
+  const statPath = path.join(binDir, 'stat');
+  await fs.writeFile(statPath, statShim, { mode: 0o755 });
+
+  const shellResults = [];
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    if (script === `exec 'realpath' ${shq(root)}`) return complete(child, { stdout: `${root}\n` });
+    if (script === `exec 'realpath' ${shq(statusDir)}`) return complete(child, { stdout: `${statusDir}\n` });
+    if (script.includes('stat -c ')) {
+      const result = childProcess.spawnSync('/bin/sh', ['-c', script], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${binDir}:${process.env.PATH}`,
+          STAT_APPEND_PATH: appendAfterFirstStat ? stdoutLog : '',
+          STAT_APPEND_MARKER: path.join(root, 'appended'),
+          STAT_APPEND_DATA: appendAfterFirstStat,
+          STAT_MALFORMED_FIRST: malformedFirstStat ? '1' : '',
+        },
+      });
+      shellResults.push(result);
+      return complete(child, { code: result.status ?? 1, stdout: result.stdout, stderr: result.stderr });
+    }
+    return complete(child, { code: 255, stderr: `unexpected script: ${script}` });
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow({ exposed_roots: JSON.stringify([root]) }), { spawnFn: spawn });
+  return { exec, root, stdoutLog, spawn, shellResults };
+}
+
+test('remote worker readOutputRange preserves raw bytes, cut-off, has_more, and sealed state', async () => {
+  const bytes = Buffer.from([0x61, 0xff, 0x80, 0x00, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67]);
+  const { spawn } = outputRangeHarness('range', [
+    { first: { sourceId: '7:9', size: 20 }, sealed: false, encoded: bytes.toString('base64'), last: { sourceId: '7:9', size: 99 } },
+    { first: { sourceId: '7:9', size: 20 }, sealed: true, encoded: bytes.toString('base64'), last: { sourceId: '7:9', size: 99 } },
+  ]);
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  const first = await exec.readOutputRange('range', { after: 3, maxBytes: 10 });
+  assert.deepEqual(first.data, bytes);
+  assert.equal(first.source_id, '7:9');
+  assert.equal(first.next_offset, 3 + bytes.length);
+  assert.equal(first.end_offset, 20, 'cut-off must remain the first stat size');
+  assert.equal(first.has_more, true);
+  assert.equal(first.sealed, false);
+  assert.equal(first.missing, false);
+
+  const callsBeforePoll = spawn.calls.length;
+  const second = await exec.readOutputRange('range', { after: 3, maxBytes: 10 });
+  assert.equal(second.sealed, true);
+  assert.equal(spawn.calls.length - callsBeforePoll, 1, 'cached-path poll must use one SSH spawn');
+  const pollScript = scriptOf(spawn.calls.at(-1));
+  assert.deepEqual(outputRangeStatFormats(pollScript), ['%d:%i %s', '%d:%i']);
+  assert.match(pollScript, /tail -c \+4 -- '\/real\/root\/\.palantir-runs\/range\/stdout\.log'/);
+  assert.match(pollScript, /head -c "\$want"/);
+});
+
+test('remote worker readOutputRange discards bytes when the output generation changes', async () => {
+  const encoded = Buffer.from('old generation').toString('base64');
+  const { spawn } = outputRangeHarness('changed', [
+    { first: { sourceId: '1:2', size: 50 }, sealed: false, encoded, last: { sourceId: '1:3', size: 50 } },
+  ]);
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  const result = await exec.readOutputRange('changed', { after: 8, maxBytes: 32 });
+  assert.equal(result.generation_changed, true);
+  assert.equal(result.deleted, false);
+  assert.deepEqual(result.data, Buffer.alloc(0));
+  assert.equal(result.next_offset, 0);
+  assert.equal(result.end_offset, 50);
+});
+
+test('remote worker readOutputRange distinguishes deletion during read from generation change', async () => {
+  const { spawn } = outputRangeHarness('deleted-range', [
+    { first: { sourceId: '1:2', size: 50 }, sealed: false, encoded: '', last: { sourceId: null, size: 0 } },
+  ]);
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  const result = await exec.readOutputRange('deleted-range', { after: 8, maxBytes: 32 });
+  assert.equal(result.deleted, true);
+  assert.equal(result.generation_changed, false);
+  assert.equal(result.source_id, '1:2');
+  assert.deepEqual(result.data, Buffer.alloc(0));
+  assert.equal(result.next_offset, 0);
+});
+
+test('remote worker readOutputRange treats a final-stat deletion race as deleted and discards data', async () => {
+  const runId = 'deleted-stat-race';
+  const statusDir = `/srv/root/.palantir-runs/${runId}`;
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    if (script === "exec 'realpath' '/srv/root'") return complete(child, { stdout: '/real/root\n' });
+    if (script === `exec 'realpath' ${shq(statusDir)}`) {
+      return complete(child, { stdout: `/real/root/.palantir-runs/${runId}\n` });
+    }
+    if (script.includes('stat -c ')) {
+      const raceRecovered = script.includes(`elif [ ! -e '/real/root/.palantir-runs/${runId}/stdout.log' ]; then echo MISSING`);
+      return complete(child, raceRecovered
+        ? { stdout: `1:2 12\n0\n${Buffer.from('data').toString('base64')}\nMISSING\n` }
+        : { code: 1, stderr: 'stat: stdout.log: No such file' });
+    }
+    return complete(child, { code: 255, stderr: `unexpected script: ${script}` });
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  const result = await exec.readOutputRange(runId, { after: 8, maxBytes: 32 });
+  assert.equal(result.deleted, true);
+  assert.deepEqual(result.data, Buffer.alloc(0));
+  assert.equal(result.next_offset, 0);
+});
+
+test('remote worker readOutputRange rejects a final-stat failure when the file still exists', async () => {
+  const runId = 'failed-final-stat';
+  const statusDir = `/srv/root/.palantir-runs/${runId}`;
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    if (script === "exec 'realpath' '/srv/root'") return complete(child, { stdout: '/real/root\n' });
+    if (script === `exec 'realpath' ${shq(statusDir)}`) {
+      return complete(child, { stdout: `/real/root/.palantir-runs/${runId}\n` });
+    }
+    if (script.includes('stat -c ')) {
+      const preservesFailure = script.includes(`elif [ ! -e '/real/root/.palantir-runs/${runId}/stdout.log' ]; then echo MISSING`);
+      return complete(child, preservesFailure
+        ? { code: 13, stderr: 'stat: stdout.log: Permission denied' }
+        : { stdout: `1:2 12\n0\n${Buffer.from('data').toString('base64')}\nMISSING\n` });
+    }
+    return complete(child, { code: 255, stderr: `unexpected script: ${script}` });
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await assert.rejects(
+    () => exec.readOutputRange(runId, { after: 8, maxBytes: 32 }),
+    (err) => err.code === 13 && err.stderr === 'stat: stdout.log: Permission denied',
+  );
+});
+
+test('remote worker readOutputRange maps the malformed-first-stat guard to OUTPUT_FRAME_INVALID', async () => {
+  const runId = 'malformed-first-stat';
+  const statusDir = `/srv/root/.palantir-runs/${runId}`;
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    if (script === "exec 'realpath' '/srv/root'") return complete(child, { stdout: '/real/root\n' });
+    if (script === `exec 'realpath' ${shq(statusDir)}`) {
+      return complete(child, { stdout: `/real/root/.palantir-runs/${runId}\n` });
+    }
+    if (script.includes('stat -c ')) {
+      assert.match(script, /case "\$first_size" in ''\|\*\[!0-9\]\*\) echo 'OUTPUT_FRAME_INVALID:first-stat' >&2; exit 90;; esac/);
+      return complete(child, { code: 90, stdout: 'garbage\n', stderr: 'OUTPUT_FRAME_INVALID:first-stat\n' });
+    }
+    return complete(child, { code: 255, stderr: `unexpected script: ${script}` });
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await assert.rejects(
+    () => exec.readOutputRange(runId, { after: 0, maxBytes: 32 }),
+    (err) => err.code === 'OUTPUT_FRAME_INVALID',
+  );
+});
+
+test('remote worker readOutputRange treats exit 90 without the marker as commandError', async () => {
+  const runId = 'unmarked-exit-90';
+  const statusDir = `/srv/root/.palantir-runs/${runId}`;
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    if (script === "exec 'realpath' '/srv/root'") return complete(child, { stdout: '/real/root\n' });
+    if (script === `exec 'realpath' ${shq(statusDir)}`) {
+      return complete(child, { stdout: `/real/root/.palantir-runs/${runId}\n` });
+    }
+    if (script.includes('stat -c ')) return complete(child, { code: 90, stderr: 'stat failed\n' });
+    return complete(child, { code: 255, stderr: `unexpected script: ${script}` });
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await assert.rejects(
+    () => exec.readOutputRange(runId, { after: 0, maxBytes: 32 }),
+    (err) => err.code === 90 && err.stderr === 'stat failed\n',
+  );
+});
+
+test('remote worker readOutputRange reports a missing initial stdout log without throwing', async () => {
+  const { spawn } = outputRangeHarness('missing-range', [
+    { first: { sourceId: null, size: 0 }, sealed: true, encoded: '', last: { sourceId: null, size: 0 } },
+  ]);
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  assert.deepEqual(await exec.readOutputRange('missing-range', { after: 7, maxBytes: 16 }), {
+    source_id: null,
+    data: Buffer.alloc(0),
+    next_offset: 7,
+    end_offset: 0,
+    has_more: false,
+    sealed: true,
+    generation_changed: false,
+    deleted: false,
+    missing: true,
+  });
+});
+
+test('remote worker readOutputRange accepts empty data for zero maxBytes and a cursor past EOF', async () => {
+  const { spawn } = outputRangeHarness('empty-range', [
+    { first: { sourceId: '4:8', size: 12 }, sealed: false, encoded: '', last: { sourceId: '4:8', size: 12 } },
+    { first: { sourceId: '4:8', size: 12 }, sealed: true, encoded: '', last: { sourceId: '4:8', size: 12 } },
+  ]);
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  const zeroMax = await exec.readOutputRange('empty-range', { after: 5, maxBytes: 0 });
+  assert.deepEqual(zeroMax.data, Buffer.alloc(0));
+  assert.equal(zeroMax.next_offset, 5);
+  assert.equal(zeroMax.has_more, true);
+
+  const pastEof = await exec.readOutputRange('empty-range', { after: 20, maxBytes: 8 });
+  assert.deepEqual(pastEof.data, Buffer.alloc(0));
+  assert.equal(pastEof.next_offset, 20);
+  assert.equal(pastEof.end_offset, 12);
+  assert.equal(pastEof.has_more, false);
+});
+
+test('remote worker readOutputRange rejects all invalid base64 and range frame variants', async () => {
+  const cases = [
+    ['non-canonical padding', 'YQ===', 8, 10],
+    ['invalid base64 character', 'YQ?=', 8, 10],
+    ['decoded range over maxBytes', Buffer.from('ab').toString('base64'), 1, 10],
+    ['decoded range over cut-off', Buffer.from('ab').toString('base64'), 8, 1],
+  ];
+  for (let index = 0; index < cases.length; index += 1) {
+    const [label, encoded, maxBytes, endOffset] = cases[index];
+    const runId = `bad-frame-${index}`;
+    const { spawn } = outputRangeHarness(runId, [
+      { first: { sourceId: '2:4', size: endOffset }, sealed: false, encoded, last: { sourceId: '2:4', size: endOffset } },
+    ]);
+    const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+    await assert.rejects(
+      () => exec.readOutputRange(runId, { after: 0, maxBytes }),
+      (err) => err.code === 'OUTPUT_FRAME_INVALID',
+      label,
+    );
+  }
+});
+
+test('remote worker readOutputRange rejects a short read from an otherwise stable generation', async () => {
+  const { spawn } = outputRangeHarness('short-range', [{
+    first: { sourceId: '2:4', size: 10 },
+    sealed: false,
+    encoded: Buffer.from('short').toString('base64'),
+    last: { sourceId: '2:4', size: 10 },
+  }]);
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+  await assert.rejects(
+    () => exec.readOutputRange('short-range', { after: 0, maxBytes: 10 }),
+    (err) => err.code === 'OUTPUT_FRAME_INVALID',
+  );
+});
+
+test('remote worker readOutputRange emitted script runs in /bin/sh with binary data and a fixed first-stat cut-off', async (t) => {
+  const initial = Buffer.from([0x61, 0xff, 0x80, 0x00, 0x62, 0x63]);
+  const harness = await realShellOutputRangeHarness('real-shell-range', initial, {
+    sealed: true,
+    appendAfterFirstStat: 'APPENDED',
+  });
+  t.after(() => fs.rm(harness.root, { recursive: true, force: true }));
+
+  const result = await harness.exec.readOutputRange('real-shell-range', { after: 1, maxBytes: 256 });
+  assert.deepEqual(result.data, initial.subarray(1));
+  assert.equal(result.end_offset, initial.length);
+  assert.equal(result.next_offset, initial.length);
+  assert.equal(result.sealed, true);
+  assert.equal(result.generation_changed, false);
+  assert.equal(result.deleted, false);
+  assert.equal(harness.shellResults[0].stdout.split('\n').length, 5, 'four lines plus the trailing split field');
+});
+
+test('remote worker readOutputRange emitted script rejects malformed stat before arithmetic', async (t) => {
+  const harness = await realShellOutputRangeHarness('real-shell-malformed-stat', Buffer.from('abc'), {
+    malformedFirstStat: true,
+  });
+  t.after(() => fs.rm(harness.root, { recursive: true, force: true }));
+
+  await assert.rejects(
+    () => harness.exec.readOutputRange('real-shell-malformed-stat', { after: 0, maxBytes: 8 }),
+    (err) => err.code === 'OUTPUT_FRAME_INVALID',
+  );
+  assert.equal(harness.shellResults[0].status, 90);
+  assert.equal(harness.shellResults[0].stderr, 'OUTPUT_FRAME_INVALID:first-stat\n');
+});
+
+test('remote worker readOutputRange emitted script handles EOF, head -c 0, and the MISSING four-line frame', async (t) => {
+  const eofHarness = await realShellOutputRangeHarness('real-shell-eof', Buffer.from('abc'));
+  const zeroHarness = await realShellOutputRangeHarness('real-shell-zero', Buffer.from('abc'));
+  const missingHarness = await realShellOutputRangeHarness('real-shell-missing', Buffer.alloc(0), { omitStdout: true });
+  t.after(() => Promise.all([eofHarness.root, zeroHarness.root, missingHarness.root]
+    .map((root) => fs.rm(root, { recursive: true, force: true }))));
+
+  assert.deepEqual((await eofHarness.exec.readOutputRange('real-shell-eof', { after: 9, maxBytes: 8 })).data, Buffer.alloc(0));
+  assert.deepEqual((await zeroHarness.exec.readOutputRange('real-shell-zero', { after: 1, maxBytes: 0 })).data, Buffer.alloc(0));
+  const missing = await missingHarness.exec.readOutputRange('real-shell-missing', { after: 2, maxBytes: 8 });
+  assert.equal(missing.missing, true);
+  assert.equal(missingHarness.shellResults[0].stdout, 'MISSING\n0\n\nMISSING\n');
+  assert.equal(missingHarness.shellResults[0].stdout.split('\n').length, 5, 'four lines plus the trailing split field');
+});
+
+test('remote worker readOutputRange validates offsets and guards the status directory', async () => {
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: simpleSpawn() });
+  await assert.rejects(() => exec.readOutputRange('range', { after: -1, maxBytes: 1 }), TypeError);
+  await assert.rejects(() => exec.readOutputRange('range', { after: Number.NaN, maxBytes: 1 }), TypeError);
+
+  const { spawn } = outputRangeHarness('escaped-range', [{
+    first: { sourceId: null, size: 0 }, sealed: false, encoded: '', last: { sourceId: null, size: 0 },
+  }], {
+    canonicalDir: '/outside/status',
+  });
+  const escaped = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+  await assert.rejects(
+    () => escaped.readOutputRange('escaped-range', { after: 0, maxBytes: 1 }),
+    (err) => err.code === 'EXPOSED_ROOTS',
+  );
+  assert.equal(spawn.calls.some((call) => scriptOf(call).includes("stat -c '%d:%i %s'")), false);
+});
+
 test('remote worker getStructuredResult reads the durable final result record', async () => {
   const resultPath = '/srv/root/.palantir-runs/structured/result.jsonl';
   const payload = JSON.stringify({
