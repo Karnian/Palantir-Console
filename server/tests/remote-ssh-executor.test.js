@@ -2845,6 +2845,159 @@ test('remote worker getOutput caps remote tail lines and applies maxBuffer', asy
   assert.equal(tailCall.killed, 'SIGTERM');
 });
 
+function outputRangeStatFormats(script) {
+  return [...script.matchAll(/stat -c '([^']+)'/g)].map((match) => match[1]);
+}
+
+function renderOutputRangeStat(format, { sourceId, size }) {
+  if (sourceId === null) return 'MISSING';
+  if (format === '%d:%i %s') return `${sourceId} ${size}`;
+  if (format === '%d:%i') return sourceId;
+  throw new Error(`unexpected stat format: ${format}`);
+}
+
+function outputRangeHarness(runId, responses, { canonicalDir } = {}) {
+  const statusDir = `/srv/root/.palantir-runs/${runId}`;
+  const safeDir = canonicalDir || `/real/root/.palantir-runs/${runId}`;
+  let frameIndex = 0;
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    if (script === "exec 'realpath' '/srv/root'") return complete(child, { stdout: '/real/root\n' });
+    if (script === `exec 'realpath' ${shq(statusDir)}`) {
+      return complete(child, { stdout: `${safeDir}\n` });
+    }
+    if (script.includes('stat -c ')) {
+      const response = responses[Math.min(frameIndex, responses.length - 1)];
+      frameIndex += 1;
+      const formats = outputRangeStatFormats(script);
+      const first = renderOutputRangeStat(formats[0], response.first);
+      const last = renderOutputRangeStat(formats[1], response.last);
+      const stdout = `${first}\n${response.sealed ? 1 : 0}\n${response.encoded}\n${last}\n`;
+      return complete(child, { stdout });
+    }
+    return complete(child, { code: 255, stderr: `unexpected script: ${script}` });
+  });
+  return { spawn, statusDir };
+}
+
+test('remote worker readOutputRange preserves raw bytes, cut-off, has_more, and sealed state', async () => {
+  const bytes = Buffer.from([0x61, 0xff, 0x80, 0x00, 0x62]);
+  const { spawn } = outputRangeHarness('range', [
+    { first: { sourceId: '7:9', size: 20 }, sealed: false, encoded: bytes.toString('base64'), last: { sourceId: '7:9', size: 99 } },
+    { first: { sourceId: '7:9', size: 20 }, sealed: true, encoded: bytes.toString('base64'), last: { sourceId: '7:9', size: 99 } },
+  ]);
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  const first = await exec.readOutputRange('range', { after: 3, maxBytes: 10 });
+  assert.deepEqual(first.data, bytes);
+  assert.equal(first.source_id, '7:9');
+  assert.equal(first.next_offset, 3 + bytes.length);
+  assert.equal(first.end_offset, 20, 'cut-off must remain the first stat size');
+  assert.equal(first.has_more, true);
+  assert.equal(first.sealed, false);
+  assert.equal(first.missing, false);
+
+  const callsBeforePoll = spawn.calls.length;
+  const second = await exec.readOutputRange('range', { after: 3, maxBytes: 10 });
+  assert.equal(second.sealed, true);
+  assert.equal(spawn.calls.length - callsBeforePoll, 1, 'cached-path poll must use one SSH spawn');
+  const pollScript = scriptOf(spawn.calls.at(-1));
+  assert.deepEqual(outputRangeStatFormats(pollScript), ['%d:%i %s', '%d:%i']);
+  assert.match(pollScript, /tail -c \+4 -- '\/real\/root\/\.palantir-runs\/range\/stdout\.log'/);
+  assert.match(pollScript, /head -c 10/);
+});
+
+test('remote worker readOutputRange discards bytes when the output generation changes', async () => {
+  const encoded = Buffer.from('old generation').toString('base64');
+  const { spawn } = outputRangeHarness('changed', [
+    { first: { sourceId: '1:2', size: 50 }, sealed: false, encoded, last: { sourceId: '1:3', size: 50 } },
+  ]);
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  const result = await exec.readOutputRange('changed', { after: 8, maxBytes: 32 });
+  assert.equal(result.generation_changed, true);
+  assert.deepEqual(result.data, Buffer.alloc(0));
+  assert.equal(result.next_offset, 0);
+  assert.equal(result.end_offset, 50);
+});
+
+test('remote worker readOutputRange reports a missing initial stdout log without throwing', async () => {
+  const { spawn } = outputRangeHarness('missing-range', [
+    { first: { sourceId: null, size: 0 }, sealed: true, encoded: '', last: { sourceId: null, size: 0 } },
+  ]);
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  assert.deepEqual(await exec.readOutputRange('missing-range', { after: 7, maxBytes: 16 }), {
+    source_id: null,
+    data: Buffer.alloc(0),
+    next_offset: 7,
+    end_offset: 0,
+    has_more: false,
+    sealed: true,
+    generation_changed: false,
+    missing: true,
+  });
+});
+
+test('remote worker readOutputRange accepts empty data for zero maxBytes and a cursor past EOF', async () => {
+  const { spawn } = outputRangeHarness('empty-range', [
+    { first: { sourceId: '4:8', size: 12 }, sealed: false, encoded: '', last: { sourceId: '4:8', size: 12 } },
+    { first: { sourceId: '4:8', size: 12 }, sealed: true, encoded: '', last: { sourceId: '4:8', size: 12 } },
+  ]);
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  const zeroMax = await exec.readOutputRange('empty-range', { after: 5, maxBytes: 0 });
+  assert.deepEqual(zeroMax.data, Buffer.alloc(0));
+  assert.equal(zeroMax.next_offset, 5);
+  assert.equal(zeroMax.has_more, true);
+
+  const pastEof = await exec.readOutputRange('empty-range', { after: 20, maxBytes: 8 });
+  assert.deepEqual(pastEof.data, Buffer.alloc(0));
+  assert.equal(pastEof.next_offset, 20);
+  assert.equal(pastEof.end_offset, 12);
+  assert.equal(pastEof.has_more, false);
+});
+
+test('remote worker readOutputRange rejects all invalid base64 and range frame variants', async () => {
+  const cases = [
+    ['non-canonical padding', 'YQ===', 8, 10],
+    ['invalid base64 character', 'YQ?=', 8, 10],
+    ['decoded range over maxBytes', Buffer.from('ab').toString('base64'), 1, 10],
+    ['decoded range over cut-off', Buffer.from('ab').toString('base64'), 8, 1],
+  ];
+  for (let index = 0; index < cases.length; index += 1) {
+    const [label, encoded, maxBytes, endOffset] = cases[index];
+    const runId = `bad-frame-${index}`;
+    const { spawn } = outputRangeHarness(runId, [
+      { first: { sourceId: '2:4', size: endOffset }, sealed: false, encoded, last: { sourceId: '2:4', size: endOffset } },
+    ]);
+    const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+    await assert.rejects(
+      () => exec.readOutputRange(runId, { after: 0, maxBytes }),
+      (err) => err.code === 'OUTPUT_FRAME_INVALID',
+      label,
+    );
+  }
+});
+
+test('remote worker readOutputRange validates offsets and guards the status directory', async () => {
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: simpleSpawn() });
+  await assert.rejects(() => exec.readOutputRange('range', { after: -1, maxBytes: 1 }), TypeError);
+  await assert.rejects(() => exec.readOutputRange('range', { after: Number.NaN, maxBytes: 1 }), TypeError);
+
+  const { spawn } = outputRangeHarness('escaped-range', [{
+    first: { sourceId: null, size: 0 }, sealed: false, encoded: '', last: { sourceId: null, size: 0 },
+  }], {
+    canonicalDir: '/outside/status',
+  });
+  const escaped = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+  await assert.rejects(
+    () => escaped.readOutputRange('escaped-range', { after: 0, maxBytes: 1 }),
+    (err) => err.code === 'EXPOSED_ROOTS',
+  );
+  assert.equal(spawn.calls.some((call) => scriptOf(call).includes("stat -c '%d:%i %s'")), false);
+});
+
 test('remote worker getStructuredResult reads the durable final result record', async () => {
   const resultPath = '/srv/root/.palantir-runs/structured/result.jsonl';
   const payload = JSON.stringify({

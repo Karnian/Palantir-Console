@@ -15,6 +15,7 @@ const { execEnvKeys, projectTestEnvKeys } = require('./execEnvPolicy');
 
 const WORKER_OUTPUT_MAX_LINES = 500;
 const WORKER_OUTPUT_MAX_BUFFER = 256 * 1024;
+const WORKER_OUTPUT_RANGE_MAX_BYTES = 256 * 1024;
 // A Claude result event repeats the full final answer in one JSONL record, so
 // it can legitimately exceed the small live-tail ceiling. Keep this separately
 // bounded at 4 MiB: large enough for Claude's practical output window while
@@ -641,10 +642,10 @@ function validateWorkerSpec(spec) {
  * operator-controlled, not adversarial mid-operation. rmrf additionally
  * refuses to delete an exposed root itself.
  *
- * Remote requirements: /bin/sh, coreutils-compatible realpath, find, mktemp,
- * chmod, cat, test, mkdir, rm, head, tail, wc, awk, and mv, plus tmux (worker
- * channel spawn/isAlive/kill). readdir implements names only via find and does
- * not support withFileTypes or other readdir options.
+ * Remote requirements: /bin/sh, coreutils-compatible realpath and stat, find,
+ * mktemp, chmod, cat, test, mkdir, rm, head, tail, wc, awk, mv, base64, and tr,
+ * plus tmux (worker channel spawn/isAlive/kill). readdir implements names only
+ * via find and does not support withFileTypes or other readdir options.
  */
 function createRemoteSshNodeExecutor(node, {
   spawnFn = childProcess.spawn,
@@ -667,6 +668,7 @@ function createRemoteSshNodeExecutor(node, {
   const managerInteractiveCommands = new Set(['codex', 'claude']);
   let canonicalRootsPromise = null;
   let canonicalRootsValue = null;
+  const canonicalWorkerStatusDirs = new Map();
 
   function sshArgsFor(script, { keepAlive } = {}) {
     // ssh JOINS every post-destination arg with spaces and hands the single
@@ -2120,6 +2122,103 @@ function createRemoteSshNodeExecutor(node, {
     }
   }
 
+  function outputFrameInvalid(message) {
+    const err = new Error(message || 'Remote output frame is invalid');
+    err.code = 'OUTPUT_FRAME_INVALID';
+    return err;
+  }
+
+  async function canonicalWorkerStatusDir(paths) {
+    let pending = canonicalWorkerStatusDirs.get(paths.statusDir);
+    if (!pending) {
+      pending = assertWithinRoots(paths.statusDir).then(({ canonical }) => canonical);
+      canonicalWorkerStatusDirs.set(paths.statusDir, pending);
+      pending.catch(() => canonicalWorkerStatusDirs.delete(paths.statusDir));
+    }
+    return pending;
+  }
+
+  async function readOutputRange(runId, { after, maxBytes } = {}) {
+    if (!Number.isSafeInteger(after) || after < 0) {
+      throw new TypeError('after must be a non-negative safe integer');
+    }
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+      throw new TypeError('maxBytes must be a non-negative safe integer');
+    }
+    const cappedMaxBytes = Math.min(maxBytes, WORKER_OUTPUT_RANGE_MAX_BYTES);
+    const paths = workerPaths(runId);
+    const canonicalStatusDir = await canonicalWorkerStatusDir(paths);
+    const stdoutLog = path.posix.join(canonicalStatusDir, path.posix.basename(paths.stdoutLog));
+    const exitSentinel = path.posix.join(canonicalStatusDir, path.posix.basename(paths.exitSentinel));
+    const startByte = after + 1;
+    // Read the size only from the first stat: it fixes this response's end
+    // offset. The final stat is only for deletion/inode-generation detection.
+    const script = [
+      `if [ -f ${shq(stdoutLog)} ]; then stat -c '%d:%i %s' -- ${shq(stdoutLog)}; else echo MISSING; fi`,
+      `if [ -f ${shq(exitSentinel)} ]; then echo 1; else echo 0; fi`,
+      `if [ -f ${shq(stdoutLog)} ]; then tail -c +${startByte} -- ${shq(stdoutLog)} | head -c ${cappedMaxBytes} | base64 | tr -d '\\n'; fi; echo`,
+      `if [ -f ${shq(stdoutLog)} ]; then stat -c '%d:%i' -- ${shq(stdoutLog)}; else echo MISSING; fi`,
+    ].join('; ');
+    const res = await runFilesystemScript(script, {
+      maxBuffer: Math.ceil(cappedMaxBytes / 3) * 4 + 4096,
+    });
+    if (res.code !== 0) throw commandError('readOutputRange', [paths.stdoutLog], res);
+
+    const frame = stripOneTrailingNewline(res.stdout).split('\n');
+    if (frame.length !== 4 || !/^[01]$/.test(frame[1])) {
+      throw outputFrameInvalid('Remote output frame has invalid structure');
+    }
+    const sealed = frame[1] === '1';
+    if (frame[0] === 'MISSING') {
+      return {
+        source_id: null,
+        data: Buffer.alloc(0),
+        next_offset: after,
+        end_offset: 0,
+        has_more: false,
+        sealed,
+        generation_changed: false,
+        missing: true,
+      };
+    }
+
+    const firstStat = /^(\d+:\d+) (\d+)$/.exec(frame[0]);
+    if (!firstStat) throw outputFrameInvalid('Remote output frame has invalid first stat');
+    const sourceId = firstStat[1];
+    const endOffset = Number(firstStat[2]);
+    if (!Number.isSafeInteger(endOffset)) {
+      throw outputFrameInvalid('Remote output frame has invalid size');
+    }
+    const lastSourceId = frame[3] === 'MISSING'
+      ? null
+      : (/^\d+:\d+$/.test(frame[3]) ? frame[3] : undefined);
+    if (lastSourceId === undefined) {
+      throw outputFrameInvalid('Remote output frame has invalid final stat');
+    }
+
+    const decoded = Buffer.from(frame[2], 'base64');
+    if (
+      decoded.toString('base64') !== frame[2]
+      || decoded.length > cappedMaxBytes
+      || (decoded.length > 0 && after + decoded.length > endOffset)
+    ) {
+      throw outputFrameInvalid('Remote output frame has invalid data');
+    }
+    const generationChanged = lastSourceId !== sourceId;
+    const data = generationChanged ? Buffer.alloc(0) : decoded;
+    const nextOffset = generationChanged ? 0 : after + data.length;
+    return {
+      source_id: sourceId,
+      data,
+      next_offset: nextOffset,
+      end_offset: endOffset,
+      has_more: nextOffset < endOffset,
+      sealed,
+      generation_changed: generationChanged,
+      missing: false,
+    };
+  }
+
   async function getStructuredResult(runId) {
     const paths = workerPaths(runId);
     try {
@@ -2205,6 +2304,7 @@ function createRemoteSshNodeExecutor(node, {
     isAlive,
     detectExitCode,
     getOutput,
+    readOutputRange,
     getStructuredResult,
     sendInput,
     kill,
