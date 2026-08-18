@@ -7,6 +7,11 @@ const { assertSameOrigin } = require('../utils/sameOrigin');
 
 // Palantir Console is a single-process server. If clustered, this per-process
 // waiter count must be replaced by shared coordination.
+// NOTE (codex review): waitersByRun/globalWaiterCount are module-global while
+// activeWaiters/waitersStopped/maxGlobalWaiters are per-router. That is fine for
+// the documented single-app, single-process deployment, but two createApp()
+// instances in one process would share the counters and interfere. Revisit if
+// multi-instance hosting is ever introduced.
 const waitersByRun = new Map();
 let globalWaiterCount = 0;
 const MAX_GLOBAL_WAITERS = 64;

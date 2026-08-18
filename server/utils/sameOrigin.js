@@ -2,6 +2,10 @@
 
 const { ForbiddenError } = require('./errors');
 
+// NOTE: this is a same-HOST check, not a strict same-origin one -- it does not
+// compare scheme, and a missing Origin header is allowed (non-browser clients).
+// That is the policy inherited from modelPolicies; tightening it is a separate
+// change that would affect both call sites.
 function assertSameOrigin(req) {
   const origin = req.headers.origin;
   if (!origin) return;
