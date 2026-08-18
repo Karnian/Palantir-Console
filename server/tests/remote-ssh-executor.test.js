@@ -3009,7 +3009,7 @@ test('remote worker readOutputRange treats a final-stat deletion race as deleted
       return complete(child, { stdout: `/real/root/.palantir-runs/${runId}\n` });
     }
     if (script.includes('stat -c ')) {
-      const raceRecovered = /stat -c '%d:%i'[^;]+\|\| echo MISSING/.test(script);
+      const raceRecovered = script.includes(`elif [ ! -e '/real/root/.palantir-runs/${runId}/stdout.log' ]; then echo MISSING`);
       return complete(child, raceRecovered
         ? { stdout: `1:2 12\n0\n${Buffer.from('data').toString('base64')}\nMISSING\n` }
         : { code: 1, stderr: 'stat: stdout.log: No such file' });
@@ -3024,6 +3024,31 @@ test('remote worker readOutputRange treats a final-stat deletion race as deleted
   assert.equal(result.next_offset, 0);
 });
 
+test('remote worker readOutputRange rejects a final-stat failure when the file still exists', async () => {
+  const runId = 'failed-final-stat';
+  const statusDir = `/srv/root/.palantir-runs/${runId}`;
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    if (script === "exec 'realpath' '/srv/root'") return complete(child, { stdout: '/real/root\n' });
+    if (script === `exec 'realpath' ${shq(statusDir)}`) {
+      return complete(child, { stdout: `/real/root/.palantir-runs/${runId}\n` });
+    }
+    if (script.includes('stat -c ')) {
+      const preservesFailure = script.includes(`elif [ ! -e '/real/root/.palantir-runs/${runId}/stdout.log' ]; then echo MISSING`);
+      return complete(child, preservesFailure
+        ? { code: 13, stderr: 'stat: stdout.log: Permission denied' }
+        : { stdout: `1:2 12\n0\n${Buffer.from('data').toString('base64')}\nMISSING\n` });
+    }
+    return complete(child, { code: 255, stderr: `unexpected script: ${script}` });
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await assert.rejects(
+    () => exec.readOutputRange(runId, { after: 8, maxBytes: 32 }),
+    (err) => err.code === 13 && err.stderr === 'stat: stdout.log: Permission denied',
+  );
+});
+
 test('remote worker readOutputRange maps the malformed-first-stat guard to OUTPUT_FRAME_INVALID', async () => {
   const runId = 'malformed-first-stat';
   const statusDir = `/srv/root/.palantir-runs/${runId}`;
@@ -3034,8 +3059,8 @@ test('remote worker readOutputRange maps the malformed-first-stat guard to OUTPU
       return complete(child, { stdout: `/real/root/.palantir-runs/${runId}\n` });
     }
     if (script.includes('stat -c ')) {
-      assert.match(script, /case "\$first_size" in ''\|\*\[!0-9\]\*\) exit 90;; esac/);
-      return complete(child, { code: 90, stdout: 'garbage\n' });
+      assert.match(script, /case "\$first_size" in ''\|\*\[!0-9\]\*\) echo 'OUTPUT_FRAME_INVALID:first-stat' >&2; exit 90;; esac/);
+      return complete(child, { code: 90, stdout: 'garbage\n', stderr: 'OUTPUT_FRAME_INVALID:first-stat\n' });
     }
     return complete(child, { code: 255, stderr: `unexpected script: ${script}` });
   });
@@ -3044,6 +3069,26 @@ test('remote worker readOutputRange maps the malformed-first-stat guard to OUTPU
   await assert.rejects(
     () => exec.readOutputRange(runId, { after: 0, maxBytes: 32 }),
     (err) => err.code === 'OUTPUT_FRAME_INVALID',
+  );
+});
+
+test('remote worker readOutputRange treats exit 90 without the marker as commandError', async () => {
+  const runId = 'unmarked-exit-90';
+  const statusDir = `/srv/root/.palantir-runs/${runId}`;
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    if (script === "exec 'realpath' '/srv/root'") return complete(child, { stdout: '/real/root\n' });
+    if (script === `exec 'realpath' ${shq(statusDir)}`) {
+      return complete(child, { stdout: `/real/root/.palantir-runs/${runId}\n` });
+    }
+    if (script.includes('stat -c ')) return complete(child, { code: 90, stderr: 'stat failed\n' });
+    return complete(child, { code: 255, stderr: `unexpected script: ${script}` });
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await assert.rejects(
+    () => exec.readOutputRange(runId, { after: 0, maxBytes: 32 }),
+    (err) => err.code === 90 && err.stderr === 'stat failed\n',
   );
 });
 
@@ -3150,7 +3195,7 @@ test('remote worker readOutputRange emitted script rejects malformed stat before
     (err) => err.code === 'OUTPUT_FRAME_INVALID',
   );
   assert.equal(harness.shellResults[0].status, 90);
-  assert.equal(harness.shellResults[0].stderr, '');
+  assert.equal(harness.shellResults[0].stderr, 'OUTPUT_FRAME_INVALID:first-stat\n');
 });
 
 test('remote worker readOutputRange emitted script handles EOF, head -c 0, and the MISSING four-line frame', async (t) => {

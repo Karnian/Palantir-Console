@@ -2131,6 +2131,7 @@ function createRemoteSshNodeExecutor(node, {
   // The shell validates stat's size before arithmetic; reserve a distinct code
   // so malformed command output is reported as a frame error, not command failure.
   const OUTPUT_FRAME_INVALID_EXIT = 90;
+  const OUTPUT_FRAME_INVALID_MARKER = 'OUTPUT_FRAME_INVALID:first-stat';
 
   async function canonicalWorkerStatusDir(paths) {
     let pending = canonicalWorkerStatusDirs.get(paths.statusDir);
@@ -2158,16 +2159,18 @@ function createRemoteSshNodeExecutor(node, {
     // Read the size only from the first stat: it fixes this response's end
     // offset. The final stat is only for deletion/inode-generation detection.
     const script = [
-      `if [ -f ${shq(stdoutLog)} ]; then first=$(stat -c '%d:%i %s' -- ${shq(stdoutLog)}) || exit $?; echo "$first"; first_size=${'${first##* }'}; case "$first_size" in ''|*[!0-9]*) exit ${OUTPUT_FRAME_INVALID_EXIT};; esac; want=$((first_size - ${after})); if [ "$want" -lt 0 ]; then want=0; elif [ "$want" -gt ${cappedMaxBytes} ]; then want=${cappedMaxBytes}; fi; else first=MISSING; want=0; echo MISSING; fi`,
+      `if [ -f ${shq(stdoutLog)} ]; then first=$(stat -c '%d:%i %s' -- ${shq(stdoutLog)}) || exit $?; echo "$first"; first_size=${'${first##* }'}; case "$first_size" in ''|*[!0-9]*) echo ${shq(OUTPUT_FRAME_INVALID_MARKER)} >&2; exit ${OUTPUT_FRAME_INVALID_EXIT};; esac; want=$((first_size - ${after})); if [ "$want" -lt 0 ]; then want=0; elif [ "$want" -gt ${cappedMaxBytes} ]; then want=${cappedMaxBytes}; fi; else first=MISSING; want=0; echo MISSING; fi`,
       `if [ -f ${shq(exitSentinel)} ]; then echo 1; else echo 0; fi`,
       `if [ "$first" != MISSING ]; then tail -c +${startByte} -- ${shq(stdoutLog)} | head -c "$want" | base64 | tr -d '\\n'; fi; echo`,
-      `if [ -f ${shq(stdoutLog)} ]; then stat -c '%d:%i' -- ${shq(stdoutLog)} || echo MISSING; else echo MISSING; fi`,
+      // This existence recheck cannot identify stat's exact errno, but it keeps
+      // non-deletion failures visible instead of unconditionally calling them deletion.
+      `if [ -f ${shq(stdoutLog)} ]; then last=$(stat -c '%d:%i' -- ${shq(stdoutLog)}); rc=$?; if [ "$rc" -eq 0 ]; then echo "$last"; elif [ ! -e ${shq(stdoutLog)} ]; then echo MISSING; else exit "$rc"; fi; else echo MISSING; fi`,
     ].join('; ');
     const res = await runFilesystemScript(script, {
       maxBuffer: Math.ceil(cappedMaxBytes / 3) * 4 + 4096,
     });
-    // Exit 90 is emitted only by the pre-arithmetic numeric guard above.
-    if (res.code === OUTPUT_FRAME_INVALID_EXIT) {
+    // Require the guard's marker too: an unrelated command may also exit 90.
+    if (res.code === OUTPUT_FRAME_INVALID_EXIT && res.stderr.includes(OUTPUT_FRAME_INVALID_MARKER)) {
       throw outputFrameInvalid('Remote output frame has invalid first stat');
     }
     if (res.code !== 0) throw commandError('readOutputRange', [paths.stdoutLog], res);
