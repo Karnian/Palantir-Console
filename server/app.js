@@ -1880,12 +1880,17 @@ function createApp(options = {}) {
     masterMemoryService,
     projectService,
   }));
-  app.use('/api', createQuestionsRouter({
+  const questionsRouter = createQuestionsRouter({
     questionService,
     runService,
     waitTimeoutMs: options.questionWaitTimeoutMs,
     pollIntervalMs: options.questionPollIntervalMs,
-  }));
+    maxGlobalWaiters: options.questionMaxGlobalWaiters,
+    onWaiterActive: options.questionOnWaiterActive,
+  });
+  app.use('/api', questionsRouter);
+  app.stopQuestionWaiters = questionsRouter.stopWaiters;
+  app.getQuestionWaiterCount = questionsRouter.getGlobalWaiterCount;
   app.use('/api/tasks', createTasksRouter({ taskService, lifecycleService, presetService, goalDeliveryService, runService, verifyCheckService }));
   app.use('/api/runs', createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService, presetService, mcpTemplateService, projectService, taskService, nodeExecutor, nodeService }));
   app.use('/api/actions', createActionsRouter({ ledger: actionLedger }));
@@ -2111,6 +2116,7 @@ function createApp(options = {}) {
   let _shutdownPromise = null;
   let _shuttingDown = false;
   let _dbClosed = false;
+  let _questionWaiterDrain = null;
   const _closeDbOnce = () => {
     if (_dbClosed) return;
     _dbClosed = true;
@@ -2136,6 +2142,9 @@ function createApp(options = {}) {
   // manager disposal when there are no admitted/held workers to wait for.
   const _finishShutdown = () => {
     const disposeWaits = [];
+    if (_questionWaiterDrain && typeof _questionWaiterDrain.then === 'function') {
+      disposeWaits.push(_questionWaiterDrain);
+    }
     // Stop queue claims/subscriptions before adapter disposal can emit terminal
     // events. Persisted queued rows remain intact for the next server process.
     try {
@@ -2243,6 +2252,8 @@ function createApp(options = {}) {
     // disposeSession() itself calling app.shutdown) so every phase runs once.
     if (_shuttingDown) return Promise.resolve();
     _shuttingDown = true;
+    try { _questionWaiterDrain = questionsRouter.stopWaiters(); }
+    catch (err) { console.warn('[app.shutdown] question waiter stop failed:', err && err.message); }
 
     // C13: close + snapshot are synchronous, so no admitted spawn can fall
     // between the boundary and the in-flight set being captured.

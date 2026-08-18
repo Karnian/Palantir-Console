@@ -8,6 +8,8 @@ const { assertSameOrigin } = require('../utils/sameOrigin');
 // Palantir Console is a single-process server. If clustered, this per-process
 // waiter count must be replaced by shared coordination.
 const waitersByRun = new Map();
+let globalWaiterCount = 0;
+const MAX_GLOBAL_WAITERS = 64;
 
 const CREATE_ERROR_MAP = Object.freeze({
   QUESTION_INVALID: [400, 'question_invalid'],
@@ -37,8 +39,23 @@ function createQuestionsRouter({
   runService,
   waitTimeoutMs = 25_000,
   pollIntervalMs = 500,
+  maxGlobalWaiters = MAX_GLOBAL_WAITERS,
+  onWaiterActive,
 } = {}) {
   const router = express.Router();
+  const activeWaiters = new Set();
+  let waitersStopped = false;
+
+  router.stopWaiters = () => {
+    waitersStopped = true;
+    const drains = [];
+    for (const waiter of activeWaiters) {
+      drains.push(waiter.done);
+      if (waiter.wake) waiter.wake();
+    }
+    return Promise.allSettled(drains);
+  };
+  router.getGlobalWaiterCount = () => globalWaiterCount;
 
   router.post('/runs/:runId/questions', asyncHandler(async (req, res) => {
     requireWorkerForRun(req);
@@ -75,14 +92,34 @@ function createQuestionsRouter({
     }
     if (initial.status !== 'pending') return res.json({ question: initial });
 
+    if (waitersStopped) return res.json({ question: initial });
+
     if ((waitersByRun.get(req.params.runId) || 0) >= 1) {
       res.set('Retry-After', '1');
       return res.status(429).json({ error: 'run already has an active waiter', reason: 'waiter_busy' });
     }
 
+    const globalLimit = Number.isFinite(maxGlobalWaiters)
+      ? Math.max(0, Math.floor(maxGlobalWaiters))
+      : MAX_GLOBAL_WAITERS;
+    if (globalWaiterCount >= globalLimit) {
+      res.set('Retry-After', '1');
+      return res.status(429).json({ error: 'global waiter capacity reached', reason: 'waiter_capacity' });
+    }
+
     waitersByRun.set(req.params.runId, 1);
+    globalWaiterCount += 1;
     let closed = false;
     let wakePoll = null;
+    let resolveDone;
+    const waiter = {
+      done: new Promise(resolve => { resolveDone = resolve; }),
+      wake: null,
+    };
+    activeWaiters.add(waiter);
+    try {
+      if (typeof onWaiterActive === 'function') onWaiterActive({ runId: req.params.runId, questionId: req.params.id });
+    } catch { /* test/observability hooks must not affect waiter lifecycle */ }
     // IncomingMessage may emit `close` after a normally completed request body;
     // only an aborted/destroyed connection should cancel the response wait.
     const onClose = () => {
@@ -95,18 +132,23 @@ function createQuestionsRouter({
     try {
       const deadline = Date.now() + Math.min(25_000, Math.max(0, waitTimeoutMs));
       let current = initial;
-      while (!closed && current.status === 'pending' && Date.now() < deadline) {
+      // waitersStopped must gate the loop itself: waking the sleep alone just
+      // sends the waiter back around for another poll interval.
+      while (!closed && !waitersStopped && current.status === 'pending' && Date.now() < deadline) {
         const remaining = deadline - Date.now();
         await new Promise((resolve) => {
           const timer = setTimeout(() => {
             wakePoll = null;
+            waiter.wake = null;
             resolve();
           }, Math.min(pollIntervalMs, remaining));
           wakePoll = () => {
             clearTimeout(timer);
             wakePoll = null;
+            waiter.wake = null;
             resolve();
           };
+          waiter.wake = wakePoll;
         });
         if (!closed) current = questionService.getQuestion(req.params.id) || current;
       }
@@ -115,6 +157,9 @@ function createQuestionsRouter({
     } finally {
       req.off('close', onClose);
       waitersByRun.delete(req.params.runId);
+      activeWaiters.delete(waiter);
+      globalWaiterCount = Math.max(0, globalWaiterCount - 1);
+      resolveDone();
     }
   }));
 
@@ -146,4 +191,4 @@ function createQuestionsRouter({
   return router;
 }
 
-module.exports = { createQuestionsRouter };
+module.exports = { createQuestionsRouter, MAX_GLOBAL_WAITERS };

@@ -105,7 +105,12 @@ test('worker registration is run-bound, idempotent, worker-only, and active-run-
 });
 
 test('wait times out unchanged, enforces one waiter per run, and hides cross-run ids', async (t) => {
-  const app = setupApp(t, { questionWaitTimeoutMs: 80, questionPollIntervalMs: 5 });
+  const active = [];
+  const app = setupApp(t, {
+    questionWaitTimeoutMs: 80,
+    questionPollIntervalMs: 5,
+    questionOnWaiterActive: info => active.splice(0).forEach(resolve => resolve(info)),
+  });
   const worker = createWorker(app, 'wait-a');
   const otherWorker = createWorker(app, 'wait-b');
   const created = await register(app, worker).expect(201);
@@ -119,13 +124,14 @@ test('wait times out unchanged, enforces one waiter per run, and hides cross-run
     .expect('X-Accel-Buffering', 'no')
     .expect(200);
   assert.equal(timedOut.body.question.status, 'pending');
-  assert.ok(Date.now() - started < 25_000);
+  assert.ok(Date.now() - started >= 80, 'pending wait must consume the injected timeout');
 
+  const waiterActive = new Promise(resolve => active.push(resolve));
   const firstWaiter = request(app)
     .get(`/api/runs/${worker.run.id}/questions/${questionId}/wait`)
     .set(worker.auth)
     .then(response => response);
-  await new Promise(resolve => setTimeout(resolve, 15));
+  await waiterActive;
   const secondWaiter = await request(app)
     .get(`/api/runs/${worker.run.id}/questions/${questionId}/wait`)
     .set(worker.auth)
@@ -157,20 +163,72 @@ test('respond is cookie-only, same-origin, and first-commit-wins with current st
     .send({ answer: 'morning' })
     .expect(403);
 
-  const answered = await request(app)
-    .post(url)
-    .set(COOKIE)
-    .send({ answer: 'morning' })
-    .expect(200);
+  const [first, second] = await Promise.all([
+    request(app).post(url).set(COOKIE).set('Host', 'console.test').set('Origin', 'http://console.test').send({ answer: 'morning' }),
+    request(app).post(url).set(COOKIE).set('Host', 'console.test').set('Origin', 'http://console.test').send({ answer: 'evening' }),
+  ]);
+  const [answered] = [first, second].filter(response => response.status === 200);
+  const [duplicate] = [first, second].filter(response => response.status === 409);
+  assert.ok(answered, 'exactly one concurrent response must commit with 200');
+  assert.ok(duplicate, 'exactly one concurrent response must lose with 409');
   assert.equal(answered.body.question.status, 'answered');
-
-  const duplicate = await request(app)
-    .post(url)
-    .set(COOKIE)
-    .send({ answer: 'morning' })
-    .expect(409);
   assert.equal(duplicate.body.reason, 'question_not_pending');
   assert.equal(duplicate.body.question.status, 'answered');
+});
+
+test('global waiter capacity is distinct from per-run waiter contention and is released', async (t) => {
+  const active = [];
+  const app = setupApp(t, {
+    questionWaitTimeoutMs: 40,
+    questionPollIntervalMs: 5,
+    questionMaxGlobalWaiters: 1,
+    questionOnWaiterActive: info => active.splice(0).forEach(resolve => resolve(info)),
+  });
+  const workers = [createWorker(app, 'capacity-a'), createWorker(app, 'capacity-b')];
+  const questions = await Promise.all(workers.map((worker, i) => register(app, worker, `capacity-${i}`).expect(201)));
+  const nextActive = () => new Promise(resolve => active.push(resolve));
+
+  const firstActive = nextActive();
+  const first = request(app).get(`/api/runs/${workers[0].run.id}/questions/${questions[0].body.question.id}/wait`).set(workers[0].auth).then(r => r);
+  await firstActive;
+  const globalBusy = await request(app).get(`/api/runs/${workers[1].run.id}/questions/${questions[1].body.question.id}/wait`).set(workers[1].auth).expect('Retry-After', '1').expect(429);
+  assert.equal(globalBusy.body.reason, 'waiter_capacity');
+  const runBusy = await request(app).get(`/api/runs/${workers[0].run.id}/questions/${questions[0].body.question.id}/wait`).set(workers[0].auth).expect(429);
+  assert.equal(runBusy.body.reason, 'waiter_busy');
+  await first;
+
+  const released = await request(app).get(`/api/runs/${workers[1].run.id}/questions/${questions[1].body.question.id}/wait`).set(workers[1].auth).expect(200);
+  assert.equal(released.body.question.status, 'pending');
+});
+
+test('stopQuestionWaiters wakes pending waits and makes later waits return immediately', async (t) => {
+  let signalWaiterActive;
+  const waiterActive = new Promise(resolve => { signalWaiterActive = resolve; });
+  const app = setupApp(t, {
+    questionWaitTimeoutMs: 5_000,
+    questionPollIntervalMs: 1_000,
+    questionMaxGlobalWaiters: 1,
+    questionOnWaiterActive: signalWaiterActive,
+  });
+  const worker = createWorker(app, 'shutdown');
+  const created = await register(app, worker, 'shutdown').expect(201);
+  const url = `/api/runs/${worker.run.id}/questions/${created.body.question.id}/wait`;
+  const waiting = request(app).get(url).set(worker.auth).then(r => r);
+  await waiterActive;
+
+  const started = Date.now();
+  const drain = app.stopQuestionWaiters();
+  const result = await waiting;
+  await drain;
+  assert.equal(result.status, 200);
+  assert.equal(result.body.question.status, 'pending');
+  assert.equal(app.getQuestionWaiterCount(), 0);
+  assert.ok(Date.now() - started < 1_000, 'shutdown must wake the waiter before its poll interval');
+
+  const laterStarted = Date.now();
+  const later = await request(app).get(url).set(worker.auth).expect(200);
+  assert.equal(later.body.question.status, 'pending');
+  assert.ok(Date.now() - laterStarted < 1_000, 'post-shutdown wait must return immediately');
 });
 
 test('human inbox filters status and worker allowlist has exact method/path boundaries', async (t) => {
