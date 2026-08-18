@@ -1244,6 +1244,11 @@ function createRunService(db, eventBus, questionService = null) {
     // started from `running` must also require that status at commit time or it
     // can force-overwrite the user's newer `cancelled` decision.
     requireCurrentStatus = null,
+    // An enclosing transaction can still roll back after this function
+    // returns. Since better-sqlite3 exposes no outer commit hook, callers that
+    // already own a transaction must suppress lifecycle events rather than
+    // publish a state that may never commit.
+    emitEvents = true,
   } = {}) {
     if (!VALID_STATUSES.includes(status)) {
       throw new BadRequestError(`Invalid run status: ${status}`);
@@ -1371,7 +1376,7 @@ function createRunService(db, eventBus, questionService = null) {
       run = stmts.getById.get(id);
     }
     addRunEvent(id, `status:${status}`, reason ? JSON.stringify({ reason }) : null);
-    if (eventBus) {
+    if (eventBus && emitEvents) {
       // v3 Phase 5 semantic event fields (spec §9.8):
       //   from_status / to_status — the transition, not just the
       //     terminal state. A client that missed the previous status
@@ -1398,7 +1403,7 @@ function createRunService(db, eventBus, questionService = null) {
     }
 
     // Emit run:ended for terminal states so lifecycleService can sync task status
-    if (TERMINAL_STATUSES.has(status) && eventBus) {
+    if (TERMINAL_STATUSES.has(status) && eventBus && emitEvents) {
       emitStatusEvent('run:ended', {
         run,
         from_status: fromStatus,
@@ -1418,13 +1423,35 @@ function createRunService(db, eventBus, questionService = null) {
       return updateRunStatusPersisted(id, status, options);
     }
 
+    if (db.inTransaction) {
+      // The caller already owns atomicity. Do not open a nested savepoint or
+      // touch deferredStatusEvents here: a savepoint can commit before its
+      // outer transaction, and its finally would also clear the top-level
+      // deferral slot.
+      //
+      // Events are emitted immediately, exactly as they were before this
+      // refactor. Suppressing them instead would be a worse failure mode than
+      // the risk it avoids: run:ended drives B-lite retry, the goal verdict
+      // loop and harvest, so a caller that wrapped a terminal transition in a
+      // transaction would silently stop all three. There is no outer commit
+      // hook in better-sqlite3, so the honest contract is: do not wrap a
+      // terminal transition in a transaction you may roll back -- its events
+      // have already fired.
+      const run = updateRunStatusPersisted(id, status, options);
+      if (run) {
+        questionService.cancelPendingForRun(id, { terminalReason: run.terminal_reason || null });
+      }
+      return run;
+    }
+
     const pendingEvents = [];
     const persistTerminal = db.transaction(() => {
-      const before = getRun(id);
+      // This deferral slot is used only by this top-level transaction path;
+      // the db.inTransaction branch above prevents nested/re-entrant ownership.
       deferredStatusEvents = pendingEvents;
       try {
         const run = updateRunStatusPersisted(id, status, options);
-        if (run && !TERMINAL_STATUSES.has(before.status)) {
+        if (run) {
           questionService.cancelPendingForRun(id, { terminalReason: run.terminal_reason || null });
         }
         return run;
@@ -2169,28 +2196,21 @@ function createRunService(db, eventBus, questionService = null) {
     let childId = null;
     if (args.retryChild) {
       const rc = args.retryChild;
-      childId = `run_${crypto.randomUUID().slice(0, 8)}`;
-      stmts.insert.run({
-        id: childId,
+      const childRow = buildRunRow({
         task_id: rc.task_id || null,
         agent_profile_id: rc.agent_profile_id || null,
         prompt: rc.prompt || null,
-        status: 'queued',
-        is_manager: 0,
+        is_manager: false,
         parent_run_id: rc.parent_run_id || null,
-        manager_adapter: null,
-        manager_thread_id: null,
-        manager_layer: null,
-        conversation_id: `worker:${childId}`,
-        queued_args: normalizeQueuedArgs(rc.queued_args),
-        retry_count: normalizeRetryCount(rc.retry_count),
+        queued_args: rc.queued_args,
+        retry_count: rc.retry_count,
         node_id: rc.node_id || null,
         operator_instance_id: rc.operator_instance_id || null,
         retry_root_run_id: rc.retry_root_run_id || null,
-        // stmts.insert is shared with buildRunRow/insertRunRow; every named
-        // parameter of that statement must be supplied here too.
         source_question_id: rc.source_question_id || null,
       });
+      childId = childRow.id;
+      stmts.insert.run(childRow);
       stmts.setGoalActive.run(1, childId); // inherit goal control (unified activation)
       stmts.linkGoalRetry.run(childId, args.runId);
     }
