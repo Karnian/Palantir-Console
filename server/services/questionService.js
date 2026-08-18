@@ -51,7 +51,12 @@ function validateCreate(input) {
     : Math.min(1_800_000, Math.max(60_000, waitBudgetMs));
 }
 
-function createQuestionService(db, eventBus) {
+const ID_COLLISION_RETRIES = 3;
+
+function createQuestionService(db, eventBus, options = {}) {
+  const generateId = typeof options.generateId === 'function'
+    ? options.generateId
+    : () => `wq_${crypto.randomUUID().slice(0, 12)}`;
   function materialize(row) {
     if (!row) return null;
     const expired = row.status === 'pending'
@@ -110,7 +115,6 @@ function createQuestionService(db, eventBus) {
       throw serviceError('QUESTION_PENDING', 'run already has a pending question');
     }
 
-    const id = `wq_${crypto.randomUUID().slice(0, 12)}`;
     const insert = db.prepare(`
       INSERT INTO worker_questions (
         id, run_id, task_id, project_id, idempotency_key, payload_hash,
@@ -120,15 +124,28 @@ function createQuestionService(db, eventBus) {
       FROM runs
       WHERE id = ? AND status NOT IN ('completed','failed','cancelled','stopped')
     `);
+    // A primary-key collision is not a contract violation like the UNIQUE
+    // indexes are -- it just means this id is taken. Retry with a fresh id
+    // instead of misdiagnosing it through classifyCreateFailure(), and never
+    // let the raw SQLITE_CONSTRAINT_PRIMARYKEY escape the service.
+    let id;
     let result;
-    try {
-      result = insert.run(id, input.runId, input.taskId ?? null, input.projectId ?? null,
-        input.idempotencyKey, hash, input.class, input.question, JSON.stringify(input.options ?? []), input.runId);
-    } catch (err) {
-      if (err && (err.code === 'SQLITE_CONSTRAINT_UNIQUE' || err.code === 'SQLITE_CONSTRAINT')) {
-        return classifyCreateFailure();
+    for (let attempt = 0; ; attempt += 1) {
+      id = generateId();
+      try {
+        result = insert.run(id, input.runId, input.taskId ?? null, input.projectId ?? null,
+          input.idempotencyKey, hash, input.class, input.question, JSON.stringify(input.options ?? []), input.runId);
+        break;
+      } catch (err) {
+        if (err && err.code === 'SQLITE_CONSTRAINT_PRIMARYKEY') {
+          if (attempt < ID_COLLISION_RETRIES) continue;
+          throw serviceError('QUESTION_ID_COLLISION', 'could not allocate a unique question id');
+        }
+        if (err && (err.code === 'SQLITE_CONSTRAINT_UNIQUE' || err.code === 'SQLITE_CONSTRAINT')) {
+          return classifyCreateFailure();
+        }
+        throw err;
       }
-      throw err;
     }
     if (result.changes === 0) return classifyCreateFailure();
     return materialize(getRaw.get(id));

@@ -7,7 +7,7 @@ const path = require('node:path');
 const { createDatabase } = require('../db/database');
 const { createQuestionService, canonicalPayloadHash } = require('../services/questionService');
 
-function setup(t) {
+function setup(t, serviceOptions = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-question-'));
   const handle = createDatabase(path.join(dir, 'test.db'));
   handle.migrate();
@@ -16,7 +16,7 @@ function setup(t) {
     fs.rmSync(dir, { recursive: true, force: true });
   });
   const events = [];
-  const service = createQuestionService(handle.db, { emit: (channel, data) => events.push({ channel, data }) });
+  const service = createQuestionService(handle.db, { emit: (channel, data) => events.push({ channel, data }) }, serviceOptions);
   const addRun = (id, status = 'running') => handle.db.prepare(
     'INSERT INTO runs (id, status) VALUES (?, ?)',
   ).run(id, status);
@@ -220,4 +220,32 @@ test('canonical hash ignores key order and wait budget', () => {
   const b = canonicalPayloadHash({ waitBudgetMs: 1_800_000, options: ['a', 'b'], question: 'Pick', class: 'choice' });
   assert.equal(a, b);
   assert.notEqual(a, canonicalPayloadHash({ class: 'choice', question: 'Pick', options: ['b', 'a'] }));
+});
+
+test('a primary-key collision retries with a fresh id instead of leaking SQLITE_CONSTRAINT_PRIMARYKEY', t => {
+  // Force the first two allocations onto one id so the INSERT hits the PK
+  // constraint. A collision means "this id is taken", not a contract
+  // violation, so it must retry rather than be misdiagnosed as
+  // RUN_NOT_ACTIVE/QUESTION_PENDING by classifyCreateFailure().
+  const ids = ['wq_fixed_collide', 'wq_fixed_collide', 'wq_after_retry'];
+  let i = 0;
+  const { service, addRun } = setup(t, { generateId: () => ids[Math.min(i++, ids.length - 1)] });
+  addRun('run-a');
+  addRun('run-b');
+  const first = service.createQuestion(input('run-a', { idempotencyKey: 'k-a' }));
+  assert.equal(first.id, 'wq_fixed_collide');
+  const second = service.createQuestion(input('run-b', { idempotencyKey: 'k-b' }));
+  assert.equal(second.id, 'wq_after_retry', 'the collision must be retried with a new id');
+});
+
+test('a persistent primary-key collision surfaces a normalized error', t => {
+  const { service, addRun } = setup(t, { generateId: () => 'wq_always_same' });
+  addRun('run-a');
+  addRun('run-b');
+  service.createQuestion(input('run-a', { idempotencyKey: 'k-a' }));
+  assert.throws(
+    () => service.createQuestion(input('run-b', { idempotencyKey: 'k-b' })),
+    (err) => err.code === 'QUESTION_ID_COLLISION',
+    'raw SQLITE_CONSTRAINT_PRIMARYKEY must not escape the service',
+  );
 });
