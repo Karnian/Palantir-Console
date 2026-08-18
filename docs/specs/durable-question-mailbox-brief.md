@@ -184,11 +184,18 @@ COMMIT
 
 | 조각 | 성격 | 호출 위치 |
 |---|---|---|
-| `buildRunRow(args)` | **순수** — 기본값·검증·필드 구성 | tx 안 |
+| `buildRunRow(args)` | **순수** — 기본값·검증·필드 구성. UUID 생성·정규화는 **여기서 정확히 1회**. `source_question_id` 포함 **모든 INSERT 필드**를 낸다 | tx 안 |
 | `insertRunRow(row)` | INSERT 만 | **tx 안** |
-| `emitRunCreated(row)` | `run:status` emit | **커밋 이후** |
+| `readRunRow(id)` | **persisted row 재조회** (`getById`) | **tx 안**, 같은 연결 |
+| `emitRunCreated(persisted)` | `run:status` emit — **persisted row 로** | **커밋 이후** |
 
-- 기존 `createRun` 은 이 셋을 순서대로 부르는 **얇은 래퍼**가 된다 — 기존 호출자 **동작 불변**.
+- 기존 `createRun` 은 **build → insert → read → emit → return(persisted)** 을 순서대로 부르는
+  얇은 래퍼가 된다 — 기존 호출자 **동작 불변**.
+  > **왜 `read` 단계가 필요한가**: 현재 `createRun` 은 INSERT 후 DB 에서 다시 읽은 row 를
+  > 반환하고 **그 row 를 emit** 한다. 3분할(build/insert/emit)은 이 동작을 표현하지 못해
+  > `run:status` envelope 이 build 결과로 바뀔 수 있다(codex R5).
+- 재개는 tx 안에서 **같은 연결로** build → insert → read 를 하고,
+  **커밋 후** 그 persisted row 로 emit → **drain wakeup**.
 - 질문 재개는 tx 안에서 `buildRunRow` + `insertRunRow` 만 쓰고,
   **커밋 후** `emitRunCreated` + **drain wakeup**(`executeTask` 가 생성 후 부르는 것과 동일한 공개 API)을 호출한다.
 - **롤백 시 이벤트가 0건**이어야 한다(수락기준 15).
@@ -306,6 +313,7 @@ codex 적대검토 R1 이 **블로커 3 + SERIOUS 8** 을 냈고 전부 반영�
 15. **SSE 와 트랜잭션 경계** — `question:pending` 이 channels 배열에 있고 실제 구독된다.
     **롤백된 재개 시도에서 `run:status`·`question:answered` 이벤트가 0건**이고,
     커밋 후에만 발생한다. tx 안에서 emit 하도록 바꾸면 실패하는 역회귀가 있어야 한다.
+    **emit payload 는 build 결과가 아니라 persisted row** 여야 한다(기존 envelope 불변).
 16. **waiter 상한(구체화)** — run 당 2번째 동시 wait 는 **429 + `Retry-After`** 로 즉시 반환하고,
     **첫 waiter 는 계속 유지**된다. 끊긴 waiter 는 정리되어 재연결이 막히지 않는다.
     (v2 기준 16 은 "즉시 반환"만 요구해 아무 구현이나 통과했다.)
@@ -314,7 +322,8 @@ codex 적대검토 R1 이 **블로커 3 + SERIOUS 8** 을 냈고 전부 반영�
     `resumed_run_id` 가 NULL 이고 **재시도가 성공**한다. CAS 와 INSERT 를 분리한 구현으로 바꾸면
     이 테스트가 실패해야 한다(고착 재현).
     **생성 경로 호환**: 만들어진 queued run 이 기존 `claimQueuedRun` 을 통과해 실제 spawn 가능한
-    필드를 갖고, **커밋 후 drain 이 그것을 claim** 한다.
+    필드를 갖는다. **drain wakeup 을 커밋 후에 정확히 호출했고 커밋 전에는 호출하지 않았음**을
+    직접 단언한다 — "결국 claim 됐다"만 보면 다른 drain 이 대신 해도 통과해 vacuous 하다.
 18. **재개 run 이 답을 소비** — 새 run 의 컴파일된 프롬프트에 `[ANSWERED QUESTION]` 블록과
     `source_question_id` 가 있다. 블록을 제거하면 실패하는 역회귀가 있어야 한다.
 19. **answered·미재개 가시성** — `answered` ∧ `resumed_run_id IS NULL` 이 목록·UI 에서
