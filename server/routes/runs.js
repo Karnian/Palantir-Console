@@ -465,8 +465,12 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
       return res.status(501).json({ error: 'Execution engine not configured' });
     }
     if (req.query.after !== undefined) {
-      const after = Number(req.query.after);
-      if (!Number.isInteger(after) || after < 0) {
+      const afterWire = req.query.after;
+      if (typeof afterWire !== 'string' || !/^(0|[1-9]\d*)$/.test(afterWire)) {
+        return res.status(400).json({ error: 'after must be a non-negative integer' });
+      }
+      const after = Number(afterWire);
+      if (!Number.isSafeInteger(after)) {
         return res.status(400).json({ error: 'after must be a non-negative integer' });
       }
       const run = runService.getRun(req.params.id);
@@ -497,8 +501,9 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
         throw err;
       }
 
-      const terminal = ['completed', 'failed', 'cancelled', 'stopped'].includes(run.status);
-      if (range.deleted && terminal) {
+      const latestRun = runService.getRun(run.id);
+      const terminal = ['completed', 'failed', 'cancelled', 'stopped'].includes(latestRun.status);
+      if ((range.deleted || range.missing) && terminal) {
         return res.status(410).json({
           error: 'Run output is no longer available',
           reason: 'output_expired',
@@ -519,8 +524,11 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
         end_offset: range.end_offset,
         has_more: unavailable ? false : range.has_more,
         truncated: Boolean(range.generation_changed),
-        finalized: unavailable ? false : Boolean(range.sealed && !range.has_more),
-        run_status: run.status,
+        // A sealed artifact does not substitute for terminal DB state: defer
+        // exposing finalization until both signals agree.
+        finalized: !unavailable && !range.generation_changed
+          && terminal && range.sealed && !range.has_more,
+        run_status: latestRun.status,
         source_id: unavailable ? null : (range.source_id ?? null),
         format: isDetachedClaude ? 'claude_ndjson' : 'text',
       });

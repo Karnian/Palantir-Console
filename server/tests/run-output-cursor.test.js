@@ -74,7 +74,7 @@ async function createFixture(t, { result, error, nodeService = true } = {}) {
     if (detached) runService.addRunEvent(run.id, 'runtime:remote_worker_engine', '{}');
     return runService.getRun(run.id);
   }
-  return { app: server, calls, createRun };
+  return { app: server, calls, createRun, runService };
 }
 
 function rangeResult(overrides = {}) {
@@ -115,12 +115,47 @@ test('normal incremental response preserves offsets and base64-encodes Buffer by
 
 test('finalized is true only for sealed output with no remaining bytes', async (t) => {
   const sealedDone = await createFixture(t, { result: rangeResult({ sealed: true, has_more: false }) });
-  const doneRun = sealedDone.createRun();
+  const doneRun = sealedDone.createRun({ status: 'completed' });
   assert.equal((await request(sealedDone.app).get(`/api/runs/${doneRun.id}/output?after=0`)).body.finalized, true);
 
   const sealedMore = await createFixture(t, { result: rangeResult({ sealed: true, has_more: true }) });
-  const moreRun = sealedMore.createRun();
+  const moreRun = sealedMore.createRun({ status: 'completed' });
   assert.equal((await request(sealedMore.app).get(`/api/runs/${moreRun.id}/output?after=0`)).body.finalized, false);
+});
+
+test('sealed output defers finalization while the latest DB status is non-terminal', async (t) => {
+  const f = await createFixture(t, { result: rangeResult({ sealed: true, has_more: false }) });
+  const run = f.createRun({ status: 'running' });
+  const res = await request(f.app).get(`/api/runs/${run.id}/output?after=0`);
+  assert.equal(res.status, 200);
+  assert.equal(res.body.finalized, false);
+  assert.equal(res.body.run_status, 'running');
+});
+
+test('sealed output exposes finalization when the latest DB status is terminal', async (t) => {
+  const f = await createFixture(t, { result: rangeResult({ sealed: true, has_more: false }) });
+  const run = f.createRun({ status: 'completed' });
+  const res = await request(f.app).get(`/api/runs/${run.id}/output?after=0`);
+  assert.equal(res.status, 200);
+  assert.equal(res.body.finalized, true);
+  assert.equal(res.body.run_status, 'completed');
+});
+
+test('incremental output re-reads status after reading the output range', async (t) => {
+  const f = await createFixture(t, { result: rangeResult({ sealed: true, has_more: false }) });
+  const run = f.createRun({ status: 'running' });
+  const originalGetRun = f.runService.getRun;
+  let reads = 0;
+  f.runService.getRun = (id) => {
+    const current = originalGetRun(id);
+    reads += 1;
+    return reads === 1 ? current : { ...current, status: 'completed' };
+  };
+  const res = await request(f.app).get(`/api/runs/${run.id}/output?after=0`);
+  assert.equal(res.status, 200);
+  assert.equal(res.body.run_status, 'completed');
+  assert.equal(res.body.finalized, true);
+  assert.equal(reads, 2);
 });
 
 test('incremental response includes the run status from the same request', async (t) => {
@@ -157,7 +192,7 @@ test('generation change returns a truncated reset delta', async (t) => {
 
 test('missing output returns an empty non-final delta at the requested cursor', async (t) => {
   const f = await createFixture(t, { result: rangeResult({ missing: true, source_id: null, data: Buffer.alloc(0) }) });
-  const run = f.createRun();
+  const run = f.createRun({ status: 'running' });
   const res = await request(f.app).get(`/api/runs/${run.id}/output?after=23`);
   assert.equal(res.status, 200);
   assert.equal(res.body.data_base64, '');
@@ -169,6 +204,15 @@ test('missing output returns an empty non-final delta at the requested cursor', 
 test('deleted terminal output is 410 output_expired', async (t) => {
   const f = await createFixture(t, { result: rangeResult({ deleted: true, data: Buffer.alloc(0) }) });
   const run = f.createRun({ status: 'failed' });
+  const res = await request(f.app).get(`/api/runs/${run.id}/output?after=0`);
+  assert.equal(res.status, 410);
+  assert.equal(res.body.reason, 'output_expired');
+  assert.equal(typeof res.body.error, 'string');
+});
+
+test('missing terminal output is 410 output_expired', async (t) => {
+  const f = await createFixture(t, { result: rangeResult({ missing: true, data: Buffer.alloc(0) }) });
+  const run = f.createRun({ status: 'completed' });
   const res = await request(f.app).get(`/api/runs/${run.id}/output?after=0`);
   assert.equal(res.status, 410);
   assert.equal(res.body.reason, 'output_expired');
@@ -205,8 +249,8 @@ test('manager run with after reports incremental_unsupported', async (t) => {
 test('invalid after values are rejected with 400', async (t) => {
   const f = await createFixture(t);
   const run = f.createRun();
-  for (const after of ['-1', '1.5', 'NaN']) {
-    const res = await request(f.app).get(`/api/runs/${run.id}/output?after=${after}`);
+  for (const after of ['-1', '1.5', 'NaN', '9007199254740992', ' 1 ', '1e3', '']) {
+    const res = await request(f.app).get(`/api/runs/${run.id}/output?after=${encodeURIComponent(after)}`);
     assert.equal(res.status, 400, after);
   }
 });
