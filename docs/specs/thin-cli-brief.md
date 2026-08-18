@@ -46,6 +46,269 @@ CLAUDE.md 의 T1 경고("`POST /runs/:id/input` 기반 설계 금지")는 *durab
 
 ## 3. `follow` 의 전송 — 이 설계의 핵심 결정
 
+## 3.0 착수 전 실측 정정 — substrate 는 경로마다 다르다 (슬라이스 2 개정 rev2, 2026-08-18)
+
+§3.1 은 "서버가 offset 을 소유한다"고만 적고 **어떤 저장 substrate 가 그 offset 을 지탱하는지**를
+적지 않았다. 실측 결과 경로마다 다르고, 일부는 **오프셋을 원리적으로 지탱하지 못한다.**
+
+| 경로 | 출력 소스 | 안정적 바이트 오프셋 |
+|---|---|---|
+| **원격 워커** | `<exposed_root>/.palantir-runs/<runId>/stdout.log` — append-only 파일 (`remoteSshExecutor.js:1637`) | ✅ |
+| 로컬 goal run | `runtime/goal-output/<runId>.log` tee (`lifecycleService.js:2042`) | ✅ 단 `goal_enabled` 게이트 |
+| **로컬 일반 run** | SubprocessEngine 인메모리 **500줄 ring** / TmuxEngine `capture-pane` **스크린 버퍼** | ❌ **불가** |
+
+`capture-pane` 은 append-only 스트림이 아니라 화면 버퍼라 ANSI clear·커서 이동이 이미 쓴 영역을 덮어쓴다 —
+"이미 쓴 바이트를 다시 쓰지 않는다"(§9 테스트 4)를 만족시킬 offset 이 **존재하지 않는다**.
+프로세스 레코드는 종료 10분 뒤 삭제되고(`PROCESS_TTL_MS`), terminal 시 `final_output` run event 로
+**마지막 2000자만** 남는다.
+
+### 3.0.1 결정: **v1 은 원격 run 전용** (사용자 결정, 2026-08-18)
+
+원격은 이미 파일이라 substrate 신규 작업이 0 이고 실사용처(Pi fleet 무인 run 관찰)를 덮는다.
+**전역 tee**(로컬까지 파일화)는 모든 워커 stdout 을 디스크에 영속시켜 크레덴셜 잔존 범위를 넓히고
+보존창·용량 정책을 새로 요구하므로 **v1 범위 밖**이다.
+
+### 3.0.2 **서버는 파싱하지 않는다 — 원시 바이트만 준다** (rev2 의 핵심 정정)
+
+rev1 은 서버가 줄 경계로 자르고 NDJSON 을 텍스트 델타로 변환하게 했다. **틀렸다.** codex 지적대로
+그 변환은 **상태 의존**이라 무상태 요청으로 재현할 수 없다 — `claudeStreamJson.js:48` 의
+`if (resultText && !text.includes(resultText))` 는 **이전 assistant 텍스트 전체**를 봐야 결정되고,
+비-JSON 줄은 `:16` 에서 **버려진다**(원문 보존 안 됨). 델타마다 부르면 스냅샷 뷰와 어긋난다.
+
+**정정**: 상태는 **연속성이 있는 쪽**에 둔다.
+
+- **서버**: `stdout.log` 의 `[after, after+max_bytes)` **원시 바이트**를 그대로 반환. 파싱 0, 줄 로직 0,
+  UTF-8 경계 로직 0. `next_offset` = 실제 반환한 마지막 바이트의 다음.
+- **CLI**: 장수 프로세스라 상태를 자연히 갖는다. `StringDecoder` 가 **멀티바이트 carry 를 기본 제공**하고,
+  줄 재조립도 클라이언트 버퍼로 한다.
+
+이 한 번의 이동으로 rev1 이 열었던 구멍이 함께 닫힌다:
+- **UTF-8 분할** — `StringDecoder` 가 처리. 서버 경계 규칙 불필요.
+- **`line_split` 예외** — 서버가 줄 경계를 약속하지 않으므로 예외 자체가 없다(rev1 은 이 예외가
+  다시 부분 NDJSON 레코드를 만들어 자기모순이었다).
+- **부분 레코드 재조립** — CLI 버퍼가 담당. 서버에 carry 토큰이 필요 없다.
+
+**렌더링**: 응답에 `format` 을 싣는다 — detached Claude run 은 `'claude_ndjson'`, 그 외 `'text'`.
+CLI 는 `claude_ndjson` 이면 완결된 줄을 파싱해 사람이 읽을 텍스트로 렌더하고, 불완전한 꼬리는 버퍼에 남긴다.
+인식 불가한 줄은 **원문 그대로 통과**시킨다 — 스냅샷 파서가 버리는 줄까지 CLI 는 보여주므로
+`after` 뷰가 스냅샷 뷰보다 **정보를 덜 주지 않는다**.
+
+> `result.jsonl` 은 `after` 경로에서 읽지 않는다. 코드상 그것은 별개 원천이 아니라 워커 종료 후
+> `awk` 가 `stdout.log` 에서 마지막 `type:"result"` 줄을 골라 복사한 **파생물**이다
+> (`remoteSshExecutor.js:1954`). 원본이 이미 스트림 안에 있다.
+
+### 3.0.3 capability — 로컬/미지원 run 의 응답
+
+`after` 지정 + 증분 소스 없음 → **HTTP 409** + `{ error, reason: 'incremental_unsupported' }`.
+**404 아님**(run 은 존재) **501 아님**(서버 기능이 아니라 이 run 의 substrate 문제).
+CLI 는 이 `reason` 으로 "원격 run 만 follow 가능"을 stderr 에 적고 **코드 4**. 조용한 degrade 0.
+`reason` 이 판별자인 것은 `/api/fs` 403 선례(`apiFetch({ allowAppForbidden })`)와 같은 규율이다.
+
+**읽기·stat·전송 실패도 조용히 legacy 응답으로 fallback 하지 않는다** — 실패는 실패로 보고한다.
+
+### 3.0.4 봉인(`finalized`) = **durable producer seal**, 두 번의 stat 이 아니다
+
+rev1 은 "크기 → status → 크기" 로 봉인을 판정했다. **불충분하다** — 두 stat 사이가 조용해도 그 뒤
+append 가 올 수 있고, stdout FD 를 상속한 background descendant 가 있으면 특히 그렇다.
+
+**정정**: 원격 워커 스크립트는 이미 **durable seal 을 쓴다**:
+```sh
+; agent_exit_code=$?<captureStructuredResult>; echo "$agent_exit_code" > <statusDir>/exit.code
+```
+(`remoteSshExecutor.js:1962`, `:1640`. 주석 `:1806` — "The pane writes exit.code only after the worker
+and its result capture")
+
+`exit.code` 는 **워커와 result 캡처가 모두 끝난 뒤에만** 존재한다. 따라서
+**`finalized` = `exit.code` 존재 ∧ 그 시점 파일 크기까지 전부 반환됨**. DB status 가 아니라
+**producer 가 남긴 증거**를 기준으로 한다.
+
+> `exit.code` 가 끝내 안 생기는 경우(노드 리부트 등)는 §3.2 의 drain deadline 이 덮는다 — 코드 5.
+
+### 3.0.5 로그 세대 식별 — `ctime` 금지
+
+rev1 의 `st_dev:st_ino:st_ctime` 은 **틀렸다**. `ctime` 은 **append 마다 갱신**되므로 정상 출력이
+전부 "세대 변경"으로 오인된다.
+
+**정정**: `source_id` = `st_dev:st_ino` 만. run id 는 재사용되지 않고 `statusDir` 는 spawn 시 1회 생성·
+`cleanupRun` 이 1회 삭제하므로(`:2181`), 한 run 안에서 세대는 사실상 바뀌지 않는다. 바뀌었거나
+사라졌으면 §3.0.6.
+
+### 3.0.6 보존 만료 — `cleanupRun` 과의 경합
+
+`cleanupRun` 이 `statusDir` 를 통째 지운다. `follow` 중이면 출력이 부분이 아니라 **전부** 사라진다 —
+§3.1 의 `truncated`("앞부분을 버림")로는 못 덮는다.
+
+- `after` 지정인데 `stdout.log` **부재** → **HTTP 410 Gone** + `{ reason: 'output_expired' }`.
+  단 run 이 아직 running 이면 410 이 아니라 **빈 델타**로 답한다(spawn 직후 경합).
+- `source_id` 변경 → `truncated: true` 와 동일 취급(경고 + 현재 tail 재개 + **sticky 코드 5**).
+- CLI 는 410 → 경고 + **코드 5**. 단 **봉인을 이미 받은 뒤의 410 은 무시**한다(관측이 이미 완결).
+
+### 3.0.7 왕복 비용 — 한 SSH 스크립트로 묶는다
+
+폴링마다 stat·sentinel·read 를 따로 하면 왕복이 3배가 된다. **한 스크립트에서 순서대로 수행**하고
+프레이밍된 한 응답으로 받는다: `stat` → `exit.code` 존재 → `dd`/`tail -c` 로 바이트 구간 → 다시 `stat`.
+**마지막 stat 은 읽는 도중 파일이 지워지거나 바뀐 경합을 검출**한다(generation-before/after 비교).
+
+### 3.0.8 §9 수락 기준 추가
+
+- **14. 로컬 capability**: 로컬 run 에 `after` → 409 `incremental_unsupported`, CLI 코드 4. 조용한 legacy 응답 0.
+- **15. 서버 무파싱**: 서버 응답이 `stdout.log` 의 바이트 구간과 **정확히 일치**한다(파싱·줄 조작 0).
+  멀티바이트 문자가 응답 경계에 걸쳐도 CLI 출력이 깨지지 않는다(`StringDecoder` carry).
+- **16. NDJSON 렌더는 CLI 쪽**: 응답 경계가 레코드 중간이어도 CLI 가 버퍼로 재조립한다.
+  인식 불가한 줄은 원문 그대로 나온다(스냅샷 파서보다 정보를 덜 주지 않는다).
+- **17. 봉인 = sentinel**: `exit.code` 부재면 크기가 안정돼도 `finalized:false`. 생기면 그 시점 크기까지
+  전달 후 `finalized:true`. **sentinel 판정을 DB status 로 되돌리면 실패**하는 역회귀가 있어야 한다.
+- **18. 세대/만료**: `st_dev:st_ino` 변경 → sticky 5. terminal run 의 `stdout.log` 부재 → 410 → 코드 5.
+  **`ctime` 을 식별자에 넣으면 정상 append 가 세대 변경으로 오인**되는 재현 테스트가 실패한다.
+- **19. 왕복**: 폴링 1회당 SSH 왕복이 1회다.
+### 3.0.9 rev4 — 전송·봉인·재시작 (codex R2/R3 반영)
+
+#### (a) 전송 프레이밍 — 원시 바이트 보존
+
+`remoteSshExecutor.js:731` 이 `Buffer.concat(...).toString('utf8')` 로 **문자열 디코드**한다.
+바이트 구간을 그대로 나를 수 없다(잘못된 UTF-8 → replacement 문자, 코드포인트 중간 절단 → 손상).
+
+**결정**: 원격 스크립트가 **base64 로 인코딩**해 내보내고 서버가 디코드한다. base64 는 ASCII 라
+기존 문자열 경로가 무손실이다.
+
+- 원격 요구사항에 **`base64` 추가**(헤더 주석 `:644` 갱신). coreutils·busybox 모두 제공.
+- **서버는 요청된 바이트 구간을 정확히 복원하되, 응답에는 §3.0.10 결정 3 대로 `data_base64` 로 싣는다**
+  (디코드는 CLI). 줄·UTF-8 경계를 **정렬하지 않는다** —
+  §3.0.2 의 "서버 무파싱"이 유지된다. base64 는 **전송 프레이밍 해제**이지 내용 파싱이 아니다.
+  (rev3 의 "서버가 경계를 정렬한다"는 문장은 §3.0.2 와 정면 충돌하는 오류였다. 철회.)
+- 명세할 것: 개행 없는 단일 base64 프레임 / decode 실패 시 응답 처리 / 프레임 길이 상한.
+
+#### (b) 봉인 = 셸·result 캡처 완료. **그 이상을 주장하지 않는다**
+
+반례(codex): 워커가 `cmd &` descendant 를 남기고 그것이 **상속된 stdout** 을 계속 쓰면,
+foreground 종료 → result 캡처 → `exit.code` 기록 **이후에도** `stdout.log` 가 자란다.
+
+**결정**: `finalized` 는 **"셸과 result 캡처가 끝났다"**로 좁힌다. `follow` 는 **봉인에서 종료한다.**
+
+- **rev3 의 "봉인 후 append 를 다음 폴링에서 회수한다"는 철회한다.** 종료하면서 계속 관측하겠다는
+  것은 구현 불가한 자기모순이었다(수락 기준 20 삭제).
+- 대신 **한계를 문서화**한다: 봉인 이후 detached descendant 가 쓴 출력은 **관측되지 않는다.**
+  이건 `follow` 만의 문제가 아니라 **워커 owner-exit 트랙의 미해결 항목**이며(#483, S2b·S3 보류),
+  거기서 프로세스 그룹 종료·FD 격리가 해결되면 이 계약이 자동으로 강해진다.
+- **정직성 정정**: rev3 의 "harvest·final_output 이 **전부** 같은 표식을 쓴다"는 **과장이었다.**
+  코드상 `detectExitCode` 가 `exit.code` 를 읽고 원격 terminal 판정이 그 위에 서지만,
+  `final_output` 은 `getOutput`/`result.jsonl` 을 **best-effort** 로 읽는다. 정확히는
+  **"원격 terminal 판정이 이 sentinel 위에 선다"** 이고, `follow` 는 그 판정을 따를 뿐이다.
+
+#### (c) CLI 재시작 — durable checkpoint
+
+CLI 가 미완성 줄/UTF-8 조각을 버퍼에 든 채 죽으면 서버 offset 만으로 복원할 수 없다.
+
+**결정**: CLI 가 **`committed_offset` 을 durable 하게 기록**한다.
+- `fetched_offset`(메모리) 와 `committed_offset`(디스크) 를 구분한다.
+- `committed_offset` = **stdout 에 써서 flush 된** 마지막 **줄 경계**의 위치.
+- 재개는 항상 `committed_offset` 에서. 최악의 경우 마지막 부분 줄을 다시 받는다.
+- **EOF 꼬리 규칙**: 개행으로 끝나지 않는 마지막 조각은 **`finalized` 를 받은 뒤에만** commit 한다.
+  그 전에는 미완성으로 보고 commit 하지 않는다.
+- **`follow` 는 at-least-once 다** — exactly-once 가 아니다. stdout write 와 checkpoint 는
+  원자적일 수 없으므로 **write 후 checkpoint 전 crash 는 중복을 낸다.**
+  rev3 의 "중복은 항상 깨끗한 줄 경계에서만" 은 **과한 주장이라 철회**한다 —
+  부분 write 가 가능하므로 **줄 중간 중복도 가능**하다고 계약에 명시한다.
+- checkpoint 파일 위치·형식·손상 시 처리(=`after=0` 재시작 + `truncated` 취급)를 명세한다.
+
+#### §9 수락 기준 (rev4 확정)
+
+- **20. (삭제)** — 봉인 후 append 관측은 계약에서 뺀다. 대신 **한계가 문서에 적혀 있는지**만 확인한다.
+- **21. 재시작 유실 0**: 부분 줄 보유 상태에서 CLI 를 죽였다 재시작하면 그 줄이 온전히 나온다.
+- **22. at-least-once 명시**: 재시작이 중복을 낼 수 있고 **줄 중간일 수도 있음**을 계약이 명시한다.
+- **23. EOF 꼬리**: 개행 없는 마지막 조각은 `finalized` 이후에만 commit 된다.
+- **24. base64 무손실**: 임의 바이트(무효 UTF-8 포함)가 손상 없이 왕복한다. decode 실패는 조용히
+  넘어가지 않는다.
+### 3.0.10 rev5 — 확정 결정 (codex R4 처방 반영)
+
+R4 가 남긴 7개 결정 항목과 2개 모순을 전부 확정한다. **아래가 §3.0.4/§3.0.7 을 덮어쓴다.**
+
+#### 모순 해소 1 — `exit.code` 의 의미 통일
+
+§3.0.4 의 **"durable producer seal"** 표현을 **철회**한다. 전 문서에서 `exit.code` 는
+**"셸·result 캡처 완료 표식(completion marker)"** 이다. descendant 가 상속 stdout 에 계속 쓸 수
+있으므로 "모든 producer 가 닫혔다"를 뜻하지 않는다(§3.0.9(b), 한계는 #483 트랙).
+
+#### 모순 해소 2 — 봉인 폴링의 cut-off 확정
+
+한 응답 안에서 **첫 `stat` 의 크기를 이번 응답의 고정 `end_offset`** 으로 삼는다.
+
+- `exit.code` 가 존재하고 **그 `end_offset` 까지 전부 반환했을 때** `finalized: true`.
+- **마지막 `stat` 은 삭제·inode 변경 검출에만** 쓴다(크기 판정에 쓰지 않는다).
+- 이러면 "그 시점 파일 크기"가 어느 stat 인지 모호하지 않다.
+
+#### 결정 3 — wire format
+
+응답은 **JSON 유지**, 바이트는 **`data_base64`** 필드로 싣는다. CLI 가 디코드한다.
+octet-stream + 헤더 메타데이터는 채택하지 않는다(기존 `apiFetch`/JSON 오류 규율과 어긋난다).
+
+#### 결정 4 — base64 프레임 계약
+
+- **개행 없는 단일 프레임**. 공백·줄바꿈 불허.
+- 최대 원시 바이트 = `max_bytes`(256KB). 인코딩 길이 상한은 그 4/3 + padding.
+- **빈 델타는 `data_base64: ""`** (필드 생략 아님).
+- 비정상 문자·padding·길이 오류 → 서버는 **500** + `reason: 'output_frame_invalid'`,
+  CLI 는 **코드 5**(재시도 예산 안에서 재시도하되 반복되면 5). 조용히 넘어가지 않는다.
+
+#### 결정 5 — checkpoint 파일
+
+- 경로: `~/.palantir/follow/<runId>.json` (mode 0600)
+- 형식: `{ v: 1, run_id, source_id, format, committed_offset }`
+- **원자적 교체**: temp 파일 write → `fsync` → `rename`.
+- **복수 `follow` 프로세스**: 같은 runId 를 동시에 따라가는 것은 **지원하지 않는다**.
+  마지막 writer 가 이긴다(잠금 없음). 이 사실을 `--help` 에 적는다.
+
+#### 결정 6 — checkpoint 손상 / `source_id` 불일치
+
+- 손상(파싱 실패·`v` 불일치) 또는 `source_id` 불일치 → **경고 + `after=0` 재개 + `truncated` 취급**
+  (= **sticky 코드 5**). 관측이 완결이 아님을 숨기지 않는다.
+- 재개 후 checkpoint 는 **첫 commit 시점에 재작성**한다(재개 직후가 아니라).
+
+#### 결정 7 — `finalized` 시 EOF 꼬리 처리
+
+봉인 응답까지 소비한 뒤, CLI 버퍼에 남은 개행 없는 꼬리를:
+- **`format: 'text'`** → 그대로 stdout 에 쓰고 commit.
+- **`format: 'claude_ndjson'`** → 완결된 JSON 이면 파싱해 렌더, **잘린 JSON 이면 원문 그대로** 출력하고
+  **stderr 에 한 줄 경고**(불완전 레코드). 어느 쪽이든 **버리지 않는다.**
+- 순서: **렌더 → stdout flush → commit**. 그 뒤 종료 코드 판정.
+
+#### §9 수락 기준 (rev5 확정 추가)
+
+- **25. cut-off**: 봉인 폴링에서 첫 stat 크기까지만 반환하고 그때 `finalized:true`.
+  마지막 stat 을 크기 판정에 쓰도록 바꾸면 실패하는 역회귀가 있어야 한다.
+- **26. 프레임 오류**: 손상된 base64 → 500 `output_frame_invalid` → CLI 코드 5. 조용한 통과 0.
+- **27. checkpoint 손상**: 손상 파일 → `after=0` 재개 + sticky 5.
+- **28. EOF 꼬리**: 잘린 JSON 이 원문으로 출력되고 경고가 뜬다(유실 0).
+
+### 3.0.11 미해결 — 구현 착수 전 확정 필요 (codex R5)
+
+방향(원격 전용 / 서버 무파싱 / CLI 상태 / base64 프레이밍 / `exit.code` 완료표식 / `committed_offset`
+재개)은 **적대검토 5라운드로 굳었다.** 아래는 남은 **세부 결정**이며, 이게 닫히기 전에는 구현을
+시작하지 않는다 — 서로 다른 구현이 모두 "명세 준수"를 주장할 수 있는 상태이기 때문이다.
+
+1. **원격 프레임 검증 위치** — 서버가 원격 base64 를 엄격 검증한 뒤 **같은 문자열을** `data_base64` 로
+   전달하는가, **디코드 후 재인코딩**하는가. `output_frame_invalid` 검출 지점과 canonical padding
+   검증이 여기에 달렸다.
+2. **마지막 stat 이 삭제·inode 변경을 발견했을 때** 이미 읽은 `data_base64` 를 폐기하는가,
+   `truncated` 와 함께 전달하는가. 새 inode 의 어느 offset 에서 재개하는가.
+3. **checkpoint 의 `format` 이 현재 응답 `format` 과 불일치**할 때. `source_id` 가 같아도
+   렌더러 상태와 commit 경계의 의미가 달라진다.
+4. **stdout flush 완료 기준** — write 반환 / drain / callback 중 무엇을 commit 의 선행조건으로 삼는가.
+5. **checkpoint durability 범위** — temp 파일 mode 0600 적용 시점, rename 이후 **부모 디렉터리 fsync**
+   여부. 전원 장애까지 보장할 것인가(파일 fsync+rename 만으로는 부족).
+6. **`stdout.log` 가 아직 없는 running 응답의 `source_id` 표현**과, 기존 checkpoint 의 `source_id` 를
+   언제 검증하는가.
+
+> **왜 여기서 멈추는가**: 이 트랙에서 "전제를 확인하지 않고 착수"가 반복해서 비쌌다.
+> A2 는 착수 직전에 `verify_checks` 라우터 전체가 goal 게이트 뒤라는 것을 발견해 설계를 바꿨고,
+> #12 는 계약 문서의 벤더 결합을 코드 줄 수로 오판해 보류로 끝났다. 이 슬라이스도 §3.1 이
+> substrate 를 적지 않아 **로컬 일반 run 에서 구현 불가**라는 것을 착수 전에 발견했다.
+
+---
+
+> **아래 §3.1~ 는 개정 전 원문이다.** 위 §3.0 계열이 우선한다.
+
+
 초안은 `/output` 폴링만으로 충분하다고 가정했다. **틀렸다.** 확인된 제약:
 
 1. `/output` 에 **run status 가 없다** → 종료 판정 불가(codex BLOCKER-1).
