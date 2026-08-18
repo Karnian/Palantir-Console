@@ -11,6 +11,7 @@ const { parseClaudeStreamJsonOutput } = require('../services/claudeStreamJson');
 // the wire on every poll. 1 MiB matches the ceiling noted in the R2-B
 // plan; change here + in the route tests if this ever moves.
 const DIFF_MAX_BYTES = 1 * 1024 * 1024;
+const OUTPUT_RANGE_MAX_BYTES = 256 * 1024;
 // Walltime cap — we never want `git diff` to hang the runs router.
 const DIFF_TIMEOUT_MS = 10 * 1000;
 
@@ -463,6 +464,68 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
     if (!executionEngine) {
       return res.status(501).json({ error: 'Execution engine not configured' });
     }
+    if (req.query.after !== undefined) {
+      const after = Number(req.query.after);
+      if (!Number.isInteger(after) || after < 0) {
+        return res.status(400).json({ error: 'after must be a non-negative integer' });
+      }
+      const run = runService.getRun(req.params.id);
+      const isRemoteWorker = run.node_id
+        && run.node_id !== 'local'
+        && Number(run.is_manager || 0) !== 1;
+      if (!isRemoteWorker || !nodeService) {
+        return res.status(409).json({
+          error: 'Incremental output is unsupported for this run',
+          reason: 'incremental_unsupported',
+        });
+      }
+
+      const runExecutor = nodeService.pickExecutor(run.node_id);
+      let range;
+      try {
+        range = await runExecutor.readOutputRange(run.id, {
+          after,
+          maxBytes: OUTPUT_RANGE_MAX_BYTES,
+        });
+      } catch (err) {
+        if (err && err.code === 'OUTPUT_FRAME_INVALID') {
+          return res.status(500).json({
+            error: 'Remote output frame is invalid',
+            reason: 'output_frame_invalid',
+          });
+        }
+        throw err;
+      }
+
+      const terminal = ['completed', 'failed', 'cancelled', 'stopped'].includes(run.status);
+      if (range.deleted && terminal) {
+        return res.status(410).json({
+          error: 'Run output is no longer available',
+          reason: 'output_expired',
+        });
+      }
+
+      const isDetachedClaude = typeof runService.hasRunEvent === 'function'
+        ? runService.hasRunEvent(run.id, 'runtime:remote_worker_engine')
+        : typeof runService.getRunEvents === 'function'
+          && runService.getRunEvents(run.id)
+            .some((event) => event.event_type === 'runtime:remote_worker_engine');
+      const unavailable = range.missing || range.deleted;
+      return res.json({
+        data_base64: range.generation_changed || unavailable
+          ? ''
+          : range.data.toString('base64'),
+        next_offset: range.generation_changed ? 0 : unavailable ? after : range.next_offset,
+        end_offset: range.end_offset,
+        has_more: unavailable ? false : range.has_more,
+        truncated: Boolean(range.generation_changed),
+        finalized: unavailable ? false : Boolean(range.sealed && !range.has_more),
+        run_status: run.status,
+        source_id: unavailable ? null : (range.source_id ?? null),
+        format: isDetachedClaude ? 'claude_ndjson' : 'text',
+      });
+    }
+
     const lines = Math.min(Math.max(1, Number(req.query.lines || 100)), 2000);
     const run = runService.getRun(req.params.id);
     const isRemoteWorker = run.node_id
@@ -539,4 +602,5 @@ module.exports = {
   computeMcpTemplateDrift,
   runGitDiff,
   DIFF_MAX_BYTES,
+  OUTPUT_RANGE_MAX_BYTES,
 };
