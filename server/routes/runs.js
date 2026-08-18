@@ -508,7 +508,11 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
       // The two snapshots serve opposite race-safety goals and cannot be merged:
       // preRun prevents stale missing/deleted reads from producing a false 410,
       // while latestRun prevents sealed output from being finalized too early.
-      if ((range.deleted || range.missing) && wasTerminalBeforeRead) {
+      // Both snapshots must agree the run is terminal. preRun alone would 410 a
+      // run that was requeued (failed -> queued) during the read; latestRun alone
+      // would 410 a run that merely finished during it. Requiring both makes the
+      // expiry decision late in every direction instead of wrong in one.
+      if ((range.deleted || range.missing) && wasTerminalBeforeRead && isTerminalAfterRead) {
         return res.status(410).json({
           error: 'Run output is no longer available',
           reason: 'output_expired',

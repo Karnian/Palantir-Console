@@ -167,6 +167,30 @@ test('incremental output re-reads status after reading the output range', async 
   assert.ok(reads >= 2, `expected a post-range re-read, saw ${reads}`);
 });
 
+test('a run requeued during the read is not expired', async (t) => {
+  // The mirror of the stale-missing race: preRun is terminal (failed), and the
+  // run is requeued while the range is read. Deciding on preRun alone would 410
+  // a run that is about to produce fresh output.
+  let rangeReads = 0;
+  let f;
+  let run;
+  f = await createFixture(t, {
+    result: () => {
+      rangeReads += 1;
+      f.runService.updateRunStatus(run.id, 'queued', { force: true });
+      return rangeResult({ missing: true, source_id: null, data: Buffer.alloc(0) });
+    },
+  });
+  run = f.createRun({ status: 'failed' });
+
+  const res = await request(f.app).get(`/api/runs/${run.id}/output?after=0`);
+  assert.equal(res.status, 200, 'a requeued run must not be expired');
+  assert.equal(res.body.run_status, 'queued');
+  assert.equal(res.body.data_base64, '');
+  assert.equal(res.body.finalized, false);
+  assert.equal(rangeReads, 1);
+});
+
 test('stale missing read does not expire a run that completes during the read', async (t) => {
   let rangeReads = 0;
   let f;
