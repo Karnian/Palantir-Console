@@ -473,10 +473,10 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
       if (!Number.isSafeInteger(after)) {
         return res.status(400).json({ error: 'after must be a non-negative integer' });
       }
-      const run = runService.getRun(req.params.id);
-      const isRemoteWorker = run.node_id
-        && run.node_id !== 'local'
-        && Number(run.is_manager || 0) !== 1;
+      const preRun = runService.getRun(req.params.id);
+      const isRemoteWorker = preRun.node_id
+        && preRun.node_id !== 'local'
+        && Number(preRun.is_manager || 0) !== 1;
       if (!isRemoteWorker || !nodeService) {
         return res.status(409).json({
           error: 'Incremental output is unsupported for this run',
@@ -484,10 +484,10 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
         });
       }
 
-      const runExecutor = nodeService.pickExecutor(run.node_id);
+      const runExecutor = nodeService.pickExecutor(preRun.node_id);
       let range;
       try {
-        range = await runExecutor.readOutputRange(run.id, {
+        range = await runExecutor.readOutputRange(preRun.id, {
           after,
           maxBytes: OUTPUT_RANGE_MAX_BYTES,
         });
@@ -501,9 +501,14 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
         throw err;
       }
 
-      const latestRun = runService.getRun(run.id);
-      const terminal = ['completed', 'failed', 'cancelled', 'stopped'].includes(latestRun.status);
-      if ((range.deleted || range.missing) && terminal) {
+      const latestRun = runService.getRun(preRun.id);
+      const terminalStatuses = ['completed', 'failed', 'cancelled', 'stopped'];
+      const wasTerminalBeforeRead = terminalStatuses.includes(preRun.status);
+      const isTerminalAfterRead = terminalStatuses.includes(latestRun.status);
+      // The two snapshots serve opposite race-safety goals and cannot be merged:
+      // preRun prevents stale missing/deleted reads from producing a false 410,
+      // while latestRun prevents sealed output from being finalized too early.
+      if ((range.deleted || range.missing) && wasTerminalBeforeRead) {
         return res.status(410).json({
           error: 'Run output is no longer available',
           reason: 'output_expired',
@@ -511,9 +516,9 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
       }
 
       const isDetachedClaude = typeof runService.hasRunEvent === 'function'
-        ? runService.hasRunEvent(run.id, 'runtime:remote_worker_engine')
+        ? runService.hasRunEvent(preRun.id, 'runtime:remote_worker_engine')
         : typeof runService.getRunEvents === 'function'
-          && runService.getRunEvents(run.id)
+          && runService.getRunEvents(preRun.id)
             .some((event) => event.event_type === 'runtime:remote_worker_engine');
       const unavailable = range.missing || range.deleted;
       return res.json({
@@ -527,7 +532,7 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
         // A sealed artifact does not substitute for terminal DB state: defer
         // exposing finalization until both signals agree.
         finalized: !unavailable && !range.generation_changed
-          && terminal && range.sealed && !range.has_more,
+          && isTerminalAfterRead && range.sealed && !range.has_more,
         run_status: latestRun.status,
         source_id: unavailable ? null : (range.source_id ?? null),
         format: isDetachedClaude ? 'claude_ndjson' : 'text',

@@ -40,7 +40,7 @@ async function createFixture(t, { result, error, nodeService = true } = {}) {
     readOutputRange: async (...args) => {
       calls.push(args);
       if (error) throw error;
-      return result || rangeResult();
+      return typeof result === 'function' ? result() : result || rangeResult();
     },
   };
   app.services.nodeService.createNode({
@@ -142,20 +142,59 @@ test('sealed output exposes finalization when the latest DB status is terminal',
 });
 
 test('incremental output re-reads status after reading the output range', async (t) => {
-  const f = await createFixture(t, { result: rangeResult({ sealed: true, has_more: false }) });
+  let reads = 0;
+  let f;
+  f = await createFixture(t, {
+    result: () => {
+      assert.equal(reads, 1);
+      f.runService.updateRunStatus(run.id, 'completed', { force: true });
+      return rangeResult({ sealed: true, has_more: false });
+    },
+  });
   const run = f.createRun({ status: 'running' });
   const originalGetRun = f.runService.getRun;
-  let reads = 0;
   f.runService.getRun = (id) => {
-    const current = originalGetRun(id);
     reads += 1;
-    return reads === 1 ? current : { ...current, status: 'completed' };
+    return originalGetRun(id);
   };
   const res = await request(f.app).get(`/api/runs/${run.id}/output?after=0`);
   assert.equal(res.status, 200);
   assert.equal(res.body.run_status, 'completed');
   assert.equal(res.body.finalized, true);
-  assert.equal(reads, 2);
+  // Ordering is proven by the mock: `reads === 1` inside readOutputRange fixes the
+  // pre-read, and observing the status flipped there proves the re-read happened
+  // after. An exact count would also tally runService's own internal getRun calls.
+  assert.ok(reads >= 2, `expected a post-range re-read, saw ${reads}`);
+});
+
+test('stale missing read does not expire a run that completes during the read', async (t) => {
+  let rangeReads = 0;
+  let f;
+  let run;
+  f = await createFixture(t, {
+    result: () => {
+      rangeReads += 1;
+      if (rangeReads === 1) {
+        f.runService.updateRunStatus(run.id, 'completed', { force: true });
+        return rangeResult({ missing: true, source_id: null, data: Buffer.alloc(0) });
+      }
+      return rangeResult({ sealed: true, has_more: false });
+    },
+  });
+  run = f.createRun({ status: 'running' });
+
+  const first = await request(f.app).get(`/api/runs/${run.id}/output?after=0`);
+  assert.equal(first.status, 200);
+  assert.equal(first.body.data_base64, '');
+  assert.equal(first.body.next_offset, 0);
+  assert.equal(first.body.finalized, false);
+  assert.equal(first.body.run_status, 'completed');
+
+  const second = await request(f.app).get(`/api/runs/${run.id}/output?after=0`);
+  assert.equal(second.status, 200);
+  assert.equal(second.body.finalized, true);
+  assert.equal(second.body.run_status, 'completed');
+  assert.equal(rangeReads, 2);
 });
 
 test('incremental response includes the run status from the same request', async (t) => {
