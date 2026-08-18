@@ -184,6 +184,7 @@ function rootAwareSpawn({ cwd = '/srv/root/project', secretPath = null } = {}) {
       child.stdin.once('finish', () => complete(child, { stdout: `${secretPath}\n` }));
       return undefined;
     }
+    if (/^exec 'rm' '-f' /.test(script)) return complete(child);
     if (script.includes('tmux new-session -d -s ')) return complete(child);
     return undefined;
   });
@@ -204,7 +205,7 @@ test('manager spawn builds a pod-derived clean env with one PATH and reference-o
   await executor.spawnInteractive('codex', ['exec', hostileArg], {
     cwd,
     pathPrefix: prefix,
-    envAllowlist: ['POD_ONLY_PROVIDER_KEY', 'GITHUB_TOKEN', 'PALANTIR_TOKEN'],
+    envAllowlist: ['POD_ONLY_PROVIDER_KEY', 'GITHUB_TOKEN', 'PALANTIR_TOKEN', 'CUSTOM_ENV'],
     env: {
       PATH: '/controller/path/must-not-win',
       CUSTOM_ENV: explicitValue,
@@ -258,7 +259,8 @@ test('manager spawn builds a pod-derived clean env with one PATH and reference-o
   }
   assert.equal(call.stdin, `${managerToken}\n`);
   assert.ok(script.includes(`cd ${shq(cwd.replace('/srv/root', '/real/root'))} &&`));
-  assert.ok(script.includes(`CUSTOM_ENV=${shq(explicitValue)}`));
+  assert.equal(script.includes(`CUSTOM_ENV=${shq(explicitValue)}`), false);
+  assert.ok(script.includes('CUSTOM_ENV=$(cat --'));
   assert.ok(script.endsWith(`${shq('codex')} ${shq('exec')} ${shq(hostileArg)}`));
   assert.equal(script.includes('/controller/path/must-not-win'), false);
   for (const key of ACTOR_KEYS) {
@@ -277,6 +279,7 @@ test('worker spawn preserves pod allowlist names without manager network/vendor 
   const workerToken = 'worker-capability-literal-must-not-enter-argv';
   const apiBase = 'https://argv-zero.example:8443/proxy-prefix';
   const explicitValue = `controller ' " $HOME * ? [abc]`;
+  const unlistedSecret = 'unlisted-worker-secret-must-use-file-channel';
   const spawn = rootAwareSpawn({ cwd });
   const executor = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
 
@@ -288,6 +291,7 @@ test('worker spawn preserves pod allowlist names without manager network/vendor 
     envAllowlist: ['POD_ONLY_PROVIDER_KEY', 'GITHUB_TOKEN', 'PALANTIR_PM_TOKEN'],
     env: {
       GITHUB_TOKEN: explicitValue,
+      UNLISTED_WORKER_SECRET: unlistedSecret,
       PALANTIR_TOKEN: 'human-global-secret',
       PALANTIR_PM_TOKEN: 'pm-global-secret',
       PALANTIR_MANAGER_TOKEN: 'wrong-run-secret',
@@ -311,6 +315,16 @@ test('worker spawn preserves pod allowlist names without manager network/vendor 
   assert.equal(inner.includes(`GITHUB_TOKEN=${shq(explicitValue)}`), false);
   assert.ok(inner.includes('GITHUB_TOKEN=$(cat --'));
   assert.ok(inner.includes('export GITHUB_TOKEN'));
+  const unlistedRead = inner.slice(
+    inner.indexOf('UNLISTED_WORKER_SECRET=$(cat --'),
+    inner.indexOf(';', inner.indexOf('UNLISTED_WORKER_SECRET=$(cat --')),
+  );
+  assert.ok(unlistedRead.startsWith('UNLISTED_WORKER_SECRET=$(cat --'), inner);
+  assert.ok(
+    unlistedRead.includes(`/srv/root/.palantir-runs/${runId}/controller-env-UNLISTED_WORKER_SECRET`),
+    unlistedRead,
+  );
+  assert.ok(inner.includes('export UNLISTED_WORKER_SECRET'));
   assert.ok(
     inner.indexOf(shq('GITHUB_TOKEN')) < inner.indexOf('GITHUB_TOKEN=$(cat --'),
     'controller materialisation must remain the final explicit override',
@@ -339,19 +353,84 @@ test('worker spawn preserves pod allowlist names without manager network/vendor 
     assert.equal(inner.includes(secret), false);
   }
   const bundleWrite = spawn.calls.find(
-    (call) => call.stdin === workerToken + apiBase + explicitValue,
+    (call) => call.stdin === workerToken + apiBase + explicitValue + unlistedSecret,
   );
-  assert.ok(bundleWrite, 'worker capability and API base share one stdin bundle write');
+  assert.ok(bundleWrite, 'worker capability, API base, and controller env share one stdin bundle write');
   for (const call of spawn.calls) {
     assert.equal(JSON.stringify(call.args).includes(workerToken), false);
     assert.equal(JSON.stringify(call.args).includes(apiBase), false);
     assert.equal(JSON.stringify(call.args).includes(explicitValue), false);
+    assert.equal(JSON.stringify(call.args).includes(unlistedSecret), false);
   }
+  assert.equal(
+    spawn.calls.reduce((count, call) => count + call.stdin.split(unlistedSecret).length - 1, 0),
+    1,
+    'the non-allowlisted worker value appears exactly once, in upload stdin',
+  );
   assert.equal(
     spawn.calls.reduce((count, call) => count + call.stdin.split(apiBase).length - 1, 0),
     1,
     'the API base value appears exactly once, in upload stdin',
   );
+});
+
+test('worker spawn with only controller env uploads, slices, exports, and cleans its bundle', async () => {
+  const runId = 'controller_env_only';
+  const cwd = '/srv/root/project';
+  const firstSecret = 'secret';
+  const secondSecret = 'longer-secret';
+  const spawn = rootAwareSpawn({ cwd });
+  const executor = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await executor.spawnWorker(runId, {
+    command: 'codex',
+    cwd,
+    env: {
+      CUSTOM_SECRET: firstSecret,
+      SECOND_SECRET: secondSecret,
+    },
+    envAllowlist: [],
+  });
+
+  for (const call of spawn.calls) {
+    const argv = JSON.stringify(call.args);
+    assert.equal(argv.includes(firstSecret), false);
+    assert.equal(argv.includes(secondSecret), false);
+  }
+
+  const bundleWrite = spawn.calls.find(
+    (call) => call.stdin === firstSecret + secondSecret,
+  );
+  assert.ok(bundleWrite, 'controller env-only values must create one upload bundle');
+  const script = logicalScriptOf(bundleWrite);
+  const tmuxPrefix = `tmux new-session -d -s ${shq(`palantir-run-${runId}`)} `;
+  const tmuxIndex = script.indexOf(tmuxPrefix);
+  assert.notEqual(tmuxIndex, -1);
+  const inner = unshq(firstShqWord(script.slice(tmuxIndex + tmuxPrefix.length)));
+  const bundle = `/real/root/.palantir-runs/${runId}/worker-input.bundle`;
+  const firstFile = `/srv/root/.palantir-runs/${runId}/controller-env-CUSTOM_SECRET`;
+  const secondFile = `/srv/root/.palantir-runs/${runId}/controller-env-SECOND_SECRET`;
+  assert.ok(inner.includes(`head -c ${Buffer.byteLength(firstSecret)} ${shq(bundle)} > ${shq(firstFile)}`), inner);
+  assert.ok(
+    inner.includes(
+      `tail -c +${Buffer.byteLength(firstSecret) + 1} ${shq(bundle)} | head -c ${Buffer.byteLength(secondSecret)} > ${shq(secondFile)}`,
+    ),
+    inner,
+  );
+  const firstRead = inner.slice(
+    inner.indexOf('CUSTOM_SECRET=$(cat --'),
+    inner.indexOf(';', inner.indexOf('CUSTOM_SECRET=$(cat --')),
+  );
+  assert.ok(firstRead.includes(firstFile), firstRead);
+  assert.ok(inner.includes('export CUSTOM_SECRET'), inner);
+  const secondRead = inner.slice(
+    inner.indexOf('SECOND_SECRET=$(cat --'),
+    inner.indexOf(';', inner.indexOf('SECOND_SECRET=$(cat --')),
+  );
+  assert.ok(secondRead.includes(secondFile), secondRead);
+  assert.ok(inner.includes('export SECOND_SECRET'), inner);
+  const cleanup = `rm -f -- ${shq(bundle)} ${shq(firstFile)} ${shq(secondFile)}`;
+  assert.ok(script.includes(cleanup), script);
 });
 
 test('worker spawn rejects multiline controller materialization without changing it', async () => {
@@ -373,6 +452,41 @@ test('worker spawn rejects multiline controller materialization without changing
   for (const call of spawn.calls) {
     assert.equal(JSON.stringify(call.args).includes('line one\nline two'), false);
   }
+});
+
+test('manager spawn sends non-empty controller env outside the allowlist through files, never argv', async () => {
+  const cwd = '/srv/root/project';
+  const secretPath = '/srv/root/.palantir-secret-manager/controller-env';
+  const secret = 'non-allowlisted-secret-must-not-enter-argv';
+  const spawn = rootAwareSpawn({ cwd, secretPath });
+  const executor = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await executor.spawnInteractive('codex', ['exec'], {
+    cwd,
+    envAllowlist: ['GITHUB_TOKEN'],
+    env: { UNLISTED_SECRET: secret },
+  });
+  for (const call of spawn.calls) {
+    assert.equal(JSON.stringify(call.args).includes(secret), false);
+  }
+  const script = logicalScriptOf(spawn.calls.at(-1));
+  assert.ok(script.includes('UNLISTED_SECRET=$(cat --'));
+  assert.ok(script.includes('export UNLISTED_SECRET'));
+});
+
+test('manager spawn keeps empty non-allowlisted controller env as argv blanking', async () => {
+  const cwd = '/srv/root/project';
+  const spawn = rootAwareSpawn({ cwd });
+  const executor = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await executor.spawnInteractive('codex', ['exec'], {
+    cwd,
+    envAllowlist: [],
+    env: { UNLISTED_BLANK: '' },
+  });
+
+  const script = logicalScriptOf(spawn.calls.at(-1));
+  assert.ok(script.includes(`UNLISTED_BLANK=${shq('')}`));
 });
 
 test('git/materialize exec filters pod env with the shared policy while filesystem primitives stay separate', async () => {
@@ -682,4 +796,57 @@ test('manager spawn cleans materialized files when ssh fails with exit 255 (clos
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   assert.ok(removals.length > 0, 'ssh 255 종료에서도 materialized 파일이 정리돼야 한다');
+});
+
+test('kill reaps controller env files and fixed artifacts, tolerating a missing status dir', async () => {
+  const existingRunId = 'kill-controller-env';
+  const missingRunId = 'kill-missing-status';
+  const statusDir = `/srv/root/.palantir-runs/${existingRunId}`;
+  const canonicalStatusDir = `/real/root/.palantir-runs/${existingRunId}`;
+  const scripts = [];
+  const spawn = makeSpawn((call, child) => {
+    const script = logicalScriptOf(call);
+    scripts.push(script);
+    if (script === `exec ${shq('realpath')} ${shq('/srv/root')}`) {
+      return complete(child, { stdout: '/real/root\n' });
+    }
+    if (script === `exec ${shq('realpath')} ${shq(statusDir)}`) {
+      return complete(child, { stdout: `${canonicalStatusDir}\n` });
+    }
+    if (script === `exec ${shq('realpath')} ${shq(`/srv/root/.palantir-runs/${missingRunId}`)}`) {
+      return complete(child, { code: 1 });
+    }
+    if (script === `exec ${shq('realpath')} ${shq('/srv/root/.palantir-runs')}`) {
+      return complete(child, { stdout: '/real/root/.palantir-runs\n' });
+    }
+    return complete(child, { code: 0 });
+  });
+  const executor = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  assert.equal(await executor.kill(existingRunId), true);
+  const fixedCleanup = [
+    'stdin.txt',
+    'system-prompt.txt',
+    'worker-capability',
+    'worker-api-base',
+    'worker-input.bundle',
+    'result.jsonl.tmp',
+  ].map((name) => shq(`${statusDir}/${name}`)).join(' ');
+  assert.ok(
+    scripts.includes(`exec 'rm' '-f' ${fixedCleanup}`),
+    'kill must retain cleanup of every fixed artifact',
+  );
+  assert.ok(
+    scripts.includes(
+      `exec 'find' ${shq(canonicalStatusDir)} '-maxdepth' '1' '-type' 'f' '-name' 'controller-env-*' '-delete'`,
+    ),
+    'kill must delete dynamic controller env files inside the validated status dir',
+  );
+
+  assert.equal(await executor.kill(missingRunId), true);
+  assert.equal(
+    scripts.some((script) => script.startsWith("exec 'find' ") && script.includes(missingRunId)),
+    false,
+    'a missing status dir must skip find without changing the return contract',
+  );
 });
