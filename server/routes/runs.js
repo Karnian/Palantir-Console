@@ -515,6 +515,14 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
       // attempt is already producing output. Requiring an unchanged observation
       // makes the decision late in every direction instead of wrong in one -- a
       // deferred 410 costs one extra poll, a false 410 is unrecoverable.
+      //
+      // Residual: an ABA that returns to the SAME status with an ended_at that
+      // lands in the same second (completed -> queued -> completed) is not
+      // distinguishable here, because ended_at is second-granular and no
+      // monotonic status revision exists on runs. started_at cannot substitute --
+      // a goal retry-child requeue preserves it. Closing this needs a status
+      // epoch column; tracked separately. The consequence is a recoverable CLI
+      // error (code 5, re-run follow), not lost or corrupted output.
       const runUnmovedAcrossRead = preRun.status === latestRun.status
         && (preRun.ended_at ?? null) === (latestRun.ended_at ?? null);
       if (
