@@ -11,6 +11,7 @@ const { parseClaudeStreamJsonOutput } = require('../services/claudeStreamJson');
 // the wire on every poll. 1 MiB matches the ceiling noted in the R2-B
 // plan; change here + in the route tests if this ever moves.
 const DIFF_MAX_BYTES = 1 * 1024 * 1024;
+const OUTPUT_RANGE_MAX_BYTES = 256 * 1024;
 // Walltime cap — we never want `git diff` to hang the runs router.
 const DIFF_TIMEOUT_MS = 10 * 1000;
 
@@ -463,6 +464,103 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
     if (!executionEngine) {
       return res.status(501).json({ error: 'Execution engine not configured' });
     }
+    if (req.query.after !== undefined) {
+      const afterWire = req.query.after;
+      if (typeof afterWire !== 'string' || !/^(0|[1-9]\d*)$/.test(afterWire)) {
+        return res.status(400).json({ error: 'after must be a non-negative integer' });
+      }
+      const after = Number(afterWire);
+      if (!Number.isSafeInteger(after)) {
+        return res.status(400).json({ error: 'after must be a non-negative integer' });
+      }
+      const preRun = runService.getRun(req.params.id);
+      const isRemoteWorker = preRun.node_id
+        && preRun.node_id !== 'local'
+        && Number(preRun.is_manager || 0) !== 1;
+      if (!isRemoteWorker || !nodeService) {
+        return res.status(409).json({
+          error: 'Incremental output is unsupported for this run',
+          reason: 'incremental_unsupported',
+        });
+      }
+
+      const runExecutor = nodeService.pickExecutor(preRun.node_id);
+      let range;
+      try {
+        range = await runExecutor.readOutputRange(preRun.id, {
+          after,
+          maxBytes: OUTPUT_RANGE_MAX_BYTES,
+        });
+      } catch (err) {
+        if (err && err.code === 'OUTPUT_FRAME_INVALID') {
+          return res.status(500).json({
+            error: 'Remote output frame is invalid',
+            reason: 'output_frame_invalid',
+          });
+        }
+        throw err;
+      }
+
+      const latestRun = runService.getRun(preRun.id);
+      const terminalStatuses = ['completed', 'failed', 'cancelled', 'stopped'];
+      const wasTerminalBeforeRead = terminalStatuses.includes(preRun.status);
+      const isTerminalAfterRead = terminalStatuses.includes(latestRun.status);
+      // The two snapshots serve opposite race-safety goals and cannot be merged:
+      // preRun prevents stale missing/deleted reads from producing a false 410,
+      // while latestRun prevents sealed output from being finalized too early.
+      // Expiry is only claimed when the run did not move at all across the read.
+      // preRun alone would 410 a run requeued (failed -> queued) during the read;
+      // latestRun alone would 410 a run that merely finished during it; both being
+      // terminal still admits an ABA (failed -> queued -> completed) where a new
+      // attempt is already producing output. Requiring an unchanged observation
+      // makes the decision late in every direction instead of wrong in one -- a
+      // deferred 410 costs one extra poll, a false 410 is unrecoverable.
+      //
+      // Residual: an ABA that returns to the SAME status with an ended_at that
+      // lands in the same second (completed -> queued -> completed) is not
+      // distinguishable here, because ended_at is second-granular and no
+      // monotonic status revision exists on runs. started_at cannot substitute --
+      // a goal retry-child requeue preserves it. Closing this needs a status
+      // epoch column; tracked separately. The consequence is a recoverable CLI
+      // error (code 5, re-run follow), not lost or corrupted output.
+      const runUnmovedAcrossRead = preRun.status === latestRun.status
+        && (preRun.ended_at ?? null) === (latestRun.ended_at ?? null);
+      if (
+        (range.deleted || range.missing)
+        && wasTerminalBeforeRead
+        && isTerminalAfterRead
+        && runUnmovedAcrossRead
+      ) {
+        return res.status(410).json({
+          error: 'Run output is no longer available',
+          reason: 'output_expired',
+        });
+      }
+
+      const isDetachedClaude = typeof runService.hasRunEvent === 'function'
+        ? runService.hasRunEvent(preRun.id, 'runtime:remote_worker_engine')
+        : typeof runService.getRunEvents === 'function'
+          && runService.getRunEvents(preRun.id)
+            .some((event) => event.event_type === 'runtime:remote_worker_engine');
+      const unavailable = range.missing || range.deleted;
+      return res.json({
+        data_base64: range.generation_changed || unavailable
+          ? ''
+          : range.data.toString('base64'),
+        next_offset: range.generation_changed ? 0 : unavailable ? after : range.next_offset,
+        end_offset: range.end_offset,
+        has_more: unavailable ? false : range.has_more,
+        truncated: Boolean(range.generation_changed),
+        // A sealed artifact does not substitute for terminal DB state: defer
+        // exposing finalization until both signals agree.
+        finalized: !unavailable && !range.generation_changed
+          && isTerminalAfterRead && range.sealed && !range.has_more,
+        run_status: latestRun.status,
+        source_id: unavailable ? null : (range.source_id ?? null),
+        format: isDetachedClaude ? 'claude_ndjson' : 'text',
+      });
+    }
+
     const lines = Math.min(Math.max(1, Number(req.query.lines || 100)), 2000);
     const run = runService.getRun(req.params.id);
     const isRemoteWorker = run.node_id
@@ -539,4 +637,5 @@ module.exports = {
   computeMcpTemplateDrift,
   runGitDiff,
   DIFF_MAX_BYTES,
+  OUTPUT_RANGE_MAX_BYTES,
 };
