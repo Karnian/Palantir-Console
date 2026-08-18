@@ -280,7 +280,11 @@ octet-stream + 헤더 메타데이터는 채택하지 않는다(기존 `apiFetch
 - **27. checkpoint 손상**: 손상 파일 → `after=0` 재개 + sticky 5.
 - **28. EOF 꼬리**: 잘린 JSON 이 원문으로 출력되고 경고가 뜬다(유실 0).
 
-### 3.0.11 미해결 — 구현 착수 전 확정 필요 (codex R5)
+### 3.0.11 (해소됨) — 아래 §3.0.12~§3.0.17 이 6건을 전부 확정했다
+
+> **codex 적대검토 11라운드 끝에 GO.** 아래 절들이 정본이며, 이 절은 이력으로만 남긴다.
+
+#### (이력) 당시 미해결이던 것
 
 방향(원격 전용 / 서버 무파싱 / CLI 상태 / base64 프레이밍 / `exit.code` 완료표식 / `committed_offset`
 재개)은 **적대검토 5라운드로 굳었다.** 아래는 남은 **세부 결정**이며, 이게 닫히기 전에는 구현을
@@ -303,6 +307,332 @@ octet-stream + 헤더 메타데이터는 채택하지 않는다(기존 `apiFetch
 > A2 는 착수 직전에 `verify_checks` 라우터 전체가 goal 게이트 뒤라는 것을 발견해 설계를 바꿨고,
 > #12 는 계약 문서의 벤더 결합을 코드 줄 수로 오판해 보류로 끝났다. 이 슬라이스도 §3.1 이
 > substrate 를 적지 않아 **로컬 일반 run 에서 구현 불가**라는 것을 착수 전에 발견했다.
+
+### 3.0.12 rev6 — §3.0.11 의 6건 확정 (구현 착수 계약)
+
+§3.0.11 을 **이 절이 대체한다.** 아래는 전부 "구현자가 다르게 해석할 여지가 없는" 형태로 적는다.
+
+#### D1. 원격 base64 프레임은 **서버가 디코드·검증하고 재인코딩**해서 싣는다
+
+원격이 준 문자열을 그대로 전달하지 **않는다**.
+
+- 서버가 `Buffer.from(frame, 'base64')` 로 디코드하고, **재인코딩한 결과가 원문과 같은지** 확인한다
+  (canonical padding·비정상 문자 검출의 단일 지점).
+- 응답의 `data_base64` 는 **서버가 재인코딩한 canonical 문자열**이다.
+- **왜**: `next_offset` 은 "실제로 반환한 마지막 바이트의 다음"이다. 원격 문자열을 그대로 흘리면
+  서버가 **자기가 반환한 바이트 수를 모르는 채** `next_offset` 을 주장하게 된다.
+  디코드해야 `next_offset = after + decoded.length` 가 **증명 가능**해진다.
+- 검증 실패 → **500** + `reason: 'output_frame_invalid'`. CLI 는 재시도 예산 안에서 재시도하고
+  반복되면 **코드 5**.
+
+#### D2. 마지막 `stat` 이 inode 변경을 잡으면 **읽은 데이터를 버린다**
+
+- 응답: `truncated: true`, `source_id` = **새 세대의 값**, `data_base64: ""`, `next_offset: 0`.
+- **왜**: 읽는 도중 세대가 바뀌었으면 그 바이트들은 **두 세대에 걸쳐 있어 귀속 불가**다.
+  전달하면 "이미 쓴 바이트를 다시 쓰지 않는다"(§9 테스트 4)를 깨고 서로 다른 run 의 출력이 섞인다.
+  유실을 감수하고 **정직하게 truncated 로 알리는 편**이 낫다.
+- CLI: 경고 + **sticky 코드 5** + `after=0` 으로 새 세대 재개(§3.0.5 와 동일 처리).
+- 파일이 **삭제만** 되고 재생성이 없으면 §3.0.6 의 **410** 이다(이 경우와 구분된다).
+
+#### D3. checkpoint 의 `format` 불일치 = **checkpoint 폐기**
+
+- 저장된 `format` 이 현재 응답의 `format` 과 다르면 checkpoint 를 버리고
+  **`after=0` 재개 + truncated 취급(sticky 5)**. 손상(D5)과 **같은 처리**다.
+- **왜**: `format` 이 바이트를 어떻게 렌더했는지와 **commit 경계의 의미**를 정한다.
+  `source_id` 가 같아도 `committed_offset` 이 다른 렌더 규칙 아래 기록됐다면 그 값은 이식 불가다.
+
+#### D4. commit 선행조건 = **`write()` 의 callback**
+
+- CLI 는 `process.stdout.write(chunk, cb)` 의 **`cb` 가 호출된 뒤에만** `committed_offset` 을 올린다.
+- **왜**: `write()` 의 **반환값은 buffered 여부**일 뿐이고, **`drain` 은 스트림 전체의 backpressure
+  신호**라 특정 chunk 의 완료를 뜻하지 않는다. callback 만이 그 chunk 에 대한 완료 신호다.
+- write 가 **에러**(EPIPE 등)면 commit 하지 않는다. EPIPE 는 §7 대로 **정상 종료(0)**.
+
+#### D5. checkpoint durability = **파일 fsync + rename 까지. 부모 디렉터리 fsync 는 하지 않는다**
+
+- temp 파일은 **생성 시점에 mode 0600** (`fs.open` 의 mode 인자). **생성 후 `chmod` 는 금지** — race.
+- write → `fsync(fd)` → `rename`. **부모 dir fsync 없음.**
+- **왜**: `follow` 는 이미 **at-least-once** 다. 전원 장애로 dir 엔트리가 유실되면 checkpoint 가
+  없는 것으로 보여 `after=0` 재개 → 결과는 **중복이지 유실이 아니다**. 계약이 이미 허용하는 실패다.
+  이를 막으려고 **폴링마다 dir fsync** 를 걸면 동기 I/O 가 스트림 경로에 붙는다 —
+  얻는 것(중복 회피)이 비용(모든 commit 의 지연)보다 작다.
+
+#### D6. `stdout.log` 부재(running) 응답의 `source_id` 는 **`null`**
+
+- 파일이 아직 없으면 `source_id: null`, `data_base64: ""`, `finalized: false`.
+- CLI 는 **`source_id` 가 null 이면 기존 checkpoint 와 비교하지 않는다**(검증 유예).
+  **첫 non-null `source_id` 를 받은 시점**에 검증한다.
+- **왜**: 파일이 없으면 세대가 **존재하지 않으므로** 불일치를 판정할 근거가 없다.
+  running + 파일 부재는 spawn 직후의 **정상 상태**다(§3.0.6).
+
+#### §9 수락 기준 (rev6 확정 추가)
+
+- **29. 프레임 canonical**: 비정상 padding·문자를 실은 원격 프레임 → 500 `output_frame_invalid`.
+  서버가 재인코딩한 문자열이 응답에 실린다(원격 문자열 pass-through 를 하도록 바꾸면 실패).
+- **30. 세대 경합**: 읽는 도중 inode 가 바뀌면 **데이터가 버려지고** `truncated:true`+`next_offset:0`.
+  읽은 바이트를 전달하도록 바꾸면 실패하는 역회귀가 있어야 한다.
+- **31. format 불일치**: checkpoint format ≠ 응답 format → `after=0` + sticky 5.
+- **32. commit 타이밍**: write callback 전에 commit 하도록 바꾸면 실패한다(crash 주입 테스트).
+- **33. source_id null**: 파일 부재 running 응답이 기존 checkpoint 를 무효화하지 **않는다**.
+
+### 3.0.13 rev7 — R6 잔여 5건 확정 + §3.0.6 정정
+
+#### E1. D2 가 §3.0.6 의 "현재 tail 재개"를 **대체한다** (모순 해소)
+
+`source_id` 변경 시 재개 위치는 **`after=0`** 이다. §3.0.6 의 "경고 + 현재 tail 재개"는 **철회**한다.
+**왜**: 새 세대에서 "현재 tail" 은 의미가 없다 — 이전 세대의 offset 과 무관한 새 파일이므로
+**처음부터** 봐야 한다. (경고 + sticky 코드 5 는 그대로.)
+
+#### E2. D1 에 **길이·offset 일관성 검증**을 추가한다
+
+canonical equality 외에 **둘 다** 만족해야 한다:
+- `decoded.length <= max_bytes`
+- `next_offset - after === decoded.length`
+
+하나라도 어긋나면 **500 `output_frame_invalid`**. **왜**: canonical 이지만 **과대 프레임**이거나
+메타데이터와 불일치한 프레임이 통과하면 `next_offset` 의 의미가 깨진다. 이 검사가 서버 내부
+일관성의 **단일 강제 지점**이다.
+
+#### E3. D4 의 오류 경계 확정
+
+- `write(chunk, cb)` 의 **`cb(err)` 가 err 와 함께** 호출되거나 stream `'error'` 가 오면 **commit 하지 않는다.**
+- **`err.code === 'EPIPE'`** → §7 대로 **코드 0** 으로 즉시 정상 종료(`follow | head`).
+- **그 외 오류** → **코드 5**.
+- **callback 성공 뒤 늦게 오는 `'error'`** 는 **이미 한 commit 을 되돌리지 않는다**
+  (at-least-once 계약이 이미 중복을 허용하므로 되돌릴 이유가 없다). 다만 **이후 write 를 중단**하고
+  EPIPE 면 0, 아니면 5 로 끝낸다.
+- **우선순위**: EPIPE 는 다른 어떤 오류 코드보다 **먼저** 판정한다.
+
+#### E4. D5 의 안전한 checkpoint 파일 생성
+
+- 디렉터리: `~/.palantir/follow/` 를 `fs.mkdir(..., { recursive: true, mode: 0o700 })`.
+- temp: **같은 디렉터리 안**에 `<runId>.json.tmp.<pid>`, `fs.open(..., 'wx', 0o600)` (**O_EXCL**).
+  **생성 후 `chmod` 금지**(race).
+- 읽기 전 **`lstat`** 으로 검사 — **심볼릭 링크이거나 일반 파일이 아니면 읽지 않고 손상으로 취급**
+  (= `after=0` + sticky 5, D3/D5 와 동일 처리). 쓰기는 `rename` 으로 덮어쓴다.
+- write → `fsync(fd)` → `rename`. **부모 디렉터리 fsync 없음**(D5 근거 그대로).
+
+#### E5. D6 의 offset 과 첫 non-null 불일치 순서
+
+- `source_id: null` 응답의 **`next_offset` 은 요청한 `after` 를 그대로 반향**한다(진전 0).
+  CLI 는 checkpoint 를 **건드리지 않는다**.
+- **첫 non-null `source_id`** 가 checkpoint 의 것과 **불일치**하면 → **그 응답의 데이터를 먼저 폐기**하고
+  `after=0` 재개 + sticky 5. (D2 와 **같은 순서**: 폐기 → 재개.)
+- 일치하면 그 응답부터 정상 소비한다.
+
+#### 기록하는 한계 — 같은 inode 의 truncate 후 재증가
+
+`st_dev:st_ino` 는 **같은 inode 가 truncate 된 뒤 다시 커지는 경우**를 검출하지 못한다.
+**수용한다**: 원격 `stdout.log` 는 spawn 시 `> stdout.log` 로 한 번 생성된 뒤 **append 로만** 쓰이고,
+재시도는 **새 run id** 를 만들어 새 `statusDir` 를 쓴다. 한 run 의 수명 안에서 truncate 경로가 없다.
+이 전제가 깨지면(같은 runId 재spawn) 검출이 불가하므로 **여기 한계로 기록**한다.
+
+#### §9 수락 기준 (rev7 확정 추가)
+
+- **34. 세대 재개 위치**: `source_id` 변경 시 `after=0` 으로 재개한다(현재 tail 이 아니다).
+- **35. 프레임 일관성**: `next_offset - after ≠ decoded.length` 인 프레임 → 500 `output_frame_invalid`.
+- **36. EPIPE 우선**: write 오류가 EPIPE 면 코드 0, 그 외면 5. EPIPE 가 다른 오류보다 먼저 판정된다.
+- **37. checkpoint 심볼릭 링크**: checkpoint 경로가 symlink 면 읽지 않고 `after=0` + sticky 5.
+- **38. null 진전 0**: `source_id: null` 응답이 `next_offset === after` 이고 checkpoint 를 바꾸지 않는다.
+
+### 3.0.14 rev8 — E4 확정 + **sticky 5 적용 범위 정정**
+
+#### F0. 정정 — checkpoint 문제는 **sticky 코드 5 가 아니다**
+
+rev5~rev7 은 checkpoint **손상·format 불일치**에도 sticky 코드 5 를 걸었다. **틀렸다.**
+두 부류를 혼동했다:
+
+| 부류 | 결과 | 코드 |
+|---|---|---|
+| **서버가 바이트를 못 준다** — `truncated` / `source_id` 변경 / 410 `output_expired` | **관측 유실** | **sticky 5** |
+| **CLI 가 자기 북마크를 잃었다** — checkpoint 부재·손상·format 불일치·symlink | `after=0` 재시작 → **전부 다시 봄** | **5 아님** |
+
+후자는 유실이 아니라 **중복**이고, 그건 **at-least-once 계약이 이미 허용**하는 것이다.
+따라서 **경고만 stderr 에 적고 정상 종료 코드(0/6)를 낸다.**
+**D3·D5·E4 의 "sticky 5" 는 전부 이 규칙으로 대체된다.**
+
+> **왜 중요한가**: 처음 실행은 checkpoint 가 없는 것이 정상인데, "부재 = 손상 = 5" 로 두면
+> **모든 첫 follow 가 코드 5** 로 끝난다. `source_id` 변경(진짜 유실)과 같은 코드를 쓰면
+> 자동화가 둘을 구분하지 못한다.
+
+#### F1. checkpoint 디렉터리 검증
+
+- `~/.palantir/follow/` 를 `lstat` 한다.
+- **symlink 이거나 디렉터리가 아니면** → stderr 경고 + **checkpoint 기능 비활성화**하고 follow 는 계속한다
+  (재시작 시 `after=0`, 즉 중복 가능). follow 자체를 실패시키지 않는다.
+- 없으면 `fs.mkdir(..., { recursive: true, mode: 0o700 })`.
+- 있는데 **mode 가 0700 보다 넓으면** `chmod 0o700` 을 시도하고, 실패하면 경고 + 비활성화.
+- 소유자 검증은 하지 않는다 — 사용자 홈 아래이고, mode·symlink 방어로 충분하다.
+
+#### F2. checkpoint 읽기 — TOCTOU 방어
+
+```
+open(path, O_RDONLY | O_NOFOLLOW)  →  fstat(fd)  →  일반 파일 확인  →  같은 fd 로 read
+```
+- **경로로 두 번 접근하지 않는다**(lstat 후 open 은 TOCTOU 가 남는다).
+- `ENOENT` → **checkpoint 없음 = 정상**(첫 실행). `after=0` 으로 시작, 경고도 코드 변경도 없다.
+- `ELOOP`(symlink) / 일반 파일 아님 / 파싱 실패 / `v` 불일치 / `format` 불일치
+  → 경고 + **checkpoint 무시** + `after=0`. **F0 대로 코드는 바꾸지 않는다.**
+
+#### F3. temp 파일 — 충돌 정책
+
+- 이름: `<runId>.json.tmp.<12 hex random>`, **같은 디렉터리**에서 `fs.open(..., 'wx', 0o600)`(**O_EXCL**).
+- `EEXIST` → **새 nonce 로 1회 재시도**, 그래도 실패면 경고 + 이번 commit 만 건너뛴다
+  (다음 commit 에서 다시 시도. follow 는 중단하지 않는다).
+- 실패 경로에서 **자기 temp 는 반드시 unlink** 한다.
+- **남의 stale temp 는 건드리지 않는다** — 0600 이고 사용자 전용 디렉터리라 무해하다.
+  누적은 **수용된 한계**로 기록한다(무작위 nonce 라 충돌로 인한 정지는 없다).
+
+#### F4. E3 보강 — 복수 오류 경합
+
+- **EPIPE 가 관측되면 무조건 코드 0** — 다른 오류보다 우선한다.
+- EPIPE 가 없으면 **first-observed 오류**로 코드 5.
+- 즉 판정은 "EPIPE 포함 여부" → 아니면 "가장 먼저 본 것" 2단계로 **결정적**이다.
+
+#### §9 수락 기준 (rev8 확정)
+
+- **39. 첫 실행**: checkpoint 부재는 경고 없이 `after=0` 시작이고 **코드 0/6** 으로 끝난다
+  (5 가 아니다). 이걸 5 로 바꾸면 실패하는 역회귀가 있어야 한다.
+- **40. 유실 vs 중복 구분**: `source_id` 변경은 **5**, checkpoint 손상은 **0/6**. 두 경로가 같은
+  코드를 내도록 바꾸면 실패한다.
+- **41. TOCTOU**: checkpoint 읽기가 `O_NOFOLLOW` + `fstat(fd)` + 같은 fd read 다.
+  경로 재접근으로 바꾸면 실패하는 테스트가 있어야 한다.
+- **42. temp 충돌**: `EEXIST` 에서 nonce 재시도 후 실패해도 follow 가 계속되고, 자기 temp 는 남지 않는다.
+- **43. EPIPE 우선**: EPIPE 와 다른 오류를 동시에 주입해도 코드 0.
+
+### 3.0.15 rev9 — 상충 문언 명시 폐기 + 위협 모델 + 오류 관측 창
+
+#### G1. 폐기하는 문언 (F0 이 대체) — **열거로 확정한다**
+
+"대체한다"는 선언만으로는 부족하다. 아래를 **명시적으로 폐기**한다:
+
+- §3.0.10 **결정 6** 의 "손상 … → sticky 코드 5"
+- §3.0.13 **E4** 의 "손상으로 취급 (= `after=0` + sticky 5)"
+- §9 기준 **27**("checkpoint 손상 → `after=0` 재개 + sticky 5")
+- §9 기준 **37**("checkpoint 경로가 symlink 면 … sticky 5")
+
+이들은 전부 **F0 의 표**를 따른다: checkpoint 부재·손상·format 불일치·symlink → **경고 + `after=0`,
+종료 코드는 0/6**. sticky 5 는 **서버가 바이트를 못 주는 경우**(`truncated` / `source_id` 변경 /
+410 `output_expired`)에만.
+
+기준 27·37 은 **F0 기준(§9 39·40)으로 대체**되므로 §9 목록에서 삭제한다.
+
+#### G2. 위협 모델 명시 — 같은 사용자의 경로 조작은 **범위 밖**
+
+rev8 F1 의 "symlink 방어로 충분하다"는 **과한 주장이라 철회**한다. 정확히는:
+
+- **방어 대상**: 잘못된 상태(오래된 symlink, 엉뚱한 파일 타입)로 인한 **사고성 오작동·정보 노출**.
+- **범위 밖**: `~/.palantir` **상위 경로 자체가 symlink** 인 경우, 그리고 `lstat`/`chmod` 와
+  이후 `open`/`rename` 사이의 **디렉터리 치환 TOCTOU**.
+- **왜**: 이 경로는 사용자 홈 아래이고 조작에는 **그 사용자 권한**이 필요하다. 같은 사용자를
+  공격자로 두면 checkpoint 방어와 무관하게 CLI 바이너리·셸 설정을 바꿀 수 있다.
+  이 전제는 repo 의 원격 executor 가 이미 채택한 것과 같다
+  ("pods are operator-controlled, not adversarial mid-operation", `remoteSshExecutor.js:640`).
+- 최종 `~/.palantir/follow` 에 대한 `lstat` 검사와 F2 의 `O_NOFOLLOW` 는 **그대로 유지**한다
+  (사고 방어로는 유효하다).
+
+#### G3. F4 의 **오류 관측 창** 확정
+
+"관측한 오류 집합"의 창이 언제 닫히는지 확정한다.
+
+- 창은 **CLI 가 종료 코드를 확정하는 순간** 닫힌다. 구체적으로:
+  **봉인 소비 완료(또는 치명적 오류 발생) → `process.stdout.end()` → 그 callback 이 오거나
+  `'error'` 가 날 때까지.**
+- 그 창 **안에서** EPIPE 가 한 번이라도 관측되면 **코드 0**.
+- EPIPE 가 없으면 창 안의 **first-observed 오류**로 **코드 5**.
+- 창이 닫힌 **뒤** 도착하는 오류는 **무시**한다(종료 코드를 바꾸지 않는다).
+
+#### G4. F3 정정 — unlink 대상은 **소유권을 얻은 pathname 만**
+
+rev8 의 "실패 경로에서 자기 temp 는 반드시 unlink" 를 좁힌다:
+
+- **`open(..., 'wx')` 가 성공한 pathname 에만** unlink 를 적용한다.
+- **`EEXIST` 로 실패한 pathname 은 건드리지 않는다** — 그건 우리 것이 아니다.
+  (rev8 의 "남의 stale temp 는 건드리지 않는다"와 이제 일관된다.)
+
+#### 기록하는 한계 — 세대 교체 + checkpoint 손상 동시 발생
+
+checkpoint 가 손상된 **동시에** 서버 쪽 세대가 교체되면, CLI 는 이전 `source_id` 증거를 잃어
+`after=0` 으로 **새 세대만** 읽고도 **과거 세대의 유실을 검출하지 못한다.**
+
+- 이것은 checkpoint 손상을 sticky 5 로 만들 이유가 **아니다**(그러면 정상적인 첫 실행까지 5 가 된다).
+- **명세의 한계로 기록**한다: `follow` 는 **자신이 관측한 범위 안에서만** 완결성을 주장한다.
+- 원격 로그가 이미 삭제된 경우는 `after=0` 도 `after` 지정 요청이므로 **§3.0.6 의 410 이 sticky 5 를 낸다** —
+  그 경로는 덮인다.
+
+#### §9 수락 기준 (rev9 확정)
+
+- **44. 폐기 확인**: 기준 27·37 이 목록에 없고, checkpoint 손상 경로가 0/6 으로 끝난다.
+- **45. 오류 창**: 종료 코드 확정 뒤 도착한 오류가 종료 코드를 바꾸지 않는다.
+- **46. temp 소유권**: `EEXIST` 로 실패한 pathname 을 unlink 하지 않는다(남의 temp 보존).
+
+### 3.0.16 rev10 — G1 폐기 목록 보완 + G3 오류 인자 확정 (최종)
+
+#### H1. §3.0.9(c) 도 폐기 목록에 넣는다
+
+G1 이 "빠짐없이 열거한다"고 했으나 **한 건을 빠뜨렸다.** §3.0.9(c) 의
+
+> "checkpoint 파일 위치·형식·**손상 시 처리(=`after=0` 재시작 + `truncated` 취급)**"
+
+에서 **`truncated` 취급** 문언을 **폐기**한다. `truncated` 는 §3.1 에서 **sticky 5** 로 정의되므로,
+이 문언이 남으면 checkpoint 손상이 **우회 경로로 다시 sticky 5** 에 연결되어 구현자가
+0/6 과 5 중 어느 쪽도 정당화할 수 있다.
+
+**정정된 문언**: checkpoint 손상 → **경고 + `after=0` 재시작, 종료 코드 0/6** (F0 의 표 그대로).
+`truncated` 라는 단어를 checkpoint 문맥에서 **쓰지 않는다** — 그 단어는 **서버가 알려주는
+관측 유실**에만 예약한다.
+
+> **폐기 목록 최종**: §3.0.9(c) 의 `truncated` 취급 / §3.0.10 결정 6 / §3.0.13 E4 의 sticky 5 /
+> §9 기준 27 · 37. 전부 **F0 의 표**로 대체된다.
+
+#### H2. G3 — `end()` callback 의 오류 인자와 창 종료 시점 확정
+
+- `process.stdout.end(cb)` 의 **`cb(err)` 가 오류 인자를 받으면 그것도 "창 안의 오류"** 로 센다.
+- 창은 **`cb` 호출과 `'error'` 이벤트 중 먼저 도착한 것**이 닫는다.
+- 판정은 여전히 2단계로 결정적이다: **창 안에 EPIPE 가 있으면 0**, 없으면 **first-observed 로 5**.
+
+#### §9 수락 기준 (rev10 확정)
+
+- **47. `end` 오류 인자**: `end(cb)` 의 `cb(err)` 로만 오류가 오는 경우에도 종료 코드가
+  EPIPE→0 / 그 외→5 로 정확히 판정된다.
+- **48. 창 종료 경쟁**: `cb` 와 `'error'` 중 **먼저 온 것**이 창을 닫고, 그 뒤 도착한 오류는
+  종료 코드를 바꾸지 않는다. non-EPIPE 가 먼저 오고 EPIPE 가 **창 안에** 뒤이어 와도 **0** 이다
+  (EPIPE 우선이 first-observed 보다 강하다).
+- **49. checkpoint 어휘**: checkpoint 손상 경로가 `truncated` 를 세팅하지 않는다.
+  세팅하도록 바꾸면 기준 40(유실 vs 중복 구분)이 실패한다.
+
+### 3.0.17 rev11 — 오류 수집 기간과 창 종료 사건 분리 (최종)
+
+R10 이 지적한 모순은 **규칙이 아니라 내 수락 기준 48 이 틀린 것**이었다.
+"먼저 온 것이 창을 닫는다"와 "창 닫힌 뒤 온 EPIPE 도 창 안"은 양립 불가다.
+**기준 48 을 폐기하고** 아래로 대체한다.
+
+#### I1. 두 개념을 분리한다
+
+- **수집 기간(collection period)**: `follow` **시작부터** 창이 닫힐 때까지. 이 동안 관측하는 오류는
+  **세 곳**에서 온다 — ① `write(chunk, cb)` 의 `cb(err)`, ② 스트림 `'error'` 이벤트,
+  ③ `end(cb)` 의 `cb(err)`.
+- **창 종료 사건(closing event)**: `end()` 호출 뒤 **`cb` 가 오거나 `'error'` 가 오는 것 중 먼저인 것**.
+  그 시점에 수집 기간이 끝난다.
+
+#### I2. 판정 — 2단계, 결정적
+
+1. **수집 기간 안에 EPIPE 가 하나라도 있으면 → 코드 0.**
+2. 없으면 **first-observed 오류로 → 코드 5.**
+3. **창이 닫힌 뒤 도착한 오류는 무시**한다 — **EPIPE 라도** 종료 코드를 바꾸지 않는다.
+
+**EPIPE 우선이 의미를 갖는 실제 시나리오**: 스트리밍 도중 어떤 `write` 의 `cb` 가 EPIPE 를 받아
+쓰기를 멈추고 `end()` 를 불렀는데, `end` 의 `cb` 가 **다른 오류**를 실어 오는 경우.
+두 오류가 **모두 수집 기간 안**에 있으므로 EPIPE 가 이겨 **코드 0**(`follow | head` 의 정상 종료)이 된다.
+이게 우선순위 규칙이 존재하는 이유이고, "창 밖 EPIPE 를 되살린다"는 뜻이 **아니다**.
+
+#### §9 수락 기준 (rev11 확정)
+
+- **48 (폐기)** — "창 닫힌 뒤 EPIPE 도 0" 은 창 정의와 모순이라 삭제한다.
+- **48a. 수집 기간 내 EPIPE 우선**: 스트리밍 중 `write` cb 가 EPIPE, 이후 `end` cb 가 다른 오류 →
+  **코드 0**. `end` cb 오류만 보도록 바꾸면 실패한다.
+- **48b. 창 밖 오류 무시**: 창이 닫힌 뒤 도착한 오류(EPIPE 포함)가 종료 코드를 바꾸지 않는다.
+- **48c. 창 종료 경쟁**: `end` 의 `cb` 와 `'error'` 중 **먼저 온 것**이 창을 닫는다.
 
 ---
 
