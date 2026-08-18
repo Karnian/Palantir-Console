@@ -2884,6 +2884,7 @@ async function realShellOutputRangeHarness(runId, initialBytes, {
   sealed = false,
   appendAfterFirstStat = '',
   omitStdout = false,
+  malformedFirstStat = false,
 } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-output-range-'));
   const statusDir = path.join(root, '.palantir-runs', runId);
@@ -2908,7 +2909,7 @@ if [ -n "$STAT_APPEND_PATH" ] && [ "$file" = "$STAT_APPEND_PATH" ] && [ ! -e "$S
   printf '%s' "$STAT_APPEND_DATA" >> "$file"
 fi
 case "$format" in
-  '%d:%i %s') printf '%s:%s %s\n' "$dev" "$ino" "$size" ;;
+  '%d:%i %s') if [ -n "$STAT_MALFORMED_FIRST" ]; then printf 'garbage\n'; else printf '%s:%s %s\n' "$dev" "$ino" "$size"; fi ;;
   '%d:%i') printf '%s:%s\n' "$dev" "$ino" ;;
   *) exit 65 ;;
 esac
@@ -2930,6 +2931,7 @@ esac
           STAT_APPEND_PATH: appendAfterFirstStat ? stdoutLog : '',
           STAT_APPEND_MARKER: path.join(root, 'appended'),
           STAT_APPEND_DATA: appendAfterFirstStat,
+          STAT_MALFORMED_FIRST: malformedFirstStat ? '1' : '',
         },
       });
       shellResults.push(result);
@@ -2995,6 +2997,54 @@ test('remote worker readOutputRange distinguishes deletion during read from gene
   assert.equal(result.source_id, '1:2');
   assert.deepEqual(result.data, Buffer.alloc(0));
   assert.equal(result.next_offset, 0);
+});
+
+test('remote worker readOutputRange treats a final-stat deletion race as deleted and discards data', async () => {
+  const runId = 'deleted-stat-race';
+  const statusDir = `/srv/root/.palantir-runs/${runId}`;
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    if (script === "exec 'realpath' '/srv/root'") return complete(child, { stdout: '/real/root\n' });
+    if (script === `exec 'realpath' ${shq(statusDir)}`) {
+      return complete(child, { stdout: `/real/root/.palantir-runs/${runId}\n` });
+    }
+    if (script.includes('stat -c ')) {
+      const raceRecovered = /stat -c '%d:%i'[^;]+\|\| echo MISSING/.test(script);
+      return complete(child, raceRecovered
+        ? { stdout: `1:2 12\n0\n${Buffer.from('data').toString('base64')}\nMISSING\n` }
+        : { code: 1, stderr: 'stat: stdout.log: No such file' });
+    }
+    return complete(child, { code: 255, stderr: `unexpected script: ${script}` });
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  const result = await exec.readOutputRange(runId, { after: 8, maxBytes: 32 });
+  assert.equal(result.deleted, true);
+  assert.deepEqual(result.data, Buffer.alloc(0));
+  assert.equal(result.next_offset, 0);
+});
+
+test('remote worker readOutputRange maps the malformed-first-stat guard to OUTPUT_FRAME_INVALID', async () => {
+  const runId = 'malformed-first-stat';
+  const statusDir = `/srv/root/.palantir-runs/${runId}`;
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    if (script === "exec 'realpath' '/srv/root'") return complete(child, { stdout: '/real/root\n' });
+    if (script === `exec 'realpath' ${shq(statusDir)}`) {
+      return complete(child, { stdout: `/real/root/.palantir-runs/${runId}\n` });
+    }
+    if (script.includes('stat -c ')) {
+      assert.match(script, /case "\$first_size" in ''\|\*\[!0-9\]\*\) exit 90;; esac/);
+      return complete(child, { code: 90, stdout: 'garbage\n' });
+    }
+    return complete(child, { code: 255, stderr: `unexpected script: ${script}` });
+  });
+  const exec = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  await assert.rejects(
+    () => exec.readOutputRange(runId, { after: 0, maxBytes: 32 }),
+    (err) => err.code === 'OUTPUT_FRAME_INVALID',
+  );
 });
 
 test('remote worker readOutputRange reports a missing initial stdout log without throwing', async () => {
@@ -3087,6 +3137,20 @@ test('remote worker readOutputRange emitted script runs in /bin/sh with binary d
   assert.equal(result.generation_changed, false);
   assert.equal(result.deleted, false);
   assert.equal(harness.shellResults[0].stdout.split('\n').length, 5, 'four lines plus the trailing split field');
+});
+
+test('remote worker readOutputRange emitted script rejects malformed stat before arithmetic', async (t) => {
+  const harness = await realShellOutputRangeHarness('real-shell-malformed-stat', Buffer.from('abc'), {
+    malformedFirstStat: true,
+  });
+  t.after(() => fs.rm(harness.root, { recursive: true, force: true }));
+
+  await assert.rejects(
+    () => harness.exec.readOutputRange('real-shell-malformed-stat', { after: 0, maxBytes: 8 }),
+    (err) => err.code === 'OUTPUT_FRAME_INVALID',
+  );
+  assert.equal(harness.shellResults[0].status, 90);
+  assert.equal(harness.shellResults[0].stderr, '');
 });
 
 test('remote worker readOutputRange emitted script handles EOF, head -c 0, and the MISSING four-line frame', async (t) => {

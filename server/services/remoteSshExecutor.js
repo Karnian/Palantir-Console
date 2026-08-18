@@ -2128,6 +2128,10 @@ function createRemoteSshNodeExecutor(node, {
     return err;
   }
 
+  // The shell validates stat's size before arithmetic; reserve a distinct code
+  // so malformed command output is reported as a frame error, not command failure.
+  const OUTPUT_FRAME_INVALID_EXIT = 90;
+
   async function canonicalWorkerStatusDir(paths) {
     let pending = canonicalWorkerStatusDirs.get(paths.statusDir);
     if (!pending) {
@@ -2154,14 +2158,18 @@ function createRemoteSshNodeExecutor(node, {
     // Read the size only from the first stat: it fixes this response's end
     // offset. The final stat is only for deletion/inode-generation detection.
     const script = [
-      `if [ -f ${shq(stdoutLog)} ]; then first=$(stat -c '%d:%i %s' -- ${shq(stdoutLog)}) || exit $?; echo "$first"; first_size=${'${first##* }'}; want=$((first_size - ${after})); if [ "$want" -lt 0 ]; then want=0; elif [ "$want" -gt ${cappedMaxBytes} ]; then want=${cappedMaxBytes}; fi; else first=MISSING; want=0; echo MISSING; fi`,
+      `if [ -f ${shq(stdoutLog)} ]; then first=$(stat -c '%d:%i %s' -- ${shq(stdoutLog)}) || exit $?; echo "$first"; first_size=${'${first##* }'}; case "$first_size" in ''|*[!0-9]*) exit ${OUTPUT_FRAME_INVALID_EXIT};; esac; want=$((first_size - ${after})); if [ "$want" -lt 0 ]; then want=0; elif [ "$want" -gt ${cappedMaxBytes} ]; then want=${cappedMaxBytes}; fi; else first=MISSING; want=0; echo MISSING; fi`,
       `if [ -f ${shq(exitSentinel)} ]; then echo 1; else echo 0; fi`,
       `if [ "$first" != MISSING ]; then tail -c +${startByte} -- ${shq(stdoutLog)} | head -c "$want" | base64 | tr -d '\\n'; fi; echo`,
-      `if [ -f ${shq(stdoutLog)} ]; then stat -c '%d:%i' -- ${shq(stdoutLog)}; else echo MISSING; fi`,
+      `if [ -f ${shq(stdoutLog)} ]; then stat -c '%d:%i' -- ${shq(stdoutLog)} || echo MISSING; else echo MISSING; fi`,
     ].join('; ');
     const res = await runFilesystemScript(script, {
       maxBuffer: Math.ceil(cappedMaxBytes / 3) * 4 + 4096,
     });
+    // Exit 90 is emitted only by the pre-arithmetic numeric guard above.
+    if (res.code === OUTPUT_FRAME_INVALID_EXIT) {
+      throw outputFrameInvalid('Remote output frame has invalid first stat');
+    }
     if (res.code !== 0) throw commandError('readOutputRange', [paths.stdoutLog], res);
 
     const frame = stripOneTrailingNewline(res.stdout).split('\n');
