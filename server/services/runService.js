@@ -80,7 +80,7 @@ function deriveOperatorProjectId(run) {
   return parsedPid;
 }
 
-function createRunService(db, eventBus) {
+function createRunService(db, eventBus, questionService = null) {
   const stmts = {
     getAll: db.prepare(`
       SELECT r.*, ap.name as agent_name, ap.type as agent_type, ap.icon as agent_icon,
@@ -125,13 +125,13 @@ function createRunService(db, eventBus) {
         id, task_id, agent_profile_id, prompt, status, is_manager,
         parent_run_id, manager_adapter, manager_thread_id, manager_layer,
         conversation_id, queued_args, retry_count, node_id,
-        operator_instance_id, retry_root_run_id
+        operator_instance_id, retry_root_run_id, source_question_id
       )
       VALUES (
         @id, @task_id, @agent_profile_id, @prompt, @status, @is_manager,
         @parent_run_id, @manager_adapter, @manager_thread_id, @manager_layer,
         @conversation_id, @queued_args, @retry_count, @node_id,
-        @operator_instance_id, @retry_root_run_id
+        @operator_instance_id, @retry_root_run_id, @source_question_id
       )
     `),
     insertPrivateProfile: db.prepare(`
@@ -964,7 +964,7 @@ function createRunService(db, eventBus) {
     return Number.isInteger(n) && n >= 0 ? n : 0;
   }
 
-  function createRun({
+  function buildRunRow({
     task_id,
     agent_profile_id,
     prompt,
@@ -979,6 +979,7 @@ function createRunService(db, eventBus) {
     retry_count,
     operator_instance_id,
     retry_root_run_id,
+    source_question_id,
   }) {
     // task_id and agent_profile_id are required for worker runs, optional for manager
     if (!is_manager && !task_id) throw new BadRequestError('task_id is required');
@@ -1006,7 +1007,7 @@ function createRunService(db, eventBus) {
       if (!effectiveConversationId) effectiveConversationId = `worker:${id}`;
     }
 
-    stmts.insert.run({
+    return {
       id,
       task_id: task_id || null,
       agent_profile_id: agent_profile_id || null,
@@ -1023,8 +1024,19 @@ function createRunService(db, eventBus) {
       node_id: node_id || null,
       operator_instance_id: operator_instance_id || null,
       retry_root_run_id: retry_root_run_id || null,
-    });
-    const run = stmts.getById.get(id);
+      source_question_id: source_question_id || null,
+    };
+  }
+
+  function insertRunRow(row) {
+    stmts.insert.run(row);
+  }
+
+  function readRunRow(id) {
+    return stmts.getById.get(id);
+  }
+
+  function emitRunCreated(run) {
     if (eventBus) {
       // v3 Phase 5: normalize run:status envelope on the initial queued
       // emission too (codex R1 finding). Prior to this, subscribers saw
@@ -1044,6 +1056,13 @@ function createRunService(db, eventBus) {
         node_id: run.node_id || null,
       });
     }
+  }
+
+  function createRun(args) {
+    const row = buildRunRow(args);
+    insertRunRow(row);
+    const run = readRunRow(row.id);
+    emitRunCreated(run);
     return run;
   }
 
@@ -1195,7 +1214,13 @@ function createRunService(db, eventBus) {
     return stmts.getById.get(id);
   }
 
-  function updateRunStatus(id, status, {
+  let deferredStatusEvents = null;
+  function emitStatusEvent(channel, payload) {
+    if (deferredStatusEvents) deferredStatusEvents.push([channel, payload]);
+    else eventBus.emit(channel, payload);
+  }
+
+  function updateRunStatusPersisted(id, status, {
     force = false,
     reason = null,
     terminalReason = null,
@@ -1361,7 +1386,7 @@ function createRunService(db, eventBus) {
       //     payload only shipped the full row, forcing every subscriber
       //     to re-derive them. Hoisting lets clients write dumber
       //     filters and matches the spec exactly.
-      eventBus.emit('run:status', {
+      emitStatusEvent('run:status', {
         run,
         from_status: fromStatus,
         to_status: status,
@@ -1374,7 +1399,7 @@ function createRunService(db, eventBus) {
 
     // Emit run:ended for terminal states so lifecycleService can sync task status
     if (TERMINAL_STATUSES.has(status) && eventBus) {
-      eventBus.emit('run:ended', {
+      emitStatusEvent('run:ended', {
         run,
         from_status: fromStatus,
         to_status: status,
@@ -1385,6 +1410,30 @@ function createRunService(db, eventBus) {
       });
     }
 
+    return run;
+  }
+
+  function updateRunStatus(id, status, options = {}) {
+    if (!questionService || !TERMINAL_STATUSES.has(status)) {
+      return updateRunStatusPersisted(id, status, options);
+    }
+
+    const pendingEvents = [];
+    const persistTerminal = db.transaction(() => {
+      const before = getRun(id);
+      deferredStatusEvents = pendingEvents;
+      try {
+        const run = updateRunStatusPersisted(id, status, options);
+        if (run && !TERMINAL_STATUSES.has(before.status)) {
+          questionService.cancelPendingForRun(id, { terminalReason: run.terminal_reason || null });
+        }
+        return run;
+      } finally {
+        deferredStatusEvents = null;
+      }
+    });
+    const run = persistTerminal();
+    for (const [channel, payload] of pendingEvents) eventBus.emit(channel, payload);
     return run;
   }
 
@@ -2138,6 +2187,9 @@ function createRunService(db, eventBus) {
         node_id: rc.node_id || null,
         operator_instance_id: rc.operator_instance_id || null,
         retry_root_run_id: rc.retry_root_run_id || null,
+        // stmts.insert is shared with buildRunRow/insertRunRow; every named
+        // parameter of that statement must be supplied here too.
+        source_question_id: rc.source_question_id || null,
       });
       stmts.setGoalActive.run(1, childId); // inherit goal control (unified activation)
       stmts.linkGoalRetry.run(childId, args.runId);
@@ -2362,7 +2414,7 @@ function createRunService(db, eventBus) {
   }
 
   return {
-    listRuns, getRun, createRun, findRetryAttempt, insertRetryRun,
+    listRuns, getRun, buildRunRow, insertRunRow, readRunRow, emitRunCreated, createRun, findRetryAttempt, insertRetryRun,
     updateRunStatus, markRunStarted, updateRunResult, updateGoalCapture, setSessionSnapshot, sumProjectCost, rejectQueuedRun, setGoalActive, setGoalWorkspacePath,
     updateGoalAcceptance, setDeliverableState,
     setGoalJudgeActive, casJudgePending, finalizeJudge, casJudgeExpiredToError,
