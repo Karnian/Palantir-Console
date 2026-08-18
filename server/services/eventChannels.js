@@ -59,6 +59,10 @@ const SERVER_EMITS = Object.freeze([
   // Operator scheduler lifecycle
   'operator:schedule',
 
+  // durable worker question mailbox
+  'question:answered',
+  'question:pending',
+
   // run lifecycle
   'run:completed',
   'run:ended',
