@@ -87,6 +87,8 @@ const { resolveClaudeAuth, CLAUDE_AUTH_KEYS } = require('./services/authResolver
 const { createMemoryRouter } = require('./routes/memory');
 const { createMemoryDiagnosticsRouter } = require('./routes/memoryDiagnostics');
 const { createMemoryProposalsRouter } = require('./routes/memoryProposals');
+const { createQuestionService } = require('./services/questionService');
+const { createQuestionsRouter } = require('./routes/questions');
 const {
   resolveAppActorTokenPolicy,
   createWorkerProposalTokenService,
@@ -1254,6 +1256,7 @@ function createApp(options = {}) {
     validatePresetId: (id) => presetService.getPreset(id),
   });
   const runService = createRunService(db, eventBus);
+  const questionService = createQuestionService(db, eventBus);
   const actionLedger = createActionLedgerService(db);
   const resolveOperatorConversationId = createOperatorConversationIdResolver(db);
   const agentProfileService = createAgentProfileService(db);
@@ -1877,6 +1880,12 @@ function createApp(options = {}) {
     masterMemoryService,
     projectService,
   }));
+  app.use('/api', createQuestionsRouter({
+    questionService,
+    runService,
+    waitTimeoutMs: options.questionWaitTimeoutMs,
+    pollIntervalMs: options.questionPollIntervalMs,
+  }));
   app.use('/api/tasks', createTasksRouter({ taskService, lifecycleService, presetService, goalDeliveryService, runService, verifyCheckService }));
   app.use('/api/runs', createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService, presetService, mcpTemplateService, projectService, taskService, nodeExecutor, nodeService }));
   app.use('/api/actions', createActionsRouter({ ledger: actionLedger }));
@@ -2084,6 +2093,7 @@ function createApp(options = {}) {
     operatorScheduleService,
     operatorScheduler,
     managerMessageQueueService,
+    questionService,
     workerProposalTokenService,
     managerCapabilityTokenService,
     resolveOperatorConversationId, // W-P2+: instance-aware dual-read resolver (legacy alias + operator:oi_*)

@@ -51,6 +51,19 @@ function workerProposalRunId(req) {
   try { return decodeURIComponent(match[1]); } catch { return null; }
 }
 
+function workerQuestionRunId(req) {
+  const rawPath = String(req.originalUrl || '').split('?')[0];
+  const method = String(req.method || '').toUpperCase();
+  let match = null;
+  if (method === 'POST') {
+    match = /^\/api\/runs\/([^/]+)\/questions\/?$/.exec(rawPath);
+  } else if (method === 'GET') {
+    match = /^\/api\/runs\/([^/]+)\/questions\/[^/]+\/wait\/?$/.exec(rawPath);
+  }
+  if (!match) return null;
+  try { return decodeURIComponent(match[1]); } catch { return null; }
+}
+
 function conversationMessageTarget(rawPath) {
   const match = /^\/api\/conversations\/([^/]+)\/message\/?$/.exec(rawPath);
   if (!match) return null;
@@ -190,7 +203,10 @@ function createAuthMiddleware({
         : null;
       if (workerGrant) {
         const pathRunId = workerProposalRunId(req);
-        if (req.method !== 'POST' || !pathRunId || pathRunId !== workerGrant.runId) {
+        const questionRunId = workerQuestionRunId(req);
+        const memoryProposalAllowed = req.method === 'POST' && pathRunId === workerGrant.runId;
+        const workerQuestionAllowed = questionRunId === workerGrant.runId;
+        if (!memoryProposalAllowed && !workerQuestionAllowed) {
           throw new ForbiddenError('Worker token is limited to its memory proposal endpoint');
         }
         req.auth = {
@@ -226,5 +242,6 @@ module.exports = {
   parseCookies,
   timingSafeEqualStr,
   workerProposalRunId,
+  workerQuestionRunId,
   managerCapabilityRequestAllowed,
 };
