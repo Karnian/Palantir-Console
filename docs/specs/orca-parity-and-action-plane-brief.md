@@ -42,6 +42,129 @@
 | 원격 | SSH 연결 모드는 pod 에 `orca serve` 조차 설치하지 않고 **relay 로 직접 접속** |
 | 없는 것 | 에이전트 메모리/학습 축적, 모델·effort·비용 정책, 예산 상한, 자기보고 외의 결정론적 완료 검증, **외부 액션의 멱등성·영수증** |
 
+### 1.0 소스 실측 정정 (2026-08-18) — §1 표의 일부 항목을 덮어쓴다
+
+위 표는 **`--help` 출력과 명령 실행**으로 만든 것이다. 이번에 **Orca 앱 소스를 직접 읽어** 확인했고,
+그 결과 **전제 하나가 틀렸음이 드러났다.** 아래가 우선한다.
+
+읽은 곳: `/Applications/Orca.app` — `Contents/Resources/app.asar.unpacked/out/cli/{specs,handlers}/*.js`
+(평문) 및 `app.asar` 내부 `out/main/index.js`(9.1MB, `@electron/asar extract-file` 로 추출).
+
+#### (a) Orca 는 CLI 가 아니라 **Electron 데스크톱 앱**이다
+
+- `app.asar` 122MB + `Frameworks` + 다국어 `.lproj` = Electron 앱.
+- `/usr/local/bin/orca` 는 **VS Code 식 런처 33줄 bash** — `ELECTRON_RUN_AS_NODE=1` 로
+  앱 안의 `out/cli/index.js` 를 실행할 뿐이다.
+- 메인 화면에 **xterm.js + node-pty 로 진짜 PTY 터미널이 임베드**돼 있다.
+- **CLI 는 GUI 런타임의 RPC 클라이언트이자 에이전트용 action surface 이지 본체가 아니다.**
+
+**따라서 "웹 UI 만으로는 대체 선언에 부족하다"는 §4 4단계의 근거는 폐기한다.**
+그 문장은 "Orca 의 본체가 터미널/CLI"라는 오해에서 나왔다. Orca 도 GUI 가 주 경로다.
+**"Orca 터미널 UI 전체를 복제하지 않는다"는 유지**하되 표현을 고친다 —
+Orca 는 단순 터미널 UI 가 아니라 **GUI workspace/terminal 자원 관리자**이고,
+split/focus/tab topology·renderer-backed TUI·worktree 사이드바 복제는 우리 방향과 맞지 않는다.
+
+**대체 판정 기준을 바꾼다**: UI 종류가 아니라 —
+> 사람과 에이전트 양쪽이 **같은 durable control-plane 연산**을 부를 수 있고,
+> 실제 운영 workflow(terminal lifecycle · 질문/승인 · retry · workspace · automation 이력)가
+> **손실 없이 이식**됐는가.
+
+#### (b) `orchestration run` 자율 코디네이터는 **퇴역했다**
+
+§1 표의 "`orchestration run` 자율 코디네이터" 는 현 버전과 맞지 않는다.
+`orchestration.run` / `orchestration.runStop` 은 `RETIRED_ORCHESTRATION_METHODS` 이고
+handler 가 migration 안내만 반환한다. 실제 코디네이터 루프는 **에이전트가 orchestration skill 을
+읽고 경량 primitive 를 조합**하는 방식이다.
+
+#### (c) 실제 데이터 모델 — `orchestration.db` (SQLite/WAL, Electron userData)
+
+명령 표면이 아니라 **스키마 원문**이다. 우리가 mailbox 를 설계할 때의 기준선이다.
+
+```sql
+messages(id, run_id,
+  delivery_contract CHECK('legacy_direct'|'current_delivery'|'audit_only'),
+  from_handle, to_handle, subject, body,
+  type CHECK('status'|'dispatch'|'worker_done'|'merge_ready'|'escalation'
+            |'handoff'|'decision_gate'|'question'|'heartbeat'),
+  priority CHECK('normal'|'high'|'urgent'),
+  thread_id, payload, read,
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,   -- 단조 순서
+  created_at, delivered_at, sender_pane_key)    -- 송신자 신원을 기록 시점에 고정
+
+deliveries(id, run_id, consumer_generation, message_ids,
+  status CHECK('outstanding'|'acknowledged'|'fenced'), created_at, acknowledged_at)
+UNIQUE INDEX ON deliveries(run_id) WHERE status='outstanding'   -- run 당 outstanding 1개
+
+mutation_receipts(caller_fingerprint, request_id, method, payload_hash,
+  state CHECK('pending'|'completed'), receipt,
+  PRIMARY KEY(caller_fingerprint, request_id))                  -- 멱등 영수증
+
+tasks(id, run_id, parent_id, deps,                              -- deps = JSON 배열
+  created_by_terminal_handle, created_by_pane_key,
+  created_by_process_incarnation, created_by_run_generation,    -- 생성자 provenance
+  spec, status CHECK('pending'|'ready'|'dispatched'|'completed'|'failed'|'blocked'), result)
+
+dispatch_contexts(id, run_id, task_id, contract_version,
+  launch_token_hash, assignee_handle, assignee_pane_key,
+  capability_hash, process_incarnation, capability_revoked_at,   -- capability 모델
+  status CHECK('pending'|'dispatched'|'completed'|'failed'|'circuit_broken'),
+  failure_count, last_failure, last_heartbeat_at)
+
+decision_gates(id, run_id, task_id, question, options,
+  status CHECK('pending'|'resolved'|'timeout'), resolution)
+
+question_threads(message_id PK, run_id, dispatch_id, asker_handle,
+  status CHECK('pending'|'answered'|'closed'),
+  answer_message_id, answer_body, answered_by_generation)
+
+worker_dispatches(dispatch_id, runtime_epoch,
+  state CHECK('starting'|'ready'|'start_unknown'|'failed'|'succeeded'
+             |'stopping'|'stop_unknown'|'stopped'|'abandoned'),
+  stage, worktree_id, agent_terminal_handle, setup_state,
+  effects, residual_resources, start_options, last_error)
+```
+
+#### (d) 검증된 계약 (설계 기준선)
+
+- **ack 는 삭제가 아니다** — Delivery 를 `acknowledged` 로, 포함 Message 를 `read=1` 로. **멱등**.
+- **ack 전 재호출은 같은 Delivery ID·같은 메시지 목록을 replay**. 새 메시지가 와도 구성이 안 바뀐다.
+- Delivery = unread 메시지를 `sequence ASC` 로 **최대 50개** 묶은 FIFO 배치.
+- **`consumer_generation`** 으로 consumer 재바인딩 시 이전 Delivery 를 `fenced`.
+- **timeout·연결끊김·취소는 아무것도 소비하지 않는다**(출력이 "no messages were consumed" 로 명시).
+- **replay 는 "MAY HAVE BEEN SEEN" 라벨** — at-least-once 를 소비자에게 드러낸다.
+- **`check` 는 기본이 파괴적**(mark-read). `peek`/`all`/`unread:false` 만 읽기 전용
+  (`isOrchestrationMutation` 이 이걸 mutation 분류의 기준으로 쓴다).
+- `ask` 기본 **600s** / 최대 **1800s**, 클라이언트 timeout = 서버 + **5s** grace.
+  `check --wait` 기본 **120s**. wait 중 **keepalive JSON 을 stderr 로** 흘린다(stdout 은 payload 전용).
+- **`start_unknown`/`stop_unknown` 이 1급 상태**이고 `residual_resources` 를 동반한다.
+- `dispatch_contexts` 에 **`circuit_broken` + `failure_count`** — attempt 단위 circuit breaker.
+
+#### (e) automations 는 격차가 작다 (재평가)
+
+§2 갭 표는 스케줄러를 큰 결손으로 적었으나, A1/A2 완료 후 **timezone·grace·misfire·durable
+occurrence/history·run-now·precheck·연속 3회 precheck 오류 disable** 이 모두 있다.
+남은 차이는 **cron/RRULE 범용성**과 **automation 별 workspace/session mode** 뿐이고,
+precheck 은 오히려 우리가 더 안전하다(Orca = raw command, 우리 = human-attested artifact check).
+
+#### (f) 가장 큰 격차 3개 (재정의)
+
+1. **durable mailbox + ask/reply + decision gate** — 무인 운영 중 워커가 막혔을 때 필요한 것은
+   stdin 대기가 아니라 *질문을 durable 하게 등록 → 나중에 응답 → 그동안 Task block → 재시작 후 resume*
+   이다. 우리는 로컬 stdin 뿐이고 **원격은 아예 실패**한다. **1순위.**
+2. **Task DAG + Dispatch attempt identity** — "A·B 끝나면 C", "실패한 시도만 교체",
+   "이 완료 보고가 현재 시도 것인가"를 표현 못 한다. 다만 실사용 자동화 2개가 선형이라 **2순위**.
+3. **원격 포함 워커 terminal lifecycle** — `stop/abandon/retain/release` 와 `unknown` 표면화.
+   "DB status 를 cancelled 로 바꿨다"와 "실제 프로세스가 멈췄다"는 다르다.
+
+#### (g) 얇은 CLI 의 위치 (정직한 평가)
+
+Orca 대응물은 `worker-start`/`worker-read`/`terminal send`/`worker-stop` 이지만 **의미 파리티가 낮다** —
+`spawn` 은 worktree placement·retry linkage·terminal ownership 을 못 담고, `input` 은 durable
+message 가 아니라 stdin 이며 원격에서 실패한다. **Orca 에서도 CLI 는 본체가 아니다.**
+
+다만 **S-A/S-B 의 커서 설계는 검증됐다** — Orca `worker-read` 도 커서를 소스에 pin 하고
+`source_changed` 를 알린다. 우리가 독립적으로 같은 결론에 도달했다.
+
 ### 1.1 결정적 관측 — 지식이 프롬프트에 하드코딩된다
 
 사용자가 운영 중인 automation 2개의 프롬프트 길이:
