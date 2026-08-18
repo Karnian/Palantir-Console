@@ -2154,9 +2154,9 @@ function createRemoteSshNodeExecutor(node, {
     // Read the size only from the first stat: it fixes this response's end
     // offset. The final stat is only for deletion/inode-generation detection.
     const script = [
-      `if [ -f ${shq(stdoutLog)} ]; then stat -c '%d:%i %s' -- ${shq(stdoutLog)}; else echo MISSING; fi`,
+      `if [ -f ${shq(stdoutLog)} ]; then first=$(stat -c '%d:%i %s' -- ${shq(stdoutLog)}) || exit $?; echo "$first"; first_size=${'${first##* }'}; want=$((first_size - ${after})); if [ "$want" -lt 0 ]; then want=0; elif [ "$want" -gt ${cappedMaxBytes} ]; then want=${cappedMaxBytes}; fi; else first=MISSING; want=0; echo MISSING; fi`,
       `if [ -f ${shq(exitSentinel)} ]; then echo 1; else echo 0; fi`,
-      `if [ -f ${shq(stdoutLog)} ]; then tail -c +${startByte} -- ${shq(stdoutLog)} | head -c ${cappedMaxBytes} | base64 | tr -d '\\n'; fi; echo`,
+      `if [ "$first" != MISSING ]; then tail -c +${startByte} -- ${shq(stdoutLog)} | head -c "$want" | base64 | tr -d '\\n'; fi; echo`,
       `if [ -f ${shq(stdoutLog)} ]; then stat -c '%d:%i' -- ${shq(stdoutLog)}; else echo MISSING; fi`,
     ].join('; ');
     const res = await runFilesystemScript(script, {
@@ -2178,6 +2178,7 @@ function createRemoteSshNodeExecutor(node, {
         has_more: false,
         sealed,
         generation_changed: false,
+        deleted: false,
         missing: true,
       };
     }
@@ -2197,16 +2198,19 @@ function createRemoteSshNodeExecutor(node, {
     }
 
     const decoded = Buffer.from(frame[2], 'base64');
+    const deleted = lastSourceId === null;
+    const generationChanged = lastSourceId !== null && lastSourceId !== sourceId;
+    const expected = Math.min(cappedMaxBytes, Math.max(0, endOffset - after));
     if (
       decoded.toString('base64') !== frame[2]
       || decoded.length > cappedMaxBytes
-      || (decoded.length > 0 && after + decoded.length > endOffset)
+      || (!deleted && !generationChanged && decoded.length !== expected)
     ) {
       throw outputFrameInvalid('Remote output frame has invalid data');
     }
-    const generationChanged = lastSourceId !== sourceId;
-    const data = generationChanged ? Buffer.alloc(0) : decoded;
-    const nextOffset = generationChanged ? 0 : after + data.length;
+    const discardData = deleted || generationChanged;
+    const data = discardData ? Buffer.alloc(0) : decoded;
+    const nextOffset = discardData ? 0 : after + data.length;
     return {
       source_id: sourceId,
       data,
@@ -2215,6 +2219,7 @@ function createRemoteSshNodeExecutor(node, {
       has_more: nextOffset < endOffset,
       sealed,
       generation_changed: generationChanged,
+      deleted,
       missing: false,
     };
   }
