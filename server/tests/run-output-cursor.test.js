@@ -167,6 +167,30 @@ test('incremental output re-reads status after reading the output range', async 
   assert.ok(reads >= 2, `expected a post-range re-read, saw ${reads}`);
 });
 
+test('an ABA requeue-and-recomplete during the read is not expired', async (t) => {
+  // Both snapshots read terminal, but the run passed through queued in between,
+  // so a new attempt is already producing output. Terminal-on-both-ends is not
+  // enough; the observation must be unmoved.
+  let rangeReads = 0;
+  let f;
+  let run;
+  f = await createFixture(t, {
+    result: () => {
+      rangeReads += 1;
+      f.runService.updateRunStatus(run.id, 'queued', { force: true });
+      f.runService.updateRunStatus(run.id, 'completed', { force: true });
+      return rangeResult({ missing: true, source_id: null, data: Buffer.alloc(0) });
+    },
+  });
+  run = f.createRun({ status: 'failed' });
+
+  const res = await request(f.app).get(`/api/runs/${run.id}/output?after=0`);
+  assert.equal(res.status, 200, 'an ABA requeue must not be expired');
+  assert.equal(res.body.run_status, 'completed');
+  assert.equal(res.body.finalized, false);
+  assert.equal(rangeReads, 1);
+});
+
 test('a run requeued during the read is not expired', async (t) => {
   // The mirror of the stale-missing race: preRun is terminal (failed), and the
   // run is requeued while the range is read. Deciding on preRun alone would 410

@@ -508,11 +508,21 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
       // The two snapshots serve opposite race-safety goals and cannot be merged:
       // preRun prevents stale missing/deleted reads from producing a false 410,
       // while latestRun prevents sealed output from being finalized too early.
-      // Both snapshots must agree the run is terminal. preRun alone would 410 a
-      // run that was requeued (failed -> queued) during the read; latestRun alone
-      // would 410 a run that merely finished during it. Requiring both makes the
-      // expiry decision late in every direction instead of wrong in one.
-      if ((range.deleted || range.missing) && wasTerminalBeforeRead && isTerminalAfterRead) {
+      // Expiry is only claimed when the run did not move at all across the read.
+      // preRun alone would 410 a run requeued (failed -> queued) during the read;
+      // latestRun alone would 410 a run that merely finished during it; both being
+      // terminal still admits an ABA (failed -> queued -> completed) where a new
+      // attempt is already producing output. Requiring an unchanged observation
+      // makes the decision late in every direction instead of wrong in one -- a
+      // deferred 410 costs one extra poll, a false 410 is unrecoverable.
+      const runUnmovedAcrossRead = preRun.status === latestRun.status
+        && (preRun.ended_at ?? null) === (latestRun.ended_at ?? null);
+      if (
+        (range.deleted || range.missing)
+        && wasTerminalBeforeRead
+        && isTerminalAfterRead
+        && runUnmovedAcrossRead
+      ) {
         return res.status(410).json({
           error: 'Run output is no longer available',
           reason: 'output_expired',
