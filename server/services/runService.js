@@ -80,7 +80,7 @@ function deriveOperatorProjectId(run) {
   return parsedPid;
 }
 
-function createRunService(db, eventBus) {
+function createRunService(db, eventBus, questionService = null) {
   const stmts = {
     getAll: db.prepare(`
       SELECT r.*, ap.name as agent_name, ap.type as agent_type, ap.icon as agent_icon,
@@ -125,13 +125,13 @@ function createRunService(db, eventBus) {
         id, task_id, agent_profile_id, prompt, status, is_manager,
         parent_run_id, manager_adapter, manager_thread_id, manager_layer,
         conversation_id, queued_args, retry_count, node_id,
-        operator_instance_id, retry_root_run_id
+        operator_instance_id, retry_root_run_id, source_question_id
       )
       VALUES (
         @id, @task_id, @agent_profile_id, @prompt, @status, @is_manager,
         @parent_run_id, @manager_adapter, @manager_thread_id, @manager_layer,
         @conversation_id, @queued_args, @retry_count, @node_id,
-        @operator_instance_id, @retry_root_run_id
+        @operator_instance_id, @retry_root_run_id, @source_question_id
       )
     `),
     insertPrivateProfile: db.prepare(`
@@ -964,7 +964,7 @@ function createRunService(db, eventBus) {
     return Number.isInteger(n) && n >= 0 ? n : 0;
   }
 
-  function createRun({
+  function buildRunRow({
     task_id,
     agent_profile_id,
     prompt,
@@ -979,6 +979,7 @@ function createRunService(db, eventBus) {
     retry_count,
     operator_instance_id,
     retry_root_run_id,
+    source_question_id,
   }) {
     // task_id and agent_profile_id are required for worker runs, optional for manager
     if (!is_manager && !task_id) throw new BadRequestError('task_id is required');
@@ -1006,7 +1007,7 @@ function createRunService(db, eventBus) {
       if (!effectiveConversationId) effectiveConversationId = `worker:${id}`;
     }
 
-    stmts.insert.run({
+    return {
       id,
       task_id: task_id || null,
       agent_profile_id: agent_profile_id || null,
@@ -1023,8 +1024,19 @@ function createRunService(db, eventBus) {
       node_id: node_id || null,
       operator_instance_id: operator_instance_id || null,
       retry_root_run_id: retry_root_run_id || null,
-    });
-    const run = stmts.getById.get(id);
+      source_question_id: source_question_id || null,
+    };
+  }
+
+  function insertRunRow(row) {
+    stmts.insert.run(row);
+  }
+
+  function readRunRow(id) {
+    return stmts.getById.get(id);
+  }
+
+  function emitRunCreated(run) {
     if (eventBus) {
       // v3 Phase 5: normalize run:status envelope on the initial queued
       // emission too (codex R1 finding). Prior to this, subscribers saw
@@ -1044,6 +1056,13 @@ function createRunService(db, eventBus) {
         node_id: run.node_id || null,
       });
     }
+  }
+
+  function createRun(args) {
+    const row = buildRunRow(args);
+    insertRunRow(row);
+    const run = readRunRow(row.id);
+    emitRunCreated(run);
     return run;
   }
 
@@ -1195,7 +1214,13 @@ function createRunService(db, eventBus) {
     return stmts.getById.get(id);
   }
 
-  function updateRunStatus(id, status, {
+  let deferredStatusEvents = null;
+  function emitStatusEvent(channel, payload) {
+    if (deferredStatusEvents) deferredStatusEvents.push([channel, payload]);
+    else eventBus.emit(channel, payload);
+  }
+
+  function updateRunStatusPersisted(id, status, {
     force = false,
     reason = null,
     terminalReason = null,
@@ -1219,6 +1244,11 @@ function createRunService(db, eventBus) {
     // started from `running` must also require that status at commit time or it
     // can force-overwrite the user's newer `cancelled` decision.
     requireCurrentStatus = null,
+    // An enclosing transaction can still roll back after this function
+    // returns. Since better-sqlite3 exposes no outer commit hook, callers that
+    // already own a transaction must suppress lifecycle events rather than
+    // publish a state that may never commit.
+    emitEvents = true,
   } = {}) {
     if (!VALID_STATUSES.includes(status)) {
       throw new BadRequestError(`Invalid run status: ${status}`);
@@ -1346,7 +1376,7 @@ function createRunService(db, eventBus) {
       run = stmts.getById.get(id);
     }
     addRunEvent(id, `status:${status}`, reason ? JSON.stringify({ reason }) : null);
-    if (eventBus) {
+    if (eventBus && emitEvents) {
       // v3 Phase 5 semantic event fields (spec §9.8):
       //   from_status / to_status — the transition, not just the
       //     terminal state. A client that missed the previous status
@@ -1361,7 +1391,7 @@ function createRunService(db, eventBus) {
       //     payload only shipped the full row, forcing every subscriber
       //     to re-derive them. Hoisting lets clients write dumber
       //     filters and matches the spec exactly.
-      eventBus.emit('run:status', {
+      emitStatusEvent('run:status', {
         run,
         from_status: fromStatus,
         to_status: status,
@@ -1373,8 +1403,8 @@ function createRunService(db, eventBus) {
     }
 
     // Emit run:ended for terminal states so lifecycleService can sync task status
-    if (TERMINAL_STATUSES.has(status) && eventBus) {
-      eventBus.emit('run:ended', {
+    if (TERMINAL_STATUSES.has(status) && eventBus && emitEvents) {
+      emitStatusEvent('run:ended', {
         run,
         from_status: fromStatus,
         to_status: status,
@@ -1385,6 +1415,54 @@ function createRunService(db, eventBus) {
       });
     }
 
+    return run;
+  }
+
+  function updateRunStatus(id, status, options = {}) {
+    if (!questionService || !TERMINAL_STATUSES.has(status)) {
+      return updateRunStatusPersisted(id, status, options);
+    }
+
+    if (db.inTransaction) {
+      // The caller already owns atomicity. Do not open a nested savepoint or
+      // touch deferredStatusEvents here: a savepoint can commit before its
+      // outer transaction, and its finally would also clear the top-level
+      // deferral slot.
+      //
+      // Events are emitted immediately, exactly as they were before this
+      // refactor. This is NOT "immediate emit is safer" in general -- after a
+      // rollback the external effects (retry, harvest) would survive a reverted
+      // transition. The reasons are narrower and concrete: no production caller
+      // wraps updateRunStatus in an outer transaction today, and suppressing
+      // run:ended would be a compatibility change that silently drops every
+      // lifecycle subscriber (B-lite retry, goal verdict loop, harvest) the
+      // moment one appears. better-sqlite3 has no outer commit hook, so the
+      // contract is: do not wrap a terminal transition in a transaction you may
+      // roll back -- its events have already fired.
+      const run = updateRunStatusPersisted(id, status, options);
+      if (run) {
+        questionService.cancelPendingForRun(id, { terminalReason: run.terminal_reason || null });
+      }
+      return run;
+    }
+
+    const pendingEvents = [];
+    const persistTerminal = db.transaction(() => {
+      // This deferral slot is used only by this top-level transaction path;
+      // the db.inTransaction branch above prevents nested/re-entrant ownership.
+      deferredStatusEvents = pendingEvents;
+      try {
+        const run = updateRunStatusPersisted(id, status, options);
+        if (run) {
+          questionService.cancelPendingForRun(id, { terminalReason: run.terminal_reason || null });
+        }
+        return run;
+      } finally {
+        deferredStatusEvents = null;
+      }
+    });
+    const run = persistTerminal();
+    for (const [channel, payload] of pendingEvents) eventBus.emit(channel, payload);
     return run;
   }
 
@@ -2120,25 +2198,21 @@ function createRunService(db, eventBus) {
     let childId = null;
     if (args.retryChild) {
       const rc = args.retryChild;
-      childId = `run_${crypto.randomUUID().slice(0, 8)}`;
-      stmts.insert.run({
-        id: childId,
+      const childRow = buildRunRow({
         task_id: rc.task_id || null,
         agent_profile_id: rc.agent_profile_id || null,
         prompt: rc.prompt || null,
-        status: 'queued',
-        is_manager: 0,
+        is_manager: false,
         parent_run_id: rc.parent_run_id || null,
-        manager_adapter: null,
-        manager_thread_id: null,
-        manager_layer: null,
-        conversation_id: `worker:${childId}`,
-        queued_args: normalizeQueuedArgs(rc.queued_args),
-        retry_count: normalizeRetryCount(rc.retry_count),
+        queued_args: rc.queued_args,
+        retry_count: rc.retry_count,
         node_id: rc.node_id || null,
         operator_instance_id: rc.operator_instance_id || null,
         retry_root_run_id: rc.retry_root_run_id || null,
+        source_question_id: rc.source_question_id || null,
       });
+      childId = childRow.id;
+      stmts.insert.run(childRow);
       stmts.setGoalActive.run(1, childId); // inherit goal control (unified activation)
       stmts.linkGoalRetry.run(childId, args.runId);
     }
@@ -2362,7 +2436,7 @@ function createRunService(db, eventBus) {
   }
 
   return {
-    listRuns, getRun, createRun, findRetryAttempt, insertRetryRun,
+    listRuns, getRun, buildRunRow, insertRunRow, readRunRow, emitRunCreated, createRun, findRetryAttempt, insertRetryRun,
     updateRunStatus, markRunStarted, updateRunResult, updateGoalCapture, setSessionSnapshot, sumProjectCost, rejectQueuedRun, setGoalActive, setGoalWorkspacePath,
     updateGoalAcceptance, setDeliverableState,
     setGoalJudgeActive, casJudgePending, finalizeJudge, casJudgeExpiredToError,

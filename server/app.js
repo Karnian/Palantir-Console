@@ -1255,8 +1255,8 @@ function createApp(options = {}) {
     // D2c: defense-in-depth — service-layer preset existence check
     validatePresetId: (id) => presetService.getPreset(id),
   });
-  const runService = createRunService(db, eventBus);
   const questionService = createQuestionService(db, eventBus);
+  const runService = createRunService(db, eventBus, questionService);
   const actionLedger = createActionLedgerService(db);
   const resolveOperatorConversationId = createOperatorConversationIdResolver(db);
   const agentProfileService = createAgentProfileService(db);
