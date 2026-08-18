@@ -161,6 +161,9 @@ function createGoalVerdictService({
       operator_instance_id: run.operator_instance_id || null,
       parent_run_id: run.parent_run_id || null,
       retry_root_run_id: run.retry_root_run_id || run.id,
+      // Provenance survives retries: a run that exists because a human answered
+      // a worker question keeps pointing at that question across attempts.
+      source_question_id: run.source_question_id || null,
     };
   }
 

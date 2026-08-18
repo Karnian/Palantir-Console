@@ -101,6 +101,31 @@ test('spawnQueuedRun compiles the goal prompt for a goal-enabled task', async (t
   assert.match(prompt, /palantir-goal-report/, 'requests completion report');
 });
 
+test('G3: a retry child inherits source_question_id through the production builder', async (t) => {
+  // Provenance must survive a retry: a run that exists because a human answered
+  // a worker question keeps pointing at that question across attempts. This goes
+  // through the real settle() path -- a test that hand-builds the retryChild
+  // would pass even when buildRetryChild() drops the field.
+  const { db, rs, ts, ps, lc } = await harness(t);
+  const project = ps.createProject({ name: 'P', directory: null });
+  const task = ts.createTask({ project_id: project.id, title: 'Ship it', description: 'd', acceptance_criteria: '- passes' });
+  db.prepare('UPDATE tasks SET goal_enabled = 1, goal_max_attempts = 3 WHERE id = ?').run(task.id);
+  const profile = seedProfile(db);
+  const parent = rs.createRun({
+    is_manager: false, task_id: task.id, agent_profile_id: profile.id,
+    node_id: 'local', prompt: 'orig', source_question_id: 'wq_provenance',
+  });
+  assert.equal(rs.getRun(parent.id).source_question_id, 'wq_provenance');
+  rs.setGoalActive(parent.id, 1);
+  rs.markRunStarted(parent.id, {});
+  rs.updateRunStatus(parent.id, 'completed', { force: true });
+  rs.updateGoalAcceptance(parent.id, { gate: true, kind: 'command', name: 'unit', status: 'ran', passed: false, exit_code: 1, output_tail: 'fail' });
+  lc._goalVerdictService.settle(parent.id);
+  const childId = rs.getRun(parent.id).goal_retry_run_id;
+  assert.ok(childId, 'retry child created');
+  assert.equal(rs.getRun(childId).source_question_id, 'wq_provenance', 'retry child must inherit the question provenance');
+});
+
 test('G3: a retry child is spawned with its real attempt number + prior-attempt feedback', async (t) => {
   const { db, rs, ts, ps, exec, lc } = await harness(t);
   const project = ps.createProject({ name: 'P', directory: null });

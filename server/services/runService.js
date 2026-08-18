@@ -1430,13 +1430,15 @@ function createRunService(db, eventBus, questionService = null) {
       // deferral slot.
       //
       // Events are emitted immediately, exactly as they were before this
-      // refactor. Suppressing them instead would be a worse failure mode than
-      // the risk it avoids: run:ended drives B-lite retry, the goal verdict
-      // loop and harvest, so a caller that wrapped a terminal transition in a
-      // transaction would silently stop all three. There is no outer commit
-      // hook in better-sqlite3, so the honest contract is: do not wrap a
-      // terminal transition in a transaction you may roll back -- its events
-      // have already fired.
+      // refactor. This is NOT "immediate emit is safer" in general -- after a
+      // rollback the external effects (retry, harvest) would survive a reverted
+      // transition. The reasons are narrower and concrete: no production caller
+      // wraps updateRunStatus in an outer transaction today, and suppressing
+      // run:ended would be a compatibility change that silently drops every
+      // lifecycle subscriber (B-lite retry, goal verdict loop, harvest) the
+      // moment one appears. better-sqlite3 has no outer commit hook, so the
+      // contract is: do not wrap a terminal transition in a transaction you may
+      // roll back -- its events have already fired.
       const run = updateRunStatusPersisted(id, status, options);
       if (run) {
         questionService.cancelPendingForRun(id, { terminalReason: run.terminal_reason || null });
