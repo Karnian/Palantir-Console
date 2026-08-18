@@ -77,11 +77,36 @@ test('only one pending question is allowed per run', t => {
   assert.throws(() => service.createQuestion(input('run-1', { idempotencyKey: 'idem-2' })), hasCode('QUESTION_PENDING'));
 });
 
+test('creation persists stale pending expiry before allowing a new question', t => {
+  const { db, service, addRun } = setup(t);
+  addRun('run-expired');
+  const stale = service.createQuestion(input('run-expired'));
+  db.prepare("UPDATE worker_questions SET expires_at = datetime('now', '-1 second') WHERE id = ?").run(stale.id);
+
+  const next = service.createQuestion(input('run-expired', { idempotencyKey: 'idem-2' }));
+  assert.ok(next.id);
+  assert.equal(db.prepare('SELECT status FROM worker_questions WHERE id = ?').get(stale.id).status, 'expired');
+});
+
 test('terminal or absent runs are not active', t => {
   const { service, addRun } = setup(t);
   addRun('run-terminal', 'completed');
   assert.throws(() => service.createQuestion(input('run-terminal')), hasCode('RUN_NOT_ACTIVE'));
   assert.throws(() => service.createQuestion(input('missing')), hasCode('RUN_NOT_ACTIVE'));
+});
+
+test('terminal run creation normalizes same-key and different-key outcomes', t => {
+  const { db, service, addRun } = setup(t);
+  addRun('run-terminal-race');
+  const existing = service.createQuestion(input('run-terminal-race'));
+  db.prepare("UPDATE runs SET status = 'completed' WHERE id = ?").run('run-terminal-race');
+  db.prepare("UPDATE worker_questions SET status = 'cancelled' WHERE id = ?").run(existing.id);
+
+  assert.equal(service.createQuestion(input('run-terminal-race')).id, existing.id);
+  assert.throws(
+    () => service.createQuestion(input('run-terminal-race', { idempotencyKey: 'idem-2' })),
+    err => err.code === 'RUN_NOT_ACTIVE' && !String(err.code).startsWith('SQLITE_'),
+  );
 });
 
 test('answer uses CAS and emits only after success', t => {
@@ -125,13 +150,29 @@ test('get and list materialize stale pending rows as expired before sweep', t =>
 });
 
 test('cancelPendingForRun cancels normally but preserves question_unanswered', t => {
-  const { service, addRun } = setup(t);
+  const { db, service, addRun } = setup(t);
   addRun('run-preserve');
   const preserved = service.createQuestion(input('run-preserve'));
-  assert.equal(service.cancelPendingForRun('run-preserve', { terminalReason: 'question_unanswered' }), 0);
+  const cancel = db.transaction(reason => service.cancelPendingForRun('run-preserve', { terminalReason: reason }));
+  assert.equal(cancel('question_unanswered'), 0);
   assert.equal(service.getQuestion(preserved.id).status, 'pending');
-  assert.equal(service.cancelPendingForRun('run-preserve', { terminalReason: 'failed' }), 1);
+  assert.equal(cancel('failed'), 1);
   assert.equal(service.getQuestion(preserved.id).status, 'cancelled');
+});
+
+test('cancelPendingForRun requires an active transaction', t => {
+  const { service } = setup(t);
+  assert.throws(() => service.cancelPendingForRun('run-1'), hasCode('MUST_BE_IN_TRANSACTION'));
+});
+
+test('free-form answer must be a non-empty string of at most 4000 characters', t => {
+  const { service, addRun } = setup(t);
+  for (const [suffix, answer] of [['type', 42], ['long', 'x'.repeat(4001)], ['empty', '']]) {
+    const runId = `run-answer-${suffix}`;
+    addRun(runId);
+    const question = service.createQuestion(input(runId));
+    assert.throws(() => service.answerQuestion(question.id, { answer }), hasCode('QUESTION_INVALID'));
+  }
 });
 
 test('expireStale returns changed count and persists transition', t => {

@@ -1,7 +1,6 @@
 const crypto = require('node:crypto');
 
 const CLASSES = new Set(['clarification', 'choice', 'approval']);
-const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled', 'stopped']);
 
 function serviceError(code, message, current) {
   const err = new Error(message);
@@ -80,6 +79,25 @@ function createQuestionService(db, eventBus) {
   const createTx = db.transaction((input) => {
     validateCreate(input);
     const hash = canonicalPayloadHash(input);
+    db.prepare(`
+      UPDATE worker_questions SET status = 'expired'
+      WHERE run_id = ? AND status = 'pending' AND expires_at <= datetime('now')
+    `).run(input.runId);
+
+    const classifyCreateFailure = () => {
+      const existing = db.prepare(
+        'SELECT * FROM worker_questions WHERE run_id = ? AND idempotency_key = ?',
+      ).get(input.runId, input.idempotencyKey);
+      if (existing) {
+        if (existing.payload_hash === hash) return materialize(existing);
+        throw serviceError('IDEMPOTENCY_CONFLICT', 'idempotency key was already used for a different question');
+      }
+      if (db.prepare("SELECT 1 FROM worker_questions WHERE run_id = ? AND status = 'pending'").get(input.runId)) {
+        throw serviceError('QUESTION_PENDING', 'run already has a pending question');
+      }
+      throw serviceError('RUN_NOT_ACTIVE', 'run does not exist or is terminal');
+    };
+
     const existing = db.prepare(
       'SELECT * FROM worker_questions WHERE run_id = ? AND idempotency_key = ?',
     ).get(input.runId, input.idempotencyKey);
@@ -88,22 +106,31 @@ function createQuestionService(db, eventBus) {
       throw serviceError('IDEMPOTENCY_CONFLICT', 'idempotency key was already used for a different question');
     }
 
-    const run = db.prepare('SELECT status FROM runs WHERE id = ?').get(input.runId);
-    if (!run || TERMINAL_RUN_STATUSES.has(run.status)) {
-      throw serviceError('RUN_NOT_ACTIVE', 'run does not exist or is terminal');
-    }
     if (db.prepare("SELECT 1 FROM worker_questions WHERE run_id = ? AND status = 'pending'").get(input.runId)) {
       throw serviceError('QUESTION_PENDING', 'run already has a pending question');
     }
 
     const id = `wq_${crypto.randomUUID().slice(0, 12)}`;
-    db.prepare(`
+    const insert = db.prepare(`
       INSERT INTO worker_questions (
         id, run_id, task_id, project_id, idempotency_key, payload_hash,
         class, question, options_json, expires_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '+7 days'))
-    `).run(id, input.runId, input.taskId ?? null, input.projectId ?? null,
-      input.idempotencyKey, hash, input.class, input.question, JSON.stringify(input.options ?? []));
+      )
+      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '+7 days')
+      FROM runs
+      WHERE id = ? AND status NOT IN ('completed','failed','cancelled','stopped')
+    `);
+    let result;
+    try {
+      result = insert.run(id, input.runId, input.taskId ?? null, input.projectId ?? null,
+        input.idempotencyKey, hash, input.class, input.question, JSON.stringify(input.options ?? []), input.runId);
+    } catch (err) {
+      if (err && (err.code === 'SQLITE_CONSTRAINT_UNIQUE' || err.code === 'SQLITE_CONSTRAINT')) {
+        return classifyCreateFailure();
+      }
+      throw err;
+    }
+    if (result.changes === 0) return classifyCreateFailure();
     return materialize(getRaw.get(id));
   });
 
@@ -121,6 +148,9 @@ function createQuestionService(db, eventBus) {
   }
 
   const answerTx = db.transaction((id, answer) => {
+    if (typeof answer !== 'string' || answer.length === 0 || [...answer].length > 4000) {
+      throw serviceError('QUESTION_INVALID', 'answer must be a non-empty string of at most 4000 characters');
+    }
     const row = getRaw.get(id);
     const current = materialize(row);
     if (!current || current.status !== 'pending') {
@@ -148,6 +178,9 @@ function createQuestionService(db, eventBus) {
   }
 
   function cancelPendingForRun(runId, { terminalReason } = {}) {
+    if (!db.inTransaction) {
+      throw serviceError('MUST_BE_IN_TRANSACTION', 'cancelPendingForRun must be called inside a transaction');
+    }
     if (terminalReason === 'question_unanswered') return 0;
     return db.prepare(
       "UPDATE worker_questions SET status = 'cancelled' WHERE run_id = ? AND status = 'pending'",
