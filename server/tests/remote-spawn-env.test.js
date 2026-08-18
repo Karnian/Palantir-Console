@@ -797,3 +797,56 @@ test('manager spawn cleans materialized files when ssh fails with exit 255 (clos
   }
   assert.ok(removals.length > 0, 'ssh 255 종료에서도 materialized 파일이 정리돼야 한다');
 });
+
+test('kill reaps controller env files and fixed artifacts, tolerating a missing status dir', async () => {
+  const existingRunId = 'kill-controller-env';
+  const missingRunId = 'kill-missing-status';
+  const statusDir = `/srv/root/.palantir-runs/${existingRunId}`;
+  const canonicalStatusDir = `/real/root/.palantir-runs/${existingRunId}`;
+  const scripts = [];
+  const spawn = makeSpawn((call, child) => {
+    const script = logicalScriptOf(call);
+    scripts.push(script);
+    if (script === `exec ${shq('realpath')} ${shq('/srv/root')}`) {
+      return complete(child, { stdout: '/real/root\n' });
+    }
+    if (script === `exec ${shq('realpath')} ${shq(statusDir)}`) {
+      return complete(child, { stdout: `${canonicalStatusDir}\n` });
+    }
+    if (script === `exec ${shq('realpath')} ${shq(`/srv/root/.palantir-runs/${missingRunId}`)}`) {
+      return complete(child, { code: 1 });
+    }
+    if (script === `exec ${shq('realpath')} ${shq('/srv/root/.palantir-runs')}`) {
+      return complete(child, { stdout: '/real/root/.palantir-runs\n' });
+    }
+    return complete(child, { code: 0 });
+  });
+  const executor = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+
+  assert.equal(await executor.kill(existingRunId), true);
+  const fixedCleanup = [
+    'stdin.txt',
+    'system-prompt.txt',
+    'worker-capability',
+    'worker-api-base',
+    'worker-input.bundle',
+    'result.jsonl.tmp',
+  ].map((name) => shq(`${statusDir}/${name}`)).join(' ');
+  assert.ok(
+    scripts.includes(`exec 'rm' '-f' ${fixedCleanup}`),
+    'kill must retain cleanup of every fixed artifact',
+  );
+  assert.ok(
+    scripts.includes(
+      `exec 'find' ${shq(canonicalStatusDir)} '-maxdepth' '1' '-type' 'f' '-name' 'controller-env-*' '-delete'`,
+    ),
+    'kill must delete dynamic controller env files inside the validated status dir',
+  );
+
+  assert.equal(await executor.kill(missingRunId), true);
+  assert.equal(
+    scripts.some((script) => script.startsWith("exec 'find' ") && script.includes(missingRunId)),
+    false,
+    'a missing status dir must skip find without changing the return contract',
+  );
+});

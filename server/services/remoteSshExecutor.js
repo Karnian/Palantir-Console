@@ -2173,6 +2173,19 @@ function createRemoteSshNodeExecutor(node, {
         paths.uploadBundle,
         paths.structuredResultTmp,
       ]);
+      const checkedStatusDir = await assertWithinRoots(paths.statusDir, { allowMissing: true });
+      if (checkedStatusDir.exists) {
+        await runRemoteCommand('find', [
+          checkedStatusDir.canonical,
+          '-maxdepth',
+          '1',
+          '-type',
+          'f',
+          '-name',
+          'controller-env-*',
+          '-delete',
+        ]);
+      }
     } catch {}
     return res.code === 0;
   }
