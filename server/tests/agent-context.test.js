@@ -216,7 +216,6 @@ test('agent context derives layer and authority from manager capabilities', asyn
     assert.equal(matching.status, 200);
     assert.equal(matching.headers['cache-control'], 'private, no-store');
     assert.equal(matching.headers.vary, 'Authorization', 'per-caller responses must not be shared across Authorization values');
-    assert.equal(matching.headers.vary, 'Authorization');
 
     const post = await invokeApp(app, {
       method: 'POST', path: '/api/agent-context', headers: topAuthorization,
@@ -226,6 +225,22 @@ test('agent context derives layer and authority from manager capabilities', asyn
       method: 'GET', path: '/api/agent-contextX', headers: topAuthorization,
     });
     assert.equal(lookalike.status, 403);
+
+    // The allowlist is an exact-path regex; pin the shapes that a looser one
+    // would let through. A mutation dropping the `/?$` anchor is caught by the
+    // lookalike case above, and these fix the rest of the boundary.
+    const trailingSlash = await invokeApp(app, {
+      method: 'GET', path: '/api/agent-context/', headers: topAuthorization,
+    });
+    assert.equal(trailingSlash.status, 200, 'trailing slash is the same endpoint');
+    const withQuery = await invokeApp(app, {
+      method: 'GET', path: '/api/agent-context?layer=top', headers: topAuthorization,
+    });
+    assert.equal(withQuery.status, 200, 'the query string is stripped before matching');
+    const encodedSlash = await invokeApp(app, {
+      method: 'GET', path: '/api/agent-context%2Fextra', headers: topAuthorization,
+    });
+    assert.equal(encodedSlash.status, 403, 'an encoded separator must not extend the allowlisted path');
   } finally {
     await app.shutdown();
   }
