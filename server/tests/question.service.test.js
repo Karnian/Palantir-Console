@@ -7,6 +7,8 @@ const path = require('node:path');
 const { createDatabase } = require('../db/database');
 const { createQuestionService, canonicalPayloadHash, compileResumePrompt } = require('../services/questionService');
 const { createRunService } = require('../services/runService');
+const { createTaskService } = require('../services/taskService');
+const { createGoalVerdictService } = require('../services/goalVerdictService');
 
 function setup(t, serviceOptions = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-question-'));
@@ -367,6 +369,83 @@ test('answer resume skips a goal run that already has a successor', t => {
   assert.equal(answered.resumeSkipped, 'successor_exists');
   assert.equal(answered.resumedRunId, null);
   assert.equal(db.prepare('SELECT count(*) AS n FROM runs WHERE source_question_id = ?').get(question.id).n, 0);
+});
+
+test('verdict retry child wins the goal successor race and blocks answer resume', t => {
+  const { db, service, realRunService, question, original } = resumeSetup(t);
+  db.prepare("UPDATE runs SET status = 'completed', goal_active = 1 WHERE id = ?").run(original.id);
+  const verdict = realRunService.persistGoalVerdictTx({
+    runId: original.id,
+    verdict: 'retry',
+    effectTypes: [],
+    retryChild: {
+      task_id: original.task_id,
+      agent_profile_id: original.agent_profile_id,
+      prompt: original.prompt,
+      retry_count: 1,
+      retry_root_run_id: original.id,
+    },
+  });
+  assert.equal(verdict.winner, true);
+  assert.ok(verdict.childId);
+  const runCountBeforeResume = db.prepare('SELECT count(*) AS n FROM runs').get().n;
+
+  const answered = service.answerQuestion(question.id, { answer: 'Proceed', resume: true });
+
+  assert.equal(answered.resumeSkipped, 'successor_exists');
+  assert.equal(answered.resumedRunId, null);
+  assert.equal(realRunService.getRun(original.id).goal_retry_run_id, verdict.childId);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM runs').get().n, runCountBeforeResume);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM runs WHERE source_question_id = ?').get(question.id).n, 0);
+});
+
+test('answer resume wins the goal successor race and verdict creates no retry child', t => {
+  const { db, service, realRunService, question, original } = resumeSetup(t);
+  db.prepare("UPDATE runs SET status = 'completed', goal_active = 1 WHERE id = ?").run(original.id);
+  const answered = service.answerQuestion(question.id, { answer: 'Proceed', resume: true });
+  const runCountBeforeVerdict = db.prepare('SELECT count(*) AS n FROM runs').get().n;
+
+  const verdict = realRunService.persistGoalVerdictTx({
+    runId: original.id,
+    verdict: 'retry',
+    effectTypes: [],
+    retryChild: {
+      task_id: original.task_id,
+      agent_profile_id: original.agent_profile_id,
+      prompt: original.prompt,
+      retry_count: 1,
+      retry_root_run_id: original.id,
+    },
+  });
+
+  assert.equal(verdict.winner, true);
+  assert.equal(verdict.childId, answered.resumedRunId);
+  assert.equal(realRunService.getRun(original.id).goal_retry_run_id, answered.resumedRunId);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM runs').get().n, runCountBeforeVerdict);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM runs WHERE retry_root_run_id = ?').get(original.id).n, 1);
+});
+
+test('resumed goal attempt uses inherited retry count when deciding budget exhaustion', t => {
+  const { db, service, realRunService, question, original } = resumeSetup(t);
+  db.prepare('UPDATE tasks SET goal_enabled = 1, goal_max_attempts = 2 WHERE id = ?').run(original.task_id);
+  db.prepare("UPDATE runs SET status = 'completed', goal_active = 1, retry_count = 1 WHERE id = ?").run(original.id);
+  const answered = service.answerQuestion(question.id, { answer: 'Proceed', resume: true });
+  const resumed = realRunService.getRun(answered.resumedRunId);
+  assert.equal(resumed.retry_count, 1);
+
+  realRunService.markRunStarted(resumed.id, {});
+  realRunService.updateRunStatus(resumed.id, 'failed', { force: true });
+  const verdictService = createGoalVerdictService({
+    runService: realRunService,
+    taskService: createTaskService(db),
+    eventBus: { emit() {} },
+  });
+  const settled = verdictService.settle(resumed.id);
+
+  assert.equal(settled.verdict, 'exhausted');
+  assert.equal(realRunService.getRun(resumed.id).goal_verdict, 'exhausted');
+  assert.equal(realRunService.getRun(resumed.id).goal_retry_run_id, null);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM runs WHERE retry_root_run_id = ?').get(original.id).n, 1);
 });
 
 test('explicit resume rejects a goal run that already has a successor', t => {
