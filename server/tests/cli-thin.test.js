@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
+const fs = require('node:fs');
 const { spawn } = require('node:child_process');
 
 const CLI_PATH = path.resolve(__dirname, '../../bin/palantir.mjs');
@@ -35,7 +36,7 @@ async function withServer(handler, fn) {
   }
 }
 
-function runCli(args, { baseUrl, token = SECRET } = {}) {
+function runCli(args, { baseUrl, token = SECRET, env = {} } = {}) {
   return new Promise((resolve, reject) => {
     const argv = [CLI_PATH, ...args];
     const child = spawn(process.execPath, argv, {
@@ -43,6 +44,7 @@ function runCli(args, { baseUrl, token = SECRET } = {}) {
         ...process.env,
         PALANTIR_BASE_URL: baseUrl,
         PALANTIR_TOKEN: token,
+        ...env,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -55,6 +57,25 @@ function runCli(args, { baseUrl, token = SECRET } = {}) {
     child.once('error', reject);
     child.once('close', (code, signal) => resolve({ code, signal, stdout, stderr, argv, child }));
   });
+}
+
+function outputPage(textOrBuffer, options = {}) {
+  const bytes = Buffer.isBuffer(textOrBuffer) ? textOrBuffer : Buffer.from(textOrBuffer);
+  return {
+    data_base64: bytes.toString('base64'),
+    next_offset: options.next_offset,
+    end_offset: options.end_offset ?? options.next_offset,
+    has_more: options.has_more ?? false,
+    truncated: options.truncated ?? false,
+    finalized: options.finalized ?? false,
+    run_status: options.run_status ?? 'running',
+    source_id: options.source_id ?? '2049:1234',
+    format: options.format ?? 'text',
+  };
+}
+
+function followHome() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-follow-home-'));
 }
 
 async function readRequest(req) {
@@ -436,4 +457,146 @@ test('--help 는 의도한 성공이다 — stdout + 코드 0, 사용법 오류(
   assert.equal(bogus.code, 1);
   assert.equal(bogus.stdout, '', '오류 사용법은 stdout 을 오염시키지 않는다');
   assert.match(bogus.stderr, /Usage: palantir/);
+});
+
+test('follow streams multiple pages byte-exactly and exits 0 when completed and finalized', async () => {
+  const home = followHome();
+  const seen = [];
+  try {
+    await withServer((req, res) => {
+      const after = Number(new URL(req.url, 'http://x').searchParams.get('after'));
+      seen.push(after);
+      if (after === 0) return json(res, 200, outputPage('alpha\n', { next_offset: 6, has_more: true }));
+      json(res, 200, outputPage('beta\n', { next_offset: 11, finalized: true, run_status: 'completed' }));
+    }, async (baseUrl) => {
+      const result = await runCli(['follow', 'r-normal'], { baseUrl, env: { HOME: home } });
+      assert.equal(result.code, 0);
+      assert.equal(result.stdout, 'alpha\nbeta\n');
+      assert.equal(result.stderr, '');
+      assert.deepEqual(seen, [0, 6]);
+    });
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('follow maps a failed finalized run to code 6', async () => {
+  const home = followHome();
+  try {
+    await withServer((_req, res) => json(res, 200, outputPage('', {
+      next_offset: 0, finalized: true, run_status: 'failed',
+    })), async (baseUrl) => {
+      const result = await runCli(['follow', 'r-failed'], { baseUrl, env: { HOME: home } });
+      assert.equal(result.code, 6);
+    });
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('follow truncation warning is stderr-only and loss code 5 remains sticky', async () => {
+  const home = followHome();
+  let count = 0;
+  try {
+    await withServer((_req, res) => {
+      count += 1;
+      if (count === 1) return json(res, 200, outputPage('', { next_offset: 0, truncated: true }));
+      json(res, 200, outputPage('kept\n', { next_offset: 5, finalized: true, run_status: 'completed' }));
+    }, async (baseUrl) => {
+      const result = await runCli(['follow', 'r-truncated'], { baseUrl, env: { HOME: home } });
+      assert.equal(result.code, 5);
+      assert.equal(result.stdout, 'kept\n');
+      assert.match(result.stderr, /truncated/);
+      assert.doesNotMatch(result.stdout, /truncated/);
+    });
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('follow maps 409 to 4 and output-expired 410 to 5', async (t) => {
+  for (const [status, code] of [[409, 4], [410, 5]]) {
+    await t.test(String(status), async () => {
+      const home = followHome();
+      try {
+        await withServer((_req, res) => json(res, status, { reason: status === 409 ? 'incremental_unsupported' : 'output_expired' }), async (baseUrl) => {
+          const result = await runCli(['follow', `r-${status}`], { baseUrl, env: { HOME: home } });
+          assert.equal(result.code, code);
+          assert.equal(result.stdout, '');
+        });
+      } finally { fs.rmSync(home, { recursive: true, force: true }); }
+    });
+  }
+});
+
+test('follow preserves a Korean UTF-8 character split across response boundaries', async () => {
+  const home = followHome();
+  const bytes = Buffer.from('한글\n');
+  try {
+    await withServer((req, res) => {
+      const after = Number(new URL(req.url, 'http://x').searchParams.get('after'));
+      if (after === 0) return json(res, 200, outputPage(bytes.subarray(0, 2), { next_offset: 2, has_more: true }));
+      json(res, 200, outputPage(bytes.subarray(2), { next_offset: bytes.length, finalized: true, run_status: 'completed' }));
+    }, async (baseUrl) => {
+      const result = await runCli(['follow', 'r-utf8'], { baseUrl, env: { HOME: home } });
+      assert.equal(result.code, 0);
+      assert.equal(result.stdout, '한글\n');
+    });
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('follow resumes at a valid checkpoint offset', async () => {
+  const home = followHome();
+  const dir = path.join(home, '.palantir', 'follow');
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(dir, 'r-resume.json'), JSON.stringify({
+    v: 1, run_id: 'r-resume', source_id: '2049:1234', format: 'text', committed_offset: 7,
+  }), { mode: 0o600 });
+  let seen;
+  try {
+    await withServer((req, res) => {
+      seen = Number(new URL(req.url, 'http://x').searchParams.get('after'));
+      json(res, 200, outputPage('tail\n', { next_offset: 12, finalized: true, run_status: 'completed' }));
+    }, async (baseUrl) => {
+      const result = await runCli(['follow', 'r-resume'], { baseUrl, env: { HOME: home } });
+      assert.equal(result.code, 0);
+      assert.equal(seen, 7);
+      assert.equal(result.stdout, 'tail\n');
+    });
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('follow missing checkpoint is normal and does not affect exit code', async () => {
+  const home = followHome();
+  try {
+    await withServer((_req, res) => json(res, 200, outputPage('', {
+      next_offset: 0, finalized: true, run_status: 'completed',
+    })), async (baseUrl) => {
+      const result = await runCli(['follow', 'r-first'], { baseUrl, env: { HOME: home } });
+      assert.equal(result.code, 0);
+      assert.equal(result.stderr, '');
+    });
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('follow renders Claude NDJSON and passes malformed lines through verbatim', async () => {
+  const home = followHome();
+  const input = '{"type":"result","result":"answer"}\nnot-json\n';
+  try {
+    await withServer((_req, res) => json(res, 200, outputPage(input, {
+      next_offset: Buffer.byteLength(input), finalized: true, run_status: 'completed', format: 'claude_ndjson',
+    })), async (baseUrl) => {
+      const result = await runCli(['follow', 'r-claude'], { baseUrl, env: { HOME: home } });
+      assert.equal(result.code, 0);
+      assert.equal(result.stdout, 'answer\nnot-json\n');
+    });
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('follow terminal status without finalization hits the drain deadline and exits 5', { timeout: 10_000 }, async () => {
+  const home = followHome();
+  try {
+    await withServer((_req, res) => json(res, 200, outputPage('', {
+      next_offset: 0, run_status: 'completed', finalized: false,
+    })), async (baseUrl) => {
+      const result = await runCli(['follow', 'r-drain'], { baseUrl, env: { HOME: home } });
+      assert.equal(result.code, 5);
+      assert.equal(result.stdout, '');
+      assert.match(result.stderr, /drain deadline/);
+    });
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });

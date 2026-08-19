@@ -1,11 +1,18 @@
 #!/usr/bin/env node
 
 import { parseArgs } from 'node:util';
+import { StringDecoder } from 'node:string_decoder';
+import * as fs from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import os from 'node:os';
+import path from 'node:path';
 
 const DEFAULT_BASE_URL = 'http://127.0.0.1:4177';
 const token = process.env.PALANTIR_TOKEN || '';
 let jsonMode = process.argv.slice(2).includes('--json');
 let interrupted = false;
+let followErrorCollector = null;
 
 process.once('SIGINT', () => {
   interrupted = true;
@@ -13,6 +20,10 @@ process.once('SIGINT', () => {
 });
 
 function handleBrokenPipe(error) {
+  if (followErrorCollector) {
+    followErrorCollector(error);
+    return;
+  }
   // EPIPE = 소비자가 먼저 닫음 → 우리 실패가 아니다(§7 우선순위).
   if (error?.code === 'EPIPE') process.exit(interrupted ? 130 : 0);
   // 그 외 쓰기 오류(ENOSPC/EIO…)는 출력이 온전히 전달됐는지 확인할 수 없다는 뜻이므로
@@ -46,7 +57,8 @@ function writeJson(value) {
 
 const USAGE = 'Usage: palantir spawn <task_id> [--agent <profile_id>] [--json]\n'
   + '       palantir input <run_id> <text...> [--json]\n'
-  + '       palantir cancel <run_id> [--json]\n';
+  + '       palantir cancel <run_id> [--json]\n'
+  + '       palantir follow <run_id>\n';
 
 function usageError() {
   if (jsonMode) writeJson({ type: 'error', kind: 'usage' });
@@ -94,6 +106,10 @@ function parseCli(argv) {
   }
   if (command === 'cancel') {
     if (agent !== undefined || args.length !== 1 || !args[0]) return null;
+    return { command, id: args[0] };
+  }
+  if (command === 'follow') {
+    if (agent !== undefined || parsed.values.json !== undefined || args.length !== 1 || !args[0]) return null;
     return { command, id: args[0] };
   }
   return null;
@@ -198,7 +214,305 @@ async function isRemoteRun(baseUrl, runId) {
   }
 }
 
+const FOLLOW_POLL_MS = 1000;
+const FOLLOW_DRAIN_MS = 5000;
+const FOLLOW_RETRY_BUDGET_MS = 30000;
+const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', 'stopped']);
+
+function warnFollow(message) {
+  process.stderr.write(`palantir: ${message}\n`);
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function checkpointPaths(runId) {
+  const safeId = encodeURIComponent(runId);
+  const dir = path.join(os.homedir(), '.palantir', 'follow');
+  return { dir, file: path.join(dir, `${safeId}.json`) };
+}
+
+async function prepareCheckpoint(runId) {
+  const paths = checkpointPaths(runId);
+  try {
+    await fs.mkdir(paths.dir, { recursive: true, mode: 0o700 });
+    const stat = await fs.lstat(paths.dir);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error('unsafe checkpoint directory');
+    return { ...paths, enabled: true };
+  } catch (error) {
+    warnFollow(`checkpoint disabled (${error?.code || error?.message || 'unknown error'})`);
+    return { ...paths, enabled: false };
+  }
+}
+
+async function readCheckpoint(state, runId) {
+  if (!state.enabled) return null;
+  let handle;
+  try {
+    handle = await fs.open(state.file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const stat = await handle.stat();
+    if (!stat.isFile()) throw new Error('not a regular file');
+    const raw = await handle.readFile({ encoding: 'utf8' });
+    const value = JSON.parse(raw);
+    if (value?.v !== 1 || value.run_id !== runId || typeof value.source_id !== 'string'
+      || !['text', 'claude_ndjson'].includes(value.format)
+      || !Number.isSafeInteger(value.committed_offset) || value.committed_offset < 0) {
+      throw new Error('invalid checkpoint');
+    }
+    return value;
+  } catch (error) {
+    if (error?.code !== 'ENOENT') warnFollow(`checkpoint ignored (${error?.code || error?.message || 'invalid'})`);
+    return null;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+async function saveCheckpoint(state, value) {
+  if (!state.enabled) return;
+  const tmp = `${state.file}.tmp.${randomBytes(6).toString('hex')}`;
+  let handle;
+  let opened = false;
+  try {
+    handle = await fs.open(tmp, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
+    opened = true;
+    await handle.writeFile(`${JSON.stringify(value)}\n`, 'utf8');
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    await fs.rename(tmp, state.file);
+  } catch (error) {
+    warnFollow(`checkpoint update failed (${error?.code || 'unknown'})`);
+    await handle?.close().catch(() => {});
+    if (opened) await fs.unlink(tmp).catch(() => {});
+  }
+}
+
+function renderClaudeLine(line) {
+  try {
+    const value = JSON.parse(line);
+    if (typeof value?.result === 'string') return value.result;
+    if (typeof value?.delta?.text === 'string') return value.delta.text;
+    if (typeof value?.event?.delta?.text === 'string') return value.event.delta.text;
+    const content = value?.message?.content ?? value?.content;
+    if (Array.isArray(content)) {
+      const text = content.filter((part) => part?.type === 'text' && typeof part.text === 'string')
+        .map((part) => part.text).join('');
+      if (text) return text;
+    }
+    return line;
+  } catch {
+    return line;
+  }
+}
+
+function writeFollowChunk(chunk, errors) {
+  return new Promise((resolve) => {
+    process.stdout.write(chunk, (error) => {
+      if (error) errors.push(error);
+      resolve(error);
+    });
+  });
+}
+
+async function finishFollowOutput(errors) {
+  return new Promise((resolve) => {
+    let closed = false;
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      followErrorCollector = null;
+      resolve();
+    };
+    followErrorCollector = (error) => {
+      errors.push(error);
+      close();
+    };
+    process.stdout.end((error) => {
+      if (error) errors.push(error);
+      close();
+    });
+  });
+}
+
+async function follow(command, baseUrl) {
+  const checkpointState = await prepareCheckpoint(command.id);
+  let checkpoint = await readCheckpoint(checkpointState, command.id);
+  let committedOffset = checkpoint?.committed_offset ?? 0;
+  let fetchedOffset = committedOffset;
+  let sourceId = checkpoint?.source_id ?? null;
+  let format = checkpoint?.format ?? null;
+  let decoder = new StringDecoder('utf8');
+  let lineBuffer = '';
+  let rawSinceCommit = Buffer.alloc(0);
+  let stickyLoss = false;
+  let sealed = false;
+  let drainDeadline = null;
+  let retryStarted = null;
+  let retryDelay = 250;
+  const outputErrors = [];
+  followErrorCollector = (error) => outputErrors.push(error);
+
+  const resetAtZero = () => {
+    committedOffset = 0;
+    fetchedOffset = 0;
+    decoder = new StringDecoder('utf8');
+    lineBuffer = '';
+    rawSinceCommit = Buffer.alloc(0);
+  };
+
+  const commitOutput = async (text, boundary) => {
+    const error = await writeFollowChunk(text, outputErrors);
+    if (error) return false;
+    committedOffset = boundary;
+    await saveCheckpoint(checkpointState, {
+      v: 1, run_id: command.id, source_id: sourceId, format, committed_offset: committedOffset,
+    });
+    return true;
+  };
+
+  let exitCode = 5;
+  while (true) {
+    if (outputErrors.length) break;
+    if (drainDeadline !== null && Date.now() >= drainDeadline) {
+      warnFollow('output drain deadline exceeded before finalization');
+      stickyLoss = true;
+      break;
+    }
+
+    let response;
+    try {
+      const remaining = drainDeadline === null ? DEFAULT_TIMEOUT_MS : Math.max(1, drainDeadline - Date.now());
+      response = await request(baseUrl,
+        `/api/runs/${encodeURIComponent(command.id)}/output?after=${fetchedOffset}`,
+        { timeoutMs: remaining });
+    } catch {
+      const now = Date.now();
+      retryStarted ??= now;
+      if (now - retryStarted >= FOLLOW_RETRY_BUDGET_MS) {
+        reportTransportError();
+        break;
+      }
+      await delay(Math.min(retryDelay, FOLLOW_RETRY_BUDGET_MS - (now - retryStarted)));
+      retryDelay = Math.min(retryDelay * 2, 5000);
+      continue;
+    }
+
+    if (response.status >= 500) {
+      const now = Date.now();
+      retryStarted ??= now;
+      if (now - retryStarted >= FOLLOW_RETRY_BUDGET_MS) {
+        reportHttpError(response.status);
+        break;
+      }
+      await delay(Math.min(retryDelay, FOLLOW_RETRY_BUDGET_MS - (now - retryStarted)));
+      retryDelay = Math.min(retryDelay * 2, 5000);
+      continue;
+    }
+    retryStarted = null;
+    retryDelay = 250;
+
+    if (!response.ok) {
+      if (response.status === 410) {
+        if (!sealed) {
+          warnFollow('output expired; some output may be unavailable');
+          stickyLoss = true;
+        }
+        exitCode = stickyLoss ? 5 : 0;
+      } else {
+        reportHttpError(response.status);
+        exitCode = exitCodeForStatus(response.status);
+      }
+      break;
+    }
+
+    const payload = await parseResponse(response);
+    if (!payload || typeof payload.data_base64 !== 'string'
+      || !Number.isSafeInteger(payload.next_offset) || payload.next_offset < fetchedOffset
+      || typeof payload.has_more !== 'boolean' || typeof payload.finalized !== 'boolean'
+      || !['text', 'claude_ndjson'].includes(payload.format) || typeof payload.source_id !== 'string') {
+      reportInvalidResponse();
+      break;
+    }
+
+    if (checkpoint && format !== payload.format) {
+      warnFollow('checkpoint format changed; restarting from offset 0');
+      checkpoint = null;
+      format = payload.format;
+      sourceId = payload.source_id;
+      resetAtZero();
+      continue;
+    }
+    if (sourceId !== null && sourceId !== payload.source_id) {
+      warnFollow('output source changed; restarting from offset 0');
+      stickyLoss = true;
+      sourceId = payload.source_id;
+      format = payload.format;
+      checkpoint = null;
+      resetAtZero();
+      continue;
+    }
+    sourceId = payload.source_id;
+    format = payload.format;
+    checkpoint = null;
+
+    if (payload.truncated) {
+      warnFollow('output was truncated; restarting from offset 0');
+      stickyLoss = true;
+      resetAtZero();
+      continue;
+    }
+
+    if (TERMINAL_STATUSES.has(payload.run_status) && drainDeadline === null && !sealed) {
+      drainDeadline = Date.now() + FOLLOW_DRAIN_MS;
+    }
+    if (payload.finalized) {
+      sealed = true;
+      drainDeadline = null;
+    }
+
+    const bytes = Buffer.from(payload.data_base64, 'base64');
+    rawSinceCommit = Buffer.concat([rawSinceCommit, bytes]);
+    lineBuffer += decoder.write(bytes);
+    fetchedOffset = payload.next_offset;
+
+    let newline;
+    while ((newline = lineBuffer.indexOf('\n')) !== -1) {
+      const line = lineBuffer.slice(0, newline);
+      lineBuffer = lineBuffer.slice(newline + 1);
+      const rawNewline = rawSinceCommit.indexOf(0x0a);
+      const boundary = committedOffset + rawNewline + 1;
+      rawSinceCommit = rawSinceCommit.subarray(rawNewline + 1);
+      const rendered = format === 'claude_ndjson' ? renderClaudeLine(line) : line;
+      if (!await commitOutput(`${rendered}\n`, boundary)) break;
+    }
+    if (outputErrors.length) break;
+
+    if (payload.finalized && !payload.has_more) {
+      lineBuffer += decoder.end();
+      if (lineBuffer || rawSinceCommit.length) {
+        const rendered = format === 'claude_ndjson' ? renderClaudeLine(lineBuffer) : lineBuffer;
+        if (!await commitOutput(rendered, fetchedOffset)) break;
+        lineBuffer = '';
+        rawSinceCommit = Buffer.alloc(0);
+      }
+      exitCode = stickyLoss ? 5 : (payload.run_status === 'completed' ? 0 : 6);
+      break;
+    }
+    if (!payload.has_more) await delay(FOLLOW_POLL_MS);
+  }
+
+  await finishFollowOutput(outputErrors);
+  if (interrupted) return 130;
+  const epipe = outputErrors.some((error) => error?.code === 'EPIPE');
+  if (epipe) return 0;
+  if (outputErrors.length) return 5;
+  return stickyLoss ? 5 : exitCode;
+}
+
 async function execute(command, baseUrl) {
+  if (command.command === 'follow') return follow(command, baseUrl);
   const id = encodeURIComponent(command.id);
   let pathname;
   let body;
