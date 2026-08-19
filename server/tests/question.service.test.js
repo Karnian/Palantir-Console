@@ -339,8 +339,51 @@ test('resumed attempts inherit queued args and goal lineage without consuming re
   const resumed = realRunService.getRun(answered.resumedRunId);
   assert.equal(resumed.queued_args, original.queued_args);
   assert.equal(resumed.goal_active, 1);
-  assert.equal(resumed.retry_root_run_id, 'run_goal_root');
-  assert.equal(resumed.retry_count, 0);
+  assert.equal(resumed.retry_root_run_id, original.id);
+  assert.equal(resumed.retry_count, 2);
+  assert.equal(db.prepare('SELECT goal_retry_run_id FROM runs WHERE id = ?').get(original.id).goal_retry_run_id,
+    resumed.id);
+  const verdict = realRunService.persistGoalVerdictTx({
+    runId: original.id,
+    verdict: 'retry',
+    effectTypes: [],
+    retryChild: {
+      task_id: original.task_id,
+      agent_profile_id: original.agent_profile_id,
+      prompt: original.prompt,
+      retry_count: 3,
+      retry_root_run_id: original.id,
+    },
+  });
+  assert.equal(verdict.childId, resumed.id);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM runs WHERE retry_root_run_id = ?').get(original.id).n, 1);
+});
+
+test('answer resume skips a goal run that already has a successor', t => {
+  const { db, service, question, original } = resumeSetup(t);
+  db.prepare("UPDATE runs SET status = 'completed', goal_active = 1, goal_retry_run_id = 'existing-successor' WHERE id = ?")
+    .run(original.id);
+  const answered = service.answerQuestion(question.id, { answer: 'Proceed', resume: true });
+  assert.equal(answered.resumeSkipped, 'successor_exists');
+  assert.equal(answered.resumedRunId, null);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM runs WHERE source_question_id = ?').get(question.id).n, 0);
+});
+
+test('explicit resume rejects a goal run that already has a successor', t => {
+  const { db, service, question, original } = resumeSetup(t);
+  service.answerQuestion(question.id, { answer: 'Proceed', resume: false });
+  db.prepare("UPDATE runs SET status = 'completed', goal_active = 1, goal_retry_run_id = 'existing-successor' WHERE id = ?")
+    .run(original.id);
+  assert.throws(() => service.resumeQuestion(question.id), hasCode('SUCCESSOR_EXISTS'));
+  assert.equal(service.getQuestion(question.id).resumedRunId, null);
+});
+
+test('non-goal resume resets retry count and leaves the goal successor field unused', t => {
+  const { db, service, realRunService, question, original } = resumeSetup(t);
+  db.prepare("UPDATE runs SET status = 'completed', goal_active = 0, retry_count = 2 WHERE id = ?").run(original.id);
+  const answered = service.answerQuestion(question.id, { answer: 'Proceed', resume: true });
+  assert.equal(realRunService.getRun(answered.resumedRunId).retry_count, 0);
+  assert.equal(db.prepare('SELECT goal_retry_run_id FROM runs WHERE id = ?').get(original.id).goal_retry_run_id, null);
 });
 
 test('resume emit failure is isolated so the committed run still wakes drain', t => {

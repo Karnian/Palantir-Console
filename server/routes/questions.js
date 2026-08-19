@@ -200,6 +200,9 @@ function createQuestionsRouter({
       if (err && err.code === 'RUN_STILL_ACTIVE') {
         return res.status(409).json({ error: err.message, reason: 'run_still_active' });
       }
+      if (err && err.code === 'SUCCESSOR_EXISTS') {
+        return res.status(409).json({ error: err.message, reason: 'successor_exists' });
+      }
       return sendServiceError(res, err, {
         QUESTION_NOT_ANSWERED: [409, 'question_not_answered'],
         RESUME_UNAVAILABLE: [503, 'resume_unavailable'],

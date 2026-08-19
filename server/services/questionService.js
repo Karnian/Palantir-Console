@@ -193,6 +193,14 @@ function createQuestionService(db, eventBus, options = {}) {
     if (!runService) throw serviceError('RESUME_UNAVAILABLE', 'question resume service is unavailable');
   }
 
+  function claimGoalSuccessor(originalRun, successorRunId) {
+    if (originalRun.goal_active !== 1) return true;
+    return db.prepare(`
+      UPDATE runs SET goal_retry_run_id = ?
+      WHERE id = ? AND goal_retry_run_id IS NULL
+    `).run(successorRunId, originalRun.id).changes === 1;
+  }
+
   const answerTx = db.transaction((id, answer, resume) => {
     if (typeof answer !== 'string' || answer.length === 0 || [...answer].length > 4000) {
       throw serviceError('QUESTION_INVALID', 'answer must be a non-empty string of at most 4000 characters');
@@ -223,12 +231,23 @@ function createQuestionService(db, eventBus, options = {}) {
           node_id: originalRun.node_id, operator_instance_id: originalRun.operator_instance_id,
           parent_run_id: originalRun.parent_run_id, prompt, source_question_id: row.id,
           queued_args: originalRun.queued_args,
-          retry_root_run_id: originalRun.retry_root_run_id || originalRun.id,
-          // A resumed question is a new attempt, not a failure retry. It keeps
-          // goal lineage independently while remaining outside the B-lite budget.
-          retry_count: 0 });
+          // A goal resume is linked through goal_retry_run_id and starts a fresh
+          // storage retry root so the inherited count does not collide with the
+          // UNIQUE (retry_root_run_id, retry_count) attempt key.
+          retry_root_run_id: originalRun.goal_active === 1
+            ? originalRun.id
+            : (originalRun.retry_root_run_id || originalRun.id),
+          // Goal resume continues the same budget: answering a question neither
+          // consumes a failure retry nor resets attempts already used. Non-goal
+          // resume stays at zero because it is outside the B-lite goal budget.
+          retry_count: originalRun.goal_active === 1 ? Number(originalRun.retry_count || 0) : 0 });
         newRunId = built.id;
-        newRun = { built, goalActive: originalRun.goal_active === 1 };
+        if (claimGoalSuccessor(originalRun, newRunId)) {
+          newRun = { built, goalActive: originalRun.goal_active === 1 };
+        } else {
+          newRunId = null;
+          resumeSkipped = 'successor_exists';
+        }
       }
     }
     const result = db.prepare(`
@@ -295,10 +314,16 @@ function createQuestionService(db, eventBus, options = {}) {
       node_id: originalRun.node_id, operator_instance_id: originalRun.operator_instance_id,
       parent_run_id: originalRun.parent_run_id, prompt, source_question_id: row.id,
       queued_args: originalRun.queued_args,
-      retry_root_run_id: originalRun.retry_root_run_id || originalRun.id,
-      // Question resume is not a failure retry; goal lineage does not consume
-      // or increment the B-lite retry budget.
-      retry_count: 0 });
+      // A goal resume is linked through goal_retry_run_id and starts a fresh
+      // storage retry root so the inherited count does not collide with the
+      // UNIQUE (retry_root_run_id, retry_count) attempt key.
+      retry_root_run_id: originalRun.goal_active === 1
+        ? originalRun.id
+        : (originalRun.retry_root_run_id || originalRun.id),
+      // Goal resume continues the same budget: answering a question neither
+      // consumes a failure retry nor resets attempts already used. Non-goal
+      // resume stays at zero because it is outside the B-lite goal budget.
+      retry_count: originalRun.goal_active === 1 ? Number(originalRun.retry_count || 0) : 0 });
     const changed = db.prepare("UPDATE worker_questions SET resumed_run_id = ? WHERE id = ? AND status = 'answered' AND resumed_run_id IS NULL")
       .run(built.id, id).changes;
     if (!changed) {
@@ -306,6 +331,9 @@ function createQuestionService(db, eventBus, options = {}) {
       const err = serviceError('QUESTION_ALREADY_RESUMED', 'question was already resumed', current);
       err.resumedRunId = current && current.resumedRunId;
       throw err;
+    }
+    if (!claimGoalSuccessor(originalRun, built.id)) {
+      throw serviceError('SUCCESSOR_EXISTS', 'goal run already has a successor', materialize(getRaw.get(id)));
     }
     runService.insertRunRow(built);
     if (originalRun.goal_active === 1) {
