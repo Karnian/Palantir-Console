@@ -176,6 +176,47 @@ test('respond is cookie-only, same-origin, and first-commit-wins with current st
   assert.equal(duplicate.body.question.status, 'answered');
 });
 
+test('respond resume creates a queryable queued run', async (t) => {
+  const app = setupApp(t);
+  const worker = createWorker(app, 'respond-resume');
+  const created = await register(app, worker).expect(201);
+  const answered = await request(app).post(`/api/questions/${created.body.question.id}/respond`)
+    .set(COOKIE).set('Host', 'console.test').set('Origin', 'http://console.test')
+    .send({ answer: 'morning', resume: true }).expect(200);
+  assert.ok(answered.body.question.resumedRunId);
+  const resumed = app.services.runService.getRun(answered.body.question.resumedRunId);
+  // Do NOT assert status === 'queued': the queue drain claims the run
+  // immediately in an app-level test, so the status races. What matters is that
+  // resume produced a real run on the normal queue path with the answer wired in.
+  assert.ok(resumed, 'resumed run exists');
+  assert.equal(resumed.source_question_id, created.body.question.id);
+  assert.match(resumed.prompt, /\[ANSWERED QUESTION\]/);
+  assert.match(resumed.prompt, /morning/);
+  assert.equal(Number(resumed.retry_count || 0), 0, 'resume is not a failure retry; it must not consume B-lite budget');
+  const kinds = app.services.runService.getRunEvents(resumed.id).map((e) => e.event_type);
+  assert.ok(kinds.includes('queue:dequeued'), 'the normal queue drain must claim the resumed run');
+});
+
+test('answered question can be resumed once with cookie same-origin only', async (t) => {
+  const app = setupApp(t);
+  const worker = createWorker(app, 'later-resume');
+  const created = await register(app, worker).expect(201);
+  const id = created.body.question.id;
+  await request(app).post(`/api/questions/${id}/respond`).set(COOKIE)
+    .set('Host', 'console.test').set('Origin', 'http://console.test')
+    .send({ answer: 'morning', resume: false }).expect(200);
+  const url = `/api/questions/${id}/resume`;
+  await request(app).post(url).set(BEARER).expect(403);
+  await request(app).post(url).set(worker.auth).expect(403);
+  await request(app).post(url).set(COOKIE).set('Origin', 'https://attacker.example').expect(403);
+  const resumed = await request(app).post(url).set(COOKIE)
+    .set('Host', 'console.test').set('Origin', 'http://console.test').expect(200);
+  const resumedId = resumed.body.question.resumedRunId;
+  const duplicate = await request(app).post(url).set(COOKIE)
+    .set('Host', 'console.test').set('Origin', 'http://console.test').expect(409);
+  assert.equal(duplicate.body.resumed_run_id, resumedId);
+});
+
 test('global waiter capacity is distinct from per-run waiter contention and is released', async (t) => {
   const active = [];
   const app = setupApp(t, {

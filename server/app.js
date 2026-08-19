@@ -1255,8 +1255,18 @@ function createApp(options = {}) {
     // D2c: defense-in-depth — service-layer preset existence check
     validatePresetId: (id) => presetService.getPreset(id),
   });
-  const questionService = createQuestionService(db, eventBus);
-  const runService = createRunService(db, eventBus, questionService);
+  let questionService;
+  const questionServiceFacade = {
+    cancelPendingForRun(...args) { return questionService.cancelPendingForRun(...args); },
+  };
+  const runService = createRunService(db, eventBus, questionServiceFacade);
+  questionService = createQuestionService(db, eventBus, {
+    runService,
+    onRunCreated(run) {
+      Promise.resolve().then(() => lifecycleService.drainQueue(run.agent_profile_id, { nodeId: run.node_id || undefined }))
+        .catch(err => console.warn(`[questions] resumed run queue drain failed: ${err.message}`));
+    },
+  });
   const actionLedger = createActionLedgerService(db);
   const resolveOperatorConversationId = createOperatorConversationIdResolver(db);
   const agentProfileService = createAgentProfileService(db);

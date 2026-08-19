@@ -176,12 +176,30 @@ function createQuestionsRouter({
     try {
       const question = questionService.answerQuestion(req.params.id, {
         answer: req.body && req.body.answer,
+        resume: !req.body || req.body.resume === undefined ? true : req.body.resume === true,
       });
       return res.json({ question });
     } catch (err) {
       return sendServiceError(res, err, {
         QUESTION_INVALID: [400, 'question_invalid'],
         QUESTION_NOT_PENDING: [409, 'question_not_pending'],
+        RESUME_UNAVAILABLE: [503, 'resume_unavailable'],
+      });
+    }
+  }));
+
+  router.post('/questions/:id/resume', asyncHandler(async (req, res) => {
+    if (!req.auth || req.auth.method !== 'cookie') throw new ForbiddenError('cookie auth required');
+    assertSameOrigin(req);
+    try {
+      return res.json({ question: questionService.resumeQuestion(req.params.id) });
+    } catch (err) {
+      if (err && err.code === 'QUESTION_ALREADY_RESUMED') {
+        return res.status(409).json({ error: err.message, reason: 'question_already_resumed', resumed_run_id: err.resumedRunId });
+      }
+      return sendServiceError(res, err, {
+        QUESTION_NOT_ANSWERED: [409, 'question_not_answered'],
+        RESUME_UNAVAILABLE: [503, 'resume_unavailable'],
       });
     }
   }));

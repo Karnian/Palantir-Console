@@ -1247,6 +1247,15 @@ function createLifecycleService({
         `POST $PALANTIR_API_BASE/api/runs/${run.id}/memory/propose with Authorization: Bearer $PALANTIR_WORKER_TOKEN`,
         'JSON body: {"kind":"convention|pitfall|heuristic|constraint","content":"...","importance":5}',
         'This capability is run-bound and candidate-only. Never include secrets, raw logs, transient status, or conversation transcripts.',
+        '## Blocking questions',
+        'If you are blocked on a decision only a human can make, register a question and wait.',
+        `POST $PALANTIR_API_BASE/api/runs/${run.id}/questions with Authorization: Bearer $PALANTIR_WORKER_TOKEN`,
+        'JSON body: {"idempotency_key":"<stable>","class":"clarification|choice|approval","question":"...","options":["a","b"]}',
+        `Then poll: GET $PALANTIR_API_BASE/api/runs/${run.id}/questions/<id>/wait (long-poll, returns within ~25s)`,
+        'Repeat the poll until status is not "pending".',
+        '- answered: proceed using the answer.',
+        '- cancelled/expired: proceed without it or stop; do not invent an answer.',
+        'Only one pending question per run. Never put secrets in the question.',
       ].filter(Boolean).join('\n\n');
     }
     const buildWorkerEnv = (explicitEnv) => applyWorkerCredentialPolicy(explicitEnv, {
