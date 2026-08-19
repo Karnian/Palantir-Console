@@ -98,6 +98,9 @@ const RUN_COLUMNS = [
   // Worker idle timeout (#466, migration 080): preserves the existing terminal
   // status while recording why health cleanup finalized the run.
   'terminal_reason',
+  // Durable question mailbox (격차①, migration 092): the run created by
+  // resuming an answered worker question points back at that question.
+  'source_question_id',
 ];
 
 const COMPOSITION_EVENT_COLUMNS = [

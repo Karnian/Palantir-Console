@@ -31,9 +31,27 @@ for (const [key, value] of Object.entries(DEFAULTS)) {
   if (env[key] === undefined) env[key] = value;
 }
 
+// Bound the runner's parallelism. `node --test` defaults to one worker per CPU
+// (18 on the dev machine), and at that level the suite fails 1-3 DIFFERENT
+// tests per run -- every one of them passing when its file runs alone. Those
+// were being triaged by hand as "known flakes", which is how a real regression
+// (a canonical `runs` column list that migration 092 invalidated) hid among
+// them for a whole session.
+//
+// Measured on the dev machine: default (18) fails 2/2/0 across three runs;
+// concurrency 4 is green 2/2 and costs ~12s (~20%). Determinism is worth more
+// than that, and a CI gate is meaningless without it.
+//
+// An explicit --test-concurrency on the command line still wins.
+const passthrough = process.argv.slice(2);
+const hasExplicitConcurrency = passthrough.some(
+  (arg) => arg === '--test-concurrency' || arg.startsWith('--test-concurrency='),
+);
+const concurrencyArgs = hasExplicitConcurrency ? [] : ['--test-concurrency=4'];
+
 const child = spawn(
   process.execPath,
-  ['--test', ...process.argv.slice(2)],
+  ['--test', ...concurrencyArgs, ...passthrough],
   { stdio: 'inherit', env },
 );
 
