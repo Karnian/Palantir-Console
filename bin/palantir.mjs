@@ -1,11 +1,18 @@
 #!/usr/bin/env node
 
 import { parseArgs } from 'node:util';
+import { StringDecoder } from 'node:string_decoder';
+import * as fs from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import os from 'node:os';
+import path from 'node:path';
 
 const DEFAULT_BASE_URL = 'http://127.0.0.1:4177';
 const token = process.env.PALANTIR_TOKEN || '';
 let jsonMode = process.argv.slice(2).includes('--json');
 let interrupted = false;
+let followErrorCollector = null;
 
 process.once('SIGINT', () => {
   interrupted = true;
@@ -13,6 +20,10 @@ process.once('SIGINT', () => {
 });
 
 function handleBrokenPipe(error) {
+  if (followErrorCollector) {
+    followErrorCollector(error);
+    return;
+  }
   // EPIPE = 소비자가 먼저 닫음 → 우리 실패가 아니다(§7 우선순위).
   if (error?.code === 'EPIPE') process.exit(interrupted ? 130 : 0);
   // 그 외 쓰기 오류(ENOSPC/EIO…)는 출력이 온전히 전달됐는지 확인할 수 없다는 뜻이므로
@@ -46,7 +57,9 @@ function writeJson(value) {
 
 const USAGE = 'Usage: palantir spawn <task_id> [--agent <profile_id>] [--json]\n'
   + '       palantir input <run_id> <text...> [--json]\n'
-  + '       palantir cancel <run_id> [--json]\n';
+  + '       palantir cancel <run_id> [--json]\n'
+  + '       palantir follow <run_id>\n'
+  + '\nConcurrent follow processes for the same run_id are unsupported (last-writer-wins).\n';
 
 function usageError() {
   if (jsonMode) writeJson({ type: 'error', kind: 'usage' });
@@ -94,6 +107,10 @@ function parseCli(argv) {
   }
   if (command === 'cancel') {
     if (agent !== undefined || args.length !== 1 || !args[0]) return null;
+    return { command, id: args[0] };
+  }
+  if (command === 'follow') {
+    if (agent !== undefined || parsed.values.json !== undefined || args.length !== 1 || !args[0]) return null;
     return { command, id: args[0] };
   }
   return null;
@@ -198,7 +215,408 @@ async function isRemoteRun(baseUrl, runId) {
   }
 }
 
+const FOLLOW_POLL_MS = 1000;
+const FOLLOW_DRAIN_MS = 5000;
+const FOLLOW_RETRY_BUDGET_MS = 30000;
+const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', 'stopped']);
+
+function warnFollow(message) {
+  process.stderr.write(`palantir: ${message}\n`);
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function checkpointPaths(runId) {
+  const safeId = encodeURIComponent(runId);
+  const dir = path.join(os.homedir(), '.palantir', 'follow');
+  return { dir, file: path.join(dir, `${safeId}.json`) };
+}
+
+async function prepareCheckpoint(runId) {
+  const paths = checkpointPaths(runId);
+  try {
+    await fs.mkdir(paths.dir, { recursive: true, mode: 0o700 });
+    const stat = await fs.lstat(paths.dir);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error('unsafe checkpoint directory');
+    if ((stat.mode & 0o077) !== 0) await fs.chmod(paths.dir, 0o700);
+    return { ...paths, enabled: true };
+  } catch (error) {
+    warnFollow(`checkpoint disabled (${error?.code || error?.message || 'unknown error'})`);
+    return { ...paths, enabled: false };
+  }
+}
+
+async function readCheckpoint(state, runId) {
+  if (!state.enabled) return null;
+  let handle;
+  try {
+    handle = await fs.open(state.file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const stat = await handle.stat();
+    if (!stat.isFile()) throw new Error('not a regular file');
+    const raw = await handle.readFile({ encoding: 'utf8' });
+    const value = JSON.parse(raw);
+    if (value?.v !== 1 || value.run_id !== runId || typeof value.source_id !== 'string'
+      || !['text', 'claude_ndjson'].includes(value.format)
+      || !Number.isSafeInteger(value.committed_offset) || value.committed_offset < 0) {
+      throw new Error('invalid checkpoint');
+    }
+    return value;
+  } catch (error) {
+    if (error?.code !== 'ENOENT') warnFollow(`checkpoint ignored (${error?.code || error?.message || 'invalid'})`);
+    return null;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+async function saveCheckpoint(state, value) {
+  if (!state.enabled) return;
+  let handle;
+  let opened = false;
+  let tmp;
+  try {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      tmp = `${state.file}.tmp.${randomBytes(6).toString('hex')}`;
+      try {
+        handle = await fs.open(tmp, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
+        opened = true;
+        break;
+      } catch (error) {
+        if (error?.code !== 'EEXIST' || attempt === 1) throw error;
+      }
+    }
+    await handle.writeFile(`${JSON.stringify(value)}\n`, 'utf8');
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    await fs.rename(tmp, state.file);
+  } catch (error) {
+    warnFollow(`checkpoint update failed (${error?.code || 'unknown'})`);
+    await handle?.close().catch(() => {});
+    if (opened) await fs.unlink(tmp).catch(() => {});
+  }
+}
+
+function renderClaudeLine(line) {
+  try {
+    const value = JSON.parse(line);
+    if (typeof value?.result === 'string') return value.result;
+    if (typeof value?.delta?.text === 'string') return value.delta.text;
+    if (typeof value?.event?.delta?.text === 'string') return value.event.delta.text;
+    const content = value?.message?.content ?? value?.content;
+    if (Array.isArray(content)) {
+      const text = content.filter((part) => part?.type === 'text' && typeof part.text === 'string')
+        .map((part) => part.text).join('');
+      if (text) return text;
+    }
+    return line;
+  } catch {
+    return line;
+  }
+}
+
+function isCompleteJson(line) {
+  try {
+    JSON.parse(line);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const DEADLINE_EXCEEDED = Symbol('follow deadline exceeded');
+
+async function withinDeadline(promise, deadline) {
+  if (deadline === null) return promise;
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) return DEADLINE_EXCEEDED;
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((resolve) => { timer = setTimeout(resolve, remaining, DEADLINE_EXCEEDED); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function delayWithin(ms, deadline) {
+  if (deadline === null) {
+    await delay(ms);
+    return undefined;
+  }
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) return DEADLINE_EXCEEDED;
+  await delay(Math.min(ms, remaining));
+  return Date.now() >= deadline ? DEADLINE_EXCEEDED : undefined;
+}
+
+function writeFollowChunk(chunk, errors) {
+  return new Promise((resolve) => {
+    process.stdout.write(chunk, (error) => {
+      if (error) errors.push(error);
+      resolve(error);
+    });
+  });
+}
+
+async function finishFollowOutput(errors, deadline) {
+  return withinDeadline(new Promise((resolve) => {
+    let closed = false;
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      followErrorCollector = null;
+      resolve();
+    };
+    followErrorCollector = (error) => {
+      errors.push(error);
+      close();
+    };
+    process.stdout.end((error) => {
+      if (error) errors.push(error);
+      close();
+    });
+  }), deadline);
+}
+
+async function follow(command, baseUrl) {
+  const checkpointState = await prepareCheckpoint(command.id);
+  let checkpoint = await readCheckpoint(checkpointState, command.id);
+  let committedOffset = checkpoint?.committed_offset ?? 0;
+  let fetchedOffset = committedOffset;
+  let sourceId = checkpoint?.source_id ?? null;
+  let format = checkpoint?.format ?? null;
+  let decoder = new StringDecoder('utf8');
+  let lineBuffer = '';
+  let rawSinceCommit = Buffer.alloc(0);
+  let stickyLoss = false;
+  let sealed = false;
+  let drainDeadline = null;
+  let retryStarted = null;
+  let retryDelay = 250;
+  const outputErrors = [];
+  let drainWarningShown = false;
+  followErrorCollector = (error) => outputErrors.push(error);
+
+  const resetAtZero = () => {
+    committedOffset = 0;
+    fetchedOffset = 0;
+    decoder = new StringDecoder('utf8');
+    lineBuffer = '';
+    rawSinceCommit = Buffer.alloc(0);
+  };
+
+  const commitOutput = async (text, boundary) => {
+    const error = await withinDeadline(writeFollowChunk(text, outputErrors), drainDeadline);
+    if (error === DEADLINE_EXCEEDED) return DEADLINE_EXCEEDED;
+    if (error) return false;
+    committedOffset = boundary;
+    if (sourceId !== null) {
+      const saved = await withinDeadline(saveCheckpoint(checkpointState, {
+        v: 1, run_id: command.id, source_id: sourceId, format, committed_offset: committedOffset,
+      }), drainDeadline);
+      if (saved === DEADLINE_EXCEEDED) return DEADLINE_EXCEEDED;
+    }
+    return true;
+  };
+
+  const markDrainExceeded = () => {
+    if (!drainWarningShown) warnFollow('output drain deadline exceeded before finalization');
+    drainWarningShown = true;
+    stickyLoss = true;
+    process.stdout.destroy();
+  };
+
+  let exitCode = 5;
+  while (true) {
+    if (outputErrors.length) break;
+    if (drainDeadline !== null && Date.now() >= drainDeadline) {
+      markDrainExceeded();
+      break;
+    }
+
+    let response;
+    try {
+      const remaining = drainDeadline === null ? DEFAULT_TIMEOUT_MS : Math.max(1, drainDeadline - Date.now());
+      response = await request(baseUrl,
+        `/api/runs/${encodeURIComponent(command.id)}/output?after=${fetchedOffset}`,
+        { timeoutMs: remaining });
+    } catch {
+      const now = Date.now();
+      retryStarted ??= now;
+      if (now - retryStarted >= FOLLOW_RETRY_BUDGET_MS) {
+        reportTransportError();
+        break;
+      }
+      const waited = await delayWithin(
+        Math.min(retryDelay, FOLLOW_RETRY_BUDGET_MS - (now - retryStarted)), drainDeadline,
+      );
+      if (waited === DEADLINE_EXCEEDED) { markDrainExceeded(); break; }
+      retryDelay = Math.min(retryDelay * 2, 5000);
+      continue;
+    }
+
+    if (response.status >= 500) {
+      const now = Date.now();
+      retryStarted ??= now;
+      if (now - retryStarted >= FOLLOW_RETRY_BUDGET_MS) {
+        reportHttpError(response.status);
+        break;
+      }
+      const waited = await delayWithin(
+        Math.min(retryDelay, FOLLOW_RETRY_BUDGET_MS - (now - retryStarted)), drainDeadline,
+      );
+      if (waited === DEADLINE_EXCEEDED) { markDrainExceeded(); break; }
+      retryDelay = Math.min(retryDelay * 2, 5000);
+      continue;
+    }
+    retryStarted = null;
+    retryDelay = 250;
+
+    if (!response.ok) {
+      if (response.status === 410) {
+        if (!sealed) {
+          warnFollow('output expired; some output may be unavailable');
+          stickyLoss = true;
+        }
+        exitCode = stickyLoss ? 5 : 0;
+      } else {
+        const errorPayload = response.status === 409 ? await parseResponse(response) : null;
+        if (response.status === 409 && errorPayload?.reason === 'incremental_unsupported') {
+          warnFollow('incremental_unsupported: 이 run 은 follow 할 수 없다 (원격 run 만 지원)');
+        } else reportHttpError(response.status);
+        exitCode = exitCodeForStatus(response.status);
+      }
+      break;
+    }
+
+    const payload = await parseResponse(response);
+    if (!payload || typeof payload.data_base64 !== 'string'
+      || !Number.isSafeInteger(payload.next_offset) || payload.next_offset < fetchedOffset
+      || typeof payload.has_more !== 'boolean' || typeof payload.finalized !== 'boolean'
+      || !['text', 'claude_ndjson'].includes(payload.format)
+      || (payload.source_id !== null && typeof payload.source_id !== 'string')) {
+      reportInvalidResponse();
+      break;
+    }
+
+    // §3.0.12 D6 / §3.0.13 E5: a null source_id means the log does not exist
+    // yet, so the response must make no progress. Consuming bytes we cannot
+    // attribute to a generation would write output to stdout that no checkpoint
+    // can ever describe.
+    if (payload.source_id === null
+      && (payload.next_offset !== fetchedOffset || payload.data_base64 !== '' || payload.finalized)) {
+      reportInvalidResponse();
+      break;
+    }
+
+    // §3.1: has_more must make progress. Without this the client re-requests the
+    // same offset forever -- a server that always answers "more, but none yet"
+    // would hang follow with no output and no exit. This is independent of the
+    // null-source guard below: either can produce a stalled cursor.
+    if (payload.has_more && payload.next_offset === fetchedOffset) {
+      reportInvalidResponse();
+      break;
+    }
+
+    // A sealed response must carry the terminal status it sealed at (§3.0.4);
+    // finalized + a live run_status is a contradiction, not something to act on.
+    if (payload.finalized && !['completed', 'failed', 'cancelled', 'stopped'].includes(payload.run_status)) {
+      reportInvalidResponse();
+      break;
+    }
+
+    if (checkpoint && format !== payload.format) {
+      warnFollow('checkpoint format changed; restarting from offset 0');
+      checkpoint = null;
+      format = payload.format;
+      sourceId = payload.source_id;
+      resetAtZero();
+      continue;
+    }
+    if (payload.source_id !== null && sourceId !== null && sourceId !== payload.source_id) {
+      warnFollow('output source changed; restarting from offset 0');
+      stickyLoss = true;
+      sourceId = payload.source_id;
+      format = payload.format;
+      checkpoint = null;
+      resetAtZero();
+      continue;
+    }
+    if (payload.source_id !== null) sourceId = payload.source_id;
+    format = payload.format;
+    checkpoint = null;
+
+    if (payload.truncated) {
+      warnFollow('output was truncated; restarting from offset 0');
+      stickyLoss = true;
+      resetAtZero();
+      continue;
+    }
+
+    if (TERMINAL_STATUSES.has(payload.run_status) && drainDeadline === null && !sealed) {
+      drainDeadline = Date.now() + FOLLOW_DRAIN_MS;
+    }
+    if (payload.finalized) {
+      sealed = true;
+      drainDeadline = null;
+    }
+
+    const bytes = Buffer.from(payload.data_base64, 'base64');
+    rawSinceCommit = Buffer.concat([rawSinceCommit, bytes]);
+    lineBuffer += decoder.write(bytes);
+    fetchedOffset = payload.next_offset;
+
+    let newline;
+    while ((newline = lineBuffer.indexOf('\n')) !== -1) {
+      const line = lineBuffer.slice(0, newline);
+      lineBuffer = lineBuffer.slice(newline + 1);
+      const rawNewline = rawSinceCommit.indexOf(0x0a);
+      const boundary = committedOffset + rawNewline + 1;
+      rawSinceCommit = rawSinceCommit.subarray(rawNewline + 1);
+      const rendered = format === 'claude_ndjson' ? renderClaudeLine(line) : line;
+      const committed = await commitOutput(`${rendered}\n`, boundary);
+      if (committed === DEADLINE_EXCEEDED) { markDrainExceeded(); break; }
+      if (!committed) break;
+    }
+    if (outputErrors.length) break;
+
+    if (payload.finalized && !payload.has_more) {
+      lineBuffer += decoder.end();
+      if (lineBuffer || rawSinceCommit.length) {
+        const completeJson = format !== 'claude_ndjson' || isCompleteJson(lineBuffer);
+        const rendered = format === 'claude_ndjson' && completeJson ? renderClaudeLine(lineBuffer) : lineBuffer;
+        if (format === 'claude_ndjson' && !completeJson) {
+          warnFollow('incomplete claude_ndjson JSON at finalized EOF; emitting raw tail');
+        }
+        if (!await commitOutput(rendered, fetchedOffset)) break;
+        lineBuffer = '';
+        rawSinceCommit = Buffer.alloc(0);
+      }
+      exitCode = stickyLoss ? 5 : (payload.run_status === 'completed' ? 0 : 6);
+      break;
+    }
+    if (!payload.has_more) {
+      const waited = await delayWithin(FOLLOW_POLL_MS, drainDeadline);
+      if (waited === DEADLINE_EXCEEDED) { markDrainExceeded(); break; }
+    }
+  }
+
+  const finished = await finishFollowOutput(outputErrors, drainDeadline);
+  if (finished === DEADLINE_EXCEEDED) markDrainExceeded();
+  if (interrupted) return 130;
+  const epipe = outputErrors.some((error) => error?.code === 'EPIPE');
+  if (epipe) return 0;
+  if (outputErrors.length) return 5;
+  return stickyLoss ? 5 : exitCode;
+}
+
 async function execute(command, baseUrl) {
+  if (command.command === 'follow') return follow(command, baseUrl);
   const id = encodeURIComponent(command.id);
   let pathname;
   let body;

@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
+const fs = require('node:fs');
 const { spawn } = require('node:child_process');
 
 const CLI_PATH = path.resolve(__dirname, '../../bin/palantir.mjs');
@@ -35,17 +36,22 @@ async function withServer(handler, fn) {
   }
 }
 
-function runCli(args, { baseUrl, token = SECRET } = {}) {
+function runCli(args, { baseUrl, token = SECRET, env = {}, cliPath = CLI_PATH, killAfterMs = null } = {}) {
   return new Promise((resolve, reject) => {
-    const argv = [CLI_PATH, ...args];
+    const argv = [cliPath, ...args];
     const child = spawn(process.execPath, argv, {
       env: {
         ...process.env,
         PALANTIR_BASE_URL: baseUrl,
         PALANTIR_TOKEN: token,
+        ...env,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    // Guard so a regression that stalls the client surfaces as a failed
+    // assertion instead of hanging the whole suite (codex review).
+    const killTimer = killAfterMs === null ? null : setTimeout(() => child.kill('SIGKILL'), killAfterMs);
+    if (killTimer?.unref) killTimer.unref();
     let stdout = '';
     let stderr = '';
     child.stdout.setEncoding('utf8');
@@ -53,8 +59,36 @@ function runCli(args, { baseUrl, token = SECRET } = {}) {
     child.stdout.on('data', (chunk) => { stdout += chunk; });
     child.stderr.on('data', (chunk) => { stderr += chunk; });
     child.once('error', reject);
-    child.once('close', (code, signal) => resolve({ code, signal, stdout, stderr, argv, child }));
+    child.once('close', (code, signal) => {
+      if (killTimer) clearTimeout(killTimer);
+      resolve({ code, signal, stdout, stderr, argv, child });
+    });
   });
+}
+
+function outputPage(textOrBuffer, options = {}) {
+  const bytes = Buffer.isBuffer(textOrBuffer) ? textOrBuffer : Buffer.from(textOrBuffer);
+  return {
+    data_base64: bytes.toString('base64'),
+    next_offset: options.next_offset,
+    end_offset: options.end_offset ?? options.next_offset,
+    has_more: options.has_more ?? false,
+    truncated: options.truncated ?? false,
+    finalized: options.finalized ?? false,
+    run_status: options.run_status ?? 'running',
+    source_id: Object.hasOwn(options, 'source_id') ? options.source_id : '2049:1234',
+    format: options.format ?? 'text',
+  };
+}
+
+function followHome() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-follow-home-'));
+}
+
+function transformedCli(home, transform) {
+  const target = path.join(home, 'palantir-test.mjs');
+  fs.writeFileSync(target, transform(fs.readFileSync(CLI_PATH, 'utf8')));
+  return target;
 }
 
 async function readRequest(req) {
@@ -431,9 +465,342 @@ test('--help 는 의도한 성공이다 — stdout + 코드 0, 사용법 오류(
   assert.equal(help.code, 0, '`palantir --help` 로 설치 여부를 확인하는 스크립트가 실패로 읽으면 안 된다');
   assert.match(help.stdout, /Usage: palantir/);
   assert.equal(help.stderr, '', '요청된 출력이므로 stderr 가 아니다');
+  assert.match(help.stdout, /Concurrent follow.*same run_id.*unsupported.*last-writer-wins/i);
 
   const bogus = await runCli(['bogus-command'], { baseUrl: 'http://127.0.0.1:1' });
   assert.equal(bogus.code, 1);
   assert.equal(bogus.stdout, '', '오류 사용법은 stdout 을 오염시키지 않는다');
   assert.match(bogus.stderr, /Usage: palantir/);
+});
+
+test('follow defers checkpoint source validation for null, then discards a mismatched source page', async () => {
+  const home = followHome();
+  const dir = path.join(home, '.palantir', 'follow');
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(dir, 'r-source.json'), JSON.stringify({
+    v: 1, run_id: 'r-source', source_id: 'old-source', format: 'text', committed_offset: 7,
+  }), { mode: 0o600 });
+  const seen = [];
+  try {
+    await withServer((req, res) => {
+      const after = Number(new URL(req.url, 'http://x').searchParams.get('after'));
+      seen.push(after);
+      if (seen.length === 1) return json(res, 200, outputPage('', { next_offset: 7, source_id: null }));
+      if (seen.length === 2) return json(res, 200, outputPage('discarded\n', {
+        next_offset: 17, source_id: 'new-source', has_more: true,
+      }));
+      return json(res, 200, outputPage('kept\n', {
+        next_offset: 5, source_id: 'new-source', finalized: true, run_status: 'completed',
+      }));
+    }, async (baseUrl) => {
+      const result = await runCli(['follow', 'r-source'], { baseUrl, env: { HOME: home } });
+      assert.equal(result.code, 5);
+      assert.equal(result.stdout, 'kept\n');
+      assert.deepEqual(seen, [7, 7, 0]);
+      assert.match(result.stderr, /source changed/);
+      assert.doesNotMatch(result.stderr, /invalid response/);
+    });
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('follow rejects a null-source page that makes progress', async () => {
+  // §3.0.12 D6: a null source_id means the log does not exist yet, so the
+  // response must not advance the offset or carry bytes. Consuming them would
+  // put output on stdout that no checkpoint can ever attribute to a generation.
+  const home = followHome();
+  try {
+    for (const bad of [
+      { label: 'offset advanced', page: outputPage('', { next_offset: 9, source_id: null }) },
+      { label: 'carried data', page: outputPage('leaked\n', { next_offset: 0, source_id: null }) },
+      { label: 'sealed', page: outputPage('', { next_offset: 0, source_id: null, finalized: true, run_status: 'completed' }) },
+    ]) {
+      await withServer((req, res) => json(res, 200, bad.page), async (baseUrl) => {
+        const result = await runCli(['follow', 'r-nullprog'], { baseUrl, env: { HOME: home }, killAfterMs: 8000 });
+        assert.equal(result.code, 5, bad.label);
+        assert.match(result.stderr, /invalid response/, bad.label);
+        assert.equal(result.stdout, '', `${bad.label}: unattributable bytes must not reach stdout`);
+      });
+    }
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('follow rejects a has_more page that does not advance the offset', async () => {
+  // §3.1: has_more must make progress. Without this guard the client re-requests
+  // the same offset forever. killAfterMs turns a regression into a failed
+  // assertion rather than a hung suite.
+  const home = followHome();
+  try {
+    for (const [label, sourceId] of [['non-null source', '2049:1234'], ['null source', null]]) {
+      let requests = 0;
+      await withServer((req, res) => {
+        requests += 1;
+        json(res, 200, outputPage('', { next_offset: 0, has_more: true, source_id: sourceId }));
+      }, async (baseUrl) => {
+        const result = await runCli(['follow', 'r-stall'], { baseUrl, env: { HOME: home }, killAfterMs: 8000 });
+        assert.equal(result.code, 5, label);
+        assert.match(result.stderr, /invalid response/, label);
+        assert.equal(result.stdout, '', label);
+        assert.equal(requests, 1, `${label}: a stalled cursor must be rejected on the first page`);
+      });
+    }
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('follow rejects a sealed page whose run_status is not terminal', async () => {
+  // §3.0.4: a sealed response carries the terminal status it sealed at.
+  // finalized + a live run_status is a contradiction, not an exit code to act on.
+  const home = followHome();
+  try {
+    await withServer((req, res) => json(res, 200, outputPage('x\n', {
+      next_offset: 2, finalized: true, run_status: 'running',
+    })), async (baseUrl) => {
+      const result = await runCli(['follow', 'r-badseal'], { baseUrl, env: { HOME: home } });
+      assert.equal(result.code, 5);
+      assert.match(result.stderr, /invalid response/);
+    });
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('follow streams multiple pages byte-exactly and exits 0 when completed and finalized', async () => {
+  const home = followHome();
+  const seen = [];
+  try {
+    await withServer((req, res) => {
+      const after = Number(new URL(req.url, 'http://x').searchParams.get('after'));
+      seen.push(after);
+      if (after === 0) return json(res, 200, outputPage('alpha\n', { next_offset: 6, has_more: true }));
+      json(res, 200, outputPage('beta\n', { next_offset: 11, finalized: true, run_status: 'completed' }));
+    }, async (baseUrl) => {
+      const result = await runCli(['follow', 'r-normal'], { baseUrl, env: { HOME: home } });
+      assert.equal(result.code, 0);
+      assert.equal(result.stdout, 'alpha\nbeta\n');
+      assert.equal(result.stderr, '');
+      assert.deepEqual(seen, [0, 6]);
+    });
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('follow maps a failed finalized run to code 6', async () => {
+  const home = followHome();
+  try {
+    await withServer((_req, res) => json(res, 200, outputPage('', {
+      next_offset: 0, finalized: true, run_status: 'failed',
+    })), async (baseUrl) => {
+      const result = await runCli(['follow', 'r-failed'], { baseUrl, env: { HOME: home } });
+      assert.equal(result.code, 6);
+    });
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('follow truncation warning is stderr-only and loss code 5 remains sticky', async () => {
+  const home = followHome();
+  let count = 0;
+  try {
+    await withServer((_req, res) => {
+      count += 1;
+      if (count === 1) return json(res, 200, outputPage('', { next_offset: 0, truncated: true }));
+      json(res, 200, outputPage('kept\n', { next_offset: 5, finalized: true, run_status: 'completed' }));
+    }, async (baseUrl) => {
+      const result = await runCli(['follow', 'r-truncated'], { baseUrl, env: { HOME: home } });
+      assert.equal(result.code, 5);
+      assert.equal(result.stdout, 'kept\n');
+      assert.match(result.stderr, /truncated/);
+      assert.doesNotMatch(result.stdout, /truncated/);
+    });
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('follow maps 409 to 4 and output-expired 410 to 5', async (t) => {
+  for (const [status, code] of [[409, 4], [410, 5]]) {
+    await t.test(String(status), async () => {
+      const home = followHome();
+      try {
+        await withServer((_req, res) => json(res, status, { reason: status === 409 ? 'incremental_unsupported' : 'output_expired' }), async (baseUrl) => {
+          const result = await runCli(['follow', `r-${status}`], { baseUrl, env: { HOME: home } });
+          assert.equal(result.code, code);
+          assert.equal(result.stdout, '');
+          if (status === 409) {
+            assert.match(result.stderr, /incremental_unsupported/);
+            assert.match(result.stderr, /원격 run 만 지원/);
+          }
+        });
+      } finally { fs.rmSync(home, { recursive: true, force: true }); }
+    });
+  }
+});
+
+test('follow preserves a Korean UTF-8 character split across response boundaries', async () => {
+  const home = followHome();
+  const bytes = Buffer.from('한글\n');
+  try {
+    await withServer((req, res) => {
+      const after = Number(new URL(req.url, 'http://x').searchParams.get('after'));
+      if (after === 0) return json(res, 200, outputPage(bytes.subarray(0, 2), { next_offset: 2, has_more: true }));
+      json(res, 200, outputPage(bytes.subarray(2), { next_offset: bytes.length, finalized: true, run_status: 'completed' }));
+    }, async (baseUrl) => {
+      const result = await runCli(['follow', 'r-utf8'], { baseUrl, env: { HOME: home } });
+      assert.equal(result.code, 0);
+      assert.equal(result.stdout, '한글\n');
+    });
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('follow resumes at a valid checkpoint offset', async () => {
+  const home = followHome();
+  const dir = path.join(home, '.palantir', 'follow');
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(dir, 'r-resume.json'), JSON.stringify({
+    v: 1, run_id: 'r-resume', source_id: '2049:1234', format: 'text', committed_offset: 7,
+  }), { mode: 0o600 });
+  let seen;
+  try {
+    await withServer((req, res) => {
+      seen = Number(new URL(req.url, 'http://x').searchParams.get('after'));
+      json(res, 200, outputPage('tail\n', { next_offset: 12, finalized: true, run_status: 'completed' }));
+    }, async (baseUrl) => {
+      const result = await runCli(['follow', 'r-resume'], { baseUrl, env: { HOME: home } });
+      assert.equal(result.code, 0);
+      assert.equal(seen, 7);
+      assert.equal(result.stdout, 'tail\n');
+    });
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('follow missing checkpoint is normal and does not affect exit code', async () => {
+  const home = followHome();
+  try {
+    await withServer((_req, res) => json(res, 200, outputPage('', {
+      next_offset: 0, finalized: true, run_status: 'completed',
+    })), async (baseUrl) => {
+      const result = await runCli(['follow', 'r-first'], { baseUrl, env: { HOME: home } });
+      assert.equal(result.code, 0);
+      assert.equal(result.stderr, '');
+    });
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('follow renders Claude NDJSON and passes malformed lines through verbatim', async () => {
+  const home = followHome();
+  const input = '{"type":"result","result":"answer"}\nnot-json\n';
+  try {
+    await withServer((_req, res) => json(res, 200, outputPage(input, {
+      next_offset: Buffer.byteLength(input), finalized: true, run_status: 'completed', format: 'claude_ndjson',
+    })), async (baseUrl) => {
+      const result = await runCli(['follow', 'r-claude'], { baseUrl, env: { HOME: home } });
+      assert.equal(result.code, 0);
+      assert.equal(result.stdout, 'answer\nnot-json\n');
+    });
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('follow warns and emits a truncated Claude NDJSON EOF tail verbatim', async () => {
+  const home = followHome();
+  const input = '{"type":"result","result":"cut';
+  try {
+    await withServer((_req, res) => json(res, 200, outputPage(input, {
+      next_offset: Buffer.byteLength(input), finalized: true, run_status: 'completed', format: 'claude_ndjson',
+    })), async (baseUrl) => {
+      const result = await runCli(['follow', 'r-claude-tail'], { baseUrl, env: { HOME: home } });
+      assert.equal(result.code, 0);
+      assert.equal(result.stdout, input);
+      assert.match(result.stderr, /incomplete claude_ndjson JSON/);
+    });
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('follow terminal status without finalization hits the drain deadline and exits 5', { timeout: 10_000 }, async () => {
+  const home = followHome();
+  try {
+    await withServer((_req, res) => json(res, 200, outputPage('', {
+      next_offset: 0, run_status: 'completed', finalized: false,
+    })), async (baseUrl) => {
+      const result = await runCli(['follow', 'r-drain'], { baseUrl, env: { HOME: home } });
+      assert.equal(result.code, 5);
+      assert.equal(result.stdout, '');
+      assert.match(result.stderr, /drain deadline/);
+    });
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('follow retry backoff cannot outlive the absolute drain deadline', { timeout: 8_000 }, async () => {
+  const home = followHome();
+  let requests = 0;
+  const started = Date.now();
+  try {
+    await withServer((_req, res) => {
+      requests += 1;
+      if (requests === 1) return json(res, 200, outputPage('', {
+        next_offset: 0, run_status: 'completed', finalized: false,
+      }));
+      return json(res, 503, { error: 'still draining' });
+    }, async (baseUrl) => {
+      const result = await runCli(['follow', 'r-drain-5xx'], { baseUrl, env: { HOME: home } });
+      const elapsed = Date.now() - started;
+      assert.equal(result.code, 5);
+      assert.match(result.stderr, /drain deadline/);
+      assert.ok(requests >= 2);
+      assert.ok(elapsed < 6_000, `absolute 5s deadline was exceeded: ${elapsed}ms`);
+    });
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('follow narrows an existing permissive checkpoint directory to 0700', async () => {
+  const home = followHome();
+  const dir = path.join(home, '.palantir', 'follow');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.chmodSync(dir, 0o777);
+  try {
+    await withServer((_req, res) => json(res, 200, outputPage('', {
+      next_offset: 0, finalized: true, run_status: 'completed',
+    })), async (baseUrl) => {
+      const result = await runCli(['follow', 'r-mode'], { baseUrl, env: { HOME: home } });
+      assert.equal(result.code, 0);
+      assert.equal(fs.statSync(dir).mode & 0o777, 0o700);
+    });
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('follow disables checkpointing when narrowing directory mode fails', async () => {
+  const home = followHome();
+  const dir = path.join(home, '.palantir', 'follow');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.chmodSync(dir, 0o777);
+  const cliPath = transformedCli(home, (source) => source.replace(
+    'await fs.chmod(paths.dir, 0o700);',
+    "await Promise.reject(Object.assign(new Error('denied'), { code: 'EACCES' }));",
+  ));
+  try {
+    await withServer((_req, res) => json(res, 200, outputPage('done\n', {
+      next_offset: 5, finalized: true, run_status: 'completed',
+    })), async (baseUrl) => {
+      const result = await runCli(['follow', 'r-mode-fail'], { baseUrl, cliPath, env: { HOME: home } });
+      assert.equal(result.code, 0);
+      assert.equal(result.stdout, 'done\n');
+      assert.match(result.stderr, /checkpoint disabled \(EACCES\)/);
+      assert.equal(fs.existsSync(path.join(dir, 'r-mode-fail.json')), false);
+    });
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('follow retries an EEXIST checkpoint temp collision once and commits', async () => {
+  const home = followHome();
+  const dir = path.join(home, '.palantir', 'follow');
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(dir, 'r-eexist.json.tmp.collision'), 'owned-by-someone-else');
+  const cliPath = transformedCli(home, (source) => source
+    .replace("import path from 'node:path';", "import path from 'node:path';\nlet testNonceIndex = 0;")
+    .replace("randomBytes(6).toString('hex')", "(['collision', 'success'][testNonceIndex++] ?? 'later')"));
+  try {
+    await withServer((_req, res) => json(res, 200, outputPage('done\n', {
+      next_offset: 5, finalized: true, run_status: 'completed', source_id: 'source-eexist',
+    })), async (baseUrl) => {
+      const result = await runCli(['follow', 'r-eexist'], { baseUrl, cliPath, env: { HOME: home } });
+      assert.equal(result.code, 0);
+      assert.doesNotMatch(result.stderr, /checkpoint update failed/);
+      const checkpoint = JSON.parse(fs.readFileSync(path.join(dir, 'r-eexist.json'), 'utf8'));
+      assert.equal(checkpoint.committed_offset, 5);
+      assert.equal(checkpoint.source_id, 'source-eexist');
+      assert.equal(fs.readFileSync(path.join(dir, 'r-eexist.json.tmp.collision'), 'utf8'), 'owned-by-someone-else');
+    });
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
