@@ -253,8 +253,13 @@ test('answered question can be resumed once with cookie same-origin only', async
 
 test('global waiter capacity is distinct from per-run waiter contention and is released', async (t) => {
   const active = [];
+  // The first waiter must still be holding its slot when the two 429
+  // assertions run. A short wait budget made that a race: under parallel load
+  // the waiter could expire before the follow-up requests landed, and both
+  // would then get 200. Give it a long budget and end it explicitly by
+  // answering the question instead of racing a timer.
   const app = setupApp(t, {
-    questionWaitTimeoutMs: 40,
+    questionWaitTimeoutMs: 5_000,
     questionPollIntervalMs: 5,
     questionMaxGlobalWaiters: 1,
     questionOnWaiterActive: info => active.splice(0).forEach(resolve => resolve(info)),
@@ -270,6 +275,12 @@ test('global waiter capacity is distinct from per-run waiter contention and is r
   assert.equal(globalBusy.body.reason, 'waiter_capacity');
   const runBusy = await request(app).get(`/api/runs/${workers[0].run.id}/questions/${questions[0].body.question.id}/wait`).set(workers[0].auth).expect(429);
   assert.equal(runBusy.body.reason, 'waiter_busy');
+
+  // Release the first waiter deterministically: answering wakes it on the next
+  // poll tick rather than leaving the test to wait out the budget.
+  await request(app).post(`/api/questions/${questions[0].body.question.id}/respond`)
+    .set(COOKIE).set('Host', 'console.test').set('Origin', 'http://console.test')
+    .send({ answer: 'morning', resume: false }).expect(200);
   await first;
 
   const released = await request(app).get(`/api/runs/${workers[1].run.id}/questions/${questions[1].body.question.id}/wait`).set(workers[1].auth).expect(200);
