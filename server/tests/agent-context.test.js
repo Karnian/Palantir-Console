@@ -49,6 +49,28 @@ function expectedOperationIds(layer, gates) {
     .map(operation => operation.id);
 }
 
+function managerAuthorization(app, layer) {
+  const conversationId = layer === 'top' ? 'top' : `operator:agent-context-${appSequence}`;
+  const run = app.services.runService.createRun({
+    is_manager: true,
+    manager_layer: layer,
+    conversation_id: conversationId,
+    manager_adapter: 'codex',
+    prompt: `${layer} agent context`,
+  });
+  app.services.runService.updateRunStatus(run.id, 'running', { force: true });
+  app.managerRegistry.setActive(conversationId, run.id, {
+    isSessionAlive: () => true,
+    detectExitCode: () => null,
+    disposeSession: () => true,
+  });
+  const token = app.services.managerCapabilityTokenService.mint(run.id, {
+    conversationId,
+    layer,
+  });
+  return { Authorization: `Bearer ${token}` };
+}
+
 function productionRouterMounts(app) {
   const candidates = new Set(['/api']);
   for (const operation of managerOperationManifest.operations) {
@@ -118,38 +140,118 @@ function mountedOperationIds(app) {
     .map(operation => operation.id));
 }
 
-test('agent context requires a valid layer and inherits API authentication', async () => {
-  const app = createApp(manifestAppOptions({ authToken: 'agent-context-token' }));
+test('agent context derives layer and authority from manager capabilities', async () => {
+  const app = createApp(manifestAppOptions({
+    authToken: 'agent-context-token',
+    pmToken: 'agent-context-pm-token',
+    agentProcessIsolation: true,
+  }));
   try {
-    const unauthorized = await invokeApp(app, {
-      method: 'GET',
-      path: '/api/agent-context?layer=top',
-    });
-    assert.equal(unauthorized.status, 403);
+    const topAuthorization = managerAuthorization(app, 'top');
+    const operatorAuthorization = managerAuthorization(app, 'operator');
 
-    const authorization = { Authorization: 'Bearer agent-context-token' };
-    const missing = await invokeApp(app, {
+    const top = await invokeApp(app, {
       method: 'GET',
       path: '/api/agent-context',
-      headers: authorization,
+      headers: topAuthorization,
     });
-    assert.equal(missing.status, 400);
-    assert.match(missing.body.error, /layer must be top or operator/);
+    assert.equal(top.status, 200);
+    assert.equal(top.body.layer, 'top');
+    assert.ok(top.body.operations.every(operation => (
+      managerOperationManifest.operations.find(candidate => candidate.id === operation.id)
+        .layers.includes('top')
+    )));
 
-    const bogus = await invokeApp(app, {
+    const operator = await invokeApp(app, {
       method: 'GET',
-      path: '/api/agent-context?layer=bogus',
-      headers: authorization,
+      path: '/api/agent-context',
+      headers: operatorAuthorization,
     });
-    assert.equal(bogus.status, 400);
-    assert.match(bogus.body.error, /layer must be top or operator/);
+    assert.equal(operator.status, 200);
+    assert.equal(operator.body.layer, 'operator');
+    assert.ok(operator.body.operations.every(operation => (
+      managerOperationManifest.operations.find(candidate => candidate.id === operation.id)
+        .layers.includes('operator')
+    )));
+    assert.notDeepEqual(
+      top.body.operations.map(operation => operation.id),
+      operator.body.operations.map(operation => operation.id),
+      'top and operator operation lists must differ',
+    );
 
-    const authorized = await invokeApp(app, {
+    const cookie = await invokeApp(app, {
       method: 'GET',
-      path: '/api/agent-context?layer=top',
-      headers: authorization,
+      path: '/api/agent-context',
+      headers: { Cookie: 'palantir_token=agent-context-token' },
     });
-    assert.equal(authorized.status, 200);
+    assert.equal(cookie.status, 403);
+    assert.match(cookie.body.error, /manager capability required/);
+
+    for (const token of ['agent-context-token', 'agent-context-pm-token']) {
+      const bearer = await invokeApp(app, {
+        method: 'GET', path: '/api/agent-context', headers: { Authorization: `Bearer ${token}` },
+      });
+      assert.equal(bearer.status, 403);
+      assert.match(bearer.body.error, /manager capability required/);
+    }
+
+    const workerToken = app.services.workerProposalTokenService.mint('worker-run', {
+      projectId: 'worker-project',
+    });
+    const worker = await invokeApp(app, {
+      method: 'GET',
+      path: '/api/agent-context',
+      headers: { Authorization: `Bearer ${workerToken}` },
+    });
+    assert.equal(worker.status, 403);
+
+    const mismatch = await invokeApp(app, {
+      method: 'GET', path: '/api/agent-context?layer=top', headers: operatorAuthorization,
+    });
+    assert.equal(mismatch.status, 400);
+
+    const matching = await invokeApp(app, {
+      method: 'GET', path: '/api/agent-context?layer=operator', headers: operatorAuthorization,
+    });
+    assert.equal(matching.status, 200);
+    assert.equal(matching.headers['cache-control'], 'private, no-store');
+    assert.equal(matching.headers.vary, 'Authorization', 'per-caller responses must not be shared across Authorization values');
+
+    const post = await invokeApp(app, {
+      method: 'POST', path: '/api/agent-context', headers: topAuthorization,
+    });
+    assert.equal(post.status, 403);
+    const lookalike = await invokeApp(app, {
+      method: 'GET', path: '/api/agent-contextX', headers: topAuthorization,
+    });
+    assert.equal(lookalike.status, 403);
+
+    // The allowlist is an exact-path regex; pin the shapes that a looser one
+    // would let through. A mutation dropping the `/?$` anchor is caught by the
+    // lookalike case above, and these fix the rest of the boundary.
+    const trailingSlash = await invokeApp(app, {
+      method: 'GET', path: '/api/agent-context/', headers: topAuthorization,
+    });
+    assert.equal(trailingSlash.status, 200, 'trailing slash is the same endpoint');
+    const withQuery = await invokeApp(app, {
+      method: 'GET', path: '/api/agent-context?layer=top', headers: topAuthorization,
+    });
+    assert.equal(withQuery.status, 200, 'the query string is stripped before matching');
+    const encodedSlash = await invokeApp(app, {
+      method: 'GET', path: '/api/agent-context%2Fextra', headers: topAuthorization,
+    });
+    assert.equal(encodedSlash.status, 403, 'an encoded separator must not extend the allowlisted path');
+  } finally {
+    await app.shutdown();
+  }
+});
+
+test('agent context fails closed when authentication is disabled', async () => {
+  const app = createApp(manifestAppOptions({ authToken: null }));
+  try {
+    const response = await invokeApp(app, { method: 'GET', path: '/api/agent-context' });
+    assert.equal(response.status, 403);
+    assert.match(response.body.error, /manager capability required/);
   } finally {
     await app.shutdown();
   }
@@ -159,6 +261,8 @@ test('agent context projection and runtime gates cannot drift from production ro
   for (const goalActive of [false, true]) {
     for (const specialistAvailable of [false, true]) {
       const app = createApp(manifestAppOptions({
+        authToken: 'agent-context-drift-token',
+        agentProcessIsolation: true,
         goalFeatureActive: () => goalActive,
         ...(specialistAvailable ? {
           operatorSpecialistEnabled: true,
@@ -166,11 +270,17 @@ test('agent context projection and runtime gates cannot drift from production ro
         } : {}),
       }));
       try {
+        const authorizations = Object.fromEntries(
+          LAYERS.map(layer => [layer, managerAuthorization(app, layer)]),
+        );
         const mounts = productionRouterMounts(app);
         const mountedIds = mountedOperationIds(app);
         // A2: the gate moved to kind level, so a 200 on GET /api/verify-checks no
         // longer signals goal mode — artifact reads are open in both modes.
-        const verifyChecksResponse = await invokeApp(app, { method: 'GET', path: '/api/verify-checks' });
+        const verifyChecksResponse = await invokeApp(app, {
+          method: 'GET', path: '/api/verify-checks',
+          headers: { Authorization: 'Bearer agent-context-drift-token' },
+        });
         assert.equal(verifyChecksResponse.status, 200, 'artifact verify-check reads stay available');
         // The drift guard must still PROBE the runtime, never copy the expectation
         // (`runtimeGoalActive = goalActive` would make this test assert nothing).
@@ -178,6 +288,7 @@ test('agent context projection and runtime gates cannot drift from production ro
         // the honest runtime signal now.
         const goalGateResponse = await invokeApp(app, {
           method: 'POST', path: '/api/verify-checks/assign', body: { task_id: 'probe', check_id: null },
+          headers: { Authorization: 'Bearer agent-context-drift-token' },
         });
         // `/assign` runs requireAuth BEFORE the goal check, so an unauthenticated
         // probe against an auth-enabled app would 401 and be misread as "goal
@@ -204,7 +315,8 @@ test('agent context projection and runtime gates cannot drift from production ro
         for (const layer of LAYERS) {
           const response = await invokeApp(app, {
             method: 'GET',
-            path: `/api/agent-context?layer=${layer}`,
+            path: '/api/agent-context',
+            headers: authorizations[layer],
           });
           assert.equal(response.status, 200);
           assert.equal(response.body.layer, layer);
