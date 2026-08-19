@@ -36,7 +36,7 @@ async function withServer(handler, fn) {
   }
 }
 
-function runCli(args, { baseUrl, token = SECRET, env = {}, cliPath = CLI_PATH } = {}) {
+function runCli(args, { baseUrl, token = SECRET, env = {}, cliPath = CLI_PATH, killAfterMs = null } = {}) {
   return new Promise((resolve, reject) => {
     const argv = [cliPath, ...args];
     const child = spawn(process.execPath, argv, {
@@ -48,6 +48,10 @@ function runCli(args, { baseUrl, token = SECRET, env = {}, cliPath = CLI_PATH } 
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    // Guard so a regression that stalls the client surfaces as a failed
+    // assertion instead of hanging the whole suite (codex review).
+    const killTimer = killAfterMs === null ? null : setTimeout(() => child.kill('SIGKILL'), killAfterMs);
+    if (killTimer?.unref) killTimer.unref();
     let stdout = '';
     let stderr = '';
     child.stdout.setEncoding('utf8');
@@ -55,7 +59,10 @@ function runCli(args, { baseUrl, token = SECRET, env = {}, cliPath = CLI_PATH } 
     child.stdout.on('data', (chunk) => { stdout += chunk; });
     child.stderr.on('data', (chunk) => { stderr += chunk; });
     child.once('error', reject);
-    child.once('close', (code, signal) => resolve({ code, signal, stdout, stderr, argv, child }));
+    child.once('close', (code, signal) => {
+      if (killTimer) clearTimeout(killTimer);
+      resolve({ code, signal, stdout, stderr, argv, child });
+    });
   });
 }
 
@@ -508,10 +515,32 @@ test('follow rejects a null-source page that makes progress', async () => {
       { label: 'sealed', page: outputPage('', { next_offset: 0, source_id: null, finalized: true, run_status: 'completed' }) },
     ]) {
       await withServer((req, res) => json(res, 200, bad.page), async (baseUrl) => {
-        const result = await runCli(['follow', 'r-nullprog'], { baseUrl, env: { HOME: home } });
+        const result = await runCli(['follow', 'r-nullprog'], { baseUrl, env: { HOME: home }, killAfterMs: 8000 });
         assert.equal(result.code, 5, bad.label);
         assert.match(result.stderr, /invalid response/, bad.label);
         assert.equal(result.stdout, '', `${bad.label}: unattributable bytes must not reach stdout`);
+      });
+    }
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('follow rejects a has_more page that does not advance the offset', async () => {
+  // §3.1: has_more must make progress. Without this guard the client re-requests
+  // the same offset forever. killAfterMs turns a regression into a failed
+  // assertion rather than a hung suite.
+  const home = followHome();
+  try {
+    for (const [label, sourceId] of [['non-null source', '2049:1234'], ['null source', null]]) {
+      let requests = 0;
+      await withServer((req, res) => {
+        requests += 1;
+        json(res, 200, outputPage('', { next_offset: 0, has_more: true, source_id: sourceId }));
+      }, async (baseUrl) => {
+        const result = await runCli(['follow', 'r-stall'], { baseUrl, env: { HOME: home }, killAfterMs: 8000 });
+        assert.equal(result.code, 5, label);
+        assert.match(result.stderr, /invalid response/, label);
+        assert.equal(result.stdout, '', label);
+        assert.equal(requests, 1, `${label}: a stalled cursor must be rejected on the first page`);
       });
     }
   } finally { fs.rmSync(home, { recursive: true, force: true }); }

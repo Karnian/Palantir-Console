@@ -514,6 +514,15 @@ async function follow(command, baseUrl) {
       break;
     }
 
+    // §3.1: has_more must make progress. Without this the client re-requests the
+    // same offset forever -- a server that always answers "more, but none yet"
+    // would hang follow with no output and no exit. This is independent of the
+    // null-source guard below: either can produce a stalled cursor.
+    if (payload.has_more && payload.next_offset === fetchedOffset) {
+      reportInvalidResponse();
+      break;
+    }
+
     // A sealed response must carry the terminal status it sealed at (§3.0.4);
     // finalized + a live run_status is a contradiction, not something to act on.
     if (payload.finalized && !['completed', 'failed', 'cancelled', 'stopped'].includes(payload.run_status)) {
