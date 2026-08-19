@@ -504,6 +504,23 @@ async function follow(command, baseUrl) {
       break;
     }
 
+    // §3.0.12 D6 / §3.0.13 E5: a null source_id means the log does not exist
+    // yet, so the response must make no progress. Consuming bytes we cannot
+    // attribute to a generation would write output to stdout that no checkpoint
+    // can ever describe.
+    if (payload.source_id === null
+      && (payload.next_offset !== fetchedOffset || payload.data_base64 !== '' || payload.finalized)) {
+      reportInvalidResponse();
+      break;
+    }
+
+    // A sealed response must carry the terminal status it sealed at (§3.0.4);
+    // finalized + a live run_status is a contradiction, not something to act on.
+    if (payload.finalized && !['completed', 'failed', 'cancelled', 'stopped'].includes(payload.run_status)) {
+      reportInvalidResponse();
+      break;
+    }
+
     if (checkpoint && format !== payload.format) {
       warnFollow('checkpoint format changed; restarting from offset 0');
       checkpoint = null;

@@ -496,6 +496,42 @@ test('follow defers checkpoint source validation for null, then discards a misma
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
 
+test('follow rejects a null-source page that makes progress', async () => {
+  // §3.0.12 D6: a null source_id means the log does not exist yet, so the
+  // response must not advance the offset or carry bytes. Consuming them would
+  // put output on stdout that no checkpoint can ever attribute to a generation.
+  const home = followHome();
+  try {
+    for (const bad of [
+      { label: 'offset advanced', page: outputPage('', { next_offset: 9, source_id: null }) },
+      { label: 'carried data', page: outputPage('leaked\n', { next_offset: 0, source_id: null }) },
+      { label: 'sealed', page: outputPage('', { next_offset: 0, source_id: null, finalized: true, run_status: 'completed' }) },
+    ]) {
+      await withServer((req, res) => json(res, 200, bad.page), async (baseUrl) => {
+        const result = await runCli(['follow', 'r-nullprog'], { baseUrl, env: { HOME: home } });
+        assert.equal(result.code, 5, bad.label);
+        assert.match(result.stderr, /invalid response/, bad.label);
+        assert.equal(result.stdout, '', `${bad.label}: unattributable bytes must not reach stdout`);
+      });
+    }
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('follow rejects a sealed page whose run_status is not terminal', async () => {
+  // §3.0.4: a sealed response carries the terminal status it sealed at.
+  // finalized + a live run_status is a contradiction, not an exit code to act on.
+  const home = followHome();
+  try {
+    await withServer((req, res) => json(res, 200, outputPage('x\n', {
+      next_offset: 2, finalized: true, run_status: 'running',
+    })), async (baseUrl) => {
+      const result = await runCli(['follow', 'r-badseal'], { baseUrl, env: { HOME: home } });
+      assert.equal(result.code, 5);
+      assert.match(result.stderr, /invalid response/);
+    });
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
 test('follow streams multiple pages byte-exactly and exits 0 when completed and finalized', async () => {
   const home = followHome();
   const seen = [];
