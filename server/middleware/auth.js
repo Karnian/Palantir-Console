@@ -75,6 +75,7 @@ function managerCapabilityRequestAllowed(req, grant = null) {
   const method = String(req.method || 'GET').toUpperCase();
   if (method === 'GET') {
     return /^\/api\/(?:runs(?:\/[^/]+(?:\/(?:events|output))?)?|tasks(?:\/[^/]+)?|projects(?:\/[^/]+\/(?:tasks|memory|skill-packs))?|agents|skill-packs|operator\/profiles|conversations\/[^/]+\/events)\/?$/.test(rawPath)
+      || /^\/api\/agent-context\/?$/.test(rawPath)
       || (
         grant?.layer !== 'top'
         && /^\/api\/verify-checks(?:\/[^/]+)?\/?$/.test(rawPath)
