@@ -468,7 +468,9 @@ test('executeTask: worker receives only a run-bound memory proposal capability',
   assert.match(spawned.stdin, /## Blocking questions/);
   assert.match(spawned.stdin, new RegExp(`/api/runs/${run.id}/questions`));
   assert.match(spawned.stdin, new RegExp(`/api/runs/${run.id}/questions/<id>/wait`));
-  assert.match(spawned.stdin, /Repeat the poll until status is not "pending"/);
+  assert.match(spawned.stdin, /response envelope is \{"question":\{\.\.\.\}\}/);
+  assert.match(spawned.stdin, /question\.status is "pending"/);
+  assert.match(spawned.stdin, /question\.answer/);
   assert.match(spawned.stdin, /cancelled\/expired: proceed without it or stop; do not invent an answer/);
   assert.deepEqual(minted, [{
     runId: run.id,

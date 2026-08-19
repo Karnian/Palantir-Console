@@ -180,6 +180,19 @@ test('respond resume creates a queryable queued run', async (t) => {
   const app = setupApp(t);
   const worker = createWorker(app, 'respond-resume');
   const created = await register(app, worker).expect(201);
+  // The only way a question outlives its run is the production path: the worker
+  // exhausted its wait budget, so the run ends with
+  // terminal_reason='question_unanswered'. Any other terminal reason cancels the
+  // pending question (PR2a §6) and respond would correctly 409.
+  app.services.runService.updateRunStatus(worker.run.id, 'failed', {
+    force: true,
+    terminalReason: 'question_unanswered',
+  });
+  assert.equal(
+    app.services.questionService.getQuestion(created.body.question.id).status,
+    'pending',
+    'question_unanswered must NOT cancel the question',
+  );
   const answered = await request(app).post(`/api/questions/${created.body.question.id}/respond`)
     .set(COOKIE).set('Host', 'console.test').set('Origin', 'http://console.test')
     .send({ answer: 'morning', resume: true }).expect(200);
@@ -197,6 +210,20 @@ test('respond resume creates a queryable queued run', async (t) => {
   assert.ok(kinds.includes('queue:dequeued'), 'the normal queue drain must claim the resumed run');
 });
 
+test('respond resume skips a new run while the original worker is active', async (t) => {
+  const app = setupApp(t);
+  const worker = createWorker(app, 'respond-active');
+  const created = await register(app, worker).expect(201);
+  const answered = await request(app).post(`/api/questions/${created.body.question.id}/respond`)
+    .set(COOKIE).set('Host', 'console.test').set('Origin', 'http://console.test')
+    .send({ answer: 'morning', resume: true }).expect(200);
+  assert.equal(answered.body.question.status, 'answered');
+  assert.equal(answered.body.question.resumedRunId, null);
+  assert.equal(answered.body.resumeSkipped, 'run_active');
+  assert.equal(app.services._rawDb.prepare('SELECT count(*) AS n FROM runs WHERE source_question_id = ?')
+    .get(created.body.question.id).n, 0);
+});
+
 test('answered question can be resumed once with cookie same-origin only', async (t) => {
   const app = setupApp(t);
   const worker = createWorker(app, 'later-resume');
@@ -209,6 +236,13 @@ test('answered question can be resumed once with cookie same-origin only', async
   await request(app).post(url).set(BEARER).expect(403);
   await request(app).post(url).set(worker.auth).expect(403);
   await request(app).post(url).set(COOKIE).set('Origin', 'https://attacker.example').expect(403);
+  const active = await request(app).post(url).set(COOKIE)
+    .set('Host', 'console.test').set('Origin', 'http://console.test').expect(409);
+  assert.equal(active.body.reason, 'run_still_active');
+  app.services.runService.updateRunStatus(worker.run.id, 'stopped', {
+    force: true,
+    reason: 'test_terminal_before_explicit_resume',
+  });
   const resumed = await request(app).post(url).set(COOKIE)
     .set('Host', 'console.test').set('Origin', 'http://console.test').expect(200);
   const resumedId = resumed.body.question.resumedRunId;

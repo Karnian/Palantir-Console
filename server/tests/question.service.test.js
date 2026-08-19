@@ -39,7 +39,7 @@ function hasCode(code) {
   return err => err && err.code === code;
 }
 
-function resumeSetup(t, mutateRunService) {
+function resumeSetup(t, mutateRunService, serviceOptions = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'palantir-question-resume-'));
   const handle = createDatabase(path.join(dir, 'test.db'));
   handle.migrate();
@@ -52,9 +52,10 @@ function resumeSetup(t, mutateRunService) {
   const bus = { emit: (channel, data) => events.push({ channel, data }) };
   const realRunService = createRunService(db, bus);
   const injectedRunService = mutateRunService ? mutateRunService(realRunService) : realRunService;
-  const service = createQuestionService(db, bus, { runService: injectedRunService });
+  const service = createQuestionService(db, bus, { runService: injectedRunService, ...serviceOptions });
   const original = realRunService.createRun({ task_id: 'task-1', agent_profile_id: 'profile-1',
-    prompt: 'BASE PROMPT', node_id: 'local', operator_instance_id: 'operator-1' });
+    prompt: 'BASE PROMPT', node_id: 'local', operator_instance_id: 'operator-1',
+    queued_args: { command: 'worker --resume-safe', env: { MODE: 'goal' } } });
   const question = service.createQuestion(input(original.id, { taskId: 'task-1', projectId: 'project-1' }));
   return { db, service, realRunService, question, original, events };
 }
@@ -271,11 +272,23 @@ test('a persistent primary-key collision surfaces a normalized error', t => {
   );
 });
 
-test('answer with resume atomically answers and creates an inherited queued run', t => {
-  const { service, realRunService, question } = resumeSetup(t);
+test('answer with resume skips a new attempt while the original run is active', t => {
+  const { db, service, question } = resumeSetup(t);
+  db.prepare("UPDATE runs SET status = 'running' WHERE id = ?").run(question.runId);
+  const answered = service.answerQuestion(question.id, { answer: 'Proceed', resume: true });
+  assert.equal(answered.status, 'answered');
+  assert.equal(answered.resumedRunId, null);
+  assert.equal(answered.resumeSkipped, 'run_active');
+  assert.equal(db.prepare('SELECT count(*) AS n FROM runs WHERE source_question_id=?').get(question.id).n, 0);
+});
+
+test('answer with resume atomically answers and creates an inherited queued run after terminal', t => {
+  const { db, service, realRunService, question } = resumeSetup(t);
+  db.prepare("UPDATE runs SET status = 'completed' WHERE id = ?").run(question.runId);
   const answered = service.answerQuestion(question.id, { answer: 'Proceed', resume: true });
   const run = realRunService.getRun(answered.resumedRunId);
   assert.equal(answered.status, 'answered');
+  assert.equal(answered.resumeSkipped, null);
   assert.equal(run.status, 'queued');
   assert.equal(run.source_question_id, question.id);
   assert.equal(run.retry_count, 0);
@@ -291,6 +304,7 @@ test('resume insert failure rolls the answer CAS back and permits retry', t => {
     if (fail) { fail = false; throw new Error('injected insert failure'); }
     return real.insertRunRow(row);
   } }));
+  ctx.db.prepare("UPDATE runs SET status = 'failed' WHERE id = ?").run(ctx.question.runId);
   assert.throws(() => ctx.service.answerQuestion(ctx.question.id, { answer: 'Proceed', resume: true }), /injected/);
   assert.equal(ctx.service.getQuestion(ctx.question.id).status, 'pending');
   assert.ok(ctx.service.answerQuestion(ctx.question.id, { answer: 'Proceed', resume: true }).resumedRunId);
@@ -299,6 +313,7 @@ test('resume insert failure rolls the answer CAS back and permits retry', t => {
 test('resumeQuestion creates exactly one run and reports the existing id', t => {
   const { db, service, question } = resumeSetup(t);
   service.answerQuestion(question.id, { answer: 'Proceed', resume: false });
+  db.prepare("UPDATE runs SET status = 'stopped' WHERE id = ?").run(question.runId);
   const first = service.resumeQuestion(question.id);
   assert.throws(() => service.resumeQuestion(question.id), err => {
     assert.equal(err.code, 'QUESTION_ALREADY_RESUMED');
@@ -306,6 +321,39 @@ test('resumeQuestion creates exactly one run and reports the existing id', t => 
     return true;
   });
   assert.equal(db.prepare('SELECT count(*) AS n FROM runs WHERE source_question_id=?').get(question.id).n, 1);
+});
+
+test('resumeQuestion rejects an explicit resume while the original run is active', t => {
+  const { db, service, question } = resumeSetup(t);
+  service.answerQuestion(question.id, { answer: 'Proceed', resume: false });
+  db.prepare("UPDATE runs SET status = 'running' WHERE id = ?").run(question.runId);
+  assert.throws(() => service.resumeQuestion(question.id), hasCode('RUN_STILL_ACTIVE'));
+  assert.equal(db.prepare('SELECT count(*) AS n FROM runs WHERE source_question_id=?').get(question.id).n, 0);
+});
+
+test('resumed attempts inherit queued args and goal lineage without consuming retry budget', t => {
+  const { db, service, realRunService, question, original } = resumeSetup(t);
+  db.prepare("UPDATE runs SET status = 'completed', goal_active = 1, retry_root_run_id = ?, retry_count = 2 WHERE id = ?")
+    .run('run_goal_root', original.id);
+  const answered = service.answerQuestion(question.id, { answer: 'Proceed', resume: true });
+  const resumed = realRunService.getRun(answered.resumedRunId);
+  assert.equal(resumed.queued_args, original.queued_args);
+  assert.equal(resumed.goal_active, 1);
+  assert.equal(resumed.retry_root_run_id, 'run_goal_root');
+  assert.equal(resumed.retry_count, 0);
+});
+
+test('resume emit failure is isolated so the committed run still wakes drain', t => {
+  let drains = 0;
+  const ctx = resumeSetup(t, real => ({
+    ...real,
+    emitRunCreated() { throw new Error('injected emit failure'); },
+  }), { onRunCreated() { drains += 1; } });
+  ctx.db.prepare("UPDATE runs SET status = 'completed' WHERE id = ?").run(ctx.question.runId);
+  const answered = ctx.service.answerQuestion(ctx.question.id, { answer: 'Proceed', resume: true });
+  assert.ok(answered.resumedRunId);
+  assert.ok(ctx.realRunService.getRun(answered.resumedRunId));
+  assert.equal(drains, 1);
 });
 
 test('resume false answers without a run and missing injection rejects resume', t => {

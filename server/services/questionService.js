@@ -54,6 +54,7 @@ function validateCreate(input) {
 
 const ID_COLLISION_RETRIES = 3;
 const UNSAFE_PLACEHOLDER = '[UNSAFE CONTENT REMOVED]';
+const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled', 'stopped']);
 
 function sanitizeResumeField(value) {
   const text = String(value == null ? '' : value);
@@ -209,16 +210,26 @@ function createQuestionService(db, eventBus, options = {}) {
     const resumeRow = resume ? runService.buildRunRow : null;
     let newRun = null;
     let newRunId = null;
+    let resumeSkipped = null;
     if (resume) {
       const originalRun = db.prepare('SELECT * FROM runs WHERE id = ?').get(row.run_id);
       if (!originalRun) throw serviceError('RESUME_UNAVAILABLE', 'original question run is unavailable');
-      const prompt = compileResumePrompt({ basePrompt: originalRun.prompt,
-        question: { id: row.id, question: row.question, answer } });
-      const built = resumeRow({ task_id: originalRun.task_id, agent_profile_id: originalRun.agent_profile_id,
-        node_id: originalRun.node_id, operator_instance_id: originalRun.operator_instance_id,
-        parent_run_id: originalRun.parent_run_id, prompt, source_question_id: row.id, retry_count: 0 });
-      newRunId = built.id;
-      newRun = { built };
+      if (!TERMINAL_RUN_STATUSES.has(originalRun.status)) {
+        resumeSkipped = 'run_active';
+      } else {
+        const prompt = compileResumePrompt({ basePrompt: originalRun.prompt,
+          question: { id: row.id, question: row.question, answer } });
+        const built = resumeRow({ task_id: originalRun.task_id, agent_profile_id: originalRun.agent_profile_id,
+          node_id: originalRun.node_id, operator_instance_id: originalRun.operator_instance_id,
+          parent_run_id: originalRun.parent_run_id, prompt, source_question_id: row.id,
+          queued_args: originalRun.queued_args,
+          retry_root_run_id: originalRun.retry_root_run_id || originalRun.id,
+          // A resumed question is a new attempt, not a failure retry. It keeps
+          // goal lineage independently while remaining outside the B-lite budget.
+          retry_count: 0 });
+        newRunId = built.id;
+        newRun = { built, goalActive: originalRun.goal_active === 1 };
+      }
     }
     const result = db.prepare(`
       UPDATE worker_questions
@@ -230,21 +241,28 @@ function createQuestionService(db, eventBus, options = {}) {
     }
     if (newRun) {
       runService.insertRunRow(newRun.built);
+      if (newRun.goalActive) {
+        db.prepare('UPDATE runs SET goal_active = 1 WHERE id = ?').run(newRun.built.id);
+      }
       newRun = runService.readRunRow(newRun.built.id);
     }
-    return { question: materialize(getRaw.get(id)), run: newRun };
+    return { question: materialize(getRaw.get(id)), run: newRun, resumeSkipped };
   });
 
   function emitResumeEffects(result) {
     if (!result.run) return;
-    runService.emitRunCreated(result.run);
-    if (onRunCreated) onRunCreated(result.run);
+    // These are ordered post-commit effects, but each is isolated: an event
+    // subscriber failure must never suppress the queue-drain wakeup.
+    try { runService.emitRunCreated(result.run); } catch { /* best effort */ }
+    try { if (onRunCreated) onRunCreated(result.run); } catch { /* best effort */ }
     const raw = getRaw.get(result.question.id);
     const fields = { question_id: raw.id, question: raw.question, answer: raw.answer };
     const sanitized = Object.entries(fields).filter(([, value]) => sanitizeResumeField(value).sanitized)
       .map(([field, value]) => ({ field, reason: sanitizeResumeField(value).reason }));
     if (sanitized.length && typeof runService.addRunEvent === 'function') {
-      runService.addRunEvent(result.run.id, 'question:resume_prompt_sanitized', JSON.stringify({ fields: sanitized }));
+      try {
+        runService.addRunEvent(result.run.id, 'question:resume_prompt_sanitized', JSON.stringify({ fields: sanitized }));
+      } catch { /* best effort */ }
     }
   }
 
@@ -252,7 +270,7 @@ function createQuestionService(db, eventBus, options = {}) {
     const result = answerTx(id, answer, resume === true);
     emitResumeEffects(result);
     if (eventBus) eventBus.emit('question:answered', result.question);
-    return result.question;
+    return { ...result.question, resumeSkipped: result.resumeSkipped };
   }
 
   const resumeTx = db.transaction((id) => {
@@ -268,11 +286,19 @@ function createQuestionService(db, eventBus, options = {}) {
     }
     const originalRun = db.prepare('SELECT * FROM runs WHERE id = ?').get(row.run_id);
     if (!originalRun) throw serviceError('RESUME_UNAVAILABLE', 'original question run is unavailable');
+    if (!TERMINAL_RUN_STATUSES.has(originalRun.status)) {
+      throw serviceError('RUN_STILL_ACTIVE', 'original question run is still active', materialize(row));
+    }
     const prompt = compileResumePrompt({ basePrompt: originalRun.prompt,
       question: { id: row.id, question: row.question, answer: row.answer } });
     const built = runService.buildRunRow({ task_id: originalRun.task_id, agent_profile_id: originalRun.agent_profile_id,
       node_id: originalRun.node_id, operator_instance_id: originalRun.operator_instance_id,
-      parent_run_id: originalRun.parent_run_id, prompt, source_question_id: row.id, retry_count: 0 });
+      parent_run_id: originalRun.parent_run_id, prompt, source_question_id: row.id,
+      queued_args: originalRun.queued_args,
+      retry_root_run_id: originalRun.retry_root_run_id || originalRun.id,
+      // Question resume is not a failure retry; goal lineage does not consume
+      // or increment the B-lite retry budget.
+      retry_count: 0 });
     const changed = db.prepare("UPDATE worker_questions SET resumed_run_id = ? WHERE id = ? AND status = 'answered' AND resumed_run_id IS NULL")
       .run(built.id, id).changes;
     if (!changed) {
@@ -282,6 +308,9 @@ function createQuestionService(db, eventBus, options = {}) {
       throw err;
     }
     runService.insertRunRow(built);
+    if (originalRun.goal_active === 1) {
+      db.prepare('UPDATE runs SET goal_active = 1 WHERE id = ?').run(built.id);
+    }
     return { question: materialize(getRaw.get(id)), run: runService.readRunRow(built.id) };
   });
 

@@ -178,7 +178,7 @@ function createQuestionsRouter({
         answer: req.body && req.body.answer,
         resume: !req.body || req.body.resume === undefined ? true : req.body.resume === true,
       });
-      return res.json({ question });
+      return res.json({ question, resumeSkipped: question.resumeSkipped });
     } catch (err) {
       return sendServiceError(res, err, {
         QUESTION_INVALID: [400, 'question_invalid'],
@@ -196,6 +196,9 @@ function createQuestionsRouter({
     } catch (err) {
       if (err && err.code === 'QUESTION_ALREADY_RESUMED') {
         return res.status(409).json({ error: err.message, reason: 'question_already_resumed', resumed_run_id: err.resumedRunId });
+      }
+      if (err && err.code === 'RUN_STILL_ACTIVE') {
+        return res.status(409).json({ error: err.message, reason: 'run_still_active' });
       }
       return sendServiceError(res, err, {
         QUESTION_NOT_ANSWERED: [409, 'question_not_answered'],
