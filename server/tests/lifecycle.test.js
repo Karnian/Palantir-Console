@@ -465,6 +465,13 @@ test('executeTask: worker receives only a run-bound memory proposal capability',
   assert.equal('PALANTIR_PM_TOKEN' in spawned.env, false);
   assert.doesNotMatch(spawned.args.join(' '), /memory\/propose/);
   assert.match(spawned.stdin, new RegExp(`/api/runs/${run.id}/memory/propose`));
+  assert.match(spawned.stdin, /## Blocking questions/);
+  assert.match(spawned.stdin, new RegExp(`/api/runs/${run.id}/questions`));
+  assert.match(spawned.stdin, new RegExp(`/api/runs/${run.id}/questions/<id>/wait`));
+  assert.match(spawned.stdin, /response envelope is \{"question":\{\.\.\.\}\}/);
+  assert.match(spawned.stdin, /question\.status is "pending"/);
+  assert.match(spawned.stdin, /question\.answer/);
+  assert.match(spawned.stdin, /cancelled\/expired: proceed without it or stop; do not invent an answer/);
   assert.deepEqual(minted, [{
     runId: run.id,
     claims: { projectId: project.id },

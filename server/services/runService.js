@@ -653,7 +653,9 @@ function createRunService(db, eventBus, questionService = null) {
     `),
     // G3 §5d: link the retry child to its parent, set INSIDE the verdict tx so
     // "retry decided" and "child exists + linked" are atomic (no lost-retry window).
-    linkGoalRetry: db.prepare('UPDATE runs SET goal_retry_run_id = ? WHERE id = ?'),
+    linkGoalRetry: db.prepare(
+      'UPDATE runs SET goal_retry_run_id = ? WHERE id = ? AND goal_retry_run_id IS NULL'
+    ),
     // G3 §5d transactional outbox: durable 'pending' INTENT for a verdict's side
     // effects, committed in the SAME tx as the verdict. INSERT OR IGNORE makes it
     // idempotent (a redrive never duplicates the row).
@@ -2212,9 +2214,15 @@ function createRunService(db, eventBus, questionService = null) {
         source_question_id: rc.source_question_id || null,
       });
       childId = childRow.id;
-      stmts.insert.run(childRow);
-      stmts.setGoalActive.run(1, childId); // inherit goal control (unified activation)
-      stmts.linkGoalRetry.run(childId, args.runId);
+      const linked = stmts.linkGoalRetry.run(childId, args.runId).changes;
+      if (linked === 1) {
+        stmts.insert.run(childRow);
+        stmts.setGoalActive.run(1, childId); // inherit goal control (unified activation)
+      } else {
+        // A question resume won the shared successor slot first. Reuse that
+        // successor instead of creating a second executable branch.
+        childId = stmts.getById.get(args.runId).goal_retry_run_id;
+      }
     }
 
     for (const et of args.effectTypes || []) {

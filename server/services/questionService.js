@@ -1,4 +1,5 @@
 const crypto = require('node:crypto');
+const { detectInjection, redactSecrets } = require('./memorySanitize');
 
 const CLASSES = new Set(['clarification', 'choice', 'approval']);
 
@@ -52,8 +53,32 @@ function validateCreate(input) {
 }
 
 const ID_COLLISION_RETRIES = 3;
+const UNSAFE_PLACEHOLDER = '[UNSAFE CONTENT REMOVED]';
+const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled', 'stopped']);
+
+function sanitizeResumeField(value) {
+  const text = String(value == null ? '' : value);
+  if (detectInjection(text)) return { text: UNSAFE_PLACEHOLDER, sanitized: true, reason: 'injection' };
+  const redacted = redactSecrets(text);
+  return { text: redacted.text, sanitized: redacted.redacted, reason: redacted.redacted ? 'secret' : null };
+}
+
+function compileResumePrompt({ basePrompt, question }) {
+  const id = sanitizeResumeField(question && question.id);
+  const questionText = sanitizeResumeField(question && question.question);
+  const answer = sanitizeResumeField(question && question.answer);
+  const block = [
+    '[ANSWERED QUESTION]',
+    `question_id: ${id.text}`,
+    `question: ${questionText.text}`,
+    `answer: ${answer.text}`,
+  ].join('\n');
+  return [basePrompt || '', block].filter(Boolean).join('\n\n');
+}
 
 function createQuestionService(db, eventBus, options = {}) {
+  const runService = options.runService || null;
+  const onRunCreated = typeof options.onRunCreated === 'function' ? options.onRunCreated : null;
   const generateId = typeof options.generateId === 'function'
     ? options.generateId
     : () => `wq_${crypto.randomUUID().slice(0, 12)}`;
@@ -164,7 +189,19 @@ function createQuestionService(db, eventBus, options = {}) {
     return rows.map(materialize).filter(row => !status || row.status === status);
   }
 
-  const answerTx = db.transaction((id, answer) => {
+  function requireResumeService() {
+    if (!runService) throw serviceError('RESUME_UNAVAILABLE', 'question resume service is unavailable');
+  }
+
+  function claimGoalSuccessor(originalRun, successorRunId) {
+    if (originalRun.goal_active !== 1) return true;
+    return db.prepare(`
+      UPDATE runs SET goal_retry_run_id = ?
+      WHERE id = ? AND goal_retry_run_id IS NULL
+    `).run(successorRunId, originalRun.id).changes === 1;
+  }
+
+  const answerTx = db.transaction((id, answer, resume) => {
     if (typeof answer !== 'string' || answer.length === 0 || [...answer].length > 4000) {
       throw serviceError('QUESTION_INVALID', 'answer must be a non-empty string of at most 4000 characters');
     }
@@ -177,21 +214,138 @@ function createQuestionService(db, eventBus, options = {}) {
     if (options.length > 0 && !options.includes(answer)) {
       throw serviceError('QUESTION_INVALID', 'answer must match one of the question options');
     }
+    if (resume) requireResumeService();
+    const resumeRow = resume ? runService.buildRunRow : null;
+    let newRun = null;
+    let newRunId = null;
+    let resumeSkipped = null;
+    if (resume) {
+      const originalRun = db.prepare('SELECT * FROM runs WHERE id = ?').get(row.run_id);
+      if (!originalRun) throw serviceError('RESUME_UNAVAILABLE', 'original question run is unavailable');
+      if (!TERMINAL_RUN_STATUSES.has(originalRun.status)) {
+        resumeSkipped = 'run_active';
+      } else {
+        const prompt = compileResumePrompt({ basePrompt: originalRun.prompt,
+          question: { id: row.id, question: row.question, answer } });
+        const built = resumeRow({ task_id: originalRun.task_id, agent_profile_id: originalRun.agent_profile_id,
+          node_id: originalRun.node_id, operator_instance_id: originalRun.operator_instance_id,
+          parent_run_id: originalRun.parent_run_id, prompt, source_question_id: row.id,
+          queued_args: originalRun.queued_args,
+          // A goal resume is linked through goal_retry_run_id and starts a fresh
+          // storage retry root so the inherited count does not collide with the
+          // UNIQUE (retry_root_run_id, retry_count) attempt key.
+          retry_root_run_id: originalRun.goal_active === 1
+            ? originalRun.id
+            : (originalRun.retry_root_run_id || originalRun.id),
+          // Goal resume continues the same budget: answering a question neither
+          // consumes a failure retry nor resets attempts already used. Non-goal
+          // resume stays at zero because it is outside the B-lite goal budget.
+          retry_count: originalRun.goal_active === 1 ? Number(originalRun.retry_count || 0) : 0 });
+        newRunId = built.id;
+        if (claimGoalSuccessor(originalRun, newRunId)) {
+          newRun = { built, goalActive: originalRun.goal_active === 1 };
+        } else {
+          newRunId = null;
+          resumeSkipped = 'successor_exists';
+        }
+      }
+    }
     const result = db.prepare(`
       UPDATE worker_questions
-      SET status = 'answered', answer = ?, answered_at = datetime('now')
+      SET status = 'answered', answer = ?, answered_at = datetime('now'), resumed_run_id = ?
       WHERE id = ? AND status = 'pending' AND expires_at > datetime('now')
-    `).run(answer, id);
+    `).run(answer, newRunId, id);
     if (result.changes === 0) {
       throw serviceError('QUESTION_NOT_PENDING', 'question is not pending', materialize(getRaw.get(id)));
     }
-    return materialize(getRaw.get(id));
+    if (newRun) {
+      runService.insertRunRow(newRun.built);
+      if (newRun.goalActive) {
+        db.prepare('UPDATE runs SET goal_active = 1 WHERE id = ?').run(newRun.built.id);
+      }
+      newRun = runService.readRunRow(newRun.built.id);
+    }
+    return { question: materialize(getRaw.get(id)), run: newRun, resumeSkipped };
   });
 
-  function answerQuestion(id, { answer }) {
-    const answered = answerTx(id, answer);
-    if (eventBus) eventBus.emit('question:answered', answered);
-    return answered;
+  function emitResumeEffects(result) {
+    if (!result.run) return;
+    // These are ordered post-commit effects, but each is isolated: an event
+    // subscriber failure must never suppress the queue-drain wakeup.
+    try { runService.emitRunCreated(result.run); } catch { /* best effort */ }
+    try { if (onRunCreated) onRunCreated(result.run); } catch { /* best effort */ }
+    const raw = getRaw.get(result.question.id);
+    const fields = { question_id: raw.id, question: raw.question, answer: raw.answer };
+    const sanitized = Object.entries(fields).filter(([, value]) => sanitizeResumeField(value).sanitized)
+      .map(([field, value]) => ({ field, reason: sanitizeResumeField(value).reason }));
+    if (sanitized.length && typeof runService.addRunEvent === 'function') {
+      try {
+        runService.addRunEvent(result.run.id, 'question:resume_prompt_sanitized', JSON.stringify({ fields: sanitized }));
+      } catch { /* best effort */ }
+    }
+  }
+
+  function answerQuestion(id, { answer, resume = false }) {
+    const result = answerTx(id, answer, resume === true);
+    emitResumeEffects(result);
+    if (eventBus) eventBus.emit('question:answered', result.question);
+    return { ...result.question, resumeSkipped: result.resumeSkipped };
+  }
+
+  const resumeTx = db.transaction((id) => {
+    requireResumeService();
+    const row = getRaw.get(id);
+    if (!row || row.status !== 'answered') {
+      throw serviceError('QUESTION_NOT_ANSWERED', 'question is not answered', materialize(row));
+    }
+    if (row.resumed_run_id) {
+      const err = serviceError('QUESTION_ALREADY_RESUMED', 'question was already resumed', materialize(row));
+      err.resumedRunId = row.resumed_run_id;
+      throw err;
+    }
+    const originalRun = db.prepare('SELECT * FROM runs WHERE id = ?').get(row.run_id);
+    if (!originalRun) throw serviceError('RESUME_UNAVAILABLE', 'original question run is unavailable');
+    if (!TERMINAL_RUN_STATUSES.has(originalRun.status)) {
+      throw serviceError('RUN_STILL_ACTIVE', 'original question run is still active', materialize(row));
+    }
+    const prompt = compileResumePrompt({ basePrompt: originalRun.prompt,
+      question: { id: row.id, question: row.question, answer: row.answer } });
+    const built = runService.buildRunRow({ task_id: originalRun.task_id, agent_profile_id: originalRun.agent_profile_id,
+      node_id: originalRun.node_id, operator_instance_id: originalRun.operator_instance_id,
+      parent_run_id: originalRun.parent_run_id, prompt, source_question_id: row.id,
+      queued_args: originalRun.queued_args,
+      // A goal resume is linked through goal_retry_run_id and starts a fresh
+      // storage retry root so the inherited count does not collide with the
+      // UNIQUE (retry_root_run_id, retry_count) attempt key.
+      retry_root_run_id: originalRun.goal_active === 1
+        ? originalRun.id
+        : (originalRun.retry_root_run_id || originalRun.id),
+      // Goal resume continues the same budget: answering a question neither
+      // consumes a failure retry nor resets attempts already used. Non-goal
+      // resume stays at zero because it is outside the B-lite goal budget.
+      retry_count: originalRun.goal_active === 1 ? Number(originalRun.retry_count || 0) : 0 });
+    const changed = db.prepare("UPDATE worker_questions SET resumed_run_id = ? WHERE id = ? AND status = 'answered' AND resumed_run_id IS NULL")
+      .run(built.id, id).changes;
+    if (!changed) {
+      const current = materialize(getRaw.get(id));
+      const err = serviceError('QUESTION_ALREADY_RESUMED', 'question was already resumed', current);
+      err.resumedRunId = current && current.resumedRunId;
+      throw err;
+    }
+    if (!claimGoalSuccessor(originalRun, built.id)) {
+      throw serviceError('SUCCESSOR_EXISTS', 'goal run already has a successor', materialize(getRaw.get(id)));
+    }
+    runService.insertRunRow(built);
+    if (originalRun.goal_active === 1) {
+      db.prepare('UPDATE runs SET goal_active = 1 WHERE id = ?').run(built.id);
+    }
+    return { question: materialize(getRaw.get(id)), run: runService.readRunRow(built.id) };
+  });
+
+  function resumeQuestion(id) {
+    const result = resumeTx(id);
+    emitResumeEffects(result);
+    return result.question;
   }
 
   function cancelPendingForRun(runId, { terminalReason } = {}) {
@@ -211,7 +365,8 @@ function createQuestionService(db, eventBus, options = {}) {
     `).run().changes;
   }
 
-  return { createQuestion, getQuestion, listQuestions, answerQuestion, cancelPendingForRun, expireStale };
+  return { createQuestion, getQuestion, listQuestions, answerQuestion, resumeQuestion, cancelPendingForRun, expireStale };
 }
 
-module.exports = { createQuestionService, canonicalPayloadHash };
+createQuestionService.compileResumePrompt = compileResumePrompt;
+module.exports = { createQuestionService, canonicalPayloadHash, compileResumePrompt };
