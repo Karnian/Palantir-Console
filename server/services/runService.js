@@ -721,6 +721,17 @@ function createRunService(db, eventBus, questionService = null) {
       WHERE r.task_id = ? AND r.goal_active = 1 AND r.is_manager = 0
       ORDER BY r.rowid DESC LIMIT 1
     `),
+    getNewestAttemptRun: db.prepare(`
+      SELECT r.*, r.rowid AS _seq, ap.name as agent_name, ap.type as agent_type, ap.icon as agent_icon,
+             t.title as task_title, t.project_id as project_id, p.name as project_name
+      FROM runs r
+      LEFT JOIN agent_profiles ap ON r.agent_profile_id = ap.id
+      LEFT JOIN tasks t ON r.task_id = t.id
+      LEFT JOIN projects p ON t.project_id = p.id
+      WHERE r.task_id = ? AND r.is_manager = 0
+        AND r.status IN ('completed', 'failed')
+      ORDER BY r.rowid DESC LIMIT 1
+    `),
     // G4a: goal runs with a reviewable verdict (gate2/exhausted/error) that have
     // NOT yet had their Gate 2 review delivered (no goal:gate2_review_sent marker).
     // The Gate 2 review sweep re-drives these until the durable marker exists
@@ -2274,6 +2285,9 @@ function createRunService(db, eventBus, questionService = null) {
   function getNewestGoalRun(taskId) {
     return stmts.getNewestGoalRun.get(taskId) || null;
   }
+  function getNewestAttemptRun(taskId) {
+    return stmts.getNewestAttemptRun.get(taskId) || null;
+  }
   // G2b: runs with a retained 'captured' remote deliverable workspace (boot re-harvest).
   function listCapturedDeliverableRuns() {
     return stmts.listCapturedDeliverableRuns.all();
@@ -2454,7 +2468,7 @@ function createRunService(db, eventBus, questionService = null) {
     listPendingGoalEffects, markGoalEffectSent, listRunIdsWithPendingGoalEffects,
     listUnverdictedTerminalGoalRunIds, listVerdictedTerminalGoalRunIds,
     getGoalRetryParent,
-    listReviewableGoalRunsWithoutReview, getNewestGoalRun, listCapturedDeliverableRuns,
+    listReviewableGoalRunsWithoutReview, getNewestGoalRun, getNewestAttemptRun, listCapturedDeliverableRuns,
     countRunning, countRunningOnNode, countRunningTotalOnNode,
     getOldestQueued, getOldestQueuedOnNode, getOldestQueuedReadyOnNode,
     getOldestMaterializableOnNode,

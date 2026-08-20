@@ -3803,9 +3803,13 @@ function createLifecycleService({
     const allComplete = runs.every(r => ['completed', 'failed', 'cancelled', 'stopped'].includes(r.status));
 
     if (allComplete && runs.length > 0) {
-      const hasSuccess = runs.some(r => r.status === 'completed');
-      const hasFailed = runs.some(r => r.status === 'failed');
-      const newStatus = hasSuccess ? 'review' : hasFailed ? 'failed' : 'todo';
+      // cancelled/stopped do not constitute an attempt: a later cancellation
+      // must not hide the most recent completed/failed attempt, while a task
+      // with only cancelled/stopped runs returns to todo.
+      const newestAttempt = runService.getNewestAttemptRun(taskId);
+      const newStatus = newestAttempt?.status === 'completed'
+        ? 'review'
+        : newestAttempt?.status === 'failed' ? 'failed' : 'todo';
       try {
         taskService.updateTaskStatus(taskId, newStatus);
       } catch {
