@@ -81,6 +81,8 @@ function deriveOperatorProjectId(run) {
 }
 
 function createRunService(db, eventBus, questionService = null) {
+  const JUDGE_DEADLINE_EXPIRED_SQL =
+    "datetime(json_extract(?, '$.deadline')) IS NULL OR datetime(json_extract(?, '$.deadline')) <= datetime('now')";
   const stmts = {
     getAll: db.prepare(`
       SELECT r.*, ap.name as agent_name, ap.type as agent_type, ap.icon as agent_icon,
@@ -629,17 +631,13 @@ function createRunService(db, eventBus, questionService = null) {
     ),
     // G3c: the verdict sweep expires a crashed 'pending' claim → 'error' BEFORE
     // settling (codex SERIOUS: else a late model result finalizes after gate2).
-    // The expiry CAS below decides whether a pending judge can EVER resolve, and
-    // it does so with SQLite's datetime(), which is stricter than Date.parse: an
-    // absent deadline, 'not-a-date' and 'January 1, 2000' all yield NULL, and
-    // `NULL <= datetime('now')` is NULL, so the CAS can never match. Callers that
-    // need to know whether waiting on this judge is bounded must ask with the
-    // SAME expression -- a JS-side date check disagrees (measured).
-    judgeDeadlineResolvable: db.prepare(
-      "SELECT datetime(json_extract(?, '$.deadline')) IS NOT NULL AS ok"
+    // SQLite is the single deadline oracle. Unreadable (including absent)
+    // deadlines are expired so every pending claim retains an escape path.
+    judgeDeadlineExpired: db.prepare(
+      `SELECT ${JUDGE_DEADLINE_EXPIRED_SQL} AS expired`
     ),
     casJudgeExpiredToError: db.prepare(
-      "UPDATE runs SET judge_json = @json WHERE id = @id AND json_extract(judge_json,'$.status') = 'pending' AND datetime(json_extract(judge_json,'$.deadline')) <= datetime('now')"
+      `UPDATE runs SET judge_json = @json WHERE id = @id AND json_extract(judge_json,'$.status') = 'pending' AND (${JUDGE_DEADLINE_EXPIRED_SQL.replaceAll('?', 'judge_json')})`
     ),
     // G2 §5k-1: persist the isolated deliverable-mode workspace path.
     setGoalWorkspacePath: db.prepare(`
@@ -2159,11 +2157,9 @@ function createRunService(db, eventBus, questionService = null) {
   function finalizeJudge(id, finalJson) {
     return stmts.finalizeJudge.run({ id, json: finalJson }).changes > 0;
   }
-  // True when a pending judge's deadline is one the expiry CAS can actually
-  // evaluate. False means the claim can never expire on its own.
-  function isJudgeDeadlineResolvable(judgeJson) {
-    if (typeof judgeJson !== 'string' || !judgeJson) return false;
-    try { return stmts.judgeDeadlineResolvable.get(judgeJson)?.ok === 1; } catch { return false; }
+  function isJudgeDeadlineExpired(judgeJson) {
+    if (typeof judgeJson !== 'string' || !judgeJson) return true;
+    try { return stmts.judgeDeadlineExpired.get(judgeJson, judgeJson)?.expired === 1; } catch { return true; }
   }
   function casJudgeExpiredToError(id, errorJson) {
     return stmts.casJudgeExpiredToError.run({ id, json: errorJson }).changes > 0;
@@ -2453,7 +2449,7 @@ function createRunService(db, eventBus, questionService = null) {
     updateRunStatus, markRunStarted, updateRunResult, updateGoalCapture, setSessionSnapshot, sumProjectCost, rejectQueuedRun, setGoalActive, setGoalWorkspacePath,
     updateGoalAcceptance, setDeliverableState,
     setGoalJudgeActive, casJudgePending, finalizeJudge, casJudgeExpiredToError,
-    isJudgeDeadlineResolvable,
+    isJudgeDeadlineExpired,
     persistGoalVerdictTx,
     listPendingGoalEffects, markGoalEffectSent, listRunIdsWithPendingGoalEffects,
     listUnverdictedTerminalGoalRunIds, listVerdictedTerminalGoalRunIds,
