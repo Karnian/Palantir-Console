@@ -86,7 +86,7 @@ function createGoalVerdictService({
     try { judge = run.judge_json ? JSON.parse(run.judge_json) : null; } catch { judge = null; }
     if (!judge) return { judge: null, skip: false }; // never started (Gate-1-fail skip / pre-CAS window)
     if (judge.status === 'pending') {
-      const expired = judge.deadline ? (Date.parse(judge.deadline) <= Date.now()) : true;
+      const expired = runService.isJudgeDeadlineExpired(run.judge_json);
       if (!expired) return { judge: null, skip: true }; // in-flight — wait
       // Crashed mid-judge: expire the claim → 'error' atomically. ONLY use the
       // fabricated error if the CAS WON (still 'pending'); if it lost, a real
@@ -158,7 +158,8 @@ function createGoalVerdictService({
       // yields a signature the parent never stores if the judge finalizes 'fail'
       // instead, and a wrong signature ends the goal early. Instead the child's
         // settle is DEFERRED (see settle's pendingParentFingerprint branch) until
-      // the parent has settled, and only when that wait is bounded.
+      // the parent has settled. The shared SQLite oracle treats every unreadable
+      // deadline as expired, so every pending claim now has a bounded escape path.
       let parentJudge = null;
       let judgeFinal = true;
       if (parent.goal_judge_active) {
@@ -166,29 +167,10 @@ function createGoalVerdictService({
         try { parsed = parent.judge_json ? JSON.parse(parent.judge_json) : null; } catch { parsed = null; }
         if (parsed && parsed.status === 'pending') {
           judgeFinal = false;
-          // Defer ONLY when the wait is provably bounded, and ask the question
-          // with the expression that actually decides it. A pending judge leaves
-          // 'pending' solely through casJudgeExpiredToError, whose predicate is
-          // SQLite `datetime(deadline) <= datetime('now')`. datetime() is
-          // stricter than Date.parse: an absent deadline, 'not-a-date' AND
-          // 'January 1, 2000' all yield NULL, and NULL <= now is NULL, so the CAS
-          // can never match and that parent is already stuck in pendingJudge.
-          // Waiting on it would spread the stall to a run that settles perfectly
-          // well, so an unresolvable deadline falls back to "unknown": a missed
-          // repeat, never a hang. (The parent's own permanent stall is a separate
-          // pre-existing defect, #563 -- this only refuses to amplify it.)
-          // Both readers must agree, because escaping 'pending' needs BOTH:
-          // resolveJudge's JS check decides whether the CAS is even attempted,
-          // and the CAS's SQLite predicate decides whether it matches. They
-          // disagree in both directions (measured): SQLite rejects an absent
-          // deadline and 'January 1, 2000'; JS rejects SQLite-native forms like
-          // 2451545, '12:00' and 'now'. Either disagreement leaves the parent
-          // stuck forever, so only their intersection is a bounded wait.
-          const deadline = parsed.deadline;
-          const sqliteResolvable = typeof runService.isJudgeDeadlineResolvable === 'function'
-            && runService.isJudgeDeadlineResolvable(parent.judge_json);
-          const boundedWait = sqliteResolvable && Number.isFinite(Date.parse(deadline));
-          if (boundedWait) parentFingerprintUnresolved = true;
+          // Defer every pending judge. resolveJudge and the expiry CAS now share
+          // one SQLite predicate; unreadable deadlines expire immediately and
+          // readable future deadlines expire in time, so this wait is bounded.
+          parentFingerprintUnresolved = true;
         } else parentJudge = parsed;
       }
       if (judgeFinal) {

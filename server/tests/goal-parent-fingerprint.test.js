@@ -173,32 +173,36 @@ for (const status of ['cancelled', 'stopped']) {
   });
 }
 
-// Every deadline shape the expiry CAS cannot evaluate. resolveJudge's JS-side
-// check disagrees with the CAS on two of these -- it calls an absent deadline
-// "expired" and accepts 'January 1, 2000' -- but the CAS predicate is SQLite
-// `datetime(deadline) <= datetime('now')`, and datetime() returns NULL for all
-// three, so the claim can never leave 'pending'. Waiting on such a parent would
-// stall a child that settles fine, so none of them may be deferred on.
+// Every formerly divergent deadline shape is deferred while its parent is still
+// pending, then converges because the shared SQLite oracle gives every claim an
+// escape path (unreadable deadlines expire immediately).
 for (const [label, judge] of [
   ['absent', { status: 'pending' }],
   ['unparseable', { status: 'pending', deadline: 'not-a-date' }],
   ['parseable by Date.parse but not by SQLite', { status: 'pending', deadline: 'January 1, 2000' }],
-  // The mirror direction: SQLite reads these natively, Date.parse returns NaN,
-  // so resolveJudge never even attempts the expiry CAS.
   ['a SQLite julian day', { status: 'pending', deadline: 2451545 }],
   ['a SQLite time-only value', { status: 'pending', deadline: '12:00' }],
   ["SQLite's 'now'", { status: 'pending', deadline: 'now' }],
 ]) {
-  test(`a judge deadline ${label} is never waited on`, async (t) => {
+  test(`a judge deadline ${label} is deferred and then converges`, async (t) => {
     const h = await harness(t);
     const { parent, child } = parentAndChild(h);
     h.db.prepare('UPDATE runs SET goal_judge_active = 1, judge_json = ? WHERE id = ?')
       .run(JSON.stringify(judge), parent.id);
 
     const result = h.svc.settle(child.id);
-    assert.notEqual(result.pendingParentFingerprint, true, 'an unbounded wait must not be entered');
-    assert.equal(result.settled, true);
-    assert.ok(h.rs.getRun(child.id).goal_verdict, 'the child must still reach a verdict');
+    assert.equal(result.pendingParentFingerprint, true);
+    assert.equal(h.rs.getRun(child.id).goal_verdict, null);
+
+    let sweeps = 0;
+    while ((!h.rs.getRun(parent.id).goal_verdict || !h.rs.getRun(child.id).goal_verdict) && sweeps < 3) {
+      h.svc.sweep();
+      sweeps += 1;
+    }
+    assert.ok(h.rs.getRun(parent.id).goal_verdict, 'the parent must settle');
+    assert.equal(JSON.parse(h.rs.getRun(parent.id).judge_json).status, 'error');
+    assert.ok(h.rs.getRun(child.id).goal_verdict, 'the child must settle');
+    assert.ok(sweeps <= 3);
   });
 }
 
