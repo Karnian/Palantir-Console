@@ -9,7 +9,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { buildProjectScopedSystemSection, PM_ROLE_SECTION } = require('../services/operatorPromptSections');
+const { buildProjectScopedSystemSection, buildFinalOperatorSystemPrompt, PM_ROLE_SECTION } = require('../services/operatorPromptSections');
+
+const SENTINEL = '\u0000PALANTIR_OPERATION_SEGMENT:';
 
 test('A2b: shared builder emits the expected sections + favorite-pool PM Role', () => {
   const section = buildProjectScopedSystemSection({
@@ -84,4 +86,30 @@ test('A2b: PM_ROLE_SECTION is exported and mentions the shared pool', () => {
   assert.match(PM_ROLE_SECTION, /## PM Role/);
   assert.match(PM_ROLE_SECTION, /shared codebase pool/i);
   assert.match(PM_ROLE_SECTION, /skill_pack_ids/);
+});
+
+test('final Operator prompt rejects sentinels in project name, persona, and brief fields', () => {
+  const cases = [
+    { project: { name: `bad${SENTINEL}`, id: 'p' } },
+    { project: { name: 'p', id: 'p' }, profile: { persona: `bad${SENTINEL}` } },
+    { project: { name: 'p', id: 'p' }, brief: { conventions: `bad${SENTINEL}` } },
+    { project: { name: 'p', id: 'p' }, brief: { known_pitfalls: `bad${SENTINEL}` } },
+  ];
+  for (const value of cases) {
+    assert.throws(
+      () => buildFinalOperatorSystemPrompt({ baseSystemPrompt: 'base', ...value }),
+      error => error.code === 'OPERATOR_PROMPT_USER_SENTINEL',
+    );
+  }
+});
+
+test('final Operator prompt permits /api/ in user data and preserves normal assembly bytes', () => {
+  const args = {
+    baseSystemPrompt: 'base',
+    project: { name: 'docs /api/project', id: 'p', directory: '/tmp/api/work' },
+    profile: { persona: 'Explain /api/persona literally.' },
+    brief: { conventions: 'Keep /api/brief unchanged.' },
+  };
+  const section = buildProjectScopedSystemSection(args);
+  assert.equal(buildFinalOperatorSystemPrompt(args), `base\n\n${section}`);
 });

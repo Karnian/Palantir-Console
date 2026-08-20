@@ -45,15 +45,16 @@ function issueOperationSegmentToken(registry) {
 function operationSegment(id, renderedPath, text, registry) {
   const operation = getManagerOperation(id);
   const value = { kind: 'operation', id, method: operation.method, renderedPath, text };
+  const canonicalPayload = JSON.stringify(value);
   const auditEntry = { id, serialized: false };
   const token = issueOperationSegmentToken(registry);
-  registry.issued.set(token, { auditEntry, consumed: false });
+  registry.issued.set(token, { auditEntry, canonicalPayload, consumed: false });
   registry.audit.push(auditEntry);
   Object.defineProperty(value, Symbol.toPrimitive, {
     enumerable: false,
     value: () => {
       auditEntry.serialized = true;
-      return `${OPERATION_SEGMENT_PREFIX}${token}:${Buffer.from(JSON.stringify(value)).toString('base64')}${OPERATION_SEGMENT_SUFFIX}`;
+      return `${OPERATION_SEGMENT_PREFIX}${token}:${Buffer.from(canonicalPayload).toString('base64')}${OPERATION_SEGMENT_SUFFIX}`;
     },
   });
   return value;
@@ -92,9 +93,13 @@ function deserializePromptSegments(rendered, registry) {
     if (decoded.toString('base64') !== encoded) {
       throw promptSegmentError('MANAGER_PROMPT_SEGMENT_MALFORMED', 'Malformed manager prompt operation segment: non-canonical base64');
     }
+    const decodedPayload = decoded.toString('utf8');
+    if (decodedPayload !== issued.canonicalPayload) {
+      throw promptSegmentError('MANAGER_PROMPT_SEGMENT_PAYLOAD_MISMATCH', 'Manager prompt operation segment payload does not match the payload bound to its token');
+    }
     let segment;
     try {
-      segment = JSON.parse(decoded.toString('utf8'));
+      segment = JSON.parse(decodedPayload);
     } catch {
       throw promptSegmentError('MANAGER_PROMPT_SEGMENT_MALFORMED', 'Malformed manager prompt operation segment: invalid JSON');
     }
@@ -677,4 +682,9 @@ module.exports = {
   buildRoleSection,
   buildCommonBase,
   resolveManagerApiEndpoints,
+  _operationSegmentTestHooks: {
+    createOperationSegmentRegistry,
+    operationSegment,
+    deserializePromptSegments,
+  },
 };

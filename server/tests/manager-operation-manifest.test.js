@@ -15,6 +15,7 @@ const { createApp } = require('../app');
 const {
   buildManagerSystemPrompt,
   buildManagerSystemPromptWithTrace,
+  _operationSegmentTestHooks,
 } = require('../services/managerSystemPrompt');
 const { createDatabase } = require('../db/database');
 const { createTaskService } = require('../services/taskService');
@@ -480,20 +481,65 @@ test('forged self-describing adapter operation marker is rejected by its unissue
 });
 
 test('a legitimately issued operation token cannot be consumed twice by a copied marker', () => {
-  withPredictableSegmentTokens(firstIssuedToken => {
-    const copied = serializedMarker(firstIssuedToken, {
-      kind: 'operation', id: 'runs.list', method: 'GET', renderedPath: '/api/runs', text: 'GET /api/runs',
-    });
-    assert.throws(
-      () => buildManagerSystemPromptWithTrace({
-        adapter: { buildGuardrailsSection: () => copied },
-        port: 4317,
-        layer: 'operator',
-        adapterType: 'codex',
-      }),
-      error => error.code === 'MANAGER_PROMPT_SEGMENT_REUSED_TOKEN',
-    );
+  const registry = _operationSegmentTestHooks.createOperationSegmentRegistry();
+  const marker = String(_operationSegmentTestHooks.operationSegment('runs.list', '/api/runs', 'GET /api/runs', registry));
+  assert.throws(
+    () => _operationSegmentTestHooks.deserializePromptSegments(`${marker}${marker}`, registry),
+    error => error.code === 'MANAGER_PROMPT_SEGMENT_REUSED_TOKEN',
+  );
+});
+
+test('an issued token rejects a different valid-schema payload consumed on its own', () => {
+  const registry = _operationSegmentTestHooks.createOperationSegmentRegistry();
+  const issued = _operationSegmentTestHooks.operationSegment('runs.list', '/api/runs', 'GET /api/runs', registry);
+  const marker = String(issued);
+  const token = marker.slice(SEGMENT_PREFIX.length, marker.indexOf(':', SEGMENT_PREFIX.length));
+  const forged = serializedMarker(token, {
+    kind: 'operation', id: 'tasks.list', method: 'GET', renderedPath: '/api/tasks', text: 'GET /api/tasks',
   });
+  assert.throws(
+    () => _operationSegmentTestHooks.deserializePromptSegments(forged, registry),
+    error => error.code === 'MANAGER_PROMPT_SEGMENT_PAYLOAD_MISMATCH',
+  );
+});
+
+test('an issued token is bound to id, method, renderedPath, and text canonical fields', () => {
+  for (const [field, replacement] of [
+    ['id', 'tasks.list'],
+    ['method', 'POST'],
+    ['renderedPath', '/api/runs/other'],
+    ['text', 'GET /api/runs?forged=1'],
+  ]) {
+    const registry = _operationSegmentTestHooks.createOperationSegmentRegistry();
+    const issued = _operationSegmentTestHooks.operationSegment('runs.list', '/api/runs', 'GET /api/runs', registry);
+    const marker = String(issued);
+    const token = marker.slice(SEGMENT_PREFIX.length, marker.indexOf(':', SEGMENT_PREFIX.length));
+    const payload = { kind: 'operation', id: 'runs.list', method: 'GET', renderedPath: '/api/runs', text: 'GET /api/runs' };
+    payload[field] = replacement;
+    assert.throws(
+      () => _operationSegmentTestHooks.deserializePromptSegments(serializedMarker(token, payload), registry),
+      error => error.code === 'MANAGER_PROMPT_SEGMENT_PAYLOAD_MISMATCH',
+      field,
+    );
+  }
+});
+
+test('an issued marker omitted from assembly is rejected as unconsumed', () => {
+  const registry = _operationSegmentTestHooks.createOperationSegmentRegistry();
+  _operationSegmentTestHooks.operationSegment('runs.list', '/api/runs', 'GET /api/runs', registry);
+  assert.throws(
+    () => _operationSegmentTestHooks.deserializePromptSegments('no marker was assembled', registry),
+    error => error.code === 'MANAGER_PROMPT_SEGMENT_UNCONSUMED',
+  );
+});
+
+test('the same correctly issued marker assembled twice is rejected as reused', () => {
+  const registry = _operationSegmentTestHooks.createOperationSegmentRegistry();
+  const marker = String(_operationSegmentTestHooks.operationSegment('runs.list', '/api/runs', 'GET /api/runs', registry));
+  assert.throws(
+    () => _operationSegmentTestHooks.deserializePromptSegments(`${marker}${marker}`, registry),
+    error => error.code === 'MANAGER_PROMPT_SEGMENT_REUSED_TOKEN',
+  );
 });
 
 test('opaque per-build marker randomness does not change final prompt bytes', () => {

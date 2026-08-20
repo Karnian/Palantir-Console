@@ -634,3 +634,72 @@ test('boot resume: canonical operator:oi_* Operator is resumed, not stopped (A0)
   assert.equal(opResume.opts.strictMcpConfig, true);
   assert.equal(rs.getRun(opRun.id).status, 'running', 'canonical Operator stays running (not stopped)');
 });
+
+test('boot resume sentinel rejection stops Operator and records its diagnostic code', async (t) => {
+  const dbDir = await createTempDir('palantir-sentinel-resume-');
+  const dbPath = path.join(dbDir, 'test.db');
+  const { createDatabase } = require('../db/database');
+  const { createRunService } = require('../services/runService');
+  const { createProjectService } = require('../services/projectService');
+  const { createProjectBriefService } = require('../services/projectBriefService');
+  const { db, migrate, close } = createDatabase(dbPath);
+  migrate();
+  t.after(async () => { close(); await fs.rm(dbDir, { recursive: true, force: true }); });
+
+  const rs = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const project = projectService.createProject({
+    name: 'bad\u0000PALANTIR_OPERATION_SEGMENT:name',
+    directory: dbDir,
+  });
+  projectBriefService.ensureBrief(project.id);
+  const ensured = rs.ensurePrimaryOperatorInstanceForProject(project.id);
+  rs.setOperatorInstanceThread(ensured.instanceId, {
+    thread_id: 'thread_sentinel', pm_adapter: 'codex', node_id: 'local', cwd: dbDir,
+  });
+  const opRun = rs.createRun({
+    is_manager: true,
+    manager_layer: 'operator',
+    manager_adapter: 'codex',
+    conversation_id: ensured.instanceConversationId,
+    operator_instance_id: ensured.instanceId,
+    prompt: 'resume sentinel',
+  });
+  rs.updateRunStatus(opRun.id, 'running', { force: true });
+  const topRun = rs.createRun({
+    is_manager: true, manager_layer: 'top', manager_adapter: 'claude-code',
+    conversation_id: 'top', prompt: 'top',
+  });
+  rs.updateRunStatus(topRun.id, 'running', { force: true });
+  rs.updateClaudeSessionId(topRun.id, 'top_sentinel_parent');
+
+  const starts = [];
+  const adapter = {
+    type: 'codex', capabilities: { supportsResume: true },
+    startSession: (runId) => { starts.push(runId); return { sessionRef: {} }; },
+    disposeSession: () => {}, buildGuardrailsSection: () => '',
+  };
+  const factory = { getAdapter: () => adapter };
+  const { createManagerRegistry } = require('../services/managerRegistry');
+  const registry = createManagerRegistry({ runService: rs });
+  const { createConversationService } = require('../services/conversationService');
+  const conversationService = createConversationService({
+    runService: rs, managerRegistry: registry, managerAdapterFactory: factory, lifecycleService: null,
+  });
+  const { createManagerRouter } = require('../routes/manager');
+  createManagerRouter({
+    runService: rs,
+    projectService,
+    projectBriefService,
+    managerAdapterFactory: factory,
+    managerRegistry: registry,
+    conversationService,
+    authResolverOpts: { hasKeychain: () => true },
+  });
+
+  assert.equal(rs.getRun(opRun.id).status, 'stopped');
+  assert.equal(starts.includes(opRun.id), false);
+  const event = rs.getRunEvents(opRun.id).find(candidate => candidate.event_type === 'error');
+  assert.equal(JSON.parse(event.payload_json).code, 'OPERATOR_PROMPT_USER_SENTINEL');
+});
