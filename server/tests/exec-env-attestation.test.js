@@ -244,3 +244,36 @@ test('with nothing injected at all, the real exec environ decides', () => {
     else process.env.PALANTIR_ATTESTATION_RUNTIME_PROBE = previous;
   }
 });
+
+test('a value present at module load is still absent from the exec environ', () => {
+  // The bypass this whole change exists to remove, in the issue's own words: a
+  // module-load snapshot of process.env is defeated by import order. Every probe
+  // above passes such an implementation, because a snapshot taken at load looks
+  // like the exec environ for anything set before it. Setting the value first and
+  // loading the module AFTER separates them: the snapshot would contain it, the
+  // real /proc/self/environ never can.
+  if (process.platform !== 'linux') return;
+
+  const value = `palantir-attestation-preload-${process.pid}-${process.hrtime.bigint()}`;
+  const previous = process.env.PALANTIR_ATTESTATION_PRELOAD_PROBE;
+  process.env.PALANTIR_ATTESTATION_PRELOAD_PROBE = value;
+  const policyPath = require.resolve('../services/actorTokenPolicy');
+  const attestPath = require.resolve('../services/execEnvAttestation');
+  delete require.cache[policyPath];
+  delete require.cache[attestPath];
+  try {
+    const freshlyLoaded = require('../services/actorTokenPolicy');
+    const policy = freshlyLoaded.resolveAppActorTokenPolicy(
+      { authToken: value, agentProcessIsolation: true }, {},
+    );
+    assert.equal(
+      policy.execAttestation.reason, 'absent_from_exec_environ',
+      'finding a value that was set before module load means a snapshot was consulted',
+    );
+  } finally {
+    if (previous === undefined) delete process.env.PALANTIR_ATTESTATION_PRELOAD_PROBE;
+    else process.env.PALANTIR_ATTESTATION_PRELOAD_PROBE = previous;
+    delete require.cache[policyPath];
+    delete require.cache[attestPath];
+  }
+});
