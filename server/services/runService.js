@@ -629,6 +629,15 @@ function createRunService(db, eventBus, questionService = null) {
     ),
     // G3c: the verdict sweep expires a crashed 'pending' claim → 'error' BEFORE
     // settling (codex SERIOUS: else a late model result finalizes after gate2).
+    // The expiry CAS below decides whether a pending judge can EVER resolve, and
+    // it does so with SQLite's datetime(), which is stricter than Date.parse: an
+    // absent deadline, 'not-a-date' and 'January 1, 2000' all yield NULL, and
+    // `NULL <= datetime('now')` is NULL, so the CAS can never match. Callers that
+    // need to know whether waiting on this judge is bounded must ask with the
+    // SAME expression -- a JS-side date check disagrees (measured).
+    judgeDeadlineResolvable: db.prepare(
+      "SELECT datetime(json_extract(?, '$.deadline')) IS NOT NULL AS ok"
+    ),
     casJudgeExpiredToError: db.prepare(
       "UPDATE runs SET judge_json = @json WHERE id = @id AND json_extract(judge_json,'$.status') = 'pending' AND datetime(json_extract(judge_json,'$.deadline')) <= datetime('now')"
     ),
@@ -684,15 +693,10 @@ function createRunService(db, eventBus, questionService = null) {
        WHERE goal_active = 1 AND is_manager = 0 AND goal_verdict IS NOT NULL
          AND status IN ('completed', 'failed', 'cancelled', 'stopped')
     `),
-    // G3 §4 fingerprint-repeat: the PREVIOUS attempt (the run that pointed its
-    // goal_retry_run_id at this one) carries the prior failure fingerprint.
-    getGoalRetryParentFingerprint: db.prepare(
-      'SELECT goal_fingerprint AS fp FROM runs WHERE goal_retry_run_id = ? LIMIT 1'
-    ),
     // G3 SERIOUS-2: the prior attempt's verdict reason + acceptance + status, to
     // build the retry child's attempt-feedback (why the last attempt failed).
     getGoalRetryParent: db.prepare(
-      'SELECT id, status, goal_verdict, goal_verdict_reason, acceptance_json, result_summary, judge_json FROM runs WHERE goal_retry_run_id = ? LIMIT 1'
+      'SELECT id, status, exit_code, goal_verdict, goal_verdict_reason, acceptance_json, result_summary, goal_judge_active, judge_json, goal_fingerprint FROM runs WHERE goal_retry_run_id = ? LIMIT 1'
     ),
     // G2b §5k-1: runs whose remote deliverable workspace was retained ('captured',
     // bundle not yet complete) — the boot re-harvest re-attempts these.
@@ -2155,6 +2159,12 @@ function createRunService(db, eventBus, questionService = null) {
   function finalizeJudge(id, finalJson) {
     return stmts.finalizeJudge.run({ id, json: finalJson }).changes > 0;
   }
+  // True when a pending judge's deadline is one the expiry CAS can actually
+  // evaluate. False means the claim can never expire on its own.
+  function isJudgeDeadlineResolvable(judgeJson) {
+    if (typeof judgeJson !== 'string' || !judgeJson) return false;
+    try { return stmts.judgeDeadlineResolvable.get(judgeJson)?.ok === 1; } catch { return false; }
+  }
   function casJudgeExpiredToError(id, errorJson) {
     return stmts.casJudgeExpiredToError.run({ id, json: errorJson }).changes > 0;
   }
@@ -2255,11 +2265,6 @@ function createRunService(db, eventBus, questionService = null) {
   }
   function listVerdictedTerminalGoalRunIds() {
     return stmts.listVerdictedTerminalGoalRunIds.all().map((r) => r.id);
-  }
-  // G3 §4: the prior attempt's persisted failure fingerprint (or null).
-  function getGoalRetryParentFingerprint(runId) {
-    const row = stmts.getGoalRetryParentFingerprint.get(runId);
-    return row ? (row.fp ?? null) : null;
   }
   // G3 SERIOUS-2: the prior attempt row (verdict/reason/acceptance) for feedback.
   function getGoalRetryParent(runId) {
@@ -2448,10 +2453,11 @@ function createRunService(db, eventBus, questionService = null) {
     updateRunStatus, markRunStarted, updateRunResult, updateGoalCapture, setSessionSnapshot, sumProjectCost, rejectQueuedRun, setGoalActive, setGoalWorkspacePath,
     updateGoalAcceptance, setDeliverableState,
     setGoalJudgeActive, casJudgePending, finalizeJudge, casJudgeExpiredToError,
+    isJudgeDeadlineResolvable,
     persistGoalVerdictTx,
     listPendingGoalEffects, markGoalEffectSent, listRunIdsWithPendingGoalEffects,
     listUnverdictedTerminalGoalRunIds, listVerdictedTerminalGoalRunIds,
-    getGoalRetryParentFingerprint, getGoalRetryParent,
+    getGoalRetryParent,
     listReviewableGoalRunsWithoutReview, getNewestGoalRun, listCapturedDeliverableRuns,
     countRunning, countRunningOnNode, countRunningTotalOnNode,
     getOldestQueued, getOldestQueuedOnNode, getOldestQueuedReadyOnNode,
