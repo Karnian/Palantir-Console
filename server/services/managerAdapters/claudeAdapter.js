@@ -13,6 +13,8 @@ const {
   NORMALIZED_EVENT_TYPES,
   RAW_EVENTS_ENABLED,
   buildPayload,
+  vendorHandleFingerprint,
+  redactVendorHandles,
 } = require('./eventTypes');
 
 function createClaudeAdapter({ streamJsonEngine, runService }) {
@@ -76,7 +78,7 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
         turnIndex,
         summaryText: `${event.type}${event.subtype ? ':' + event.subtype : ''}`,
         hasRawStored: true,
-        data: { event },
+        data: { event: redactVendorHandles(event) },
       }));
     }
 
@@ -87,10 +89,10 @@ function createClaudeAdapter({ streamJsonEngine, runService }) {
       state.sessionEmitted = true;
       emitNormalized(runId, NORMALIZED_EVENT_TYPES.SESSION_STARTED, buildPayload({
         turnIndex,
-        summaryText: `Claude session ${event.session_id || ''}`.trim(),
+        summaryText: `Claude session ${vendorHandleFingerprint(event.session_id) || 'started'}`,
         hasRawStored: RAW_EVENTS_ENABLED,
         data: {
-          sessionId: event.session_id || null,
+          sessionFingerprint: vendorHandleFingerprint(event.session_id),
           model: event.model || null,
           cwd: event.cwd || null,
         },

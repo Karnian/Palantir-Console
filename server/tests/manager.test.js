@@ -1610,8 +1610,18 @@ test('run responses do not hand the tmux session name to a manager capability', 
   const { withoutSessionHandle } = require('../utils/managerRunView');
   const managerReq = { auth: { actor: 'manager' } };
   const humanReq = { auth: { actor: null, method: 'cookie' } };
-  const row = rs.getRun(worker.id);
-  assert.ok(!('tmux_session' in withoutSessionHandle(managerReq, row)));
-  assert.equal(withoutSessionHandle(humanReq, row).tmux_session, 'palantir-secret-proof',
+  const row = {
+    ...rs.getRun(worker.id),
+    claude_session_id: 'claude-resume-secret',
+    manager_thread_id: 'manager-resume-secret',
+  };
+  const managerView = withoutSessionHandle(managerReq, row);
+  assert.ok(!('tmux_session' in managerView));
+  assert.ok(!('claude_session_id' in managerView));
+  assert.ok(!('manager_thread_id' in managerView));
+  const humanView = withoutSessionHandle(humanReq, row);
+  assert.equal(humanView.tmux_session, 'palantir-secret-proof',
     'the human UI keeps its view of the run');
+  assert.equal(humanView.claude_session_id, 'claude-resume-secret');
+  assert.equal(humanView.manager_thread_id, 'manager-resume-secret');
 });

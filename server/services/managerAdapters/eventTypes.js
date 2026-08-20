@@ -16,6 +16,8 @@
  * - data:           adapter-specific structured fields (tokens, exit_code, ...)
  */
 
+const { createHash } = require('node:crypto');
+
 // Note: TURN_STARTED is reserved for adapters that emit a clear turn-boundary
 // vendor signal at the START of each turn (e.g. Codex's turn.started). Claude's
 // stream-json protocol has no equivalent event, so claudeAdapter never emits
@@ -35,6 +37,50 @@ const NORMALIZED_EVENT_TYPES = Object.freeze({
 });
 
 const RAW_EVENTS_ENABLED = process.env.PALANTIR_DEBUG_RAW_EVENTS === '1';
+const VENDOR_HANDLE_KEYS = new Set([
+  'threadId',
+  'thread_id',
+  'sessionId',
+  'session_id',
+  'claude_session_id',
+]);
+
+function vendorHandleFingerprint(handle) {
+  if (typeof handle !== 'string' || handle.length === 0) return null;
+  return createHash('sha256').update(handle).digest('hex').slice(0, 12);
+}
+
+/**
+ * Best-effort redaction for raw vendor events. Vendors can still introduce a
+ * handle under an unknown key; this protects the known handle key spellings.
+ * The input is never mutated because legacy persistence runs after raw capture.
+ */
+function redactVendorHandles(value) {
+  try {
+    function visit(current, ancestors) {
+      if (current === null || typeof current !== 'object') return current;
+      if (ancestors.has(current)) return '[Circular]';
+
+      const copy = Array.isArray(current) ? [] : {};
+      const nextAncestors = new Set(ancestors);
+      nextAncestors.add(current);
+      for (const key of Object.keys(current)) {
+        try {
+          copy[key] = VENDOR_HANDLE_KEYS.has(key)
+            ? vendorHandleFingerprint(current[key])
+            : visit(current[key], nextAncestors);
+        } catch {
+          copy[key] = null;
+        }
+      }
+      return copy;
+    }
+
+    return visit(value, new Set());
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Build a normalized payload object.
@@ -53,4 +99,6 @@ module.exports = {
   NORMALIZED_EVENT_TYPES,
   RAW_EVENTS_ENABLED,
   buildPayload,
+  vendorHandleFingerprint,
+  redactVendorHandles,
 };

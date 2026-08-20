@@ -5,6 +5,7 @@ const os = require('node:os');
 const readline = require('node:readline');
 const { assertSpawnAllowed } = require('../utils/spawnGuard');
 const { resolveSpawnCwd } = require('../utils/spawnCwd');
+const { vendorHandleFingerprint } = require('./managerAdapters/eventTypes');
 const {
   resolveActorTokenPolicy,
   buildWorkerProcessEnv,
@@ -708,7 +709,7 @@ function createStreamJsonEngine({
           proc.status = 'running';
           if (runService) {
             runService.addRunEvent(runId, 'init', JSON.stringify({
-              session_id: event.session_id,
+              session_fingerprint: vendorHandleFingerprint(event.session_id),
               model: event.model,
               tools: (event.tools || []).slice(0, 20),
               cwd: event.cwd,
@@ -718,7 +719,10 @@ function createStreamJsonEngine({
               try { runService.updateClaudeSessionId(runId, event.session_id); } catch { /* ignore */ }
             }
           }
-          if (eventBus) eventBus.emit('run:init', { runId, sessionId: event.session_id });
+          if (eventBus) eventBus.emit('run:init', {
+            runId,
+            sessionFingerprint: vendorHandleFingerprint(event.session_id),
+          });
         }
         break;
       }

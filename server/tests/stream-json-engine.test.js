@@ -606,7 +606,9 @@ test('engine: system:init event sets sessionId', async () => {
   assert.equal(engine.getSessionId('run-init'), 'fake-sess');
   const initEvts = rs._events.filter(e => e.type === 'init');
   assert.equal(initEvts.length, 1, 'init 이벤트 기록됨');
-  assert.ok(initEvts[0].data.includes('fake-sess'));
+  const initPayload = JSON.parse(initEvts[0].data);
+  assert.equal(JSON.stringify(initPayload).includes('fake-sess'), false);
+  assert.equal(initPayload.session_fingerprint, '32a3a8705fdb');
 });
 
 test('engine: assistant event records text in outputBuffer', async (t) => {
