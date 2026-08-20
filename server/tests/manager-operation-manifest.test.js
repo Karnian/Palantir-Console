@@ -706,7 +706,16 @@ async function replayBodyExample(operation, layer, name, example) {
     if (operation.id === 'runs.send_input') {
       mountPath = '/api/runs';
       router = createRunsRouter({
-        runService: { getRun: () => ({ id: 'worker-run-1', is_manager: 0, status: 'running' }) },
+        // A real operator sends input to a worker IT spawned, so the replay
+        // fixture carries the ownership marker (#447 prerequisite 1). Without
+        // it the fail-closed scope rule refuses, which is the correct answer
+        // for an unowned run and would make this a manifest-shape false alarm.
+        runService: {
+          getRun: () => ({
+            id: 'worker-run-1', is_manager: 0, status: 'running',
+            parent_run_id: managerRunId,
+          }),
+        },
         lifecycleService: { sendAgentInput: async () => true },
       });
     } else if (operation.id.startsWith('tasks.')) {

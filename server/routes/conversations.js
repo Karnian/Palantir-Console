@@ -20,9 +20,31 @@
 
 const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
+const { managerCanAccessRun } = require('../services/managerRunScope');
 
 function createConversationsRouter({ conversationService, runService }) {
   const router = express.Router();
+
+  function workerRunId(id) {
+    let decoded;
+    try { decoded = decodeURIComponent(id); } catch { return null; }
+    return decoded.startsWith('worker:') ? decoded.slice('worker:'.length) : null;
+  }
+
+  function enforceManagerWorkerScope(req, res, id) {
+    if (req.auth?.actor !== 'manager') return true;
+    const runId = workerRunId(id);
+    if (!runId) return true;
+    const run = runService.getRun(runId);
+    const allowed = managerCanAccessRun({
+      runId: req.auth.managerRunId,
+      conversationId: req.auth.conversationId,
+      layer: req.auth.layer,
+    }, run, { runService });
+    if (allowed) return true;
+    res.status(403).json({ error: 'manager capability may only access its own worker runs' });
+    return false;
+  }
 
   function mapError(err, res) {
     if (err && err.httpStatus) {
@@ -50,6 +72,7 @@ function createConversationsRouter({ conversationService, runService }) {
   // POST /api/conversations/:id/message
   router.post('/:id/message', asyncHandler(async (req, res) => {
     const { id } = req.params;
+    if (!enforceManagerWorkerScope(req, res, id)) return;
     // A2a: forward the per-turn codebase selection + turnMode. Previously only
     // { text, images } was extracted, so an explicit turn codebase was silently
     // lost (Codex A1/R3 finding). Unknown turnMode is normalized to the legacy
@@ -102,6 +125,7 @@ function createConversationsRouter({ conversationService, runService }) {
   // GET /api/conversations/:id/events
   router.get('/:id/events', asyncHandler(async (req, res) => {
     const { id } = req.params;
+    if (!enforceManagerWorkerScope(req, res, id)) return;
     const parsed = conversationService.parseConversationId(id);
     if (!parsed) {
       return res.status(400).json({ error: `invalid conversation id: ${id}` });
