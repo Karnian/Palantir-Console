@@ -516,15 +516,20 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
       // makes the decision late in every direction instead of wrong in one -- a
       // deferred 410 costs one extra poll, a false 410 is unrecoverable.
       //
-      // Residual: an ABA that returns to the SAME status with an ended_at that
-      // lands in the same second (completed -> queued -> completed) is not
-      // distinguishable here, because ended_at is second-granular and no
-      // monotonic status revision exists on runs. started_at cannot substitute --
-      // a goal retry-child requeue preserves it. Closing this needs a status
-      // epoch column; tracked separately. The consequence is a recoverable CLI
-      // error (code 5, re-run follow), not lost or corrupted output.
-      const runUnmovedAcrossRead = preRun.status === latestRun.status
-        && (preRun.ended_at ?? null) === (latestRun.ended_at ?? null);
+      // status_epoch is bumped by a database trigger for every status write,
+      // including same-value writes, so equality proves that no status write
+      // occurred between the two snapshots and makes status ABA observable.
+      //
+      // Absent epochs must NOT compare equal. `undefined === undefined` would
+      // read as "never moved" and re-open the false 410 this column exists to
+      // close -- the direction the comment above rules out, since a deferred 410
+      // costs one poll and a false one is unrecoverable. getRun selects r.* so a
+      // migrated database always carries it; a projection or an injected double
+      // may not, and that case is treated as movement.
+      const epochsObserved = Number.isInteger(preRun.status_epoch)
+        && Number.isInteger(latestRun.status_epoch);
+      const runUnmovedAcrossRead = epochsObserved
+        && preRun.status_epoch === latestRun.status_epoch;
       if (
         (range.deleted || range.missing)
         && wasTerminalBeforeRead
