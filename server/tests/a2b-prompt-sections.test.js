@@ -12,6 +12,7 @@ const assert = require('node:assert/strict');
 const { buildProjectScopedSystemSection, buildFinalOperatorSystemPrompt, PM_ROLE_SECTION } = require('../services/operatorPromptSections');
 
 const SENTINEL = '\u0000PALANTIR_OPERATION_SEGMENT:';
+const SENTINEL_SUFFIX = ':PALANTIR_OPERATION_SEGMENT\u0000';
 
 test('A2b: shared builder emits the expected sections + favorite-pool PM Role', () => {
   const section = buildProjectScopedSystemSection({
@@ -94,6 +95,27 @@ test('final Operator prompt rejects sentinels in project name, persona, and brie
     { project: { name: 'p', id: 'p' }, profile: { persona: `bad${SENTINEL}` } },
     { project: { name: 'p', id: 'p' }, brief: { conventions: `bad${SENTINEL}` } },
     { project: { name: 'p', id: 'p' }, brief: { known_pitfalls: `bad${SENTINEL}` } },
+    // codex R2 비차단 보강: suffix 단독으로도 거부되어야 한다. prefix 만 막으면
+    // 여는 쪽을 다른 경로에서 얻은 공격자가 닫는 쪽만 주입해 마커를 완성할 수 있다.
+    { project: { name: `bad${SENTINEL_SUFFIX}`, id: 'p' } },
+    // Skill pack names/descriptions reach the prompt through skillPackService,
+    // not a plain field -- exercise that path, not a shape the builder ignores.
+    {
+      project: { name: 'p', id: 'p' },
+      skillPackService: {
+        listProjectBindings: () => [{
+          skill_pack_id: 'sp1', skill_pack_name: `bad${SENTINEL}`, skill_pack_description: 'd', auto_apply: 1,
+        }],
+      },
+    },
+    {
+      project: { name: 'p', id: 'p' },
+      skillPackService: {
+        listProjectBindings: () => [{
+          skill_pack_id: 'sp1', skill_pack_name: 'n', skill_pack_description: `bad${SENTINEL_SUFFIX}`, auto_apply: 1,
+        }],
+      },
+    },
   ];
   for (const value of cases) {
     assert.throws(
