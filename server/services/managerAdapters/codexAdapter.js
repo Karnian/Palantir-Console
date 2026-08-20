@@ -53,6 +53,8 @@ const {
   NORMALIZED_EVENT_TYPES,
   RAW_EVENTS_ENABLED,
   buildPayload,
+  vendorHandleFingerprint,
+  redactVendorHandles,
 } = require('./eventTypes');
 const {
   prepareCodexMcpArgs,
@@ -788,7 +790,7 @@ function createCodexAdapter({
         turnIndex: state.turnIndex,
         summaryText: event.type || 'raw',
         hasRawStored: true,
-        data: { event },
+        data: { event: redactVendorHandles(event) },
       }));
     }
 
@@ -815,9 +817,9 @@ function createCodexAdapter({
         state.sessionStartedEmitted = true;
         emitNormalized(runId, NORMALIZED_EVENT_TYPES.SESSION_STARTED, buildPayload({
           turnIndex: state.turnIndex,
-          summaryText: `Codex thread ${state.threadId || ''}`.trim(),
+          summaryText: `Codex thread ${vendorHandleFingerprint(state.threadId) || 'started'}`,
           hasRawStored: RAW_EVENTS_ENABLED,
-          data: { threadId: state.threadId, model: state.model },
+          data: { threadFingerprint: vendorHandleFingerprint(state.threadId), model: state.model },
         }));
       }
       return;

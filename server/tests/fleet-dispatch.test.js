@@ -1266,6 +1266,16 @@ test('detached remote Claude health restores structured result, usage, and event
   ].join('\n');
   const output = [
     JSON.stringify({
+      type: 'system', subtype: 'init', session_id: 'detached-resume-secret',
+      model: 'sonnet', tools: ['Read'], cwd: '/workspace/project',
+    }),
+    // A second init with NO session_id: a normal shape that must not break the
+    // parse loop. This runs after the terminal CAS, so a throw here would strand
+    // the run's result/usage events.
+    JSON.stringify({
+      type: 'system', subtype: 'init', model: 'sonnet', tools: [], cwd: '/workspace/project',
+    }),
+    JSON.stringify({
       type: 'assistant',
       message: {
         content: [
@@ -1312,6 +1322,16 @@ test('detached remote Claude health restores structured result, usage, and event
   assert.equal(after.output_tokens, 8);
   assert.equal(after.cost_usd, 0.5);
   const events = h.runService.getRunEvents(run.id);
+  const init = events.find((event) => event.event_type === 'init');
+  assert.ok(init);
+  const initPayload = JSON.parse(init.payload_json);
+  assert.equal(JSON.stringify(initPayload).includes('detached-resume-secret'), false);
+  assert.equal(initPayload.session_id, undefined);
+  assert.equal(initPayload.session_fingerprint, '0e79fb5654da');
+  // The guard skipped the second init rather than clearing the stored handle,
+  // and the events after it were still recorded.
+  assert.equal(after.claude_session_id, 'detached-resume-secret');
+  assert.equal(events.filter((event) => event.event_type === 'init').length, 2);
   assert.ok(events.some((event) => event.event_type === 'assistant_text'));
   assert.ok(events.some((event) => event.event_type === 'tool_use'));
   assert.ok(events.some((event) => event.event_type === 'result'));

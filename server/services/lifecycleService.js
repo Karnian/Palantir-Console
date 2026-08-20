@@ -46,6 +46,7 @@ const {
   removeSecretDirWithRetry,
 } = require('./managerAdapters/codexMcpSecretTransport');
 const { createAdmissionGate } = require('./admissionGate');
+const { vendorHandleFingerprint } = require('./managerAdapters/eventTypes');
 
 // G1: cap a string to at most maxBytes UTF-8 bytes without splitting a
 // multi-byte codepoint (final_output is stored raw; the 64KB bound is on bytes,
@@ -3269,8 +3270,20 @@ function createLifecycleService({
     if (!alreadyParsed) {
       for (const event of parsed.events) {
         if (event.type === 'system' && event.subtype === 'init') {
+          // The handle moves OUT of the manager-observable event and INTO the
+          // run row, where withoutSessionHandle strips it from manager actors
+          // while a human operator can still reach it. Nothing resumes a
+          // detached worker from this column -- boot resume filters is_manager
+          // -- so this is relocation, not a new resume path.
+          //
+          // Guarded exactly like streamJsonEngine's equivalent: this runs after
+          // the terminal CAS inside a parse loop that must not throw, and a
+          // missing session_id is a normal shape.
+          if (event.session_id) {
+            try { runService.updateClaudeSessionId(run.id, event.session_id); } catch { /* ignore */ }
+          }
           runService.addRunEvent(run.id, 'init', JSON.stringify({
-            session_id: event.session_id,
+            session_fingerprint: vendorHandleFingerprint(event.session_id),
             model: event.model,
             tools: (event.tools || []).slice(0, 20),
             cwd: event.cwd,
