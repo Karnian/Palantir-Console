@@ -223,4 +223,24 @@ test('with nothing injected at all, the real exec environ decides', () => {
   const withAbsentToken = attest(absent);
   assert.equal(withAbsentToken.execAttestation.reason, 'absent_from_exec_environ');
   assert.equal(withAbsentToken.capabilitiesEnabled, true);
+
+  // The two probes above still pass an implementation that searches process.env
+  // instead of the exec environ, because a value taken from environ is normally
+  // in process.env too. This one separates the sources: a variable assigned at
+  // RUNTIME exists in process.env and can never be in /proc/self/environ, so a
+  // process.env search reports it present while the correct read reports absent.
+  const runtimeOnly = `palantir-attestation-runtime-only-${absent}`;
+  const previous = process.env.PALANTIR_ATTESTATION_RUNTIME_PROBE;
+  process.env.PALANTIR_ATTESTATION_RUNTIME_PROBE = runtimeOnly;
+  try {
+    const policy = attest(runtimeOnly);
+    assert.equal(
+      policy.execAttestation.reason, 'absent_from_exec_environ',
+      'a runtime-only value must read as absent -- finding it means process.env was searched',
+    );
+    assert.equal(policy.capabilitiesEnabled, true);
+  } finally {
+    if (previous === undefined) delete process.env.PALANTIR_ATTESTATION_RUNTIME_PROBE;
+    else process.env.PALANTIR_ATTESTATION_RUNTIME_PROBE = previous;
+  }
 });
