@@ -20,6 +20,7 @@
 // single run can still be pointed at something else.
 
 import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const DEFAULTS = {
   PALANTIR_SKIP_HOST_CREDENTIALS: '1',
@@ -49,9 +50,20 @@ const hasExplicitConcurrency = passthrough.some(
 );
 const concurrencyArgs = hasExplicitConcurrency ? [] : ['--test-concurrency=4'];
 
+// Pin hostless ephemeral binds to loopback. See scripts/loopback-bind-preload.cjs
+// for the failure this prevents (supertest requests silently reaching Tailscale
+// or another local process instead of the app under test). Passed as a runner
+// flag rather than via NODE_OPTIONS, which would be inherited by every node
+// process the suite starts. As a runner flag it reaches the per-file test
+// processes but is not inserted into the argv of a plain
+// spawn(process.execPath, [cli, ...]) — the shape the CLI tests use. A child
+// started with fork(), or one that deliberately replays process.execArgv, would
+// still inherit it.
+const preload = fileURLToPath(new URL('./loopback-bind-preload.cjs', import.meta.url));
+
 const child = spawn(
   process.execPath,
-  ['--test', ...concurrencyArgs, ...passthrough],
+  ['--require', preload, '--test', ...concurrencyArgs, ...passthrough],
   { stdio: 'inherit', env },
 );
 
