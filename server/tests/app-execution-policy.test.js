@@ -38,6 +38,7 @@ test('shared injected execution engine keeps each app capability policy at spawn
     authToken: 'human-token',
     pmToken: 'automation-token',
     agentProcessIsolation: true,
+    execAttestation: { verified: true, reason: 'test' },
     workerProposalBaseUrl: 'https://console.example',
     memoryDistillEnabled: false,
     operatorSchedulerEnabled: false,

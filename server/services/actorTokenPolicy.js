@@ -6,6 +6,7 @@ const net = require('node:net');
 const path = require('node:path');
 const { resolveAgentVendor } = require('../utils/agentVendor');
 const dotenv = require('dotenv');
+const { attestHumanTokenAbsent } = require('./execEnvAttestation');
 
 const ACTOR_TOKEN_KEYS = Object.freeze([
   'PALANTIR_TOKEN',
@@ -192,7 +193,7 @@ function prepareActorTokenEnvironment(options = {}) {
 // worker capability may be minted unless the deployer has placed agents behind
 // a real OS-user/container boundary and explicitly attested that fact.
 
-function resolveActorTokenPolicy(env = process.env) {
+function resolveActorTokenPolicy(env = process.env, { execAttestation = null } = {}) {
   const humanToken = typeof env.PALANTIR_TOKEN === 'string' && env.PALANTIR_TOKEN
     ? env.PALANTIR_TOKEN
     : null;
@@ -203,18 +204,21 @@ function resolveActorTokenPolicy(env = process.env) {
   const source = env.PALANTIR_ACTOR_TOKEN_SOURCE;
   const sourceAssured = source === 'ephemeral_file' || source === 'application_options';
   const processIsolated = env.PALANTIR_AGENT_PROCESS_ISOLATION === 'verified';
-  const capabilitiesEnabled = !!(humanToken && processIsolated);
+  const capabilitiesEnabled = !!(humanToken && processIsolated && execAttestation?.verified);
   return {
     humanToken,
     agentToken: separated ? pmToken : humanToken,
     separated,
     processIsolated,
     capabilitiesEnabled,
+    execAttestation,
     boundary: humanToken
       ? (
         capabilitiesEnabled
           ? (sourceAssured ? 'run_capabilities' : 'run_capabilities_unverified')
-          : 'agent_capabilities_disabled'
+          : (processIsolated
+            ? 'agent_capabilities_unattested'
+            : 'agent_capabilities_disabled')
       )
       : 'auth_disabled',
   };
@@ -256,6 +260,16 @@ function resolveAppActorTokenPolicy(options = {}, env = process.env) {
     (!authToken || authTokenFromOptions)
     && (!pmToken || pmTokenFromOptions)
   );
+  // execEnvironReader exists so a test can prove this path actually reads the
+  // exec environ. Asserting on the resulting `reason` alone cannot: a hardcoded
+  // default carrying a plausible reason would satisfy it, which is precisely the
+  // self-attestation this change removes.
+  const execAttestation = options.execAttestation === undefined
+    ? attestHumanTokenAbsent(
+      authToken,
+      options.execEnvironReader ? { readExecEnviron: options.execEnvironReader } : undefined,
+    )
+    : options.execAttestation;
   return resolveActorTokenPolicy({
     PALANTIR_TOKEN: authToken,
     PALANTIR_PM_TOKEN: pmToken,
@@ -266,7 +280,7 @@ function resolveAppActorTokenPolicy(options = {}, env = process.env) {
       || (allConfiguredActorTokensFromOptions
         ? 'application_options'
         : 'environment'),
-  });
+  }, { execAttestation });
 }
 
 function isResolvedActorTokenPolicy(value) {

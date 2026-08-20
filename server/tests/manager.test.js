@@ -63,7 +63,9 @@ async function createTestApp(t, options = {}) {
   // process.env.PALANTIR_TOKEN, which a sibling test file may have set. Tests
   // that need a real capability credential opt in explicitly.
   const app = createApp({
-    storageRoot, fsRoot, opencodeBin: 'opencode', dbPath, authToken: null, ...options,
+    storageRoot, fsRoot, opencodeBin: 'opencode', dbPath, authToken: null,
+    execAttestation: { verified: true, reason: 'test' },
+    ...options,
   });
 
   t.after(async () => {

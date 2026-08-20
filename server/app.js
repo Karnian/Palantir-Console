@@ -1107,6 +1107,7 @@ function createApp(options = {}) {
   const actorTokenOptions = {
     actorTokenSource: options.actorTokenSource,
     agentProcessIsolation: options.agentProcessIsolation,
+    execAttestation: options.execAttestation,
   };
   if (authTokenFromOptions) actorTokenOptions.authToken = authToken;
   if (pmTokenFromOptions) actorTokenOptions.pmToken = pmToken;

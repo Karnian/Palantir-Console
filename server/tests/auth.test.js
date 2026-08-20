@@ -47,6 +47,7 @@ async function createTestApp(t, { token, pmToken, agentProcessIsolation = false 
     authToken: token || null, // explicit null → disabled, non-empty string → enabled
     pmToken: pmToken || null,
     agentProcessIsolation,
+    execAttestation: { verified: true, reason: 'test' },
     authResolverOpts: { hasKeychain: () => false },
   });
 
@@ -93,6 +94,7 @@ test('createApp snapshots accessor-backed actor tokens for auth and capabilities
     fsRoot,
     dbPath,
     agentProcessIsolation: true,
+    execAttestation: { verified: true, reason: 'test' },
     authResolverOpts: { hasKeychain: () => false },
   };
   Object.defineProperties(options, {
@@ -591,7 +593,7 @@ test('createAuthMiddleware: worker grant is limited to its run memory proposal r
       PALANTIR_TOKEN: 'human-tok',
       PALANTIR_PM_TOKEN: 'pm-tok',
       PALANTIR_AGENT_PROCESS_ISOLATION: 'verified',
-    }),
+    }, { execAttestation: { verified: true, reason: 'test' } }),
   });
   const workerToken = workerProposalTokenService.mint('run_one', { projectId: 'proj_one' });
   const mw = createAuthMiddleware({
@@ -628,7 +630,7 @@ test('createAuthMiddleware: active manager capability is run-bound and endpoint-
     PALANTIR_TOKEN: 'human-tok',
     PALANTIR_PM_TOKEN: 'pm-tok',
     PALANTIR_AGENT_PROCESS_ISOLATION: 'verified',
-  });
+  }, { execAttestation: { verified: true, reason: 'test' } });
   const managerCapabilityTokenService = createManagerCapabilityTokenService({
     actorTokens,
     signingKey: Buffer.alloc(32, 5),
@@ -679,7 +681,7 @@ test('createAuthMiddleware: Operator capability reaches artifact verify-check CR
     PALANTIR_TOKEN: 'human-tok',
     PALANTIR_PM_TOKEN: 'pm-tok',
     PALANTIR_AGENT_PROCESS_ISOLATION: 'verified',
-  });
+  }, { execAttestation: { verified: true, reason: 'test' } });
   const managerCapabilityTokenService = createManagerCapabilityTokenService({
     actorTokens,
     signingKey: Buffer.alloc(32, 6),

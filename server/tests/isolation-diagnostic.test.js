@@ -87,7 +87,10 @@ test('isolation diagnostic stays lock-step with the policy inputs used by create
 test('app actor token policy snapshots accessor-backed token options', () => {
   let authReads = 0;
   let pmReads = 0;
-  const options = { agentProcessIsolation: true };
+  const options = {
+    agentProcessIsolation: true,
+    execAttestation: { verified: true, reason: 'test' },
+  };
   Object.defineProperties(options, {
     authToken: {
       enumerable: true,
@@ -158,7 +161,7 @@ test('diagnose:isolation --json exits 2 with concrete missing requirements', () 
   );
 });
 
-test('diagnose:isolation --json exits 0 when the runtime policy enables capabilities', () => {
+test('diagnose:isolation --json fails closed when the exec environment exposes the token', () => {
   const secret = 'json-redaction-canary';
   const result = runDiagnostic(['--json'], {
     PALANTIR_TOKEN: secret,
@@ -166,11 +169,13 @@ test('diagnose:isolation --json exits 0 when the runtime policy enables capabili
     PALANTIR_ACTOR_TOKEN_SOURCE: 'ephemeral_file',
   });
 
-  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.status, 2, result.stderr);
   assert.equal(result.stderr, '');
   const parsed = JSON.parse(result.stdout);
-  assert.equal(parsed.capabilitiesEnabled, true);
-  assert.equal(parsed.boundary, 'run_capabilities_unverified');
+  assert.equal(parsed.capabilitiesEnabled, false);
+  assert.equal(parsed.boundary, 'agent_capabilities_unattested');
+  assert.equal(parsed.execAttestation.verified, false);
+  assert.ok(['token_in_exec_environ', 'unsupported_platform'].includes(parsed.execAttestation.reason));
   assert.equal(parsed.checks.every((check) => check.ok), true);
   assert.equal(parsed.advisories[0].level, 'warning');
   assert.equal(result.stdout.includes(secret), false);
@@ -264,10 +269,11 @@ test('ambient source labels cannot claim the application-owned production bounda
     PALANTIR_AGENT_PROCESS_ISOLATION: 'verified',
   });
 
-  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.status, 2, result.stderr);
   const parsed = JSON.parse(result.stdout);
-  assert.equal(parsed.capabilitiesEnabled, true);
-  assert.equal(parsed.boundary, 'run_capabilities_unverified');
+  assert.equal(parsed.capabilitiesEnabled, false);
+  assert.equal(parsed.boundary, 'agent_capabilities_unattested');
+  assert.equal(parsed.execAttestation.verified, false);
   assert.equal(parsed.advisories[0].level, 'warning');
   assert.equal(parsed.advisories[0].ok, false);
   assert.equal(result.stdout.includes('source-canary'), false);
@@ -288,6 +294,7 @@ test('production bootstrap options replace ambient actor inputs', () => {
       pmToken: 'file-pm',
     },
   });
+  options.execAttestation = { verified: true, reason: 'test' };
   const policy = resolveAppActorTokenPolicy(options, env);
 
   assert.equal(options.actorTokenSource, 'ephemeral_file');

@@ -84,7 +84,9 @@ function diagnoseIsolation(env = process.env, {
     },
   ];
 
-  const capabilitiesEnabled = checks.every((check) => check.ok);
+  const capabilitiesEnabled = policy
+    ? policy.capabilitiesEnabled
+    : checks.every((check) => check.ok);
   // A check that is unknown must not hide a different, definite failed gate.
   // Exit 3 is reserved for cases where every known requirement passes.
   const hasIndeterminateCheck = checks.some((check) => check.indeterminate);
@@ -100,6 +102,7 @@ function diagnoseIsolation(env = process.env, {
     capabilitiesEnabled,
     indeterminate,
     boundary: policy ? policy.boundary : null,
+    execAttestation: policy ? policy.execAttestation : null,
     checks,
     advisories: [
       {

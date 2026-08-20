@@ -334,7 +334,7 @@ test('Phase 3a: authenticated Operator keeps capability out of its persisted pro
     PALANTIR_TOKEN: 'human-global',
     PALANTIR_PM_TOKEN: 'automation-global',
     PALANTIR_AGENT_PROCESS_ISOLATION: 'verified',
-  });
+  }, { execAttestation: { verified: true, reason: 'test' } });
   const managerCapabilityTokenService = createManagerCapabilityTokenService({
     actorTokens,
     signingKey: Buffer.alloc(32, 9),
