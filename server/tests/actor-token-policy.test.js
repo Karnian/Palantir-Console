@@ -24,7 +24,7 @@ function isolatedPolicy(env = {}) {
   return resolveActorTokenPolicy({
     ...env,
     PALANTIR_AGENT_PROCESS_ISOLATION: 'verified',
-  });
+  }, { execAttestation: { verified: true, reason: 'test' } });
 }
 
 test('actor token policy separates token-source assurance from process isolation', () => {
@@ -34,6 +34,7 @@ test('actor token policy separates token-source assurance from process isolation
     separated: false,
     processIsolated: false,
     capabilitiesEnabled: false,
+    execAttestation: null,
     boundary: 'auth_disabled',
   });
   assert.equal(resolveActorTokenPolicy({ PALANTIR_TOKEN: 'shared' }).boundary, 'agent_capabilities_disabled');
@@ -61,13 +62,13 @@ test('actor token policy separates token-source assurance from process isolation
     PALANTIR_TOKEN: 'human-secret',
     PALANTIR_PM_TOKEN: 'agent-secret',
     PALANTIR_AGENT_PROCESS_ISOLATION: 'verified',
-  }).boundary, 'run_capabilities_unverified');
+  }, { execAttestation: { verified: true, reason: 'test' } }).boundary, 'run_capabilities_unverified');
   assert.equal(resolveActorTokenPolicy({
     PALANTIR_TOKEN: 'human-secret',
     PALANTIR_PM_TOKEN: 'agent-secret',
     PALANTIR_ACTOR_TOKEN_SOURCE: 'ephemeral_file',
     PALANTIR_AGENT_PROCESS_ISOLATION: 'verified',
-  }).boundary, 'run_capabilities');
+  }, { execAttestation: { verified: true, reason: 'test' } }).boundary, 'run_capabilities');
 });
 
 test('repository dotenv files cannot contain actor credentials', (t) => {

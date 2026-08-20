@@ -46,7 +46,7 @@ test('final manager spawn env contains no global actor token and only the run ca
   const actorTokens = resolveActorTokenPolicy({
     ...base,
     PALANTIR_AGENT_PROCESS_ISOLATION: 'verified',
-  });
+  }, { execAttestation: { verified: true, reason: 'test' } });
   const finalEnv = applyManagerCredentialPolicy(
     buildManagerSpawnEnv({
       baseEnv: base,

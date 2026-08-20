@@ -22,6 +22,7 @@ function setupApp(t) {
     dbPath: path.join(tmp, 'test.db'),
     authToken: 'secret-token',
     agentProcessIsolation: true,
+    execAttestation: { verified: true, reason: 'test' },
     memoryDistillEnabled: false,
     operatorSchedulerEnabled: false,
     authResolverOpts: { hasKeychain: () => false },

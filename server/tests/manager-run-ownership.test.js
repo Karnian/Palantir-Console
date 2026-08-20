@@ -35,6 +35,7 @@ test('manager capabilities are scoped to owned workers on every run surface', as
     storageRoot: path.join(root, 'storage'),
     fsRoot: path.join(root, 'fs'),
     authToken: 'human-token',
+    execAttestation: { verified: true, reason: 'test' },
     executionEngine,
     authResolverOpts: { hasKeychain: () => false },
   });
@@ -228,6 +229,7 @@ test('scoping a non-manager caller costs no extra run lookup', async (t) => {
     storageRoot: path.join(root, 'storage'),
     fsRoot: path.join(root, 'fs'),
     authToken: 'human-token',
+    execAttestation: { verified: true, reason: 'test' },
     authResolverOpts: { hasKeychain: () => false },
   });
   t.after(async () => {
@@ -264,6 +266,7 @@ test('the gaps adversarial review named: instance-only ownership, Top interventi
     storageRoot: path.join(root, 'storage'),
     fsRoot: path.join(root, 'fs'),
     authToken: 'human-token',
+    execAttestation: { verified: true, reason: 'test' },
     authResolverOpts: { hasKeychain: () => false },
   });
   t.after(async () => {

@@ -224,6 +224,7 @@ test('createApp derives and wires a remote Manager API endpoint for the implicit
     fsRoot: dir,
     authToken: 'test-console-token',
     agentProcessIsolation: true,
+    execAttestation: { verified: true, reason: 'test' },
     memoryDistillEnabled: false,
     masterMemoryXprojectScanEnabled: false,
     nodeUsageService: {

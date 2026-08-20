@@ -31,6 +31,7 @@ function manifestAppOptions(options = {}) {
     storageRoot: root,
     fsRoot: root,
     authToken: null,
+    execAttestation: { verified: true, reason: 'test' },
     memoryDistillEnabled: false,
     operatorSchedulerEnabled: false,
     ...options,

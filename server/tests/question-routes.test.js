@@ -20,6 +20,10 @@ function setupApp(t, options = {}) {
     dbPath: path.join(tmp, 'test.db'),
     authToken: TOKEN,
     agentProcessIsolation: true,
+    // The exec-environ attestation is unverifiable off Linux, so a test that
+    // needs a capability must supply it through the application-owned option
+    // channel rather than relying on the platform (#447 prerequisite 3).
+    execAttestation: { verified: true, reason: 'test' },
     memoryDistillEnabled: false,
     operatorSchedulerEnabled: false,
     questionWaitTimeoutMs: 60,
