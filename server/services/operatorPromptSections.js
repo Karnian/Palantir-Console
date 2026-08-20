@@ -13,6 +13,27 @@
 // here; it rides the user payload (turnMode/codebaseProjectId, A2a) so the
 // static prompt stays cache-stable.
 
+const OPERATION_SEGMENT_PREFIX = '\u0000PALANTIR_OPERATION_SEGMENT:';
+const OPERATION_SEGMENT_SUFFIX = ':PALANTIR_OPERATION_SEGMENT\u0000';
+
+function operatorPromptError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function assertSafeOperatorUserSection(section) {
+  if (section.includes(OPERATION_SEGMENT_PREFIX) || section.includes(OPERATION_SEGMENT_SUFFIX)) {
+    // Reject loudly instead of silently stripping: stripping would conceal corrupt
+    // user configuration and could change its meaning. Callers persist this code
+    // as a run event so the failed/stopped Operator remains diagnosable.
+    throw operatorPromptError(
+      'OPERATOR_PROMPT_USER_SENTINEL',
+      'Operator user-configured prompt data contains a reserved operation-segment sentinel',
+    );
+  }
+}
+
 // Favorite-pool-aware PM Role (§4 LOCKED). The pre-favorite text said "Stay
 // within this project's scope", which contradicts the shared-pool model where
 // an Operator may be directed at any codebase. It now names the primary codebase
@@ -89,8 +110,15 @@ function buildProjectScopedSystemSection({ project, profile, brief, operatorRunI
   return sections.join('\n\n');
 }
 
+function buildFinalOperatorSystemPrompt({ baseSystemPrompt, ...projectSectionArgs }) {
+  const projectSection = buildProjectScopedSystemSection(projectSectionArgs);
+  assertSafeOperatorUserSection(projectSection);
+  return [baseSystemPrompt, projectSection].filter(Boolean).join('\n\n');
+}
+
 module.exports = {
   buildOperatorBriefSection,
   buildProjectScopedSystemSection,
+  buildFinalOperatorSystemPrompt,
   PM_ROLE_SECTION,
 };

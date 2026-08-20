@@ -9,7 +9,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { buildProjectScopedSystemSection, PM_ROLE_SECTION } = require('../services/operatorPromptSections');
+const { buildProjectScopedSystemSection, buildFinalOperatorSystemPrompt, PM_ROLE_SECTION } = require('../services/operatorPromptSections');
+
+const SENTINEL = '\u0000PALANTIR_OPERATION_SEGMENT:';
+const SENTINEL_SUFFIX = ':PALANTIR_OPERATION_SEGMENT\u0000';
 
 test('A2b: shared builder emits the expected sections + favorite-pool PM Role', () => {
   const section = buildProjectScopedSystemSection({
@@ -84,4 +87,51 @@ test('A2b: PM_ROLE_SECTION is exported and mentions the shared pool', () => {
   assert.match(PM_ROLE_SECTION, /## PM Role/);
   assert.match(PM_ROLE_SECTION, /shared codebase pool/i);
   assert.match(PM_ROLE_SECTION, /skill_pack_ids/);
+});
+
+test('final Operator prompt rejects sentinels in project name, persona, and brief fields', () => {
+  const cases = [
+    { project: { name: `bad${SENTINEL}`, id: 'p' } },
+    { project: { name: 'p', id: 'p' }, profile: { persona: `bad${SENTINEL}` } },
+    { project: { name: 'p', id: 'p' }, brief: { conventions: `bad${SENTINEL}` } },
+    { project: { name: 'p', id: 'p' }, brief: { known_pitfalls: `bad${SENTINEL}` } },
+    // codex R2 비차단 보강: suffix 단독으로도 거부되어야 한다. prefix 만 막으면
+    // 여는 쪽을 다른 경로에서 얻은 공격자가 닫는 쪽만 주입해 마커를 완성할 수 있다.
+    { project: { name: `bad${SENTINEL_SUFFIX}`, id: 'p' } },
+    // Skill pack names/descriptions reach the prompt through skillPackService,
+    // not a plain field -- exercise that path, not a shape the builder ignores.
+    {
+      project: { name: 'p', id: 'p' },
+      skillPackService: {
+        listProjectBindings: () => [{
+          skill_pack_id: 'sp1', skill_pack_name: `bad${SENTINEL}`, skill_pack_description: 'd', auto_apply: 1,
+        }],
+      },
+    },
+    {
+      project: { name: 'p', id: 'p' },
+      skillPackService: {
+        listProjectBindings: () => [{
+          skill_pack_id: 'sp1', skill_pack_name: 'n', skill_pack_description: `bad${SENTINEL_SUFFIX}`, auto_apply: 1,
+        }],
+      },
+    },
+  ];
+  for (const value of cases) {
+    assert.throws(
+      () => buildFinalOperatorSystemPrompt({ baseSystemPrompt: 'base', ...value }),
+      error => error.code === 'OPERATOR_PROMPT_USER_SENTINEL',
+    );
+  }
+});
+
+test('final Operator prompt permits /api/ in user data and preserves normal assembly bytes', () => {
+  const args = {
+    baseSystemPrompt: 'base',
+    project: { name: 'docs /api/project', id: 'p', directory: '/tmp/api/work' },
+    profile: { persona: 'Explain /api/persona literally.' },
+    brief: { conventions: 'Keep /api/brief unchanged.' },
+  };
+  const section = buildProjectScopedSystemSection(args);
+  assert.equal(buildFinalOperatorSystemPrompt(args), `base\n\n${section}`);
 });
