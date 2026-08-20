@@ -4,6 +4,7 @@ const { asyncHandler } = require('../middleware/asyncHandler');
 const { withoutSessionHandle } = require('../utils/managerRunView');
 const { createLocalNodeExecutor } = require('../services/nodeExecutor');
 const { parseClaudeStreamJsonOutput } = require('../services/claudeStreamJson');
+const { managerCanAccessRun } = require('../services/managerRunScope');
 
 // R2-B.2: maximum unified-diff payload size, in bytes. Diffs larger than
 // this are truncated and the client is warned via a `truncated` flag so
@@ -199,15 +200,51 @@ function computeMcpTemplateDrift(snapshotCore, snapshotAppliedAt, mcpTemplateSer
 function createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService, presetService, mcpTemplateService, projectService, taskService, nodeExecutor = createLocalNodeExecutor(), nodeService = null }) {
   const router = express.Router();
 
+  function managerGrant(req) {
+    return {
+      runId: req.auth?.managerRunId,
+      conversationId: req.auth?.conversationId,
+      layer: req.auth?.layer,
+    };
+  }
+
+  function managerOwns(req, run) {
+    return req.auth?.actor !== 'manager'
+      || managerCanAccessRun(managerGrant(req), run, { runService });
+  }
+
+  // For routes that do NOT already hold the run. The lookup is skipped entirely
+  // for non-manager callers: the incremental output contract proves its pre-read
+  // / re-read ordering by COUNTING getRun calls, so an unconditional lookup here
+  // is a real regression, not just a wasted query. An unreadable run denies.
+  function managerScopeDenies(req, runId) {
+    if (req.auth?.actor !== 'manager') return false;
+    let run = null;
+    try { run = runService.getRun(runId); } catch { return true; }
+    return !managerCanAccessRun(managerGrant(req), run, { runService });
+  }
+
+  function denyManagerRunAccess(res) {
+    return res.status(403).json({
+      error: 'manager capability may only access its own worker runs',
+    });
+  }
+
   router.get('/', asyncHandler(async (req, res) => {
     const { task_id, status } = req.query;
-    const runs = runService.listRuns({ task_id, status });
+    let runs = runService.listRuns({ task_id, status });
+    if (req.auth?.actor === 'manager') {
+      runs = runs.filter(run => (
+        run.id === req.auth.managerRunId || managerOwns(req, run)
+      ));
+    }
     // Strip the internal rowid: getByTask exposes _seq only for R1b ordering.
     res.json({ runs: runs.map(({ _seq, ...rest }) => withoutSessionHandle(req, rest)) });
   }));
 
   router.get('/:id', asyncHandler(async (req, res) => {
     const run = runService.getRun(req.params.id);
+    if (!managerOwns(req, run)) return denyManagerRunAccess(res);
     res.json({ run: withoutSessionHandle(req, run) });
   }));
 
@@ -363,6 +400,7 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
   }));
 
   router.get('/:id/events', asyncHandler(async (req, res) => {
+    if (managerScopeDenies(req, req.params.id)) return denyManagerRunAccess(res);
     const afterId = req.query.after ? Number(req.query.after) : undefined;
     const events = runService.getRunEvents(req.params.id, afterId);
     res.json({ events });
@@ -408,6 +446,7 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
           error: 'manager capability may not intervene in a manager run',
         });
       }
+      if (!managerOwns(req, target)) return denyManagerRunAccess(res);
     }
 
     if (conversationService) {
@@ -454,6 +493,7 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
           error: 'manager capability may not intervene in a manager run',
         });
       }
+      if (!managerOwns(req, target)) return denyManagerRunAccess(res);
     }
     await lifecycleService.cancelRun(req.params.id);
     res.json({ status: 'ok' });
@@ -464,6 +504,7 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
     if (!executionEngine) {
       return res.status(501).json({ error: 'Execution engine not configured' });
     }
+    if (managerScopeDenies(req, req.params.id)) return denyManagerRunAccess(res);
     if (req.query.after !== undefined) {
       const afterWire = req.query.after;
       if (typeof afterWire !== 'string' || !/^(0|[1-9]\d*)$/.test(afterWire)) {

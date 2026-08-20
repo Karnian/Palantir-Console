@@ -2488,6 +2488,7 @@ function createRunService(db, eventBus, questionService = null) {
     updateRunMcpConfig,
     updateRunPreset,
     resolveOperatorConversationId: resolveOperatorConversationIdWithDb,
+    resolveOperatorConversationIdWithDb,
     ensurePrimaryOperatorInstanceForProject,
     getOperatorInstance,
     assertActiveOperatorInstance,
