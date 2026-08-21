@@ -1,6 +1,37 @@
 'use strict';
 
 const { BadRequestError } = require('../utils/errors');
+const {
+  CLAUDE_AUTH_KEYS,
+  CODEX_AUTH_KEYS,
+  CLAUDE_PROVIDER_AUTH_ENV_KEYS,
+} = require('./authResolver');
+
+// A provider speaks about the AGENT'S authentication only when it names a key
+// the adapters authenticate with, or selects an alternate credential chain --
+// as an env key or as its gate.
+//
+// Two broader rules were tried and are wrong. "Has a gate" catches a config-only
+// provider toggling a feature flag (CUSTOM_FEATURE_ENABLED). "Declares any
+// secret" catches a provider handing the agent a database password: PGPASSWORD
+// is a secret, but it says nothing about how the agent authenticates to its
+// model, and cutting off auth over it would be the same over-reach.
+// Credential-bearing keys and credential-chain selectors only. ANTHROPIC_BASE_URL
+// is in CLAUDE_AUTH_KEYS but is deliberately excluded: it redirects WHERE the
+// credential is sent, it does not supply one, and it cannot make canAuth true on
+// its own. Declaring a proxy endpoint while still authenticating with the
+// ambient key is a legitimate setup, so treating it as a credential declaration
+// would contradict the config-only rule this set exists to honor.
+const AUTH_RELEVANT_ENV_KEYS = new Set([
+  ...CLAUDE_AUTH_KEYS.filter((key) => key !== 'ANTHROPIC_BASE_URL'),
+  ...CODEX_AUTH_KEYS,
+  ...CLAUDE_PROVIDER_AUTH_ENV_KEYS,
+]);
+
+function declaresAuthority(provider) {
+  const declared = [...(provider.envKeys || []), provider.gateEnvKey].filter(Boolean);
+  return declared.some((key) => AUTH_RELEVANT_ENV_KEYS.has(key));
+}
 const { isBearerEnvKeyDenied } = require('./envDenylist');
 
 const ENV_VAR_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -283,7 +314,20 @@ function resolveProviderEnvPolicy(
     valid: parsedExplicit.valid && resolvedProviders.every((provider) => provider.valid),
     explicitKeys: parsedExplicit.keys,
     effectiveKeys,
-    allowDefaultAuth: parsedExplicit.keys.length === 0,
+    // Declaring where auth comes from IS the policy. Before, a profile whose
+    // provider resolved to an empty effective list -- an inactive gate is the
+    // ordinary way that happens -- fell back to ambient defaults, so the host's
+    // ANTHROPIC_API_KEY/CODEX_API_KEY reached the child anyway. The operator
+    // said "auth comes from Bedrock"; with the gate off the answer is no auth,
+    // not a silent different credential.
+    //
+    // Only auth-relevant declarations do this. A config-only provider (a region,
+    // an endpoint) must NOT cut off authentication -- adding a variable is not a
+    // statement about credentials, and treating it as one broke that contract.
+    // Auth-relevant = it carries a gate (the way an alternate credential chain is
+    // selected) or declares a provider secret.
+    allowDefaultAuth: parsedExplicit.keys.length === 0
+      && !resolvedProviders.some(declaresAuthority),
     blockedKeys: [...blockedKeys],
     providers: resolvedProviders,
   };

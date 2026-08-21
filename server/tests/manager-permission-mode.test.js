@@ -393,7 +393,7 @@ test('Top Manager snapshots and resumes Claude runtime options after profile rem
     settingSources: '',
     settings: 'locked.json',
     envPolicy: {
-      version: 1,
+      version: 2, // envPolicy snapshot v2 (allowDefaultAuth meaning changed)
       effectiveKeys: [
         'CLAUDE_CODE_OAUTH_TOKEN',
         'ANTHROPIC_API_KEY',

@@ -650,6 +650,10 @@ test('MUTATION: deleted pinned profile resumes from its env-policy snapshot with
     const freshRun = harness.runService.getRun(runId);
     const snapshot = JSON.parse(freshRun.session_claude_options_json).envPolicy;
     assert.deepEqual(snapshot.effectiveKeys, ['PIN_ONLY']);
+    // v2: allowDefaultAuth changed meaning, so a snapshot written under the old
+    // rule must not be replayed. Pinning the number here means a future meaning
+    // change cannot ship without deciding what happens to existing sessions.
+    assert.equal(snapshot.version, 2);
     harness.runService.updateClaudeSessionId(runId, 'resume-pinned-env-snapshot');
     harness.agentProfileService.deleteProfile('claude-code');
     assert.equal(harness.runService.getRun(runId).agent_profile_id, null);

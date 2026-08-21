@@ -445,16 +445,28 @@ function bootstrapClaudeAuthFromEnv({ logger = console } = {}) {
  *                                apiKeyHelper in this child-local file.
  * @returns {{ canAuth: boolean, env: object, sources: string[], diagnostics: string[] }}
  */
+// The single place that decides whether ambient default credentials apply.
+//
+// "Empty list" is only an inference about a caller that said nothing. An
+// explicit false is a DECISION -- the profile declared where auth comes from --
+// and must beat it, otherwise an empty effective list silently re-opens ambient
+// auth. Callers that pass nothing keep the old inference, so this is additive.
+//
+// Every consumer must read the answer from here. The isolated resolver derived
+// its own variant (allowDefaultAuth !== false) and the two disagreed for a
+// non-empty allowlist with no explicit flag -- the shape liveDistiller actually
+// passes -- so a restricted profile still had a host login recovered for it.
+function shouldUseDefaultAuth(envAllowlist, allowDefaultAuth) {
+  const inferred = !Array.isArray(envAllowlist) || envAllowlist.length === 0;
+  return allowDefaultAuth === undefined ? inferred : allowDefaultAuth === true;
+}
+
 function resolveAuthAllowSet(
   envAllowlist,
   defaultAuthKeys,
-  { allowDefaultAuth = false, blockedEnvKeys = [] } = {},
+  { allowDefaultAuth, blockedEnvKeys = [] } = {},
 ) {
-  const useDefaults = (
-    !Array.isArray(envAllowlist)
-    || envAllowlist.length === 0
-    || allowDefaultAuth
-  );
+  const useDefaults = shouldUseDefaultAuth(envAllowlist, allowDefaultAuth);
   const allow = new Set(useDefaults ? defaultAuthKeys : []);
   if (Array.isArray(envAllowlist)) {
     for (const key of envAllowlist) allow.add(key);
@@ -495,7 +507,11 @@ function resolveProviderAuthSources(providerEnv, allow, adapterAuthKeys) {
 function resolveClaudeAuth({
   envAllowlist,
   providerEnv,
-  allowDefaultAuth = false,
+  // Undefined must stay undefined so resolveAuthAllowSet can tell "caller said
+  // nothing" (infer from the list) from "caller decided no" (a declared
+  // policy). Defaulting to false here made every unspecified call look like a
+  // decision and cut off ambient auth for callers that never had a policy.
+  allowDefaultAuth,
   blockedEnvKeys,
   hasKeychain = hasClaudeKeychainCredentials,
   hasCredentialsFile = hasClaudeLinuxCredentials,
@@ -627,7 +643,11 @@ function resolveClaudeAuth({
     diagnostics.push(bare
       ? 'Claude --bare requires a materialized ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN, an allowlisted Claude cloud-provider auth mode, or apiKeyHelper via --settings, but none was available.'
       : 'No Claude credentials found. Enable an allowlisted Claude cloud-provider auth mode, set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY, run `claude login`, or seed .claude-auth.json.');
-    if (Array.isArray(envAllowlist) && envAllowlist.length > 0) {
+    // Also explain the empty-allowlist case. A profile whose auth provider is
+    // inactive now resolves to an empty list and refuses ambient credentials --
+    // without this the operator only sees "No credentials found" and cannot
+    // tell that their own declaration is what withheld the present key.
+    if (Array.isArray(envAllowlist) && (envAllowlist.length > 0 || allowDefaultAuth === false)) {
       const blocked = [
         'CLAUDE_CODE_OAUTH_TOKEN',
         'ANTHROPIC_API_KEY',
@@ -650,7 +670,11 @@ function resolveClaudeAuth({
 function resolveCodexAuth({
   envAllowlist,
   providerEnv,
-  allowDefaultAuth = false,
+  // Undefined must stay undefined so resolveAuthAllowSet can tell "caller said
+  // nothing" (infer from the list) from "caller decided no" (a declared
+  // policy). Defaulting to false here made every unspecified call look like a
+  // decision and cut off ambient auth for callers that never had a policy.
+  allowDefaultAuth,
   blockedEnvKeys,
 } = {}) {
   const env = {};
@@ -692,7 +716,7 @@ function resolveCodexAuth({
   );
   if (!canAuth) {
     diagnostics.push(`No Codex credentials found. Set CODEX_API_KEY/OPENAI_API_KEY or run \`codex login\` to create ${CODEX_AUTH_FILE}.`);
-    if (Array.isArray(envAllowlist) && envAllowlist.length > 0) {
+    if (Array.isArray(envAllowlist) && (envAllowlist.length > 0 || allowDefaultAuth === false)) {
       const blocked = CODEX_AUTH_KEYS.filter(k => process.env[k] && !allow.has(k));
       if (blocked.length > 0) {
         diagnostics.push(`Profile env_allowlist excluded these present env vars: ${blocked.join(', ')}.`);
@@ -793,7 +817,11 @@ async function readClaudeKeychainToken() {
 async function resolveClaudeAuthForIsolated({
   envAllowlist,
   providerEnv,
-  allowDefaultAuth = false,
+  // Undefined must stay undefined so resolveAuthAllowSet can tell "caller said
+  // nothing" (infer from the list) from "caller decided no" (a declared
+  // policy). Defaulting to false here made every unspecified call look like a
+  // decision and cut off ambient auth for callers that never had a policy.
+  allowDefaultAuth,
   blockedEnvKeys,
   hasKeychain = hasClaudeKeychainCredentials,
   readKeychainToken = readClaudeKeychainToken,
@@ -868,7 +896,14 @@ async function resolveClaudeAuthForIsolated({
     }
   }
 
-  if (!token) {
+  // A profile that declared where auth comes from must not have a host login
+  // recovered for it. Unlike the plain CLI spawn -- where Claude reads HOME
+  // itself and no env policy can stop it -- the isolated path materializes the
+  // credential HERE, so this is the layer that can and should decline. Derived
+  // from the same decision the allow-set used, never a parallel rule.
+  const nativeFallbackAllowed = shouldUseDefaultAuth(envAllowlist, allowDefaultAuth);
+
+  if (!token && nativeFallbackAllowed) {
     if (hasKeychain()) {
       // sources note added after success only — the probe alone isn't
       // proof of extraction.
@@ -880,7 +915,7 @@ async function resolveClaudeAuthForIsolated({
     }
   }
 
-  if (!token) {
+  if (!token && nativeFallbackAllowed) {
     // Linux fallback: ~/.claude/.credentials.json (no system keychain).
     if (hasCredentialsFile()) {
       const fileToken = await readCredentialsFileToken();

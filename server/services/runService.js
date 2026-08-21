@@ -2166,7 +2166,12 @@ function createRunService(db, eventBus, questionService = null) {
       persistedOptions = {
         ...(sessionClaudeOptions || {}),
         envPolicy: {
-          version: 1,
+          // 2: allowDefaultAuth changed meaning. A v1 snapshot recorded the old
+          // rule, under which an inactive auth provider still permitted ambient
+          // credentials. The snapshot is authoritative on resume by design, so a
+          // stale one cannot be trusted -- resume refuses it instead of silently
+          // replaying a decision made under the vulnerable rule.
+          version: 2,
           effectiveKeys: effectiveKeys === null ? null : [...effectiveKeys],
           providers: JSON.parse(JSON.stringify(providers)),
           allowDefaultAuth: sessionEnvPolicy.allowDefaultAuth === true,

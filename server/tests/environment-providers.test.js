@@ -698,3 +698,221 @@ test('creating a profile that pre-approves a secret is a human write too', async
     });
   assert.equal(attempt.status, 403, JSON.stringify(attempt.body));
 });
+
+// #518 blocker 1. A profile whose provider resolved to an empty effective list --
+// an inactive gate is the ordinary way that happens -- fell back to ambient
+// defaults, so the host's ANTHROPIC_API_KEY reached the child anyway. The
+// operator said "auth comes from Bedrock"; with the gate off the answer is no
+// auth, not a silent different credential.
+const { resolveManagerAuth } = require('../services/authResolver');
+
+function authFor(app, profileId, extra = {}) {
+  const policy = app.services.agentProfileService.resolveEnvPolicy(profileId);
+  return {
+    policy,
+    ctx: resolveManagerAuth('claude-code', {
+      envAllowlist: policy.effectiveKeys,
+      providers: policy.providers,
+      allowDefaultAuth: policy.allowDefaultAuth,
+      blockedEnvKeys: policy.blockedKeys,
+      hasKeychain: () => false,
+      ...extra,
+    }),
+  };
+}
+
+function withAmbientKey(t) {
+  const previousKey = process.env.ANTHROPIC_API_KEY;
+  const previousGate = process.env.CLAUDE_CODE_USE_BEDROCK;
+  process.env.ANTHROPIC_API_KEY = 'ambient-secret';
+  delete process.env.CLAUDE_CODE_USE_BEDROCK;
+  t.after(() => {
+    if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = previousKey;
+    if (previousGate === undefined) delete process.env.CLAUDE_CODE_USE_BEDROCK;
+    else process.env.CLAUDE_CODE_USE_BEDROCK = previousGate;
+  });
+}
+
+test('an inactive auth provider does not fall back to ambient credentials', async (t) => {
+  withAmbientKey(t);
+  const app = await createTestApp(t);
+  const provider = await request(app).post('/api/environment-providers').set(...COOKIE).send({
+    name: `inactive-auth-${Math.random().toString(16).slice(2)}`,
+    env_keys: ['CLAUDE_CODE_USE_BEDROCK', 'AWS_SECRET_ACCESS_KEY'],
+    gate_env_key: 'CLAUDE_CODE_USE_BEDROCK',
+    gate_env_value: '1',
+  });
+  await request(app).patch('/api/agents/claude-code').set(...COOKIE)
+    .send({ env_allowlist: '[]', environment_provider_ids: [provider.body.provider.id] });
+
+  const { policy, ctx } = authFor(app, 'claude-code');
+  assert.deepEqual(policy.effectiveKeys, [], 'the gate is off, so nothing is effective');
+  assert.equal(policy.allowDefaultAuth, false, 'an auth declaration turns ambient defaults off');
+  assert.equal(ctx.env.ANTHROPIC_API_KEY, undefined, 'the ambient key must not reach the child');
+  assert.equal(ctx.canAuth, false, 'refusing loudly beats spawning with a credential nobody chose');
+});
+
+test('a config-only provider still leaves default auth alone', async (t) => {
+  // Adding a region variable is not a statement about credentials. Treating any
+  // attached provider as an auth declaration broke this, so it is pinned here
+  // next to the case above -- the two define the boundary together.
+  withAmbientKey(t);
+  const app = await createTestApp(t);
+  const provider = await request(app).post('/api/environment-providers').set(...COOKIE).send({
+    name: `config-only-${Math.random().toString(16).slice(2)}`,
+    env_keys: ['CUSTOM_REGION'],
+  });
+  await request(app).patch('/api/agents/claude-code').set(...COOKIE)
+    .send({ env_allowlist: '[]', environment_provider_ids: [provider.body.provider.id] });
+
+  const { policy, ctx } = authFor(app, 'claude-code');
+  assert.equal(policy.allowDefaultAuth, true);
+  assert.equal(ctx.env.ANTHROPIC_API_KEY, 'ambient-secret');
+});
+
+test('a config-only provider with a gate is still config-only', async (t) => {
+  // The gate is a generic schema, not an auth signal. Treating "has a gate" as
+  // "speaks about credentials" cut off authentication for a provider that only
+  // toggles a feature flag -- adversarial review's counter-example.
+  withAmbientKey(t);
+  const app = await createTestApp(t);
+  const provider = await request(app).post('/api/environment-providers').set(...COOKIE).send({
+    name: `gated-config-${Math.random().toString(16).slice(2)}`,
+    env_keys: ['CUSTOM_FEATURE_ENABLED', 'CUSTOM_REGION'],
+    gate_env_key: 'CUSTOM_FEATURE_ENABLED',
+    gate_env_value: '1',
+  });
+  await request(app).patch('/api/agents/claude-code').set(...COOKIE)
+    .send({ env_allowlist: '[]', environment_provider_ids: [provider.body.provider.id] });
+
+  const { policy, ctx } = authFor(app, 'claude-code');
+  assert.equal(policy.allowDefaultAuth, true, 'a feature-flag gate is not an auth declaration');
+  assert.equal(ctx.env.ANTHROPIC_API_KEY, 'ambient-secret');
+});
+
+test('declaring only an endpoint does not cut off authentication', async (t) => {
+  // ANTHROPIC_BASE_URL redirects WHERE the credential goes; it supplies none and
+  // cannot make canAuth true alone. Pointing at a proxy while still using the
+  // ambient key is a real setup, so this must behave like config, not credentials.
+  withAmbientKey(t);
+  const app = await createTestApp(t);
+  const provider = await request(app).post('/api/environment-providers').set(...COOKIE).send({
+    name: `base-url-${Math.random().toString(16).slice(2)}`,
+    env_keys: ['ANTHROPIC_BASE_URL'],
+  });
+  await request(app).patch('/api/agents/claude-code').set(...COOKIE)
+    .send({ env_allowlist: '[]', environment_provider_ids: [provider.body.provider.id] });
+
+  assert.equal(authFor(app, 'claude-code').policy.allowDefaultAuth, true);
+});
+
+test('declaring a credential key itself is an auth declaration', async (t) => {
+  withAmbientKey(t);
+  const app = await createTestApp(t);
+  const provider = await request(app).post('/api/environment-providers').set(...COOKIE).send({
+    name: `oauth-${Math.random().toString(16).slice(2)}`,
+    env_keys: ['CLAUDE_CODE_OAUTH_TOKEN'],
+  });
+  await request(app).patch('/api/agents/claude-code').set(...COOKIE)
+    .send({ env_allowlist: '[]', environment_provider_ids: [provider.body.provider.id] });
+
+  assert.equal(authFor(app, 'claude-code').policy.allowDefaultAuth, false);
+});
+
+test('a provider handing over an unrelated secret does not cut off model auth', async (t) => {
+  // A database password is a secret, but it says nothing about how the agent
+  // authenticates to its model. An earlier rule treated any declared secret as
+  // an auth declaration; a reverse regression showed that branch never fired on
+  // the cases under test, and reasoning it through showed it was also wrong.
+  withAmbientKey(t);
+  const app = await createTestApp(t);
+  const provider = await request(app).post('/api/environment-providers').set(...COOKIE).send({
+    name: `db-secret-${Math.random().toString(16).slice(2)}`,
+    env_keys: ['PGPASSWORD'],
+  });
+  await request(app).patch('/api/agents/claude-code').set(...COOKIE)
+    .send({ env_allowlist: '[]', environment_provider_ids: [provider.body.provider.id] });
+
+  const { policy, ctx } = authFor(app, 'claude-code');
+  assert.equal(policy.allowDefaultAuth, true, 'an unrelated secret is not an auth declaration');
+  assert.equal(ctx.env.ANTHROPIC_API_KEY, 'ambient-secret');
+});
+
+test('the refusal explains itself instead of reporting a generic missing credential', async (t) => {
+  // Fail-closed without a reason is an operator cliff: the spawn stops and the
+  // message blames the environment rather than the declaration that withheld it.
+  withAmbientKey(t);
+  const app = await createTestApp(t);
+  const provider = await request(app).post('/api/environment-providers').set(...COOKIE).send({
+    name: `diagnostic-${Math.random().toString(16).slice(2)}`,
+    env_keys: ['CLAUDE_CODE_USE_BEDROCK', 'AWS_SECRET_ACCESS_KEY'],
+    gate_env_key: 'CLAUDE_CODE_USE_BEDROCK',
+    gate_env_value: '1',
+  });
+  await request(app).patch('/api/agents/claude-code').set(...COOKIE)
+    .send({ env_allowlist: '[]', environment_provider_ids: [provider.body.provider.id] });
+
+  const { ctx } = authFor(app, 'claude-code');
+  assert.equal(ctx.canAuth, false);
+  // Assert on the phrase only the exclusion diagnostic produces. The generic
+  // "No Claude credentials found..." line also names ANTHROPIC_API_KEY, so
+  // matching the key alone passed even with the diagnostic suppressed.
+  assert.ok(
+    ctx.diagnostics.some((line) => line.includes('excluded these present env vars')
+      && line.includes('ANTHROPIC_API_KEY')),
+    `the refusal must name what it withheld; got ${JSON.stringify(ctx.diagnostics)}`,
+  );
+});
+
+test('an isolated preset does not recover a host login the profile did not declare', async (t) => {
+  // The plain CLI spawn reads HOME itself and no env policy can stop it, but the
+  // isolated path materializes the credential HERE. Adversarial review was right
+  // that this one is inside our reach, so declining is not out of scope.
+  const { resolveClaudeAuthForIsolated } = require('../services/authResolver');
+  const nativeHooks = {
+    hasKeychain: () => true,
+    readKeychainToken: async () => 'host-keychain-token',
+    hasCredentialsFile: () => true,
+    readCredentialsFileToken: async () => 'host-credentials-file-token',
+  };
+
+  const declared = await resolveClaudeAuthForIsolated({
+    envAllowlist: [], providers: [], allowDefaultAuth: false, blockedEnvKeys: [], ...nativeHooks,
+  });
+  assert.equal(declared.canAuth, false, 'a declared policy must not fall back to a host login');
+  assert.deepEqual(declared.env, {});
+  assert.equal(declared.sources.some((s) => s.startsWith('keychain:')), false);
+
+  // A profile that declared nothing keeps the existing behavior.
+  const undeclared = await resolveClaudeAuthForIsolated({
+    envAllowlist: [], providers: [], blockedEnvKeys: [], ...nativeHooks,
+  });
+  assert.equal(undeclared.canAuth, true);
+});
+
+test('a restricted allowlist blocks the host login even without an explicit flag', async (t) => {
+  // liveDistiller passes only { envAllowlist }. The allow-set already refuses
+  // default credentials for a non-empty list, but the isolated native fallback
+  // used a parallel rule (allowDefaultAuth !== false) and disagreed -- so the
+  // host keychain was materialized for a profile that restricted its env.
+  const { resolveClaudeAuthForIsolated } = require('../services/authResolver');
+  const nativeHooks = {
+    hasKeychain: () => true,
+    readKeychainToken: async () => 'host-keychain-token',
+    hasCredentialsFile: () => true,
+    readCredentialsFileToken: async () => 'host-credentials-file-token',
+  };
+
+  const restricted = await resolveClaudeAuthForIsolated({
+    envAllowlist: ['SOMETHING_ELSE'], providers: [], blockedEnvKeys: [], ...nativeHooks,
+  });
+  assert.equal(restricted.canAuth, false, 'a restricted allowlist must not recover a host login');
+  assert.equal(restricted.sources.some((s) => s.startsWith('keychain:')), false);
+
+  // Saying nothing at all still falls back, which is the pre-existing contract.
+  const unrestricted = await resolveClaudeAuthForIsolated({
+    providers: [], blockedEnvKeys: [], ...nativeHooks,
+  });
+  assert.equal(unrestricted.canAuth, true);
+});

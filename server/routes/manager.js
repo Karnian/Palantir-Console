@@ -171,7 +171,7 @@ function resolveSessionEnvPolicySnapshot(sessionClaudeOptionsJson) {
     !snapshot
     || typeof snapshot !== 'object'
     || Array.isArray(snapshot)
-    || snapshot.version !== 1
+    || snapshot.version !== 2
     || (snapshot.effectiveKeys !== null && !Array.isArray(snapshot.effectiveKeys))
     || !Array.isArray(snapshot.providers)
     || typeof snapshot.allowDefaultAuth !== 'boolean'
