@@ -678,10 +678,20 @@ function createManagerCapabilityTokenService({
     if (managerLayer !== 'top' && managerLayer !== 'operator' && managerLayer !== 'pm') {
       throw new Error('manager capability requires a valid layer');
     }
+    // Normalize the legacy spelling at the single point that creates a grant.
+    // Leaving it in the token forced every consumer to re-derive the same
+    // mapping, and they disagreed: managerCapabilityRequestAllowed and
+    // managerRunScope branch on `layer !== 'top'` (so 'pm' behaves as operator),
+    // while routes/agentContext.js requires the literal 'operator' (so 'pm' gets
+    // 403). One capability then works on every operator surface except one.
+    // Migration 0xx already constrains runs.manager_layer to top|operator, so a
+    // 'pm' grant is not reachable today -- normalizing here keeps it that way by
+    // construction instead of asking each surface to remember.
+    const normalizedLayer = managerLayer === 'pm' ? 'operator' : managerLayer;
     const encoded = Buffer.from(JSON.stringify({
       runId: id,
       conversationId: conversation,
-      layer: managerLayer,
+      layer: normalizedLayer,
     }), 'utf8').toString('base64url');
     const signature = crypto
       .createHmac('sha256', signingKey)

@@ -595,3 +595,30 @@ test('agent capabilities fail closed without verified process isolation', () => 
     /verified agent process isolation/,
   );
 });
+
+test('mint normalizes the legacy pm layer so every surface reads the same value', () => {
+  // The layer travels in the token and each surface re-derives meaning from it.
+  // managerCapabilityRequestAllowed and managerRunScope branch on `!== 'top'`
+  // (pm behaves as operator) while routes/agentContext.js requires the literal
+  // 'operator' (pm gets 403). Normalizing at the one place that creates a grant
+  // removes the disagreement instead of asking each surface to remember it.
+  const service = createManagerCapabilityTokenService({
+    actorTokens: {
+      humanToken: 'human', agentToken: 'human', separated: false,
+      processIsolated: true, capabilitiesEnabled: true, boundary: 'run_capabilities',
+    },
+  });
+  const token = service.mint('run-1', { conversationId: 'operator:oi_legacy', layer: 'pm' });
+  assert.ok(token);
+  assert.equal(service.verify(token).layer, 'operator');
+
+  // The non-legacy spellings are untouched.
+  assert.equal(
+    service.verify(service.mint('run-2', { conversationId: 'operator:oi_x', layer: 'operator' })).layer,
+    'operator',
+  );
+  assert.equal(
+    service.verify(service.mint('run-3', { conversationId: 'top', layer: 'top' })).layer,
+    'top',
+  );
+});
