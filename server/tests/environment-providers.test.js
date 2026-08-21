@@ -596,3 +596,105 @@ test('MUTATION: a secret-shaped gate is presence-only and its value is never sto
   assert.equal(hydrated.environment_providers[0].gate_env_value, null);
   assert.equal(hydrated.environment_providers[0].active, true);
 });
+
+// #518 blocker 3. The human/Origin guard protected `environment_provider_ids` --
+// WHICH providers are attached -- but a provider secret becomes APPROVED only
+// when the profile's `env_allowlist` names it. Guarding the attachment alone let
+// a bearer promote the secret with an allowlist-only write.
+async function bindSecretProvider(app) {
+  const created = await request(app).post('/api/environment-providers').set(...COOKIE).send({
+    name: `secret-approval-${Math.random().toString(16).slice(2)}`,
+    env_keys: ['CLAUDE_CODE_USE_BEDROCK', 'AWS_SECRET_ACCESS_KEY'],
+    gate_env_key: 'CLAUDE_CODE_USE_BEDROCK',
+    gate_env_value: '1',
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  const bound = await request(app).patch('/api/agents/claude-code').set(...COOKIE).send({
+    environment_provider_ids: [created.body.provider.id],
+  });
+  assert.equal(bound.status, 200, JSON.stringify(bound.body));
+  return created.body.provider.id;
+}
+
+const approvedFor = (agent, providerId) => (agent.environment_providers || [])
+  .find((p) => p.id === providerId)?.approved_secret_env_keys || [];
+
+// Approval also needs the provider's gate to be live in the host env, otherwise
+// an allowlisted secret is simply inert and the assertion would prove nothing.
+function withActiveGate(t) {
+  const previous = process.env.CLAUDE_CODE_USE_BEDROCK;
+  process.env.CLAUDE_CODE_USE_BEDROCK = '1';
+  t.after(() => {
+    if (previous === undefined) delete process.env.CLAUDE_CODE_USE_BEDROCK;
+    else process.env.CLAUDE_CODE_USE_BEDROCK = previous;
+  });
+}
+
+test('a bearer cannot approve a provider secret through env_allowlist alone', async (t) => {
+  const app = await createTestApp(t);
+  const providerId = await bindSecretProvider(app);
+
+  const attempt = await request(app).patch('/api/agents/claude-code')
+    .set('Authorization', 'Bearer secret-token')
+    .send({ env_allowlist: '["AWS_SECRET_ACCESS_KEY"]' });
+  assert.equal(attempt.status, 403, JSON.stringify(attempt.body));
+
+  const after = await request(app).get('/api/agents/claude-code').set(...COOKIE);
+  assert.deepEqual(approvedFor(after.body.agent, providerId), [],
+    'the refused write must not have promoted the secret');
+});
+
+test('a human with a same-origin cookie still approves it', async (t) => {
+  withActiveGate(t);
+  const app = await createTestApp(t);
+  const providerId = await bindSecretProvider(app);
+
+  const allowed = await request(app).patch('/api/agents/claude-code').set(...COOKIE)
+    .send({ env_allowlist: '["AWS_SECRET_ACCESS_KEY"]' });
+  assert.equal(allowed.status, 200, JSON.stringify(allowed.body));
+  assert.deepEqual(approvedFor(allowed.body.agent, providerId), ['AWS_SECRET_ACCESS_KEY']);
+});
+
+test('ordinary allowlist edits and de-escalation stay open to a bearer', async (t) => {
+  // The guard is on the effect, not the field name: gating every env_allowlist
+  // write would break bearer automation that never touches a secret.
+  withActiveGate(t);
+  const app = await createTestApp(t);
+  const providerId = await bindSecretProvider(app);
+
+  const ordinary = await request(app).patch('/api/agents/claude-code')
+    .set('Authorization', 'Bearer secret-token')
+    .send({ env_allowlist: '["AWS_REGION"]' });
+  assert.equal(ordinary.status, 200, JSON.stringify(ordinary.body));
+
+  // Approve as a human first.
+  await request(app).patch('/api/agents/claude-code').set(...COOKIE)
+    .send({ env_allowlist: '["AWS_SECRET_ACCESS_KEY"]' });
+
+  // Carrying an ALREADY-approved secret through while adding an ordinary key is
+  // not an escalation -- the human already approved it. Gating on mere presence
+  // instead of on what is newly added would refuse this.
+  const carried = await request(app).patch('/api/agents/claude-code')
+    .set('Authorization', 'Bearer secret-token')
+    .send({ env_allowlist: '["AWS_SECRET_ACCESS_KEY","AWS_REGION"]' });
+  assert.equal(carried.status, 200, JSON.stringify(carried.body));
+  assert.deepEqual(approvedFor(carried.body.agent, providerId), ['AWS_SECRET_ACCESS_KEY']);
+
+  // Removal is de-escalation.
+  const removed = await request(app).patch('/api/agents/claude-code')
+    .set('Authorization', 'Bearer secret-token')
+    .send({ env_allowlist: '[]' });
+  assert.equal(removed.status, 200, JSON.stringify(removed.body));
+  assert.deepEqual(approvedFor(removed.body.agent, providerId), []);
+});
+
+test('creating a profile that pre-approves a secret is a human write too', async (t) => {
+  const app = await createTestApp(t);
+  const attempt = await request(app).post('/api/agents')
+    .set('Authorization', 'Bearer secret-token')
+    .send({
+      name: 'preapproved', type: 'codex', command: 'codex',
+      env_allowlist: '["AWS_SECRET_ACCESS_KEY"]',
+    });
+  assert.equal(attempt.status, 403, JSON.stringify(attempt.body));
+});
