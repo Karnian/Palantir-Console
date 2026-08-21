@@ -4,6 +4,7 @@ const { asyncHandler } = require('../middleware/asyncHandler');
 const { withoutSessionHandle } = require('../utils/managerRunView');
 const { createLocalNodeExecutor } = require('../services/nodeExecutor');
 const { parseClaudeStreamJsonOutput } = require('../services/claudeStreamJson');
+const { managerCanAccessRun } = require('../services/managerRunScope');
 
 // R2-B.2: maximum unified-diff payload size, in bytes. Diffs larger than
 // this are truncated and the client is warned via a `truncated` flag so
@@ -11,6 +12,7 @@ const { parseClaudeStreamJsonOutput } = require('../services/claudeStreamJson');
 // the wire on every poll. 1 MiB matches the ceiling noted in the R2-B
 // plan; change here + in the route tests if this ever moves.
 const DIFF_MAX_BYTES = 1 * 1024 * 1024;
+const OUTPUT_RANGE_MAX_BYTES = 256 * 1024;
 // Walltime cap — we never want `git diff` to hang the runs router.
 const DIFF_TIMEOUT_MS = 10 * 1000;
 
@@ -198,15 +200,51 @@ function computeMcpTemplateDrift(snapshotCore, snapshotAppliedAt, mcpTemplateSer
 function createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService, presetService, mcpTemplateService, projectService, taskService, nodeExecutor = createLocalNodeExecutor(), nodeService = null }) {
   const router = express.Router();
 
+  function managerGrant(req) {
+    return {
+      runId: req.auth?.managerRunId,
+      conversationId: req.auth?.conversationId,
+      layer: req.auth?.layer,
+    };
+  }
+
+  function managerOwns(req, run) {
+    return req.auth?.actor !== 'manager'
+      || managerCanAccessRun(managerGrant(req), run, { runService });
+  }
+
+  // For routes that do NOT already hold the run. The lookup is skipped entirely
+  // for non-manager callers: the incremental output contract proves its pre-read
+  // / re-read ordering by COUNTING getRun calls, so an unconditional lookup here
+  // is a real regression, not just a wasted query. An unreadable run denies.
+  function managerScopeDenies(req, runId) {
+    if (req.auth?.actor !== 'manager') return false;
+    let run = null;
+    try { run = runService.getRun(runId); } catch { return true; }
+    return !managerCanAccessRun(managerGrant(req), run, { runService });
+  }
+
+  function denyManagerRunAccess(res) {
+    return res.status(403).json({
+      error: 'manager capability may only access its own worker runs',
+    });
+  }
+
   router.get('/', asyncHandler(async (req, res) => {
     const { task_id, status } = req.query;
-    const runs = runService.listRuns({ task_id, status });
+    let runs = runService.listRuns({ task_id, status });
+    if (req.auth?.actor === 'manager') {
+      runs = runs.filter(run => (
+        run.id === req.auth.managerRunId || managerOwns(req, run)
+      ));
+    }
     // Strip the internal rowid: getByTask exposes _seq only for R1b ordering.
     res.json({ runs: runs.map(({ _seq, ...rest }) => withoutSessionHandle(req, rest)) });
   }));
 
   router.get('/:id', asyncHandler(async (req, res) => {
     const run = runService.getRun(req.params.id);
+    if (!managerOwns(req, run)) return denyManagerRunAccess(res);
     res.json({ run: withoutSessionHandle(req, run) });
   }));
 
@@ -362,6 +400,7 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
   }));
 
   router.get('/:id/events', asyncHandler(async (req, res) => {
+    if (managerScopeDenies(req, req.params.id)) return denyManagerRunAccess(res);
     const afterId = req.query.after ? Number(req.query.after) : undefined;
     const events = runService.getRunEvents(req.params.id, afterId);
     res.json({ events });
@@ -407,6 +446,7 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
           error: 'manager capability may not intervene in a manager run',
         });
       }
+      if (!managerOwns(req, target)) return denyManagerRunAccess(res);
     }
 
     if (conversationService) {
@@ -453,6 +493,7 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
           error: 'manager capability may not intervene in a manager run',
         });
       }
+      if (!managerOwns(req, target)) return denyManagerRunAccess(res);
     }
     await lifecycleService.cancelRun(req.params.id);
     res.json({ status: 'ok' });
@@ -463,6 +504,109 @@ function createRunsRouter({ runService, lifecycleService, executionEngine, strea
     if (!executionEngine) {
       return res.status(501).json({ error: 'Execution engine not configured' });
     }
+    if (managerScopeDenies(req, req.params.id)) return denyManagerRunAccess(res);
+    if (req.query.after !== undefined) {
+      const afterWire = req.query.after;
+      if (typeof afterWire !== 'string' || !/^(0|[1-9]\d*)$/.test(afterWire)) {
+        return res.status(400).json({ error: 'after must be a non-negative integer' });
+      }
+      const after = Number(afterWire);
+      if (!Number.isSafeInteger(after)) {
+        return res.status(400).json({ error: 'after must be a non-negative integer' });
+      }
+      const preRun = runService.getRun(req.params.id);
+      const isRemoteWorker = preRun.node_id
+        && preRun.node_id !== 'local'
+        && Number(preRun.is_manager || 0) !== 1;
+      if (!isRemoteWorker || !nodeService) {
+        return res.status(409).json({
+          error: 'Incremental output is unsupported for this run',
+          reason: 'incremental_unsupported',
+        });
+      }
+
+      const runExecutor = nodeService.pickExecutor(preRun.node_id);
+      let range;
+      try {
+        range = await runExecutor.readOutputRange(preRun.id, {
+          after,
+          maxBytes: OUTPUT_RANGE_MAX_BYTES,
+        });
+      } catch (err) {
+        if (err && err.code === 'OUTPUT_FRAME_INVALID') {
+          return res.status(500).json({
+            error: 'Remote output frame is invalid',
+            reason: 'output_frame_invalid',
+          });
+        }
+        throw err;
+      }
+
+      const latestRun = runService.getRun(preRun.id);
+      const terminalStatuses = ['completed', 'failed', 'cancelled', 'stopped'];
+      const wasTerminalBeforeRead = terminalStatuses.includes(preRun.status);
+      const isTerminalAfterRead = terminalStatuses.includes(latestRun.status);
+      // The two snapshots serve opposite race-safety goals and cannot be merged:
+      // preRun prevents stale missing/deleted reads from producing a false 410,
+      // while latestRun prevents sealed output from being finalized too early.
+      // Expiry is only claimed when the run did not move at all across the read.
+      // preRun alone would 410 a run requeued (failed -> queued) during the read;
+      // latestRun alone would 410 a run that merely finished during it; both being
+      // terminal still admits an ABA (failed -> queued -> completed) where a new
+      // attempt is already producing output. Requiring an unchanged observation
+      // makes the decision late in every direction instead of wrong in one -- a
+      // deferred 410 costs one extra poll, a false 410 is unrecoverable.
+      //
+      // status_epoch is bumped by a database trigger for every status write,
+      // including same-value writes, so equality proves that no status write
+      // occurred between the two snapshots and makes status ABA observable.
+      //
+      // Absent epochs must NOT compare equal. `undefined === undefined` would
+      // read as "never moved" and re-open the false 410 this column exists to
+      // close -- the direction the comment above rules out, since a deferred 410
+      // costs one poll and a false one is unrecoverable. getRun selects r.* so a
+      // migrated database always carries it; a projection or an injected double
+      // may not, and that case is treated as movement.
+      const epochsObserved = Number.isInteger(preRun.status_epoch)
+        && Number.isInteger(latestRun.status_epoch);
+      const runUnmovedAcrossRead = epochsObserved
+        && preRun.status_epoch === latestRun.status_epoch;
+      if (
+        (range.deleted || range.missing)
+        && wasTerminalBeforeRead
+        && isTerminalAfterRead
+        && runUnmovedAcrossRead
+      ) {
+        return res.status(410).json({
+          error: 'Run output is no longer available',
+          reason: 'output_expired',
+        });
+      }
+
+      const isDetachedClaude = typeof runService.hasRunEvent === 'function'
+        ? runService.hasRunEvent(preRun.id, 'runtime:remote_worker_engine')
+        : typeof runService.getRunEvents === 'function'
+          && runService.getRunEvents(preRun.id)
+            .some((event) => event.event_type === 'runtime:remote_worker_engine');
+      const unavailable = range.missing || range.deleted;
+      return res.json({
+        data_base64: range.generation_changed || unavailable
+          ? ''
+          : range.data.toString('base64'),
+        next_offset: range.generation_changed ? 0 : unavailable ? after : range.next_offset,
+        end_offset: range.end_offset,
+        has_more: unavailable ? false : range.has_more,
+        truncated: Boolean(range.generation_changed),
+        // A sealed artifact does not substitute for terminal DB state: defer
+        // exposing finalization until both signals agree.
+        finalized: !unavailable && !range.generation_changed
+          && isTerminalAfterRead && range.sealed && !range.has_more,
+        run_status: latestRun.status,
+        source_id: unavailable ? null : (range.source_id ?? null),
+        format: isDetachedClaude ? 'claude_ndjson' : 'text',
+      });
+    }
+
     const lines = Math.min(Math.max(1, Number(req.query.lines || 100)), 2000);
     const run = runService.getRun(req.params.id);
     const isRemoteWorker = run.node_id
@@ -539,4 +683,5 @@ module.exports = {
   computeMcpTemplateDrift,
   runGitDiff,
   DIFF_MAX_BYTES,
+  OUTPUT_RANGE_MAX_BYTES,
 };

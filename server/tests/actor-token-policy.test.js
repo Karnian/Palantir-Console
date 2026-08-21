@@ -24,7 +24,7 @@ function isolatedPolicy(env = {}) {
   return resolveActorTokenPolicy({
     ...env,
     PALANTIR_AGENT_PROCESS_ISOLATION: 'verified',
-  });
+  }, { execAttestation: { verified: true, reason: 'test' } });
 }
 
 test('actor token policy separates token-source assurance from process isolation', () => {
@@ -34,6 +34,7 @@ test('actor token policy separates token-source assurance from process isolation
     separated: false,
     processIsolated: false,
     capabilitiesEnabled: false,
+    execAttestation: null,
     boundary: 'auth_disabled',
   });
   assert.equal(resolveActorTokenPolicy({ PALANTIR_TOKEN: 'shared' }).boundary, 'agent_capabilities_disabled');
@@ -61,13 +62,13 @@ test('actor token policy separates token-source assurance from process isolation
     PALANTIR_TOKEN: 'human-secret',
     PALANTIR_PM_TOKEN: 'agent-secret',
     PALANTIR_AGENT_PROCESS_ISOLATION: 'verified',
-  }).boundary, 'run_capabilities_unverified');
+  }, { execAttestation: { verified: true, reason: 'test' } }).boundary, 'run_capabilities_unverified');
   assert.equal(resolveActorTokenPolicy({
     PALANTIR_TOKEN: 'human-secret',
     PALANTIR_PM_TOKEN: 'agent-secret',
     PALANTIR_ACTOR_TOKEN_SOURCE: 'ephemeral_file',
     PALANTIR_AGENT_PROCESS_ISOLATION: 'verified',
-  }).boundary, 'run_capabilities');
+  }, { execAttestation: { verified: true, reason: 'test' } }).boundary, 'run_capabilities');
 });
 
 test('repository dotenv files cannot contain actor credentials', (t) => {
@@ -592,5 +593,32 @@ test('agent capabilities fail closed without verified process isolation', () => 
       actorTokens,
     }),
     /verified agent process isolation/,
+  );
+});
+
+test('mint normalizes the legacy pm layer so every surface reads the same value', () => {
+  // The layer travels in the token and each surface re-derives meaning from it.
+  // managerCapabilityRequestAllowed and managerRunScope branch on `!== 'top'`
+  // (pm behaves as operator) while routes/agentContext.js requires the literal
+  // 'operator' (pm gets 403). Normalizing at the one place that creates a grant
+  // removes the disagreement instead of asking each surface to remember it.
+  const service = createManagerCapabilityTokenService({
+    actorTokens: {
+      humanToken: 'human', agentToken: 'human', separated: false,
+      processIsolated: true, capabilitiesEnabled: true, boundary: 'run_capabilities',
+    },
+  });
+  const token = service.mint('run-1', { conversationId: 'operator:oi_legacy', layer: 'pm' });
+  assert.ok(token);
+  assert.equal(service.verify(token).layer, 'operator');
+
+  // The non-legacy spellings are untouched.
+  assert.equal(
+    service.verify(service.mint('run-2', { conversationId: 'operator:oi_x', layer: 'operator' })).layer,
+    'operator',
+  );
+  assert.equal(
+    service.verify(service.mint('run-3', { conversationId: 'top', layer: 'top' })).layer,
+    'top',
   );
 });

@@ -20,6 +20,7 @@
 // single run can still be pointed at something else.
 
 import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const DEFAULTS = {
   PALANTIR_SKIP_HOST_CREDENTIALS: '1',
@@ -31,9 +32,38 @@ for (const [key, value] of Object.entries(DEFAULTS)) {
   if (env[key] === undefined) env[key] = value;
 }
 
+// Bound the runner's parallelism. `node --test` defaults to one worker per CPU
+// (18 on the dev machine), and at that level the suite fails 1-3 DIFFERENT
+// tests per run -- every one of them passing when its file runs alone. Those
+// were being triaged by hand as "known flakes", which is how a real regression
+// (a canonical `runs` column list that migration 092 invalidated) hid among
+// them for a whole session.
+//
+// Measured on the dev machine: default (18) fails 2/2/0 across three runs;
+// concurrency 4 is green 2/2 and costs ~12s (~20%). Determinism is worth more
+// than that, and a CI gate is meaningless without it.
+//
+// An explicit --test-concurrency on the command line still wins.
+const passthrough = process.argv.slice(2);
+const hasExplicitConcurrency = passthrough.some(
+  (arg) => arg === '--test-concurrency' || arg.startsWith('--test-concurrency='),
+);
+const concurrencyArgs = hasExplicitConcurrency ? [] : ['--test-concurrency=4'];
+
+// Pin hostless ephemeral binds to loopback. See scripts/loopback-bind-preload.cjs
+// for the failure this prevents (supertest requests silently reaching Tailscale
+// or another local process instead of the app under test). Passed as a runner
+// flag rather than via NODE_OPTIONS, which would be inherited by every node
+// process the suite starts. As a runner flag it reaches the per-file test
+// processes but is not inserted into the argv of a plain
+// spawn(process.execPath, [cli, ...]) — the shape the CLI tests use. A child
+// started with fork(), or one that deliberately replays process.execArgv, would
+// still inherit it.
+const preload = fileURLToPath(new URL('./loopback-bind-preload.cjs', import.meta.url));
+
 const child = spawn(
   process.execPath,
-  ['--test', ...process.argv.slice(2)],
+  ['--require', preload, '--test', ...concurrencyArgs, ...passthrough],
   { stdio: 'inherit', env },
 );
 

@@ -10,7 +10,7 @@ const {
 } = require('../services/managerSystemPrompt');
 const { resolveSpawnCwd } = require('../utils/spawnCwd');
 const { resolveProjectSource } = require('../services/projectSource');
-const { buildProjectScopedSystemSection } = require('../services/operatorPromptSections'); // A2b: shared with operatorSpawnService
+const { buildFinalOperatorSystemPrompt } = require('../services/operatorPromptSections'); // A2b: shared with operatorSpawnService
 const { resolveCodexServiceTier } = require('../services/managerAdapters/codexAdapter'); // F-1
 const { goalFeatureActive: defaultGoalFeatureActive } = require('../services/goalMode'); // G2 §6
 const { resolveActorTokenPolicy, applyManagerCredentialPolicy } = require('../services/actorTokenPolicy');
@@ -712,7 +712,8 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 // sections are assembled by the SAME function as fresh spawn
                 // (server/services/operatorPromptSections), so the two paths can
                 // never drift (Codex R2 BLOCKER 3).
-                const briefSection = buildProjectScopedSystemSection({
+                const systemPrompt = buildFinalOperatorSystemPrompt({
+                  baseSystemPrompt,
                   project,
                   profile: operatorProfileService && instanceThread?.profile_id
                     ? operatorProfileService.getProfile(instanceThread.profile_id)
@@ -722,7 +723,6 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                   skillPackService,
                   logger: (err) => console.warn(`[boot] Failed to load skill packs for PM resume project=${projectId}: ${err.message}`),
                 });
-                const systemPrompt = [baseSystemPrompt, briefSection].filter(Boolean).join('\n\n');
                 // Adapter-generic: the boot-resume loop now admits claude-code
                 // (P5-S4c) — resolve auth for the run's ACTUAL adapter, not a
                 // hardcoded 'codex' (a local Claude Operator would otherwise be
@@ -904,6 +904,12 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
             } catch { /* best-effort boot diagnostic */ }
           }
           console.warn(`[boot] Failed to resume PM run=${r.id}: ${err.message}`);
+          try {
+            runService.addRunEvent(r.id, 'error', JSON.stringify({
+              code: err.code || 'OPERATOR_RESUME_FAILED',
+              message: err.message,
+            }));
+          } catch { /* ignore */ }
         }
       }
 

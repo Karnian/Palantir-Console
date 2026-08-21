@@ -71,7 +71,9 @@ const { resolveAgentVendor } = require('../utils/agentVendor');
 const { conversationIdForProject } = require('../utils/conversationId'); // PM→Operator Phase 0 producer seam
 const { deriveLegacyContext, enforceWorkspace } = require('../utils/operatorContext');
 const { resolveProjectSource } = require('./projectSource');
-const { buildProjectScopedSystemSection: buildSharedProjectScopedSection } = require('./operatorPromptSections'); // A2b: single source, shared with boot-resume
+const {
+  buildFinalOperatorSystemPrompt,
+} = require('./operatorPromptSections'); // A2b: single source, shared with boot-resume
 const {
   repoFeatureEnabled,
   repoSourceHash,
@@ -477,33 +479,6 @@ function createOperatorSpawnService({
     // Probe uncertainty must not turn the legacy default into a hard failure.
     // The first real turn will still surface an actionable adapter error.
     return 'codex';
-  }
-
-  // Build the project-scoped SYSTEM prompt section that gets appended to
-  // the shared PM layer template. Spec §9.5: "system prompt 완전히 정적
-  // (cached_input_tokens 보호)". The brief is stable per run so baking
-  // it into the instructions file is safe — Codex caches the entire
-  // system prompt, so every subsequent turn hits the cache.
-  //
-  // Putting the brief HERE (not in a seed runTurn) is the codex-R1 fix
-  // for the "previous turn still running" race: we must not call
-  // adapter.runTurn from operatorSpawnService because the caller
-  // (conversationService.sendToManagerSlot) is about to call runTurn
-  // with the user's actual message. Two back-to-back turns on the same
-  // Codex run id hit the single-turn guard at codexAdapter:spawnOneTurn.
-  // A2b: delegate to the shared builder (server/services/operatorPromptSections)
-  // so the fresh-spawn and boot-resume paths assemble byte-identical sections
-  // from one source (Codex R2 BLOCKER 3). operatorRunId is baked so the Operator
-  // can self-identify its pm_run_id for /api/dispatch-audit.
-  function buildProjectScopedSystemSection({ project, profile, brief, operatorRunId }) {
-    return buildSharedProjectScopedSection({
-      project,
-      profile,
-      brief,
-      operatorRunId,
-      skillPackService,
-      logger: (err) => log(`Failed to load skill packs for project=${project.id}: ${err.message}`),
-    });
   }
 
   // Main entry point. Returns { run, spawned, resumed } — `run` is the
@@ -947,13 +922,22 @@ function createOperatorSpawnService({
       specialistAvailable: isSpecialistAvailable(),
       apiBaseUrl: isRemoteNode ? promptApiEndpoints.remote : promptApiEndpoints.local,
     });
-    const projectSection = buildProjectScopedSystemSection({
-      project,
-      profile: operatorProfile,
-      brief,
-      operatorRunId: runId,
-    });
-    const systemPrompt = [baseSystemPrompt, projectSection].filter(Boolean).join('\n\n');
+    let systemPrompt;
+    try {
+      systemPrompt = buildFinalOperatorSystemPrompt({
+        baseSystemPrompt,
+        project,
+        profile: operatorProfile,
+        brief,
+        operatorRunId: runId,
+        skillPackService,
+        logger: (err) => log(`Failed to load skill packs for project=${project.id}: ${err.message}`),
+      });
+    } catch (err) {
+      try { runService.updateRunStatus(runId, 'failed', { force: true }); } catch { /* ignore */ }
+      try { runService.addRunEvent(runId, 'error', JSON.stringify({ code: err.code || 'OPERATOR_PROMPT_BUILD_FAILED', message: err.message })); } catch { /* ignore */ }
+      throw err;
+    }
 
     // Hook that persists a freshly captured thread id into the brief AND
     // flips the PM run row from queued → running. Fires exactly once per

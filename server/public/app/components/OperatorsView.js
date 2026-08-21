@@ -118,6 +118,170 @@ function formatDateTime(value) {
   return date.toLocaleString();
 }
 
+function SchedulePrecheckEditor({ schedule, onScheduleChanged }) {
+  const [checks, setChecks] = useState([]);
+  const [selectedCheckId, setSelectedCheckId] = useState('');
+  const [occurrences, setOccurrences] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  const fetchOccurrences = () => apiFetch(
+    `/api/operator-schedules/${encodeURIComponent(schedule.id)}/occurrences?limit=10`,
+  ).then((data) => setOccurrences(arrayValue(data?.occurrences)));
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    Promise.all([
+      apiFetch(`/api/verify-checks?project_id=${encodeURIComponent(schedule.codebase_project_id)}`),
+      apiFetch(`/api/operator-schedules/${encodeURIComponent(schedule.id)}/occurrences?limit=10`),
+    ])
+      .then(([checksData, occurrencesData]) => {
+        if (!alive) return;
+        const eligible = arrayValue(checksData?.checks).filter((check) => (
+          check.kind === 'artifact'
+          && check.created_by === 'human'
+          && check.project_id === schedule.codebase_project_id
+        ));
+        setChecks(eligible);
+        setOccurrences(arrayValue(occurrencesData?.occurrences));
+        setSelectedCheckId((current) => (
+          eligible.some((check) => String(check.id) === current)
+            ? current
+            : String(eligible[0]?.id || '')
+        ));
+      })
+      .catch((err) => {
+        if (!alive) return;
+        setChecks([]);
+        setOccurrences([]);
+        addToast(err.message, 'error');
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => { alive = false; };
+  }, [schedule.id, schedule.codebase_project_id]);
+
+  useEffect(() => {
+    const broker = typeof sseBroker !== 'undefined' ? sseBroker : null;
+    if (!broker || typeof broker.subscribe !== 'function') return undefined;
+    const unsubscribe = broker.subscribe('operator:schedule', (event) => {
+      if (event?.kind !== 'occurrence_status' || event.schedule_id !== schedule.id) return;
+      fetchOccurrences().catch(() => {});
+    });
+    return typeof unsubscribe === 'function' ? unsubscribe : undefined;
+  }, [schedule.id]);
+
+  const currentCheck = checks.find(
+    (check) => Number(check.id) === Number(schedule.precheck_verify_check_id),
+  );
+  const attach = async () => {
+    if (!selectedCheckId || saving) return;
+    setSaving(true);
+    try {
+      const data = await apiFetchWithToast(
+        `/api/operator-schedules/${encodeURIComponent(schedule.id)}/precheck`,
+        {
+          method: 'PUT',
+          body: JSON.stringify({
+            check_id: Number(selectedCheckId),
+            expected_revision: schedule.revision,
+          }),
+        },
+      );
+      onScheduleChanged(data.schedule);
+    } catch {
+      // apiFetchWithToast owns the error toast.
+    } finally {
+      setSaving(false);
+    }
+  };
+  const detach = async () => {
+    if (saving) return;
+    setSaving(true);
+    try {
+      const data = await apiFetchWithToast(
+        `/api/operator-schedules/${encodeURIComponent(schedule.id)}/precheck`,
+        {
+          method: 'DELETE',
+          body: JSON.stringify({ expected_revision: schedule.revision }),
+        },
+      );
+      onScheduleChanged(data.schedule);
+    } catch {
+      // apiFetchWithToast owns the error toast.
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const inputId = `operator-schedule-precheck-${schedule.id}`;
+  return html`
+    <div class="operator-schedule-precheck" data-role="operator-schedule-precheck">
+      <div class="form-hint">
+        ${OPERATOR_SCHEDULER_LABELS.precheckCurrent}
+        <strong data-role="operator-schedule-precheck-current">
+          ${schedule.precheck_verify_check_id
+            ? (currentCheck?.name || `#${schedule.precheck_verify_check_id}`)
+            : OPERATOR_SCHEDULER_LABELS.precheckNone}
+        </strong>
+      </div>
+      ${loading
+        ? html`<div class="form-hint">${COMMON_ACTIONS.loading}</div>`
+        : html`
+          <div class="operator-schedule-precheck-controls">
+            <div class="form-field">
+              <label class="form-label" for=${inputId}>${OPERATOR_SCHEDULER_LABELS.precheckLabel}</label>
+              <${Dropdown}
+                id=${inputId}
+                className="dropdown-field"
+                value=${selectedCheckId}
+                onChange=${setSelectedCheckId}
+                options=${checks.map((check) => ({ value: String(check.id), label: check.name }))}
+                disabled=${saving || checks.length === 0}
+              />
+            </div>
+            <button
+              type="button"
+              class="ghost small"
+              data-role="operator-schedule-precheck-attach"
+              onClick=${attach}
+              disabled=${saving || !selectedCheckId}
+            >${OPERATOR_SCHEDULER_LABELS.precheckAttach}</button>
+            <button
+              type="button"
+              class="ghost small"
+              data-role="operator-schedule-precheck-detach"
+              onClick=${detach}
+              disabled=${saving || !schedule.precheck_verify_check_id}
+            >${OPERATOR_SCHEDULER_LABELS.precheckDetach}</button>
+          </div>
+          ${checks.length === 0 && html`
+            <p class="form-hint">${OPERATOR_SCHEDULER_LABELS.precheckEmpty}</p>
+          `}
+        `}
+      <details class="operator-schedule-occurrences">
+        <summary>${OPERATOR_SCHEDULER_LABELS.occurrences} (${occurrences.length})</summary>
+        ${occurrences.length === 0
+          ? html`<p class="form-hint">${OPERATOR_SCHEDULER_LABELS.occurrencesEmpty}</p>`
+          : html`
+            <ul class="operator-schedule-occurrence-list" aria-label=${OPERATOR_SCHEDULER_LABELS.occurrences}>
+              ${occurrences.map((occurrence) => html`
+                <li key=${occurrence.id}>
+                  <strong>${occurrence.status}</strong>
+                  <span>${formatDateTime(occurrence.scheduled_for)}</span>
+                  <span>${occurrence.precheck_check_name}</span>
+                  ${occurrence.outcome_reason && html`<span>${occurrence.outcome_reason}</span>`}
+                </li>
+              `)}
+            </ul>
+          `}
+      </details>
+    </div>
+  `;
+}
+
 function refRoleLabel(role) {
   return role === 'primary'
     ? OPERATOR_ROSTER_LABELS.primaryRefRole
@@ -1242,6 +1406,14 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
     }
   };
 
+  const applyScheduleUpdate = (updated) => {
+    if (!updated?.id) return;
+    setSchedules((current) => current.map((schedule) => (
+      schedule.id === updated.id ? updated : schedule
+    )));
+    refreshOperatorInstances();
+  };
+
   const runScheduleNow = async (schedule) => {
     try {
       await apiFetchWithToast(`/api/operator-schedules/${encodeURIComponent(schedule.id)}/run-now`, { method: 'POST' });
@@ -1762,7 +1934,7 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
             ${!schedulesLoading && schedules.length === 0 && html`<p class="form-hint">${OPERATOR_SCHEDULER_LABELS.empty}</p>`}
             ${!schedulesLoading && schedules.map((schedule) => html`
               <article class="operator-schedule-row" key=${schedule.id} data-role="operator-schedule-row">
-                <div>
+                <div class="operator-schedule-main">
                   <strong>${schedule.name}</strong>
                   <div class="form-hint">
                     ${schedule.enabled ? OPERATOR_SCHEDULER_LABELS.enabled : OPERATOR_SCHEDULER_LABELS.disabled}
@@ -1777,6 +1949,10 @@ export function OperatorsView({ runs = [], projects = [], tasks = [] }) {
                       · 시도 ${Number(schedule.attempts) || 0}
                     </div>
                   `}
+                  <${SchedulePrecheckEditor}
+                    schedule=${schedule}
+                    onScheduleChanged=${applyScheduleUpdate}
+                  />
                 </div>
                 <div class="operator-schedule-actions">
                   <button type="button" class="ghost small" onClick=${() => runScheduleNow(schedule)}>${OPERATOR_SCHEDULER_LABELS.runNow}</button>

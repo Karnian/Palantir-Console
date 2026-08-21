@@ -41,8 +41,8 @@ function globToRegExp(glob) {
   return new RegExp(`^${re}$`);
 }
 
-// Symlink-safe, bounded recursive walk. Returns relative POSIX paths of regular
-// files under root. Skips symlinks and anything escaping root.
+// Symlink-safe, bounded recursive walk. Returns relative POSIX paths and sizes
+// of regular files under root. Skips symlinks and anything escaping root.
 function walkFiles(root) {
   const out = [];
   let count = 0;
@@ -62,33 +62,29 @@ function walkFiles(root) {
       if (ent.isSymbolicLink()) continue;
       if (ent.isDirectory()) { stack.push({ dir: abs, depth: depth + 1 }); continue; }
       if (ent.isFile()) {
-        out.push(path.relative(rootResolved, abs).split(path.sep).join('/'));
+        let size = null;
+        try {
+          const st = fs.lstatSync(abs);
+          if (st.isFile()) size = st.size;
+        } catch { /* preserve the matched path; a missing size evaluates as zero */ }
+        out.push({ rel: path.relative(rootResolved, abs).split(path.sep).join('/'), size });
       }
     }
   }
   return out;
 }
 
-function fileSize(root, rel) {
-  try {
-    const abs = path.join(root, rel);
-    if (!isWithinRoot(root, abs)) return null;
-    const st = fs.lstatSync(abs);
-    if (!st.isFile()) return null;
-    return st.size;
-  } catch { return null; }
-}
-
-function evalFileRule(rule, allFiles, root) {
+function evalFileRule(rule, allFiles) {
   const re = globToRegExp(rule.glob);
-  const matched = allFiles.filter((f) => re.test(f));
+  const matchedFiles = allFiles.filter((f) => re.test(f.rel));
+  const matched = matchedFiles.map((f) => f.rel);
   const mustExist = rule.must_exist !== false; // default true
   const minBytes = Number.isFinite(rule.min_bytes) ? rule.min_bytes : 0;
   let ok = true;
   const reasons = [];
   if (mustExist && matched.length === 0) { ok = false; reasons.push('no file matched'); }
   if (minBytes > 0) {
-    const bigEnough = matched.filter((f) => (fileSize(root, f) || 0) >= minBytes);
+    const bigEnough = matchedFiles.filter((f) => (f.size || 0) >= minBytes);
     if (matched.length > 0 && bigEnough.length === 0) { ok = false; reasons.push(`no match >= ${minBytes} bytes`); }
     if (mustExist && bigEnough.length === 0) ok = false;
   }
@@ -117,8 +113,8 @@ function resolveReportText(report, root, fallbackText) {
   return typeof fallbackText === 'string' ? fallbackText : null;
 }
 
-function evalReportRule(report, root, fallbackText) {
-  const text = resolveReportText(report, root, fallbackText);
+function evalReportRule(report, reportText) {
+  const text = reportText;
   const reasons = [];
   let ok = true;
   if (text == null) { return { type: 'report', ok: false, reasons: ['report not found'] }; }
@@ -137,6 +133,28 @@ function evalReportRule(report, root, fallbackText) {
 }
 
 /**
+ * Pure artifact evaluator. All filesystem/executor I/O must be completed by
+ * the caller before entering this function.
+ * @param {object} spec - normalized { files?, report? }
+ * @param {object} ctx
+ * @param {{rel:string,size:number|null}[]} [ctx.files]
+ * @param {string|null} [ctx.reportText]
+ * @returns {{ passed: boolean, results: object[], reason: string|null }}
+ */
+function evaluateArtifactSpec(spec, { files = [], reportText = null } = {}) {
+  const results = [];
+  if (Array.isArray(spec.files)) {
+    for (const rule of spec.files) results.push(evalFileRule(rule, files));
+  }
+  if (spec.report) results.push(evalReportRule(spec.report, reportText));
+
+  const passed = results.length > 0 && results.every((r) => r.ok);
+  const failed = results.filter((r) => !r.ok);
+  const reason = passed ? null : (failed.flatMap((r) => r.reasons || []).join('; ') || 'no rules evaluated');
+  return { passed, results, reason };
+}
+
+/**
  * Evaluate a normalized artifact spec against a workspace.
  * @param {object} spec        - normalized { files?, report? } (verifyCheckService.validateSpec output)
  * @param {object} ctx
@@ -152,16 +170,17 @@ function evaluateArtifactCheck(spec, { workspaceRoot, reportText = null } = {}) 
   const root = path.resolve(workspaceRoot);
   let allFiles = [];
   if (Array.isArray(spec.files) && spec.files.length) allFiles = walkFiles(root);
-
-  if (Array.isArray(spec.files)) {
-    for (const rule of spec.files) results.push(evalFileRule(rule, allFiles, root));
-  }
-  if (spec.report) results.push(evalReportRule(spec.report, root, reportText));
-
-  const passed = results.length > 0 && results.every((r) => r.ok);
-  const failed = results.filter((r) => !r.ok);
-  const reason = passed ? null : (failed.flatMap((r) => r.reasons || []).join('; ') || 'no rules evaluated');
-  return { passed, results, reason };
+  const resolvedReportText = spec.report
+    ? resolveReportText(spec.report, root, reportText)
+    : reportText;
+  return evaluateArtifactSpec(spec, { files: allFiles, reportText: resolvedReportText });
 }
 
-module.exports = { evaluateArtifactCheck, globToRegExp };
+module.exports = {
+  MAX_WALK_ENTRIES,
+  MAX_DEPTH,
+  MAX_REPORT_READ_BYTES,
+  evaluateArtifactSpec,
+  evaluateArtifactCheck,
+  globToRegExp,
+};

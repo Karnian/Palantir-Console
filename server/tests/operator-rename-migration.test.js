@@ -98,6 +98,12 @@ const RUN_COLUMNS = [
   // Worker idle timeout (#466, migration 080): preserves the existing terminal
   // status while recording why health cleanup finalized the run.
   'terminal_reason',
+  // Durable question mailbox (격차①, migration 092): the run created by
+  // resuming an answered worker question points back at that question.
+  'source_question_id',
+  // Monotonic status epoch (#545, migration 093): bumped by trigger on every
+  // status write so a same-status, same-second ABA stays distinguishable.
+  'status_epoch',
 ];
 
 const COMPOSITION_EVENT_COLUMNS = [
@@ -423,7 +429,14 @@ test('(3) schema fidelity: columns, defaults, FKs, indexes, and the exact trigge
   // drop a trigger — any change to this set must be deliberate. S1a (migration
   // 084) added the lease last-line-of-defense trigger; a rebuild that loses it
   // reopens the permanent-held cascade hole it closes.
-  assert.deepEqual(triggers, [{ name: 'trg_run_owner_leases_run_deleted' }]);
+  // Migration 093 added the status epoch bump. It is the ONLY thing that keeps
+  // status_epoch monotonic -- runService writes runs.status from 16 places and
+  // none of them bump it -- so a rebuild that loses it silently reopens the
+  // same-status ABA that produces a false 410 on incremental output (#545).
+  assert.deepEqual(triggers, [
+    { name: 'trg_run_owner_leases_run_deleted' },
+    { name: 'trg_runs_status_epoch_bump' },
+  ]);
 });
 
 test("(4) tightened CHECKs accept 'operator'/'top' but reject legacy 'pm' and garbage", (t) => {

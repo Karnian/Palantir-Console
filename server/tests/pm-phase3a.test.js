@@ -293,6 +293,35 @@ test('Phase 3a: lazy spawn creates a PM run when none exists', async (t) => {
   assert.equal(result2.run.id, result1.run.id);
 });
 
+test('fresh Operator sentinel rejection marks the run failed and records its code', async (t) => {
+  const db = await mkdb(t);
+  const rs = createRunService(db, null);
+  const projectService = createProjectService(db);
+  const projectBriefService = createProjectBriefService(db);
+  const registry = createManagerRegistry({ runService: rs });
+  const fakePm = makeFakeCodexAdapter();
+  const spawn = createOperatorSpawnService({
+    runService: rs,
+    managerRegistry: registry,
+    managerAdapterFactory: wireFactory(fakePm),
+    projectService,
+    projectBriefService,
+    authResolverOpts: { hasKeychain: true },
+  });
+  const project = projectService.createProject({ name: 'bad\u0000PALANTIR_OPERATION_SEGMENT:name' });
+  seedTop({ rs, registry, adapter: fakePm });
+
+  assert.throws(
+    () => spawn.ensureLiveOperator({ projectId: project.id }),
+    error => error.code === 'OPERATOR_PROMPT_USER_SENTINEL',
+  );
+  const run = rs.listRuns().find(candidate => candidate.manager_layer === 'operator');
+  assert.equal(run.status, 'failed');
+  const event = rs.getRunEvents(run.id).find(candidate => candidate.event_type === 'error');
+  assert.equal(JSON.parse(event.payload_json).code, 'OPERATOR_PROMPT_USER_SENTINEL');
+  assert.equal(fakePm._sessions.has(run.id), false);
+});
+
 test('Phase 3a: authenticated Operator keeps capability out of its persisted prompt', async (t) => {
   const db = await mkdb(t);
   const rs = createRunService(db, null);
@@ -305,7 +334,7 @@ test('Phase 3a: authenticated Operator keeps capability out of its persisted pro
     PALANTIR_TOKEN: 'human-global',
     PALANTIR_PM_TOKEN: 'automation-global',
     PALANTIR_AGENT_PROCESS_ISOLATION: 'verified',
-  });
+  }, { execAttestation: { verified: true, reason: 'test' } });
   const managerCapabilityTokenService = createManagerCapabilityTokenService({
     actorTokens,
     signingKey: Buffer.alloc(32, 9),

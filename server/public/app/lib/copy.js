@@ -1259,6 +1259,14 @@ export const OPERATOR_SCHEDULER_LABELS = {
   enabled: '활성',
   disabled: '꺼짐',
   nextFire: '다음',
+  precheckCurrent: '현재 precheck:',
+  precheckNone: '부착 안 됨',
+  precheckLabel: 'Artifact precheck',
+  precheckAttach: '부착',
+  precheckDetach: '해제',
+  precheckEmpty: '이 프로젝트에 부착 가능한 사람이 만든 artifact check가 없습니다.',
+  occurrences: '최근 precheck 실행',
+  occurrencesEmpty: '아직 precheck 실행 기록이 없습니다.',
 };
 
 // OperatorProfilesView — list, ProfileModal, DeleteConfirm.

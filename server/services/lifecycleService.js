@@ -46,6 +46,7 @@ const {
   removeSecretDirWithRetry,
 } = require('./managerAdapters/codexMcpSecretTransport');
 const { createAdmissionGate } = require('./admissionGate');
+const { vendorHandleFingerprint } = require('./managerAdapters/eventTypes');
 
 // G1: cap a string to at most maxBytes UTF-8 bytes without splitting a
 // multi-byte codepoint (final_output is stored raw; the 64KB bound is on bytes,
@@ -1247,6 +1248,15 @@ function createLifecycleService({
         `POST $PALANTIR_API_BASE/api/runs/${run.id}/memory/propose with Authorization: Bearer $PALANTIR_WORKER_TOKEN`,
         'JSON body: {"kind":"convention|pitfall|heuristic|constraint","content":"...","importance":5}',
         'This capability is run-bound and candidate-only. Never include secrets, raw logs, transient status, or conversation transcripts.',
+        '## Blocking questions',
+        'If you are blocked on a decision only a human can make, register a question and wait.',
+        `POST $PALANTIR_API_BASE/api/runs/${run.id}/questions with Authorization: Bearer $PALANTIR_WORKER_TOKEN`,
+        'JSON body: {"idempotency_key":"<stable>","class":"clarification|choice|approval","question":"...","options":["a","b"]}',
+        `Then poll: GET $PALANTIR_API_BASE/api/runs/${run.id}/questions/<id>/wait (long-poll, returns within ~25s)`,
+        'The response envelope is {"question":{...}}. Read status from question.status and repeat the poll while question.status is "pending".',
+        '- question.status="answered": proceed using question.answer.',
+        '- cancelled/expired: proceed without it or stop; do not invent an answer.',
+        'Only one pending question per run. Never put secrets in the question.',
       ].filter(Boolean).join('\n\n');
     }
     const buildWorkerEnv = (explicitEnv) => applyWorkerCredentialPolicy(explicitEnv, {
@@ -3312,8 +3322,20 @@ function createLifecycleService({
     if (!alreadyParsed) {
       for (const event of parsed.events) {
         if (event.type === 'system' && event.subtype === 'init') {
+          // The handle moves OUT of the manager-observable event and INTO the
+          // run row, where withoutSessionHandle strips it from manager actors
+          // while a human operator can still reach it. Nothing resumes a
+          // detached worker from this column -- boot resume filters is_manager
+          // -- so this is relocation, not a new resume path.
+          //
+          // Guarded exactly like streamJsonEngine's equivalent: this runs after
+          // the terminal CAS inside a parse loop that must not throw, and a
+          // missing session_id is a normal shape.
+          if (event.session_id) {
+            try { runService.updateClaudeSessionId(run.id, event.session_id); } catch { /* ignore */ }
+          }
           runService.addRunEvent(run.id, 'init', JSON.stringify({
-            session_id: event.session_id,
+            session_fingerprint: vendorHandleFingerprint(event.session_id),
             model: event.model,
             tools: (event.tools || []).slice(0, 20),
             cwd: event.cwd,
@@ -3846,9 +3868,13 @@ function createLifecycleService({
     const allComplete = runs.every(r => ['completed', 'failed', 'cancelled', 'stopped'].includes(r.status));
 
     if (allComplete && runs.length > 0) {
-      const hasSuccess = runs.some(r => r.status === 'completed');
-      const hasFailed = runs.some(r => r.status === 'failed');
-      const newStatus = hasSuccess ? 'review' : hasFailed ? 'failed' : 'todo';
+      // cancelled/stopped do not constitute an attempt: a later cancellation
+      // must not hide the most recent completed/failed attempt, while a task
+      // with only cancelled/stopped runs returns to todo.
+      const newestAttempt = runService.getNewestAttemptRun(taskId);
+      const newStatus = newestAttempt?.status === 'completed'
+        ? 'review'
+        : newestAttempt?.status === 'failed' ? 'failed' : 'todo';
       try {
         taskService.updateTaskStatus(taskId, newStatus);
       } catch {

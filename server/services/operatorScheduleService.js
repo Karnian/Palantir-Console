@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const {
   BadRequestError,
   ConflictError,
+  ForbiddenError,
   NotFoundError,
 } = require('../utils/errors');
 const {
@@ -11,6 +12,7 @@ const {
   normalizeTerminalError,
   findPersistedTerminalEvent,
 } = require('./terminalEventReconciliation');
+const { validateSpec, canonicalSpecHash } = require('./verifyCheckService');
 
 const ACTIVE_INVOCATION_STATUSES = new Set(['pending', 'claimed', 'delivering', 'running']);
 const TERMINAL_INVOCATION_STATUSES = new Set(['completed', 'failed', 'cancelled', 'uncertain']);
@@ -22,6 +24,20 @@ const MAX_PROMPT_LENGTH = 12000;
 const MIN_EXPIRY_AGE_MS = 24 * 60 * 60 * 1000;
 const CLAIM_LEASE_MS = 5 * 60 * 1000;
 const RUNNING_RECONCILE_MIN_AGE_MS = 5 * 60 * 1000;
+const PRECHECK_DEADLINE_MS = 15 * 60 * 1000;
+const PRECHECK_RETRY_BASE_MS = 60 * 1000;
+const PRECHECK_RETRY_CAP_MS = 15 * 60 * 1000;
+const PRECHECK_RETRY_JITTER_RATIO = 0.2;
+
+function retryDelayMs(attempts, random = Math.random) {
+  const exponent = Math.max(0, Math.min(30, Number(attempts || 1) - 1));
+  const nominal = Math.min(PRECHECK_RETRY_CAP_MS, PRECHECK_RETRY_BASE_MS * (2 ** exponent));
+  const sample = Math.max(0, Math.min(1, Number(random()) || 0));
+  const jittered = nominal * (
+    1 - PRECHECK_RETRY_JITTER_RATIO + (2 * PRECHECK_RETRY_JITTER_RATIO * sample)
+  );
+  return Math.min(PRECHECK_RETRY_CAP_MS, Math.round(jittered));
+}
 
 function nonEmptyString(value, name, maxLength) {
   if (typeof value !== 'string' || value.trim() === '') {
@@ -227,6 +243,7 @@ function parseSchedule(row) {
     revision: Number(row.revision),
     max_runs_per_day: Number(row.max_runs_per_day),
     consecutive_failures: Number(row.consecutive_failures),
+    consecutive_precheck_errors: Number(row.consecutive_precheck_errors),
     attempts: row.active_invocation_id ? Number(row.attempts) : null,
     rule,
   };
@@ -282,6 +299,12 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
              rule_json=@rule_json, timezone=@timezone, enabled=@enabled,
              next_fire_at=@next_fire_at, max_runs_per_day=@max_runs_per_day,
              grace_seconds=@grace_seconds, misfire_policy=@misfire_policy,
+             revision=revision+1, updated_at=datetime('now')
+       WHERE id=@id AND revision=@expected_revision AND archived_at IS NULL
+    `),
+    updatePrecheck: db.prepare(`
+      UPDATE operator_schedules
+         SET precheck_verify_check_id=@check_id,
              revision=revision+1, updated_at=datetime('now')
        WHERE id=@id AND revision=@expected_revision AND archived_at IS NULL
     `),
@@ -391,6 +414,111 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
       WHERE schedule_id=?
       ORDER BY scheduled_for DESC, created_at DESC
       LIMIT ?
+    `),
+    getVerifyCheck: db.prepare('SELECT * FROM verify_checks WHERE id=?'),
+    occurrenceForScheduleAt: db.prepare(`
+      SELECT * FROM operator_schedule_occurrences
+       WHERE schedule_id=? AND scheduled_for=?
+       LIMIT 1
+    `),
+    getOccurrence: db.prepare('SELECT * FROM operator_schedule_occurrences WHERE id=?'),
+    getOwnedOccurrence: db.prepare(`
+      SELECT * FROM operator_schedule_occurrences
+       WHERE id=? AND status='prechecking' AND claim_token=?
+    `),
+    listOccurrences: db.prepare(`
+      SELECT * FROM operator_schedule_occurrences
+       WHERE schedule_id=?
+       ORDER BY scheduled_for DESC, created_at DESC
+       LIMIT ?
+    `),
+    supersedeInflightOccurrences: db.prepare(`
+      UPDATE operator_schedule_occurrences
+         SET status='superseded', outcome_reason='newer_occurrence',
+             claim_token=NULL, leased_until=NULL,
+             finished_at=?, updated_at=?
+       WHERE schedule_id=? AND status IN ('pending','prechecking')
+       RETURNING *
+    `),
+    insertOccurrence: db.prepare(`
+      INSERT INTO operator_schedule_occurrences (
+        id, schedule_id, operator_instance_id, scheduled_for, schedule_revision,
+        precheck_verify_check_id, precheck_check_id_snapshot, precheck_check_name,
+        precheck_kind, precheck_spec_hash, precheck_node_id,
+        precheck_workspace_generation, status, outcome_reason,
+        next_attempt_at, deadline_at, finished_at, updated_at
+      ) VALUES (
+        @id, @schedule_id, @operator_instance_id, @scheduled_for, @schedule_revision,
+        @precheck_verify_check_id, @precheck_check_id_snapshot, @precheck_check_name,
+        @precheck_kind, @precheck_spec_hash, @precheck_node_id,
+        @precheck_workspace_generation, @status, @outcome_reason,
+        @next_attempt_at, @deadline_at, @finished_at, @updated_at
+      )
+    `),
+    dueOccurrence: db.prepare(`
+      SELECT * FROM operator_schedule_occurrences
+       WHERE status='pending'
+         AND next_attempt_at <= ?
+         AND deadline_at > ?
+       ORDER BY next_attempt_at ASC, scheduled_for ASC, id ASC
+       LIMIT 1
+    `),
+    claimOccurrence: db.prepare(`
+      UPDATE operator_schedule_occurrences
+         SET status='prechecking', claim_token=?, leased_until=?,
+             attempts=attempts+1, started_at=COALESCE(started_at, ?), updated_at=?
+       WHERE id=?
+         AND status='pending'
+         AND next_attempt_at <= ?
+         AND deadline_at > ?
+    `),
+    releaseOccurrence: db.prepare(`
+      UPDATE operator_schedule_occurrences
+         SET status='pending', claim_token=NULL, leased_until=NULL,
+             next_attempt_at=?, updated_at=?
+       WHERE id=? AND status='prechecking' AND claim_token=?
+    `),
+    finishOccurrence: db.prepare(`
+      UPDATE operator_schedule_occurrences
+         SET status=@status, outcome_reason=@outcome_reason,
+             evaluator=@evaluator, detail_json=@detail_json,
+             invocation_id=@invocation_id, claim_token=NULL, leased_until=NULL,
+             finished_at=@finished_at, updated_at=@finished_at
+       WHERE id=@id AND status='prechecking' AND claim_token=@claim_token
+    `),
+    recoverLeasedOccurrences: db.prepare(`
+      UPDATE operator_schedule_occurrences
+         SET status='pending', claim_token=NULL, leased_until=NULL,
+             next_attempt_at=@now, updated_at=@now
+       WHERE status='prechecking'
+         AND leased_until <= @now
+         AND deadline_at > @now
+       RETURNING *
+    `),
+    expirePrecheckingOccurrences: db.prepare(`
+      UPDATE operator_schedule_occurrences
+         SET status='precheck_unavailable', outcome_reason='deadline_exceeded',
+             claim_token=NULL, leased_until=NULL, finished_at=@now, updated_at=@now
+       WHERE status='prechecking' AND deadline_at <= @now
+       RETURNING *
+    `),
+    expirePendingOccurrences: db.prepare(`
+      UPDATE operator_schedule_occurrences
+         SET status='precheck_unavailable', outcome_reason='deadline_exceeded',
+             claim_token=NULL, leased_until=NULL, finished_at=@now, updated_at=@now
+       WHERE status='pending' AND deadline_at <= @now
+       RETURNING *
+    `),
+    // Release-time expiry: same terminal transition, but fenced on the caller's
+    // ownership so a stale worker can never expire a row a newer claimant owns.
+    // The deadline decision itself lives in releaseOccurrence (it also covers the
+    // "backoff would overshoot the deadline" case, which a `deadline_at <= now`
+    // predicate here would silently refuse to apply).
+    expireOwnedOccurrence: db.prepare(`
+      UPDATE operator_schedule_occurrences
+         SET status='precheck_unavailable', outcome_reason='deadline_exceeded',
+             claim_token=NULL, leased_until=NULL, finished_at=@now, updated_at=@now
+       WHERE id=@id AND status='prechecking' AND claim_token=@token
     `),
     getInvocation: db.prepare('SELECT * FROM operator_invocations WHERE id=?'),
     cancelSuperseded: db.prepare(`
@@ -566,6 +694,19 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
              updated_at=datetime('now')
        WHERE id=?
     `),
+    resetPrecheckErrors: db.prepare(`
+      UPDATE operator_schedules
+         SET consecutive_precheck_errors=0, updated_at=datetime('now')
+       WHERE id=?
+    `),
+    incrementPrecheckErrors: db.prepare(`
+      UPDATE operator_schedules
+         SET consecutive_precheck_errors=consecutive_precheck_errors+1,
+             enabled=CASE WHEN consecutive_precheck_errors+1 >= 3 THEN 0 ELSE enabled END,
+             next_fire_at=CASE WHEN consecutive_precheck_errors+1 >= 3 THEN NULL ELSE next_fire_at END,
+             updated_at=datetime('now')
+       WHERE id=?
+    `),
     recoverClaimed: db.prepare(`
       UPDATE operator_invocations
          SET status='pending', claim_token=NULL, locked_at=NULL, run_after=?,
@@ -659,9 +800,21 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     `),
   };
 
-  function emit(kind, schedule, invocation) {
+  function emit(kind, schedule, invocation, occurrence = null) {
     if (!eventBus) return;
     try {
+      if (kind === 'occurrence_status') {
+        eventBus.emit('operator:schedule', {
+          kind,
+          schedule_id: schedule?.id || occurrence?.schedule_id || null,
+          operator_instance_id: schedule?.operator_instance_id || occurrence?.operator_instance_id || null,
+          invocation_id: occurrence?.invocation_id || null,
+          status: occurrence?.status || null,
+          occurrence_id: occurrence?.id || null,
+          occurrence_status: occurrence?.status || null,
+        });
+        return;
+      }
       eventBus.emit('operator:schedule', {
         kind,
         schedule_id: schedule?.id || invocation?.schedule_id || null,
@@ -758,7 +911,7 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     return schedule;
   }
 
-  function updateSchedule(id, input = {}, now = new Date()) {
+  const updateScheduleTx = db.transaction((id, input = {}, now = new Date()) => {
     const current = getSchedule(id);
     assertInstance(current.operator_instance_id);
     if (current.archived_at) throw new ConflictError('Archived schedules cannot be updated');
@@ -777,6 +930,21 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     const misfirePolicy = normalizeMisfirePolicy(input.misfire_policy, current.misfire_policy);
     const projectId = input.codebase_project_id === undefined ? current.codebase_project_id : input.codebase_project_id;
     const mapped = assertMappedProject(current.operator_instance_id, projectId || null);
+    if (
+      mapped.project.id !== current.codebase_project_id
+      && current.precheck_verify_check_id !== null
+    ) {
+      const check = stmts.getVerifyCheck.get(current.precheck_verify_check_id);
+      if (
+        !check
+        || check.kind !== 'artifact'
+        || check.created_by !== 'human'
+        || check.project_id === null
+        || check.project_id !== mapped.project.id
+      ) {
+        throw new ConflictError('Attached precheck is not valid for the requested project; detach it before changing projects');
+      }
+    }
     const maxRuns = input.max_runs_per_day === undefined ? current.max_runs_per_day : Number(input.max_runs_per_day);
     if (!Number.isInteger(maxRuns) || maxRuns < 1 || maxRuns > 96) {
       throw new BadRequestError('max_runs_per_day must be an integer between 1 and 96');
@@ -799,7 +967,78 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     });
     if (info.changes !== 1) throw new ConflictError('Schedule changed; reload and retry');
     if (!enabled) stmts.cancelPending.run(id);
+    return getSchedule(id);
+  });
+
+  function updateSchedule(id, input = {}, now = new Date()) {
+    const schedule = updateScheduleTx.immediate(id, input, now);
+    emit('schedule_changed', schedule, null);
+    return schedule;
+  }
+
+  function normalizeExpectedRevision(value) {
+    const revision = Number(value);
+    if (!Number.isInteger(revision) || revision < 1) {
+      throw new BadRequestError('expected_revision is required');
+    }
+    return revision;
+  }
+
+  const attachPrecheckTx = db.transaction((id, { checkId, expectedRevision } = {}) => {
     const schedule = getSchedule(id);
+    if (schedule.archived_at) throw new ConflictError('Archived schedules cannot be updated');
+    const revision = normalizeExpectedRevision(expectedRevision);
+    if (schedule.revision !== revision) {
+      throw new ConflictError('Schedule changed; reload and retry');
+    }
+    const normalizedCheckId = Number(checkId);
+    if (!Number.isInteger(normalizedCheckId) || normalizedCheckId < 1) {
+      throw new BadRequestError('check_id is required');
+    }
+    const check = stmts.getVerifyCheck.get(normalizedCheckId);
+    if (!check) throw new NotFoundError(`verify_check not found: ${normalizedCheckId}`);
+    if (check.kind !== 'artifact') {
+      throw new BadRequestError('Only artifact checks can be attached as schedule prechecks');
+    }
+    if (check.project_id === null || check.project_id !== schedule.codebase_project_id) {
+      throw new BadRequestError('check project_id must exactly match the schedule project_id');
+    }
+    if (check.created_by !== 'human') {
+      throw new ForbiddenError('schedule precheck must be created by a human');
+    }
+    const info = stmts.updatePrecheck.run({
+      id,
+      check_id: check.id,
+      expected_revision: revision,
+    });
+    if (info.changes !== 1) throw new ConflictError('Schedule changed; reload and retry');
+    return getSchedule(id);
+  });
+
+  function attachPrecheck(id, { checkId, expectedRevision } = {}) {
+    const schedule = attachPrecheckTx.immediate(id, { checkId, expectedRevision });
+    emit('schedule_changed', schedule, null);
+    return schedule;
+  }
+
+  const detachPrecheckTx = db.transaction((id, { expectedRevision } = {}) => {
+    const schedule = getSchedule(id);
+    if (schedule.archived_at) throw new ConflictError('Archived schedules cannot be updated');
+    const revision = normalizeExpectedRevision(expectedRevision);
+    if (schedule.revision !== revision) {
+      throw new ConflictError('Schedule changed; reload and retry');
+    }
+    const info = stmts.updatePrecheck.run({
+      id,
+      check_id: null,
+      expected_revision: revision,
+    });
+    if (info.changes !== 1) throw new ConflictError('Schedule changed; reload and retry');
+    return getSchedule(id);
+  });
+
+  function detachPrecheck(id, { expectedRevision } = {}) {
+    const schedule = detachPrecheckTx.immediate(id, { expectedRevision });
     emit('schedule_changed', schedule, null);
     return schedule;
   }
@@ -903,6 +1142,34 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     return stmts.listInvocations.all(scheduleId, bounded);
   }
 
+  function listOccurrences(scheduleId, limit = 50) {
+    getSchedule(scheduleId);
+    const bounded = Math.max(1, Math.min(Number(limit) || 50, 200));
+    return stmts.listOccurrences.all(scheduleId, bounded);
+  }
+
+  function workspaceGenerationForProject(project) {
+    if (!project || project.source_type !== 'git') return null;
+    return String(project.source_generation);
+  }
+
+  function specHashForCheck(check) {
+    const spec = JSON.parse(check.spec_json);
+    return canonicalSpecHash(validateSpec(check.kind, spec));
+  }
+
+  function occurrenceDeadline(now, scheduledFor, next, graceSeconds) {
+    const candidates = [];
+    if (next) candidates.push(next.getTime());
+    if (graceSeconds !== null) {
+      candidates.push(scheduledFor.getTime() + graceSeconds * 1000);
+    }
+    const deadlineMs = candidates.length > 0
+      ? Math.min(...candidates)
+      : now.getTime() + PRECHECK_DEADLINE_MS;
+    return new Date(deadlineMs).toISOString();
+  }
+
   function advancePastNow(schedule, now) {
     let cursor = new Date(schedule.next_fire_at);
     let scheduledFor = null;
@@ -996,6 +1263,61 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
             if (capped.inserted) changed.push(capped.invocation);
             return { invocation: null, changed };
           }
+          if (fresh.precheck_verify_check_id !== null) {
+            // R4: a duplicate occurrence must commit the cursor advance rather
+            // than letting UNIQUE roll the whole transaction back forever.
+            if (stmts.occurrenceForScheduleAt.get(fresh.id, scheduledForIso)) {
+              return { invocation: null, changed, occurrences: [] };
+            }
+            const check = stmts.getVerifyCheck.get(fresh.precheck_verify_check_id);
+            if (!check) {
+              stmts.incrementPrecheckErrors.run(fresh.id);
+              return { invocation: null, changed, occurrences: [], scheduleChanged: true };
+            }
+            const project = stmts.getProject.get(fresh.codebase_project_id);
+            const occurrence = {
+              id: `osocc_${crypto.randomUUID()}`,
+              schedule_id: fresh.id,
+              operator_instance_id: fresh.operator_instance_id,
+              scheduled_for: scheduledForIso,
+              schedule_revision: fresh.revision,
+              precheck_verify_check_id: check.id,
+              precheck_check_id_snapshot: check.id,
+              precheck_check_name: check.name,
+              precheck_kind: check.kind,
+              precheck_spec_hash: specHashForCheck(check),
+              precheck_node_id: project?.node_id || 'local',
+              precheck_workspace_generation: workspaceGenerationForProject(project),
+              status: 'pending',
+              outcome_reason: null,
+              next_attempt_at: nowIso,
+              deadline_at: occurrenceDeadline(now, scheduledFor, next, fresh.grace_seconds),
+              finished_at: null,
+              updated_at: nowIso,
+            };
+            let healthError = false;
+            if (check.created_by !== 'human') {
+              occurrence.status = 'precheck_blocked';
+              occurrence.outcome_reason = 'provenance_lost';
+              healthError = true;
+            } else if (check.kind !== 'artifact') {
+              occurrence.status = 'precheck_blocked';
+              occurrence.outcome_reason = 'unsupported_kind';
+              healthError = true;
+            } else if (check.project_id !== fresh.codebase_project_id) {
+              occurrence.status = 'precheck_blocked';
+              occurrence.outcome_reason = 'scope_mismatch';
+              healthError = true;
+            }
+            const occurrences = occurrence.status === 'pending'
+              ? stmts.supersedeInflightOccurrences.all(nowIso, nowIso, fresh.id)
+              : [];
+            if (occurrence.status !== 'pending') occurrence.finished_at = nowIso;
+            stmts.insertOccurrence.run(occurrence);
+            occurrences.push(stmts.getOccurrence.get(occurrence.id));
+            if (healthError) stmts.incrementPrecheckErrors.run(fresh.id);
+            return { invocation: null, changed, occurrences, scheduleChanged: healthError };
+          }
           const active = stmts.activeInvocationForOperator.get(fresh.operator_instance_id);
           if (active) {
             const canSupersede = active.source === 'scheduled'
@@ -1026,6 +1348,12 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
         }).immediate();
         if (result) {
           for (const invocation of result.changed) emit('invocation_status', null, invocation);
+          for (const occurrence of result.occurrences || []) {
+            emit('occurrence_status', null, null, occurrence);
+          }
+          if (result.scheduleChanged) {
+            emit('schedule_changed', parseSchedule(stmts.get.get(raw.id)), null);
+          }
           if (result.invocation) {
             created.push(result.invocation);
             emit(
@@ -1052,6 +1380,274 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
       if (info.changes !== 1) return null;
       return { ...stmts.getInvocation.get(row.id), claim_token: token };
     }).immediate();
+  }
+
+  function claimNextOccurrence(now = new Date()) {
+    const nowIso = now.toISOString();
+    const occurrence = db.transaction(() => {
+      const row = stmts.dueOccurrence.get(nowIso, nowIso);
+      if (!row) return null;
+      const token = crypto.randomUUID();
+      const leasedUntil = new Date(now.getTime() + CLAIM_LEASE_MS).toISOString();
+      const info = stmts.claimOccurrence.run(
+        token,
+        leasedUntil,
+        nowIso,
+        nowIso,
+        row.id,
+        nowIso,
+        nowIso,
+      );
+      if (info.changes !== 1) return null;
+      return stmts.getOccurrence.get(row.id);
+    }).immediate();
+    if (occurrence) emit('occurrence_status', null, null, occurrence);
+    return occurrence;
+  }
+
+  function releaseOccurrence(id, token, { now = new Date() } = {}) {
+    const nowIso = now.toISOString();
+    const outcome = db.transaction(() => {
+      const owned = stmts.getOwnedOccurrence.get(id, token);
+      if (!owned) return null;
+      // §4.2: a retry past the deadline is not a retry. Returning it to `pending`
+      // would produce a row the claim predicate (`deadline_at > now`) can never
+      // pick up again and whose health cost is never counted — it would linger as
+      // a zombie until a later sweep. Terminalize here, in the same transaction.
+      const nextAttemptAt = new Date(now.getTime() + retryDelayMs(owned.attempts)).toISOString();
+      // Expire when the deadline has passed OR when the backoff would land past
+      // it. Checking only `now` leaves the same zombie one step removed: the row
+      // parks as `pending`, and by the time `next_attempt_at` arrives the claim
+      // predicate (`deadline_at > now`) can no longer be satisfied.
+      if (owned.deadline_at <= nowIso || nextAttemptAt >= owned.deadline_at) {
+        const info = stmts.expireOwnedOccurrence.run({ id, token, now: nowIso });
+        if (info.changes !== 1) return null;
+        stmts.incrementPrecheckErrors.run(owned.schedule_id);
+        return { occurrence: stmts.getOccurrence.get(id), scheduleId: owned.schedule_id };
+      }
+      const info = stmts.releaseOccurrence.run(nextAttemptAt, nowIso, id, token);
+      if (info.changes !== 1) return null;
+      return { occurrence: stmts.getOccurrence.get(id), scheduleId: null };
+    }).immediate();
+    if (!outcome) return null;
+    emit('occurrence_status', null, null, outcome.occurrence);
+    if (outcome.scheduleId) emit('schedule_changed', parseSchedule(stmts.get.get(outcome.scheduleId)), null);
+    return outcome.occurrence;
+  }
+
+  function finishOwnedOccurrence(
+    occurrence,
+    token,
+    status,
+    outcomeReason,
+    invocationId,
+    nowIso,
+    evaluator = null,
+    detailJson = null,
+  ) {
+    const info = stmts.finishOccurrence.run({
+      id: occurrence.id,
+      claim_token: token,
+      status,
+      outcome_reason: outcomeReason,
+      evaluator,
+      detail_json: detailJson,
+      invocation_id: invocationId,
+      finished_at: nowIso,
+    });
+    if (info.changes !== 1) return null;
+    return stmts.getOccurrence.get(occurrence.id);
+  }
+
+  function commitPrecheck(occurrenceId, token, passed, {
+    evaluatedSpecHash,
+    evaluatedNodeId,
+    evaluatedWorkspaceGeneration,
+    evaluator = null,
+    detail = null,
+    now = new Date(),
+  } = {}) {
+    const nowIso = now.toISOString();
+    let detailJson = null;
+    if (detail !== null && detail !== undefined) {
+      const candidate = JSON.stringify(detail);
+      // The evaluator normally guarantees this bound. Keep the durable write
+      // fail-closed if another caller bypasses it.
+      detailJson = Buffer.byteLength(candidate, 'utf8') <= 2 * 1024
+        ? candidate
+        : JSON.stringify({ reason_code: 'detail_omitted' });
+    }
+    const result = db.transaction(() => {
+      // Phase 1: loss of ownership is a complete no-op. In particular, an old
+      // claimant may not terminalize a row that a newer claimant now owns.
+      const occurrence = stmts.getOwnedOccurrence.get(occurrenceId, token);
+      if (!occurrence) return null;
+
+      const schedule = parseSchedule(stmts.get.get(occurrence.schedule_id));
+      let terminalStatus = null;
+      let reason = null;
+      let health = null;
+
+      // Phase 2: the order is the contract. Attachment uses the non-FK
+      // snapshot and strict JS equality, which treats NULL as a real value.
+      if (occurrence.deadline_at <= nowIso) {
+        terminalStatus = 'precheck_unavailable';
+        reason = 'deadline_exceeded';
+        health = 'increment';
+      } else if (!schedule
+        || schedule.precheck_verify_check_id !== occurrence.precheck_check_id_snapshot) {
+        terminalStatus = 'superseded';
+        reason = 'attachment_changed';
+      } else if (schedule.revision !== Number(occurrence.schedule_revision)) {
+        terminalStatus = 'superseded';
+        reason = 'schedule_revision_changed';
+      } else {
+        const check = stmts.getVerifyCheck.get(occurrence.precheck_check_id_snapshot);
+        if (check && check.created_by !== 'human') {
+          terminalStatus = 'precheck_blocked';
+          reason = 'provenance_lost';
+          health = 'increment';
+        } else if (!check) {
+          terminalStatus = 'precheck_blocked';
+          reason = 'check_gone';
+          health = 'increment';
+        } else if (check.project_id !== schedule.codebase_project_id) {
+          terminalStatus = 'precheck_blocked';
+          reason = 'scope_mismatch';
+          health = 'increment';
+        } else if (check.kind !== occurrence.precheck_kind || check.kind !== 'artifact') {
+          // Backstop only: migration 089 makes verify_checks.kind immutable, and
+          // materialize already refuses a non-artifact precheck, so neither leg is
+          // reachable through any supported path. It stays because "the evaluated
+          // result belongs to the kind we contracted for" is the invariant the
+          // artifact-only v1 rests on (§2.1) — a future writer must trip this,
+          // not silently approve a command-shaped result.
+          terminalStatus = 'precheck_blocked';
+          reason = 'kind_changed';
+          health = 'increment';
+        } else {
+          let currentSpecHash = null;
+          try { currentSpecHash = specHashForCheck(check); } catch { /* corrupt rows fail closed */ }
+          const evaluatedGeneration = evaluatedWorkspaceGeneration == null
+            ? null
+            : String(evaluatedWorkspaceGeneration);
+          const project = stmts.getProject.get(schedule.codebase_project_id);
+          const currentNodeId = project?.node_id || 'local';
+          const currentGeneration = workspaceGenerationForProject(project);
+          if (occurrence.precheck_spec_hash !== evaluatedSpecHash
+            || occurrence.precheck_spec_hash !== currentSpecHash) {
+            terminalStatus = 'superseded';
+            reason = 'spec_changed';
+          } else if (occurrence.precheck_node_id !== evaluatedNodeId
+            || occurrence.precheck_node_id !== currentNodeId
+            || occurrence.precheck_workspace_generation !== evaluatedGeneration
+            || occurrence.precheck_workspace_generation !== currentGeneration) {
+            terminalStatus = 'superseded';
+            reason = 'workspace_changed';
+          }
+        }
+      }
+
+      const invocations = [];
+      let invocationId = null;
+      if (!terminalStatus && passed !== true) {
+        terminalStatus = 'precheck_failed';
+        reason = 'condition_not_met';
+        health = 'reset';
+      } else if (!terminalStatus) {
+        terminalStatus = 'passed';
+        health = 'reset';
+        const since = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
+        if (Number(stmts.countRecent.get(schedule.id, since)?.count || 0) >= schedule.max_runs_per_day) {
+          reason = 'daily_cap_reached';
+          const capped = insertTerminalInvocationFromSchedule(schedule, {
+            scheduledFor: occurrence.scheduled_for,
+            runAfter: nowIso,
+            waitingReason: reason,
+          });
+          invocationId = capped.invocation.id;
+          if (capped.inserted) invocations.push(capped.invocation);
+        } else {
+          const active = stmts.activeInvocationForOperator.get(schedule.operator_instance_id);
+          if (active) {
+            const canSupersede = active.source === 'scheduled'
+              && (active.status === 'pending' || active.status === 'claimed')
+              && active.scheduled_for < occurrence.scheduled_for;
+            if (canSupersede) {
+              const info = stmts.cancelSuperseded.run(active.id, occurrence.scheduled_for);
+              if (info.changes !== 1) {
+                throw new ConflictError(`Active invocation changed before supersede: ${active.id}`);
+              }
+              invocations.push(stmts.getInvocation.get(active.id));
+            } else {
+              reason = 'operator_active_skipped';
+              const skipped = insertTerminalInvocationFromSchedule(schedule, {
+                scheduledFor: occurrence.scheduled_for,
+                runAfter: nowIso,
+                waitingReason: reason,
+              });
+              invocationId = skipped.invocation.id;
+              if (skipped.inserted) invocations.push(skipped.invocation);
+            }
+          }
+          if (!invocationId) {
+            const invocation = insertInvocationFromSchedule(schedule, {
+              source: 'scheduled',
+              scheduledFor: occurrence.scheduled_for,
+              runAfter: nowIso,
+            });
+            invocationId = invocation.id;
+            invocations.push(invocation);
+          }
+        }
+      }
+
+      const finished = finishOwnedOccurrence(
+        occurrence,
+        token,
+        terminalStatus,
+        reason,
+        invocationId,
+        nowIso,
+        typeof evaluator === 'string' ? evaluator.slice(0, 80) : null,
+        detailJson,
+      );
+      if (!finished) return null;
+      if (health === 'increment') stmts.incrementPrecheckErrors.run(occurrence.schedule_id);
+      if (health === 'reset') stmts.resetPrecheckErrors.run(occurrence.schedule_id);
+      return { occurrence: finished, invocations, scheduleChanged: health !== null };
+    }).immediate();
+
+    if (!result) return null;
+    for (const invocation of result.invocations) emit('invocation_status', null, invocation);
+    emit('occurrence_status', null, null, result.occurrence);
+    if (result.scheduleChanged) {
+      emit('schedule_changed', parseSchedule(stmts.get.get(result.occurrence.schedule_id)), null);
+    }
+    return result.occurrence;
+  }
+
+  function sweepStaleOccurrences(now = new Date()) {
+    const nowIso = now.toISOString();
+    const result = db.transaction(() => {
+      // Each transition carries its own complete CAS predicate in the UPDATE.
+      const recovered = stmts.recoverLeasedOccurrences.all({ now: nowIso });
+      const unavailable = [
+        ...stmts.expirePrecheckingOccurrences.all({ now: nowIso }),
+        ...stmts.expirePendingOccurrences.all({ now: nowIso }),
+      ];
+      for (const occurrence of unavailable) {
+        stmts.incrementPrecheckErrors.run(occurrence.schedule_id);
+      }
+      return { recovered, unavailable };
+    }).immediate();
+    for (const occurrence of [...result.recovered, ...result.unavailable]) {
+      emit('occurrence_status', null, null, occurrence);
+    }
+    for (const scheduleId of new Set(result.unavailable.map((row) => row.schedule_id))) {
+      emit('schedule_changed', parseSchedule(stmts.get.get(scheduleId)), null);
+    }
+    return [...result.recovered, ...result.unavailable];
   }
 
   function releaseClaim(id, token, {
@@ -1248,6 +1844,7 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     now = new Date(),
     runningStaleMs = RUNNING_RECONCILE_MIN_AGE_MS,
   ) {
+    sweepStaleOccurrences(now);
     const pending = stmts.recoverClaimed.run(now.toISOString()).changes;
     // Order is the contract: most-informative first, unconditional backstop
     // last. Reversing it would release every 'running' row generically before
@@ -1279,14 +1876,21 @@ function createOperatorScheduleService(db, { eventBus, runService, logger } = {}
     getSchedule,
     createSchedule,
     updateSchedule,
+    attachPrecheck,
+    detachPrecheck,
     archiveSchedule,
     archiveForProjectDeletion,
     notifySchedulesChanged,
     runNow,
     listInvocations,
+    listOccurrences,
     sweepExpired,
     materializeDue,
     claimNext,
+    claimNextOccurrence,
+    releaseOccurrence,
+    commitPrecheck,
+    sweepStaleOccurrences,
     releaseClaim,
     markDelivering,
     markRunning,
@@ -1308,6 +1912,10 @@ module.exports = {
   MIN_EXPIRY_AGE_MS,
   CLAIM_LEASE_MS,
   RUNNING_RECONCILE_MIN_AGE_MS,
+  PRECHECK_DEADLINE_MS,
+  PRECHECK_RETRY_BASE_MS,
+  PRECHECK_RETRY_CAP_MS,
+  retryDelayMs,
   normalizeRule,
   normalizeTimezone,
   nextFireForRule,

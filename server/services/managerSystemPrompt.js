@@ -14,6 +14,7 @@
  */
 
 const os = require('node:os');
+const crypto = require('node:crypto');
 const { isProjectLayer } = require('../utils/conversationId');
 const {
   managerOperationManifest,
@@ -25,28 +26,83 @@ const {
 const OPERATION_SEGMENT_PREFIX = '\u0000PALANTIR_OPERATION_SEGMENT:';
 const OPERATION_SEGMENT_SUFFIX = ':PALANTIR_OPERATION_SEGMENT\u0000';
 
-function operationSegment(id, renderedPath, text, segmentAudit) {
+function promptSegmentError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function createOperationSegmentRegistry() {
+  return { issued: new Map(), audit: [] };
+}
+
+function issueOperationSegmentToken(registry) {
+  let token;
+  do token = crypto.randomBytes(18).toString('base64url'); while (registry.issued.has(token));
+  return token;
+}
+
+function operationSegment(id, renderedPath, text, registry) {
   const operation = getManagerOperation(id);
   const value = { kind: 'operation', id, method: operation.method, renderedPath, text };
+  const canonicalPayload = JSON.stringify(value);
   const auditEntry = { id, serialized: false };
-  if (segmentAudit) segmentAudit.push(auditEntry);
+  const token = issueOperationSegmentToken(registry);
+  registry.issued.set(token, { auditEntry, canonicalPayload, consumed: false });
+  registry.audit.push(auditEntry);
   Object.defineProperty(value, Symbol.toPrimitive, {
     enumerable: false,
     value: () => {
       auditEntry.serialized = true;
-      return `${OPERATION_SEGMENT_PREFIX}${Buffer.from(JSON.stringify(value)).toString('base64')}${OPERATION_SEGMENT_SUFFIX}`;
+      return `${OPERATION_SEGMENT_PREFIX}${token}:${Buffer.from(canonicalPayload).toString('base64')}${OPERATION_SEGMENT_SUFFIX}`;
     },
   });
   return value;
 }
 
-function deserializePromptSegments(rendered) {
-  const pattern = new RegExp(`${OPERATION_SEGMENT_PREFIX}([A-Za-z0-9+/=]+)${OPERATION_SEGMENT_SUFFIX}`, 'g');
+function deserializePromptSegments(rendered, registry) {
   const segments = [];
   let offset = 0;
-  for (const match of rendered.matchAll(pattern)) {
-    if (match.index > offset) segments.push({ kind: 'literal', text: rendered.slice(offset, match.index) });
-    const segment = JSON.parse(Buffer.from(match[1], 'base64').toString('utf8'));
+  while (true) {
+    const markerStart = rendered.indexOf(OPERATION_SEGMENT_PREFIX, offset);
+    if (markerStart < 0) break;
+    if (markerStart > offset) segments.push({ kind: 'literal', text: rendered.slice(offset, markerStart) });
+    const markerBodyStart = markerStart + OPERATION_SEGMENT_PREFIX.length;
+    const markerEnd = rendered.indexOf(OPERATION_SEGMENT_SUFFIX, markerBodyStart);
+    if (markerEnd < 0) {
+      throw promptSegmentError('MANAGER_PROMPT_SEGMENT_MALFORMED', 'Malformed manager prompt operation segment: missing suffix');
+    }
+    const markerBody = rendered.slice(markerBodyStart, markerEnd);
+    const separator = markerBody.indexOf(':');
+    if (separator <= 0) {
+      throw promptSegmentError('MANAGER_PROMPT_SEGMENT_MALFORMED', 'Malformed manager prompt operation segment: missing token or payload');
+    }
+    const token = markerBody.slice(0, separator);
+    const encoded = markerBody.slice(separator + 1);
+    const issued = registry.issued.get(token);
+    if (!issued) {
+      throw promptSegmentError('MANAGER_PROMPT_SEGMENT_UNKNOWN_TOKEN', 'Unknown manager prompt operation segment token');
+    }
+    if (issued.consumed) {
+      throw promptSegmentError('MANAGER_PROMPT_SEGMENT_REUSED_TOKEN', 'Manager prompt operation segment token was consumed more than once');
+    }
+    if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) {
+      throw promptSegmentError('MANAGER_PROMPT_SEGMENT_MALFORMED', 'Malformed manager prompt operation segment: non-canonical base64');
+    }
+    const decoded = Buffer.from(encoded, 'base64');
+    if (decoded.toString('base64') !== encoded) {
+      throw promptSegmentError('MANAGER_PROMPT_SEGMENT_MALFORMED', 'Malformed manager prompt operation segment: non-canonical base64');
+    }
+    const decodedPayload = decoded.toString('utf8');
+    if (decodedPayload !== issued.canonicalPayload) {
+      throw promptSegmentError('MANAGER_PROMPT_SEGMENT_PAYLOAD_MISMATCH', 'Manager prompt operation segment payload does not match the payload bound to its token');
+    }
+    let segment;
+    try {
+      segment = JSON.parse(decodedPayload);
+    } catch {
+      throw promptSegmentError('MANAGER_PROMPT_SEGMENT_MALFORMED', 'Malformed manager prompt operation segment: invalid JSON');
+    }
     if (
       segment.kind !== 'operation'
       || typeof segment.id !== 'string'
@@ -54,12 +110,20 @@ function deserializePromptSegments(rendered) {
       || typeof segment.renderedPath !== 'string'
       || typeof segment.text !== 'string'
     ) {
-      throw new Error('Invalid serialized manager prompt operation segment');
+      throw promptSegmentError('MANAGER_PROMPT_SEGMENT_MALFORMED', 'Malformed manager prompt operation segment: invalid schema');
     }
+    issued.consumed = true;
     segments.push(segment);
-    offset = match.index + match[0].length;
+    offset = markerEnd + OPERATION_SEGMENT_SUFFIX.length;
   }
   if (offset < rendered.length) segments.push({ kind: 'literal', text: rendered.slice(offset) });
+  const unconsumedTokens = [...registry.issued.values()].filter(entry => !entry.consumed);
+  if (unconsumedTokens.length > 0) {
+    throw promptSegmentError('MANAGER_PROMPT_SEGMENT_UNCONSUMED', 'Issued manager prompt operation segment token was not consumed');
+  }
+  if (segments.some(segment => segment.kind === 'literal' && segment.text.includes('/api/'))) {
+    throw promptSegmentError('MANAGER_PROMPT_LITERAL_API', 'Manager prompt contains /api/ literal outside operation segment');
+  }
   return segments;
 }
 
@@ -534,7 +598,7 @@ Always query the actual Palantir API to get real data — never guess or assume.
  */
 function buildManagerSystemPromptWithTrace({ adapter, port, token, layer = 'top', adapterType, specialistAvailable = false, apiBaseUrl }) {
   const normalizedLayer = isProjectLayer(layer) ? 'operator' : 'top';
-  const segmentAudit = [];
+  const segmentRegistry = createOperationSegmentRegistry();
   const guardrails = adapter && typeof adapter.buildGuardrailsSection === 'function'
     ? adapter.buildGuardrailsSection({ layer: normalizedLayer })
     : '';
@@ -548,14 +612,14 @@ function buildManagerSystemPromptWithTrace({ adapter, port, token, layer = 'top'
       adapterType,
       specialistAvailable,
       apiBaseUrl,
-      trace: segmentAudit,
+      trace: segmentRegistry,
     }),
   ].filter(Boolean).join('\n\n');
-  const unconsumed = segmentAudit.filter(entry => !entry.serialized);
+  const unconsumed = segmentRegistry.audit.filter(entry => !entry.serialized);
   if (unconsumed.length > 0) {
     throw new Error(`Manager prompt operation segment was not serialized: ${unconsumed.map(entry => entry.id).join(', ')}`);
   }
-  const segments = deserializePromptSegments(rendered);
+  const segments = deserializePromptSegments(rendered, segmentRegistry);
   const text = segments.map(segment => segment.text).join('');
   const trace = segments.filter(segment => segment.kind === 'operation');
   return { text, segments, trace, referencedOperationIds: trace.map(entry => entry.id) };
@@ -618,4 +682,9 @@ module.exports = {
   buildRoleSection,
   buildCommonBase,
   resolveManagerApiEndpoints,
+  _operationSegmentTestHooks: {
+    createOperationSegmentRegistry,
+    operationSegment,
+    deserializePromptSegments,
+  },
 };

@@ -15,6 +15,7 @@ const { execEnvKeys, projectTestEnvKeys } = require('./execEnvPolicy');
 
 const WORKER_OUTPUT_MAX_LINES = 500;
 const WORKER_OUTPUT_MAX_BUFFER = 256 * 1024;
+const WORKER_OUTPUT_RANGE_MAX_BYTES = 256 * 1024;
 // A Claude result event repeats the full final answer in one JSONL record, so
 // it can legitimately exceed the small live-tail ceiling. Keep this separately
 // bounded at 4 MiB: large enough for Claude's practical output window while
@@ -266,6 +267,63 @@ function normalizeEnv(env) {
     });
 }
 
+function normalizeMaterializedEnv(env) {
+  if (!env) return [];
+  return Object.entries(env)
+    .filter(([, value]) => value !== undefined)
+    .map(([key, value]) => {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw envKeyInvalidError(key);
+      const normalized = value === null ? '' : String(value);
+      // The clean-shell bootstrap uses command substitution to read mode-0600
+      // files. POSIX command substitution strips trailing newlines, so reject
+      // every line break (and NUL, which cannot survive shell variables) rather
+      // than silently changing a controller-materialized value.
+      if (/[\r\n\x00]/.test(normalized)) {
+        const err = new Error(`${key} must not contain CR, LF, or NUL`);
+        err.code = 'ENV_MATERIALIZATION_INVALID';
+        throw err;
+      }
+      return [key, normalized];
+    });
+}
+
+function buildMaterializedEnvBootstrap(envFiles) {
+  const entries = Object.entries(envFiles || {});
+  if (entries.length === 0) return [];
+  for (const [key] of entries) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw envKeyInvalidError(key);
+  }
+  const quotedFiles = entries.map(([, file]) => shq(file)).join(' ');
+  // A trap covering EVERY file, installed BEFORE the first read. The per-key
+  // `rm` below still runs inline so the exposure window stays minimal, but a
+  // failing read used to `exit 78` immediately and strand every LATER file on
+  // the pod as a mode-0600 credential — the exact class of leak this change
+  // exists to remove. The trap is discarded by `exec` at the end of the
+  // bootstrap, and by then every file has already been removed inline.
+  // `rm -f` is idempotent, so the trap firing after inline removal is a no-op.
+  // trap 본문 전체를 한 번 더 인용한다. `trap 'rm -f -- ${quotedFiles}' 0` 처럼
+  // 이미 인용된 경로를 바깥 작은따옴표 안에 그대로 끼우면, 경로에 공백이나
+  // 작은따옴표가 있을 때 첫 파싱에서 인용이 깨져 trap 설치 실패·오삭제·명령
+  // 주입으로 이어진다.
+  const lines = [`trap ${shq(`rm -f -- ${quotedFiles}`)} 0`];
+  entries.forEach(([key, file], index) => {
+    const rc = `materialized_env_${index}_rc`;
+    const rmRc = `materialized_env_${index}_rm_rc`;
+    lines.push(
+      `${key}=$(cat -- ${shq(file)})`,
+      `${rc}=$?`,
+      `rm -f -- ${shq(file)}`,
+      `${rmRc}=$?`,
+      `[ "$${rc}" -eq 0 ] || exit 78`,
+      // A successful read whose cleanup failed would leave the credential on
+      // the pod while the agent runs. Refuse to continue instead.
+      `[ "$${rmRc}" -eq 0 ] || exit 79`,
+      `export ${key}`,
+    );
+  });
+  return lines;
+}
+
 function normalizeEnvKeyList(keys, { allowPath = false } = {}) {
   if (keys === undefined || keys === null) return [];
   if (!Array.isArray(keys)) {
@@ -384,6 +442,7 @@ function buildCommandScript(command, args = [], {
   runBoundTokenKey = null,
   runBoundApiBase = false,
   claudeBareAuth = false,
+  materializedEnvFiles = {},
 } = {}) {
   const explicitEnv = cleanEnv && !cleanEnvAllowExplicitPath
     // The pod owns PATH. A controller PATH must never override it; pathPrefix
@@ -411,7 +470,8 @@ function buildCommandScript(command, args = [], {
       ...(runBoundTokenKey ? [runBoundTokenKey] : []),
       ...(runBoundApiBase ? ['PALANTIR_API_BASE'] : []),
     ];
-    if (stdinEnvKeys.length > 0 || claudeBareAuth) {
+    const materializedBootstrap = buildMaterializedEnvBootstrap(materializedEnvFiles);
+    if (stdinEnvKeys.length > 0 || claudeBareAuth || materializedBootstrap.length > 0) {
       normalizeEnvKeyList(stdinEnvKeys);
       // Run-bound values are read from stdin INSIDE the clean shell, never
       // passed as arguments. `env -i ... KEY="$KEY"` would expand a value
@@ -422,6 +482,9 @@ function buildCommandScript(command, args = [], {
         `IFS= read -r ${key} || exit 126`,
         `export ${key}`,
       ]);
+      // Keep controller materialization after the pod allowlist loop. It is the
+      // final explicit override, but its value is never an env/SSH argv item.
+      bootstrap.push(...materializedBootstrap);
       if (claudeBareAuth) bootstrap.push(buildClaudeBareAuthShell(args));
       bootstrap.push('exec "$@"');
       cleanParts.push(
@@ -441,6 +504,10 @@ function buildCommandScript(command, args = [], {
       : `${prefix}; ${commandScript}`;
   }
   const parts = ['exec'];
+  // This legacy branch is used only by executor-owned filesystem primitives;
+  // its sole explicit environment value is the fixed, non-secret LC_ALL=C.
+  // Profile/provider materialization always selects cleanEnv and mode-0600
+  // files, so those credentials cannot reach this argv assignment path.
   if (pathAssign || envParts.length > 0) {
     parts.push('env');
     if (pathAssign) parts.push(pathAssign);
@@ -575,10 +642,10 @@ function validateWorkerSpec(spec) {
  * operator-controlled, not adversarial mid-operation. rmrf additionally
  * refuses to delete an exposed root itself.
  *
- * Remote requirements: /bin/sh, coreutils-compatible realpath, find, mktemp,
- * chmod, cat, test, mkdir, rm, head, tail, wc, awk, and mv, plus tmux (worker
- * channel spawn/isAlive/kill). readdir implements names only via find and does
- * not support withFileTypes or other readdir options.
+ * Remote requirements: /bin/sh, coreutils-compatible realpath and stat, find,
+ * mktemp, chmod, cat, test, mkdir, rm, head, tail, wc, awk, mv, base64, and tr,
+ * plus tmux (worker channel spawn/isAlive/kill). readdir implements names only
+ * via find and does not support withFileTypes or other readdir options.
  */
 function createRemoteSshNodeExecutor(node, {
   spawnFn = childProcess.spawn,
@@ -601,6 +668,7 @@ function createRemoteSshNodeExecutor(node, {
   const managerInteractiveCommands = new Set(['codex', 'claude']);
   let canonicalRootsPromise = null;
   let canonicalRootsValue = null;
+  const canonicalWorkerStatusDirs = new Map();
 
   function sshArgsFor(script, { keepAlive } = {}) {
     // ssh JOINS every post-destination arg with spaces and hands the single
@@ -1036,10 +1104,15 @@ function createRemoteSshNodeExecutor(node, {
         if (isWorkerApiBaseKey(key)) delete explicitEnv[key];
       }
     }
+    // buildCommandScript historically drops a controller PATH for interactive
+    // agents; do so before materialization as well, preserving the single pod
+    // PATH assembly contract.
+    delete explicitEnv.PATH;
     const processEnvKeys = [
       ...(worker ? REMOTE_WORKER_BASE_ENV_KEYS : remoteManagerBaseEnvKeys(commandName)),
       ...normalizeEnvKeyList(envAllowlist),
     ];
+    const materialized = await materializeControllerEnv(explicitEnv);
     const script = buildCommandScript(commandName, args, {
       cwd: safeCwd,
       // The remote login shell may have controller credentials configured.
@@ -1052,7 +1125,7 @@ function createRemoteSshNodeExecutor(node, {
         PALANTIR_PM_TOKEN: null,
         ...(worker && runBoundToken ? {} : { PALANTIR_WORKER_TOKEN: null }),
         ...(!worker && runBoundToken ? {} : { PALANTIR_MANAGER_TOKEN: null }),
-        ...explicitEnv,
+        ...materialized.argvEnv,
       },
       pathPrefix,
       cleanEnv: true,
@@ -1060,16 +1133,48 @@ function createRemoteSshNodeExecutor(node, {
       runBoundTokenKey: runBoundToken ? runBoundTokenKey : null,
       runBoundApiBase: !!workerApiBase,
       claudeBareAuth,
+      materializedEnvFiles: materialized.envFiles,
     });
     // The run-bound reads happen INSIDE the clean shell (buildCommandScript):
     // reading values out here would require re-injecting them as env -i
     // arguments, which puts them in the real /usr/bin/env argv.
     const bootstrapScript = script;
-    const child = spawnFn(
-      'ssh',
-      sshArgsFor(bootstrapScript, { keepAlive: true }),
-      { stdio: ['pipe', 'pipe', 'pipe'] },
-    );
+    // The in-shell trap removes these once the remote bootstrap starts. This
+    // covers the window BEFORE that: if ssh never reaches the bootstrap the
+    // files would otherwise sit on the pod as mode-0600 credentials.
+    let materializedCleanupDone = materialized.files.length === 0;
+    const cleanupMaterialized = async () => {
+      if (materializedCleanupDone) return;
+      materializedCleanupDone = true;
+      // `rm -f` is idempotent, so racing the in-shell trap is harmless.
+      try { await runRemoteCommand('rm', ['-f', ...materialized.files]); } catch { /* best-effort */ }
+    };
+    let child;
+    try {
+      child = spawnFn(
+        'ssh',
+        sshArgsFor(bootstrapScript, { keepAlive: true }),
+        { stdio: ['pipe', 'pipe', 'pipe'] },
+      );
+    } catch (err) {
+      await cleanupMaterialized();
+      throw err;
+    }
+    // `child_process.spawn` reports most launch failures ASYNCHRONOUSLY on the
+    // `error` event, not by throwing — so the try/catch above misses connection
+    // failures and exec errors entirely. In those cases the remote bootstrap
+    // (and its trap) never ran.
+    if (!materializedCleanupDone && child && typeof child.once === 'function') {
+      child.once('error', () => { void cleanupMaterialized(); });
+      // ssh 는 연결·인증·호스트 실패를 'error' 가 아니라 **종료 코드 255 + 'close'**
+      // 로 보고한다. 'error' 만 처리하면 로컬 ssh 실행 실패(ENOENT)만 잡히고,
+      // 정작 흔한 네트워크 실패에서 파일이 pod 에 남는다.
+      // 정상 경로에서는 in-shell trap 이 이미 지웠고 `rm -f` 는 멱등이라
+      // 여기서 한 번 더 지우는 것은 무해하다.
+      child.once('close', (code) => {
+        if (code !== 0) void cleanupMaterialized();
+      });
+    }
     if (runBoundToken) {
       if (!child || !child.stdin || typeof child.stdin.write !== 'function') {
         try { child?.kill?.('SIGTERM'); } catch { /* best-effort */ }
@@ -1223,6 +1328,32 @@ function createRemoteSshNodeExecutor(node, {
     validateBareFilename(name);
     const prefix = path.posix.join(exposedRoots[0], '.palantir-secret-');
     return writeTempFile(prefix, name, content, mode);
+  }
+
+  async function materializeControllerEnv(env) {
+    const entries = normalizeMaterializedEnv(env);
+    const argvEnv = {};
+    const envFiles = {};
+    const files = [];
+    try {
+      for (const [key, value] of entries) {
+        // No non-empty controller value reaches argv through any path. Only an
+        // empty value remains as argv-level defense-in-depth blanking.
+        if (value === '') {
+          argvEnv[key] = null;
+          continue;
+        }
+        const file = await putSecretFile('controller-env', value, 0o600);
+        envFiles[key] = file;
+        files.push(file);
+      }
+      return { argvEnv, envFiles, files };
+    } catch (err) {
+      if (files.length > 0) {
+        try { await runRemoteCommand('rm', ['-f', ...files]); } catch {}
+      }
+      throw err;
+    }
   }
 
   async function resolveNodeRuntime({ pathPrefix = node.node_prefix || undefined } = {}) {
@@ -1523,6 +1654,7 @@ function createRemoteSshNodeExecutor(node, {
   }, {
     workerTokenFile = null,
     workerApiBaseFile = null,
+    materializedEnvFiles = {},
   } = {}) {
     // env -i is the primary ambient-credential boundary. Empty actor
     // assignments remain as defense in depth; the server-selected run
@@ -1540,12 +1672,15 @@ function createRemoteSshNodeExecutor(node, {
     for (const key of Object.keys(workerEnv)) {
       if (isWorkerApiBaseKey(key)) delete workerEnv[key];
     }
+    const materializedKeys = new Set(Object.keys(materializedEnvFiles));
     const envParts = normalizeEnv({
       PALANTIR_TOKEN: null,
       PALANTIR_PM_TOKEN: null,
       ...(workerTokenFile ? {} : { PALANTIR_WORKER_TOKEN: null }),
       PALANTIR_MANAGER_TOKEN: null,
-      ...workerEnv,
+      ...Object.fromEntries(
+        Object.entries(workerEnv).filter(([key]) => !materializedKeys.has(key)),
+      ),
     });
     const list = Array.isArray(args) ? args : [];
     const argv = [shq(command), ...list.map((arg) => shq(arg))];
@@ -1562,8 +1697,11 @@ function createRemoteSshNodeExecutor(node, {
     // assignment application and would otherwise discard workerPath.
     cleanParts.push(workerPath ? `PATH=${shq(workerPath)}:"$PATH"` : 'PATH="$PATH"');
     cleanParts.push(...envParts);
-    if (workerTokenFile || workerApiBaseFile || claudeBareAuth) {
-      const bootstrap = [];
+    const materializedBootstrap = buildMaterializedEnvBootstrap(materializedEnvFiles);
+    if (workerTokenFile || workerApiBaseFile || claudeBareAuth || materializedBootstrap.length > 0) {
+      // This bootstrap is intentionally after buildCleanEnvPrefix's allowlist
+      // loop, preserving controller materialization as the final override.
+      const bootstrap = [...materializedBootstrap];
       if (workerTokenFile) {
         bootstrap.push(
           // Capture the read status, clean up UNCONDITIONALLY, and only then
@@ -1746,18 +1884,6 @@ function createRemoteSshNodeExecutor(node, {
           path.posix.basename(paths.systemPromptFile),
         );
       }
-      let canonicalUploadBundle = null;
-      if (workerTokenFile || workerApiBaseFile || canonicalSystemPrompt || canonicalStdin) {
-        const bundleParent = await assertWithinRoots(
-          paths.uploadBundle,
-          { parentOnly: true },
-        );
-        canonicalUploadBundle = path.posix.join(
-          bundleParent.canonical,
-          path.posix.basename(paths.uploadBundle),
-        );
-      }
-
       const effectiveSpec = canonicalSystemPrompt
         ? {
             ...spec,
@@ -1768,16 +1894,54 @@ function createRemoteSshNodeExecutor(node, {
             ],
           }
         : spec;
+      const controllerEnvEntries = normalizeMaterializedEnv(
+        Object.fromEntries(
+          Object.entries(effectiveSpec.env || {}).filter(([key, value]) => (
+            value !== undefined
+            && value !== null
+            && value !== ''
+            && !isActorCredentialKey(key)
+            && !isWorkerApiBaseKey(key)
+            && key !== 'PATH'
+          )),
+        ),
+      );
+      let canonicalUploadBundle = null;
+      if (
+        workerTokenFile
+        || workerApiBaseFile
+        || canonicalSystemPrompt
+        || canonicalStdin
+        || controllerEnvEntries.length > 0
+      ) {
+        const bundleParent = await assertWithinRoots(
+          paths.uploadBundle,
+          { parentOnly: true },
+        );
+        canonicalUploadBundle = path.posix.join(
+          bundleParent.canonical,
+          path.posix.basename(paths.uploadBundle),
+        );
+      }
+      // No non-empty controller value reaches argv through any path. The
+      // allowlist below controls pod-process env references, not value transport.
+      const materializedEnvFiles = Object.fromEntries(controllerEnvEntries.map(([key]) => [
+        key,
+        path.posix.join(paths.statusDir, `controller-env-${key}`),
+      ]));
       const workerInvocation = buildWorkerInvocation(effectiveSpec, {
         workerTokenFile,
         workerApiBaseFile,
+        materializedEnvFiles,
       });
+      const controllerEnvFiles = Object.values(materializedEnvFiles);
       const materializedFiles = [
         canonicalStdin,
         canonicalSystemPrompt,
         workerTokenFile,
         workerApiBaseFile,
         canonicalUploadBundle,
+        ...controllerEnvFiles,
       ].filter(Boolean);
       const stdinRedirect = canonicalStdin ? ` < ${shq(canonicalStdin)}` : '';
       const cleanupPromptCommand = materializedFiles.length > 0
@@ -1809,6 +1973,10 @@ function createRemoteSshNodeExecutor(node, {
         workerApiBaseFile
           ? { path: workerApiBaseFile, content: workerApiBase }
           : null,
+        ...controllerEnvEntries.map(([key, content]) => ({
+          path: materializedEnvFiles[key],
+          content,
+        })),
         canonicalSystemPrompt
           ? { path: canonicalSystemPrompt, content: spec.systemPrompt }
           : null,
@@ -1954,6 +2122,119 @@ function createRemoteSshNodeExecutor(node, {
     }
   }
 
+  function outputFrameInvalid(message) {
+    const err = new Error(message || 'Remote output frame is invalid');
+    err.code = 'OUTPUT_FRAME_INVALID';
+    return err;
+  }
+
+  // The shell validates stat's size before arithmetic; reserve a distinct code
+  // so malformed command output is reported as a frame error, not command failure.
+  const OUTPUT_FRAME_INVALID_EXIT = 90;
+  const OUTPUT_FRAME_INVALID_MARKER = 'OUTPUT_FRAME_INVALID:first-stat';
+
+  async function canonicalWorkerStatusDir(paths) {
+    let pending = canonicalWorkerStatusDirs.get(paths.statusDir);
+    if (!pending) {
+      pending = assertWithinRoots(paths.statusDir).then(({ canonical }) => canonical);
+      canonicalWorkerStatusDirs.set(paths.statusDir, pending);
+      pending.catch(() => canonicalWorkerStatusDirs.delete(paths.statusDir));
+    }
+    return pending;
+  }
+
+  async function readOutputRange(runId, { after, maxBytes } = {}) {
+    if (!Number.isSafeInteger(after) || after < 0) {
+      throw new TypeError('after must be a non-negative safe integer');
+    }
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+      throw new TypeError('maxBytes must be a non-negative safe integer');
+    }
+    const cappedMaxBytes = Math.min(maxBytes, WORKER_OUTPUT_RANGE_MAX_BYTES);
+    const paths = workerPaths(runId);
+    const canonicalStatusDir = await canonicalWorkerStatusDir(paths);
+    const stdoutLog = path.posix.join(canonicalStatusDir, path.posix.basename(paths.stdoutLog));
+    const exitSentinel = path.posix.join(canonicalStatusDir, path.posix.basename(paths.exitSentinel));
+    const startByte = after + 1;
+    // Read the size only from the first stat: it fixes this response's end
+    // offset. The final stat is only for deletion/inode-generation detection.
+    const script = [
+      `if [ -f ${shq(stdoutLog)} ]; then first=$(stat -c '%d:%i %s' -- ${shq(stdoutLog)}) || exit $?; echo "$first"; first_size=${'${first##* }'}; case "$first_size" in ''|*[!0-9]*) echo ${shq(OUTPUT_FRAME_INVALID_MARKER)} >&2; exit ${OUTPUT_FRAME_INVALID_EXIT};; esac; want=$((first_size - ${after})); if [ "$want" -lt 0 ]; then want=0; elif [ "$want" -gt ${cappedMaxBytes} ]; then want=${cappedMaxBytes}; fi; else first=MISSING; want=0; echo MISSING; fi`,
+      `if [ -f ${shq(exitSentinel)} ]; then echo 1; else echo 0; fi`,
+      `if [ "$first" != MISSING ]; then tail -c +${startByte} -- ${shq(stdoutLog)} | head -c "$want" | base64 | tr -d '\\n'; fi; echo`,
+      // This existence recheck cannot identify stat's exact errno, but it keeps
+      // non-deletion failures visible instead of unconditionally calling them deletion.
+      `if [ -f ${shq(stdoutLog)} ]; then last=$(stat -c '%d:%i' -- ${shq(stdoutLog)}); rc=$?; if [ "$rc" -eq 0 ]; then echo "$last"; elif [ ! -e ${shq(stdoutLog)} ]; then echo MISSING; else exit "$rc"; fi; else echo MISSING; fi`,
+    ].join('; ');
+    const res = await runFilesystemScript(script, {
+      maxBuffer: Math.ceil(cappedMaxBytes / 3) * 4 + 4096,
+    });
+    // Require the guard's marker too: an unrelated command may also exit 90.
+    if (res.code === OUTPUT_FRAME_INVALID_EXIT && res.stderr.includes(OUTPUT_FRAME_INVALID_MARKER)) {
+      throw outputFrameInvalid('Remote output frame has invalid first stat');
+    }
+    if (res.code !== 0) throw commandError('readOutputRange', [paths.stdoutLog], res);
+
+    const frame = stripOneTrailingNewline(res.stdout).split('\n');
+    if (frame.length !== 4 || !/^[01]$/.test(frame[1])) {
+      throw outputFrameInvalid('Remote output frame has invalid structure');
+    }
+    const sealed = frame[1] === '1';
+    if (frame[0] === 'MISSING') {
+      return {
+        source_id: null,
+        data: Buffer.alloc(0),
+        next_offset: after,
+        end_offset: 0,
+        has_more: false,
+        sealed,
+        generation_changed: false,
+        deleted: false,
+        missing: true,
+      };
+    }
+
+    const firstStat = /^(\d+:\d+) (\d+)$/.exec(frame[0]);
+    if (!firstStat) throw outputFrameInvalid('Remote output frame has invalid first stat');
+    const sourceId = firstStat[1];
+    const endOffset = Number(firstStat[2]);
+    if (!Number.isSafeInteger(endOffset)) {
+      throw outputFrameInvalid('Remote output frame has invalid size');
+    }
+    const lastSourceId = frame[3] === 'MISSING'
+      ? null
+      : (/^\d+:\d+$/.test(frame[3]) ? frame[3] : undefined);
+    if (lastSourceId === undefined) {
+      throw outputFrameInvalid('Remote output frame has invalid final stat');
+    }
+
+    const decoded = Buffer.from(frame[2], 'base64');
+    const deleted = lastSourceId === null;
+    const generationChanged = lastSourceId !== null && lastSourceId !== sourceId;
+    const expected = Math.min(cappedMaxBytes, Math.max(0, endOffset - after));
+    if (
+      decoded.toString('base64') !== frame[2]
+      || decoded.length > cappedMaxBytes
+      || (!deleted && !generationChanged && decoded.length !== expected)
+    ) {
+      throw outputFrameInvalid('Remote output frame has invalid data');
+    }
+    const discardData = deleted || generationChanged;
+    const data = discardData ? Buffer.alloc(0) : decoded;
+    const nextOffset = discardData ? 0 : after + data.length;
+    return {
+      source_id: sourceId,
+      data,
+      next_offset: nextOffset,
+      end_offset: endOffset,
+      has_more: nextOffset < endOffset,
+      sealed,
+      generation_changed: generationChanged,
+      deleted,
+      missing: false,
+    };
+  }
+
   async function getStructuredResult(runId) {
     const paths = workerPaths(runId);
     try {
@@ -2007,6 +2288,19 @@ function createRemoteSshNodeExecutor(node, {
         paths.uploadBundle,
         paths.structuredResultTmp,
       ]);
+      const checkedStatusDir = await assertWithinRoots(paths.statusDir, { allowMissing: true });
+      if (checkedStatusDir.exists) {
+        await runRemoteCommand('find', [
+          checkedStatusDir.canonical,
+          '-maxdepth',
+          '1',
+          '-type',
+          'f',
+          '-name',
+          'controller-env-*',
+          '-delete',
+        ]);
+      }
     } catch {}
     return res.code === 0;
   }
@@ -2026,6 +2320,7 @@ function createRemoteSshNodeExecutor(node, {
     isAlive,
     detectExitCode,
     getOutput,
+    readOutputRange,
     getStructuredResult,
     sendInput,
     kill,
@@ -2053,5 +2348,8 @@ function createRemoteSshNodeExecutor(node, {
 module.exports = {
   createRemoteSshNodeExecutor,
   shq,
+  // Exported for tests: the trap/quoting contract here is security-relevant
+  // and is easier to pin directly than through a mocked mktemp path.
+  buildMaterializedEnvBootstrap,
   CLAUDE_OAUTH_USAGE_JS,
 };

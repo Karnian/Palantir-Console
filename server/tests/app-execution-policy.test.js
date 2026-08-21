@@ -38,6 +38,7 @@ test('shared injected execution engine keeps each app capability policy at spawn
     authToken: 'human-token',
     pmToken: 'automation-token',
     agentProcessIsolation: true,
+    execAttestation: { verified: true, reason: 'test' },
     workerProposalBaseUrl: 'https://console.example',
     memoryDistillEnabled: false,
     operatorSchedulerEnabled: false,
@@ -85,9 +86,17 @@ test('shared injected execution engine keeps each app capability policy at spawn
   });
 
   assert.equal(run.status, 'running');
-  const deadline = Date.now() + 2000;
+  // The budget bounds a genuine hang, it does not model how long a spawn takes.
+  // At 2s this failed on CI (2-core runner, --test-concurrency=4) while passing
+  // locally 8/8 -- the same test also failed on main before this change, so the
+  // deadline was the flake, not the code under test. The loop still exits the
+  // instant the code appears, so a generous bound costs nothing when healthy.
+  const deadline = Date.now() + 30000;
   while (executionEngine.detectExitCode(run.id) === null && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  assert.equal(executionEngine.detectExitCode(run.id), 0);
+  assert.equal(
+    executionEngine.detectExitCode(run.id), 0,
+    'the spawned worker must exit 0; null means it had not exited within the budget',
+  );
 });

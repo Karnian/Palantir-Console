@@ -20,7 +20,7 @@
 function withoutSessionHandle(req, run) {
   if (!run || typeof run !== 'object') return run;
   if (req?.auth?.actor !== 'manager') return run;
-  const { tmux_session, ...rest } = run;
+  const { tmux_session, claude_session_id, manager_thread_id, ...rest } = run;
   return rest;
 }
 

@@ -17,7 +17,13 @@
 // when the editor is an Operator, so a compromised Operator cannot launder a
 // human check into an always-PASS gate.
 
-const { BadRequestError, NotFoundError, ConflictError } = require('../utils/errors');
+const { createHash } = require('node:crypto');
+const {
+  BadRequestError,
+  NotFoundError,
+  ConflictError,
+  ForbiddenError,
+} = require('../utils/errors');
 
 const VALID_KINDS = new Set(['command', 'artifact']);
 const VALID_ACTORS = new Set(['human', 'operator']);
@@ -121,6 +127,10 @@ function canonicalSpec(normalized) {
   return JSON.stringify(normalized);
 }
 
+function canonicalSpecHash(normalized) {
+  return createHash('sha256').update(canonicalSpec(normalized)).digest('hex');
+}
+
 function createVerifyCheckService(db) {
   const stmts = {
     insert: db.prepare(`
@@ -139,14 +149,67 @@ function createVerifyCheckService(db) {
          SET name = @name, spec_json = @spec_json, created_by = @created_by,
              is_default = @is_default, updated_at = datetime('now')
        WHERE id = @id
+         AND kind = @existing_kind
+         AND project_id IS @existing_project_id
+         AND name = @existing_name
+         AND spec_json = @existing_spec_json
+         AND created_by = @existing_created_by
+         AND is_default = @existing_is_default
+         AND (
+           @actor = 'human'
+           OR NOT EXISTS (
+             SELECT 1 FROM operator_schedules
+              WHERE precheck_verify_check_id = @id
+           )
+         )
     `),
-    delete: db.prepare('DELETE FROM verify_checks WHERE id = ?'),
+    delete: db.prepare(`
+      DELETE FROM verify_checks
+       WHERE id = @id
+         AND (
+           @actor = 'human'
+           OR NOT EXISTS (
+             SELECT 1 FROM operator_schedules
+              WHERE precheck_verify_check_id = @id
+           )
+         )
+    `),
+    isSchedulePrecheck: db.prepare(`
+      SELECT 1 FROM operator_schedules
+       WHERE precheck_verify_check_id = ?
+       LIMIT 1
+    `),
     getProject: db.prepare('SELECT id FROM projects WHERE id = ?'),
     clearDefault: db.prepare(`
       UPDATE verify_checks SET is_default = 0, updated_at = datetime('now')
        WHERE coalesce(project_id, '') = ? AND is_default = 1 AND id != ?
     `),
+    // A2 (codex final review BLOCKER): setting is_default WRITES OTHER ROWS.
+    // Those collateral writes must clear the same authorization bars as a direct
+    // edit, or `is_default` becomes a laundering channel — a bearer flipping an
+    // unattached artifact could silently mutate an attached check (which is
+    // cookie-only) or a command check (which is goal-gated).
+    defaultsClearedBy: db.prepare(`
+      SELECT c.id, c.kind,
+             EXISTS(SELECT 1 FROM operator_schedules s WHERE s.precheck_verify_check_id = c.id) AS attached
+        FROM verify_checks c
+       WHERE coalesce(c.project_id, '') = ? AND c.is_default = 1 AND c.id != ?
+    `),
   };
+
+  // Fail-closed guard for the collateral rows a default-flip would clear.
+  // `commandWritable` is supplied by the route (goal mode active AND cookie),
+  // because the kind gate lives there.
+  function assertMayClearDefaults(scopeProjectId, exceptId, actor, commandWritable) {
+    for (const row of stmts.defaultsClearedBy.all(scopeProjectId || '', exceptId)) {
+      if (Number(row.attached) === 1 && actor !== 'human') {
+        throw new ForbiddenError('attached verify_check requires human (cookie) auth');
+      }
+      if (row.kind === 'command' && !commandWritable) {
+        throw new ForbiddenError('clearing a command verify_check default requires goal mode and human (cookie) auth');
+      }
+    }
+  }
 
   function assertCheck(id) {
     const row = stmts.getById.get(id);
@@ -158,6 +221,14 @@ function createVerifyCheckService(db) {
     if (err && err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
       throw new ConflictError('a verify_check with that name already exists in this project scope');
     }
+    // better-sqlite3/SQLite may report a RESTRICT action as either the specific
+    // FOREIGNKEY extended code or SQLITE_CONSTRAINT_TRIGGER.
+    if (err && (
+      err.code === 'SQLITE_CONSTRAINT_FOREIGNKEY'
+      || /FOREIGN KEY constraint failed/i.test(err.message || '')
+    )) {
+      throw new ConflictError('verify_check is attached to a schedule; detach it from schedules before deleting');
+    }
     if (err && err.code === 'SQLITE_CONSTRAINT_TRIGGER') {
       // e.g. the command→project_id column-shape trigger.
       throw new BadRequestError(err.message.replace(/^.*:\s*/, ''));
@@ -165,7 +236,7 @@ function createVerifyCheckService(db) {
     throw err;
   }
 
-  function createCheck(input = {}, { actor } = {}) {
+  function createCheck(input = {}, { actor, commandWritable = false } = {}) {
     const a = normalizeActor(actor);
     const kind = input.kind;
     if (!VALID_KINDS.has(kind)) throw new BadRequestError('kind must be command or artifact');
@@ -188,46 +259,110 @@ function createVerifyCheckService(db) {
           is_default,
         });
       } catch (err) { uniqueConflict(err); }
-      if (is_default) stmts.clearDefault.run(projectId || '', info.lastInsertRowid);
+      if (is_default) {
+        assertMayClearDefaults(projectId, info.lastInsertRowid, a, commandWritable);
+        stmts.clearDefault.run(projectId || '', info.lastInsertRowid);
+      }
       return stmts.getById.get(info.lastInsertRowid);
     });
     return tx();
   }
 
-  function updateCheck(id, input = {}, { actor } = {}) {
+  function updateCheck(id, input = {}, { actor, commandWritable = false } = {}) {
     const a = normalizeActor(actor);
-    const existing = assertCheck(id);
-    // kind + project_id are immutable (execution boundary + name-scope stability).
-    const name = input.name !== undefined ? requireNonEmptyString(input.name, 'name', MAX_NAME_LEN) : existing.name;
-    const normalized = validateSpec(existing.kind, input.spec_json ?? input.spec ?? JSON.parse(existing.spec_json));
-    // Re-validate the stored spec too so both sides are compared in canonical form.
-    const existingNormalized = validateSpec(existing.kind, JSON.parse(existing.spec_json));
-    const specChanged = canonicalSpec(normalized) !== canonicalSpec(existingNormalized);
-
-    // Provenance (Codex SERIOUS-5): a human edit vouches for the current spec
-    // (→ human). An Operator edit that CHANGES the spec downgrades to operator
-    // (a human check can't be laundered). An Operator rename (no spec change)
-    // preserves the existing provenance.
-    let created_by;
-    if (a === 'human') created_by = 'human';
-    else created_by = specChanged ? 'operator' : existing.created_by;
-
-    const is_default = input.is_default !== undefined ? (input.is_default ? 1 : 0) : existing.is_default;
-
     const tx = db.transaction(() => {
+      const existing = assertCheck(id);
+      if (a !== 'human' && stmts.isSchedulePrecheck.get(id)) {
+        throw new ForbiddenError('attached verify_check requires human (cookie) auth');
+      }
+
+      // kind + project_id are immutable (execution boundary + name-scope stability).
+      const name = input.name !== undefined
+        ? requireNonEmptyString(input.name, 'name', MAX_NAME_LEN)
+        : existing.name;
+      const normalized = validateSpec(
+        existing.kind,
+        input.spec_json ?? input.spec ?? JSON.parse(existing.spec_json),
+      );
+      // Re-validate the stored spec too so both sides are compared in canonical form.
+      const existingNormalized = validateSpec(existing.kind, JSON.parse(existing.spec_json));
+      const specChanged = canonicalSpec(normalized) !== canonicalSpec(existingNormalized);
+      const attest = input.attest === true;
+
+      if (attest) {
+        if (a !== 'human') throw new ForbiddenError('attesting a verify_check requires human (cookie) auth');
+        if (specChanged) throw new BadRequestError('attest cannot be combined with a spec change');
+        if (input.spec_hash !== canonicalSpecHash(existingNormalized)) {
+          throw new ConflictError('verify_check spec changed; review the current spec before attesting');
+        }
+      }
+
+      // A human spec edit vouches for that spec. Metadata-only edits preserve
+      // provenance; explicit attest is the sole metadata-only promotion path.
+      let created_by = existing.created_by;
+      if (attest || (a === 'human' && specChanged)) created_by = 'human';
+      else if (a === 'operator' && specChanged) created_by = 'operator';
+
+      const is_default = input.is_default !== undefined
+        ? (input.is_default ? 1 : 0)
+        : existing.is_default;
       try {
-        stmts.updateRow.run({ id, name, spec_json: JSON.stringify(normalized), created_by, is_default });
+        const result = stmts.updateRow.run({
+          id,
+          actor: a,
+          existing_kind: existing.kind,
+          existing_project_id: existing.project_id,
+          existing_name: existing.name,
+          existing_spec_json: existing.spec_json,
+          existing_created_by: existing.created_by,
+          existing_is_default: existing.is_default,
+          name,
+          spec_json: JSON.stringify(normalized),
+          created_by,
+          is_default,
+        });
+        if (result.changes === 0) {
+          if (a !== 'human' && stmts.isSchedulePrecheck.get(id)) {
+            throw new ForbiddenError('attached verify_check requires human (cookie) auth');
+          }
+          if (stmts.getById.get(id)) {
+            // `tx.immediate()` holds the writer lock across the read above and this
+            // UPDATE, so a genuine concurrent edit cannot land in between: this is
+            // an invariant assertion, NOT client-visible optimistic concurrency.
+            // Do not advertise it as a refetch-and-retry 409 the API never offers.
+            throw new ConflictError('verify_check row guard failed unexpectedly; no update was applied');
+          }
+          throw new NotFoundError(`verify_check not found: ${id}`);
+        }
       } catch (err) { uniqueConflict(err); }
-      if (is_default) stmts.clearDefault.run(existing.project_id || '', id);
+      if (is_default) {
+        assertMayClearDefaults(existing.project_id, id, a, commandWritable);
+        stmts.clearDefault.run(existing.project_id || '', id);
+      }
       return stmts.getById.get(id);
     });
-    return tx();
+    return tx.immediate();
   }
 
-  function deleteCheck(id) {
-    assertCheck(id);
-    stmts.delete.run(id);
-    return { status: 'ok' };
+  function deleteCheck(id, { actor } = {}) {
+    const a = normalizeActor(actor);
+    const tx = db.transaction(() => {
+      assertCheck(id);
+      if (a !== 'human' && stmts.isSchedulePrecheck.get(id)) {
+        throw new ForbiddenError('attached verify_check requires human (cookie) auth');
+      }
+      try {
+        const result = stmts.delete.run({ id, actor: a });
+        if (result.changes === 0) {
+          if (a !== 'human' && stmts.isSchedulePrecheck.get(id)) {
+            throw new ForbiddenError('attached verify_check requires human (cookie) auth');
+          }
+          throw new NotFoundError(`verify_check not found: ${id}`);
+        }
+      } catch (err) { uniqueConflict(err); }
+      return { status: 'ok' };
+    });
+    return tx.immediate();
   }
 
   function getCheck(id) { return assertCheck(id); }
@@ -248,4 +383,4 @@ function createVerifyCheckService(db) {
   };
 }
 
-module.exports = { createVerifyCheckService, validateSpec };
+module.exports = { createVerifyCheckService, validateSpec, canonicalSpec, canonicalSpecHash };

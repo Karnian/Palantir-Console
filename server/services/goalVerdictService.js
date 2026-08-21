@@ -86,7 +86,7 @@ function createGoalVerdictService({
     try { judge = run.judge_json ? JSON.parse(run.judge_json) : null; } catch { judge = null; }
     if (!judge) return { judge: null, skip: false }; // never started (Gate-1-fail skip / pre-CAS window)
     if (judge.status === 'pending') {
-      const expired = judge.deadline ? (Date.parse(judge.deadline) <= Date.now()) : true;
+      const expired = runService.isJudgeDeadlineExpired(run.judge_json);
       if (!expired) return { judge: null, skip: true }; // in-flight — wait
       // Crashed mid-judge: expire the claim → 'error' atomically. ONLY use the
       // fabricated error if the CAS WON (still 'pending'); if it lost, a real
@@ -140,14 +140,55 @@ function createGoalVerdictService({
     const attemptsUsed = Number(run.retry_count || 0) + 1;
     const budget = taskBudget(run);
     const fingerprint = computeFingerprint(run, acceptance, judge);
-    const priorFp = runService.getGoalRetryParentFingerprint(run.id);
+    const parent = runService.getGoalRetryParent(run.id);
+    let priorFp = parent && parent.goal_fingerprint;
+    // True only when the parent's signature is genuinely undecidable right now --
+    // never for a parent that is intentionally fingerprint-free (cancelled and
+    // stopped are not attempts under 5d, so their absence is an answer).
+    let parentFingerprintUnresolved = false;
+    if (parent && !priorFp && (parent.status === 'completed' || parent.status === 'failed')) {
+      // Mirror resolveJudge's read-only cases EXACTLY, or the recomputed
+      // signature can differ from the one the parent's own settle will store:
+      // resolveJudge yields judge=null whenever goal_judge_active is falsy, even
+      // if judge_json holds a finalized verdict.
+      //
+      // A 'pending' judge -- expired or not -- is NOT guessed at. resolveJudge
+      // resolves an expired one by CASing it to 'error', but that is a decision
+      // only the parent's own settle may take: guessing it here without the CAS
+      // yields a signature the parent never stores if the judge finalizes 'fail'
+      // instead, and a wrong signature ends the goal early. Instead the child's
+        // settle is DEFERRED (see settle's pendingParentFingerprint branch) until
+      // the parent has settled. The shared SQLite oracle treats every unreadable
+      // deadline as expired, so every pending claim now has a bounded escape path.
+      let parentJudge = null;
+      let judgeFinal = true;
+      if (parent.goal_judge_active) {
+        let parsed = null;
+        try { parsed = parent.judge_json ? JSON.parse(parent.judge_json) : null; } catch { parsed = null; }
+        if (parsed && parsed.status === 'pending') {
+          judgeFinal = false;
+          // Defer every pending judge. resolveJudge and the expiry CAS now share
+          // one SQLite predicate; unreadable deadlines expire immediately and
+          // readable future deadlines expire in time, so this wait is bounded.
+          parentFingerprintUnresolved = true;
+        } else parentJudge = parsed;
+      }
+      if (judgeFinal) {
+        // Safe fallback: the fingerprint is a pure function of this parent row.
+        // cancelled/stopped are excluded because §5d says they are not attempts,
+        // so their intentionally absent fingerprint must not be invented. Do not
+        // call resolveJudge here: it can CAS an expired pending judge to error;
+        // child settlement must only read, never mutate, the parent's judge state.
+        priorFp = computeFingerprint(parent, parseAcceptance(parent), parentJudge);
+      }
+    }
     const fingerprintRepeat = !!(priorFp && priorFp === fingerprint);
     let sourceChanged = false;
     if (typeof isSourceChanged === 'function') {
       try { sourceChanged = !!isSourceChanged(run); } catch { sourceChanged = false; }
     }
     const nonRetryable = run.status === 'failed' && isNonRetryable(run);
-    return { acceptance, judge: judge || null, attemptsUsed, budget, fingerprint, fingerprintRepeat, sourceChanged, nonRetryable };
+    return { acceptance, judge: judge || null, attemptsUsed, budget, fingerprint, fingerprintRepeat, sourceChanged, nonRetryable, parentFingerprintUnresolved };
   }
 
   function buildRetryChild(run) {
@@ -161,6 +202,9 @@ function createGoalVerdictService({
       operator_instance_id: run.operator_instance_id || null,
       parent_run_id: run.parent_run_id || null,
       retry_root_run_id: run.retry_root_run_id || run.id,
+      // Provenance survives retries: a run that exists because a human answered
+      // a worker question keeps pointing at that question across attempts.
+      source_question_id: run.source_question_id || null,
     };
   }
 
@@ -305,6 +349,20 @@ function createGoalVerdictService({
       warn(`[goalVerdict] computeInputs failed run=${runId}: ${err && err.message}`);
       return { settled: false };
     }
+    // The parent's failure signature is undecidable right now (its judge is still
+    // pending). Deciding it here would mean guessing the parent's verdict without
+    // taking its CAS, so defer instead. Same shape as the pendingJudge deferral
+    // above, and only entered when the parent's judge can actually expire.
+    //
+    // Convergence, stated honestly: listUnverdictedTerminalGoalRunIds has no
+    // ORDER BY, so a sweep does NOT visit parents first. Every sweep still makes
+    // progress -- whichever generation is resolvable settles -- so a lineage of
+    // depth N converges in at most N sweeps (60s each) after the judge deadline,
+    // not in one.
+    if (inputs.parentFingerprintUnresolved) {
+      return { settled: false, pendingParentFingerprint: true };
+    }
+
     let decision;
     try {
       decision = decide({

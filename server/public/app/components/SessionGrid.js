@@ -225,7 +225,12 @@ export function SessionGrid({ tasks, runs, projects, activePms = [], managerStat
         </div>
       </div>
 
-      <div class="manager-grid-body">
+      ${/* axe scrollable-region-focusable: an overflow-y:auto container whose
+           children are not all focusable must be keyboard-reachable itself.
+           On mobile this region scrolls with no focusable child in reach, so a
+           keyboard user could not scroll it at all. Same treatment as
+           .triage-feed / .board-columns. */ ''}
+      <div class="manager-grid-body" tabindex="0" role="region" aria-label="세션 목록">
         ${/* R2-A.3: AttentionStrip surfaces needs_input + failed worker runs
              above the task sessions list. Self-hiding when empty (spec §12.1). */ ''}
         <${AttentionStrip}

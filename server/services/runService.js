@@ -80,7 +80,9 @@ function deriveOperatorProjectId(run) {
   return parsedPid;
 }
 
-function createRunService(db, eventBus) {
+function createRunService(db, eventBus, questionService = null) {
+  const JUDGE_DEADLINE_EXPIRED_SQL =
+    "datetime(json_extract(?, '$.deadline')) IS NULL OR datetime(json_extract(?, '$.deadline')) <= datetime('now')";
   const stmts = {
     getAll: db.prepare(`
       SELECT r.*, ap.name as agent_name, ap.type as agent_type, ap.icon as agent_icon,
@@ -125,13 +127,13 @@ function createRunService(db, eventBus) {
         id, task_id, agent_profile_id, prompt, status, is_manager,
         parent_run_id, manager_adapter, manager_thread_id, manager_layer,
         conversation_id, queued_args, retry_count, node_id,
-        operator_instance_id, retry_root_run_id
+        operator_instance_id, retry_root_run_id, source_question_id
       )
       VALUES (
         @id, @task_id, @agent_profile_id, @prompt, @status, @is_manager,
         @parent_run_id, @manager_adapter, @manager_thread_id, @manager_layer,
         @conversation_id, @queued_args, @retry_count, @node_id,
-        @operator_instance_id, @retry_root_run_id
+        @operator_instance_id, @retry_root_run_id, @source_question_id
       )
     `),
     insertPrivateProfile: db.prepare(`
@@ -629,8 +631,13 @@ function createRunService(db, eventBus) {
     ),
     // G3c: the verdict sweep expires a crashed 'pending' claim → 'error' BEFORE
     // settling (codex SERIOUS: else a late model result finalizes after gate2).
+    // SQLite is the single deadline oracle. Unreadable (including absent)
+    // deadlines are expired so every pending claim retains an escape path.
+    judgeDeadlineExpired: db.prepare(
+      `SELECT ${JUDGE_DEADLINE_EXPIRED_SQL} AS expired`
+    ),
     casJudgeExpiredToError: db.prepare(
-      "UPDATE runs SET judge_json = @json WHERE id = @id AND json_extract(judge_json,'$.status') = 'pending' AND datetime(json_extract(judge_json,'$.deadline')) <= datetime('now')"
+      `UPDATE runs SET judge_json = @json WHERE id = @id AND json_extract(judge_json,'$.status') = 'pending' AND (${JUDGE_DEADLINE_EXPIRED_SQL.replaceAll('?', 'judge_json')})`
     ),
     // G2 §5k-1: persist the isolated deliverable-mode workspace path.
     setGoalWorkspacePath: db.prepare(`
@@ -653,7 +660,9 @@ function createRunService(db, eventBus) {
     `),
     // G3 §5d: link the retry child to its parent, set INSIDE the verdict tx so
     // "retry decided" and "child exists + linked" are atomic (no lost-retry window).
-    linkGoalRetry: db.prepare('UPDATE runs SET goal_retry_run_id = ? WHERE id = ?'),
+    linkGoalRetry: db.prepare(
+      'UPDATE runs SET goal_retry_run_id = ? WHERE id = ? AND goal_retry_run_id IS NULL'
+    ),
     // G3 §5d transactional outbox: durable 'pending' INTENT for a verdict's side
     // effects, committed in the SAME tx as the verdict. INSERT OR IGNORE makes it
     // idempotent (a redrive never duplicates the row).
@@ -682,15 +691,10 @@ function createRunService(db, eventBus) {
        WHERE goal_active = 1 AND is_manager = 0 AND goal_verdict IS NOT NULL
          AND status IN ('completed', 'failed', 'cancelled', 'stopped')
     `),
-    // G3 §4 fingerprint-repeat: the PREVIOUS attempt (the run that pointed its
-    // goal_retry_run_id at this one) carries the prior failure fingerprint.
-    getGoalRetryParentFingerprint: db.prepare(
-      'SELECT goal_fingerprint AS fp FROM runs WHERE goal_retry_run_id = ? LIMIT 1'
-    ),
     // G3 SERIOUS-2: the prior attempt's verdict reason + acceptance + status, to
     // build the retry child's attempt-feedback (why the last attempt failed).
     getGoalRetryParent: db.prepare(
-      'SELECT id, status, goal_verdict, goal_verdict_reason, acceptance_json, result_summary, judge_json FROM runs WHERE goal_retry_run_id = ? LIMIT 1'
+      'SELECT id, status, exit_code, goal_verdict, goal_verdict_reason, acceptance_json, result_summary, goal_judge_active, judge_json, goal_fingerprint FROM runs WHERE goal_retry_run_id = ? LIMIT 1'
     ),
     // G2b §5k-1: runs whose remote deliverable workspace was retained ('captured',
     // bundle not yet complete) — the boot re-harvest re-attempts these.
@@ -715,6 +719,17 @@ function createRunService(db, eventBus) {
       LEFT JOIN tasks t ON r.task_id = t.id
       LEFT JOIN projects p ON t.project_id = p.id
       WHERE r.task_id = ? AND r.goal_active = 1 AND r.is_manager = 0
+      ORDER BY r.rowid DESC LIMIT 1
+    `),
+    getNewestAttemptRun: db.prepare(`
+      SELECT r.*, r.rowid AS _seq, ap.name as agent_name, ap.type as agent_type, ap.icon as agent_icon,
+             t.title as task_title, t.project_id as project_id, p.name as project_name
+      FROM runs r
+      LEFT JOIN agent_profiles ap ON r.agent_profile_id = ap.id
+      LEFT JOIN tasks t ON r.task_id = t.id
+      LEFT JOIN projects p ON t.project_id = p.id
+      WHERE r.task_id = ? AND r.is_manager = 0
+        AND r.status IN ('completed', 'failed')
       ORDER BY r.rowid DESC LIMIT 1
     `),
     // G4a: goal runs with a reviewable verdict (gate2/exhausted/error) that have
@@ -964,7 +979,7 @@ function createRunService(db, eventBus) {
     return Number.isInteger(n) && n >= 0 ? n : 0;
   }
 
-  function createRun({
+  function buildRunRow({
     task_id,
     agent_profile_id,
     prompt,
@@ -979,6 +994,7 @@ function createRunService(db, eventBus) {
     retry_count,
     operator_instance_id,
     retry_root_run_id,
+    source_question_id,
   }) {
     // task_id and agent_profile_id are required for worker runs, optional for manager
     if (!is_manager && !task_id) throw new BadRequestError('task_id is required');
@@ -1006,7 +1022,7 @@ function createRunService(db, eventBus) {
       if (!effectiveConversationId) effectiveConversationId = `worker:${id}`;
     }
 
-    stmts.insert.run({
+    return {
       id,
       task_id: task_id || null,
       agent_profile_id: agent_profile_id || null,
@@ -1023,8 +1039,19 @@ function createRunService(db, eventBus) {
       node_id: node_id || null,
       operator_instance_id: operator_instance_id || null,
       retry_root_run_id: retry_root_run_id || null,
-    });
-    const run = stmts.getById.get(id);
+      source_question_id: source_question_id || null,
+    };
+  }
+
+  function insertRunRow(row) {
+    stmts.insert.run(row);
+  }
+
+  function readRunRow(id) {
+    return stmts.getById.get(id);
+  }
+
+  function emitRunCreated(run) {
     if (eventBus) {
       // v3 Phase 5: normalize run:status envelope on the initial queued
       // emission too (codex R1 finding). Prior to this, subscribers saw
@@ -1044,6 +1071,13 @@ function createRunService(db, eventBus) {
         node_id: run.node_id || null,
       });
     }
+  }
+
+  function createRun(args) {
+    const row = buildRunRow(args);
+    insertRunRow(row);
+    const run = readRunRow(row.id);
+    emitRunCreated(run);
     return run;
   }
 
@@ -1195,7 +1229,13 @@ function createRunService(db, eventBus) {
     return stmts.getById.get(id);
   }
 
-  function updateRunStatus(id, status, {
+  let deferredStatusEvents = null;
+  function emitStatusEvent(channel, payload) {
+    if (deferredStatusEvents) deferredStatusEvents.push([channel, payload]);
+    else eventBus.emit(channel, payload);
+  }
+
+  function updateRunStatusPersisted(id, status, {
     force = false,
     reason = null,
     terminalReason = null,
@@ -1219,6 +1259,11 @@ function createRunService(db, eventBus) {
     // started from `running` must also require that status at commit time or it
     // can force-overwrite the user's newer `cancelled` decision.
     requireCurrentStatus = null,
+    // An enclosing transaction can still roll back after this function
+    // returns. Since better-sqlite3 exposes no outer commit hook, callers that
+    // already own a transaction must suppress lifecycle events rather than
+    // publish a state that may never commit.
+    emitEvents = true,
   } = {}) {
     if (!VALID_STATUSES.includes(status)) {
       throw new BadRequestError(`Invalid run status: ${status}`);
@@ -1346,7 +1391,7 @@ function createRunService(db, eventBus) {
       run = stmts.getById.get(id);
     }
     addRunEvent(id, `status:${status}`, reason ? JSON.stringify({ reason }) : null);
-    if (eventBus) {
+    if (eventBus && emitEvents) {
       // v3 Phase 5 semantic event fields (spec §9.8):
       //   from_status / to_status — the transition, not just the
       //     terminal state. A client that missed the previous status
@@ -1361,7 +1406,7 @@ function createRunService(db, eventBus) {
       //     payload only shipped the full row, forcing every subscriber
       //     to re-derive them. Hoisting lets clients write dumber
       //     filters and matches the spec exactly.
-      eventBus.emit('run:status', {
+      emitStatusEvent('run:status', {
         run,
         from_status: fromStatus,
         to_status: status,
@@ -1373,8 +1418,8 @@ function createRunService(db, eventBus) {
     }
 
     // Emit run:ended for terminal states so lifecycleService can sync task status
-    if (TERMINAL_STATUSES.has(status) && eventBus) {
-      eventBus.emit('run:ended', {
+    if (TERMINAL_STATUSES.has(status) && eventBus && emitEvents) {
+      emitStatusEvent('run:ended', {
         run,
         from_status: fromStatus,
         to_status: status,
@@ -1385,6 +1430,54 @@ function createRunService(db, eventBus) {
       });
     }
 
+    return run;
+  }
+
+  function updateRunStatus(id, status, options = {}) {
+    if (!questionService || !TERMINAL_STATUSES.has(status)) {
+      return updateRunStatusPersisted(id, status, options);
+    }
+
+    if (db.inTransaction) {
+      // The caller already owns atomicity. Do not open a nested savepoint or
+      // touch deferredStatusEvents here: a savepoint can commit before its
+      // outer transaction, and its finally would also clear the top-level
+      // deferral slot.
+      //
+      // Events are emitted immediately, exactly as they were before this
+      // refactor. This is NOT "immediate emit is safer" in general -- after a
+      // rollback the external effects (retry, harvest) would survive a reverted
+      // transition. The reasons are narrower and concrete: no production caller
+      // wraps updateRunStatus in an outer transaction today, and suppressing
+      // run:ended would be a compatibility change that silently drops every
+      // lifecycle subscriber (B-lite retry, goal verdict loop, harvest) the
+      // moment one appears. better-sqlite3 has no outer commit hook, so the
+      // contract is: do not wrap a terminal transition in a transaction you may
+      // roll back -- its events have already fired.
+      const run = updateRunStatusPersisted(id, status, options);
+      if (run) {
+        questionService.cancelPendingForRun(id, { terminalReason: run.terminal_reason || null });
+      }
+      return run;
+    }
+
+    const pendingEvents = [];
+    const persistTerminal = db.transaction(() => {
+      // This deferral slot is used only by this top-level transaction path;
+      // the db.inTransaction branch above prevents nested/re-entrant ownership.
+      deferredStatusEvents = pendingEvents;
+      try {
+        const run = updateRunStatusPersisted(id, status, options);
+        if (run) {
+          questionService.cancelPendingForRun(id, { terminalReason: run.terminal_reason || null });
+        }
+        return run;
+      } finally {
+        deferredStatusEvents = null;
+      }
+    });
+    const run = persistTerminal();
+    for (const [channel, payload] of pendingEvents) eventBus.emit(channel, payload);
     return run;
   }
 
@@ -2110,6 +2203,10 @@ function createRunService(db, eventBus) {
   function finalizeJudge(id, finalJson) {
     return stmts.finalizeJudge.run({ id, json: finalJson }).changes > 0;
   }
+  function isJudgeDeadlineExpired(judgeJson) {
+    if (typeof judgeJson !== 'string' || !judgeJson) return true;
+    try { return stmts.judgeDeadlineExpired.get(judgeJson, judgeJson)?.expired === 1; } catch { return true; }
+  }
   function casJudgeExpiredToError(id, errorJson) {
     return stmts.casJudgeExpiredToError.run({ id, json: errorJson }).changes > 0;
   }
@@ -2155,27 +2252,29 @@ function createRunService(db, eventBus) {
     let childId = null;
     if (args.retryChild) {
       const rc = args.retryChild;
-      childId = `run_${crypto.randomUUID().slice(0, 8)}`;
-      stmts.insert.run({
-        id: childId,
+      const childRow = buildRunRow({
         task_id: rc.task_id || null,
         agent_profile_id: rc.agent_profile_id || null,
         prompt: rc.prompt || null,
-        status: 'queued',
-        is_manager: 0,
+        is_manager: false,
         parent_run_id: rc.parent_run_id || null,
-        manager_adapter: null,
-        manager_thread_id: null,
-        manager_layer: null,
-        conversation_id: `worker:${childId}`,
-        queued_args: normalizeQueuedArgs(rc.queued_args),
-        retry_count: normalizeRetryCount(rc.retry_count),
+        queued_args: rc.queued_args,
+        retry_count: rc.retry_count,
         node_id: rc.node_id || null,
         operator_instance_id: rc.operator_instance_id || null,
         retry_root_run_id: rc.retry_root_run_id || null,
+        source_question_id: rc.source_question_id || null,
       });
-      stmts.setGoalActive.run(1, childId); // inherit goal control (unified activation)
-      stmts.linkGoalRetry.run(childId, args.runId);
+      childId = childRow.id;
+      const linked = stmts.linkGoalRetry.run(childId, args.runId).changes;
+      if (linked === 1) {
+        stmts.insert.run(childRow);
+        stmts.setGoalActive.run(1, childId); // inherit goal control (unified activation)
+      } else {
+        // A question resume won the shared successor slot first. Reuse that
+        // successor instead of creating a second executable branch.
+        childId = stmts.getById.get(args.runId).goal_retry_run_id;
+      }
     }
 
     for (const et of args.effectTypes || []) {
@@ -2209,11 +2308,6 @@ function createRunService(db, eventBus) {
   function listVerdictedTerminalGoalRunIds() {
     return stmts.listVerdictedTerminalGoalRunIds.all().map((r) => r.id);
   }
-  // G3 §4: the prior attempt's persisted failure fingerprint (or null).
-  function getGoalRetryParentFingerprint(runId) {
-    const row = stmts.getGoalRetryParentFingerprint.get(runId);
-    return row ? (row.fp ?? null) : null;
-  }
   // G3 SERIOUS-2: the prior attempt row (verdict/reason/acceptance) for feedback.
   function getGoalRetryParent(runId) {
     return stmts.getGoalRetryParent.get(runId) || null;
@@ -2225,6 +2319,9 @@ function createRunService(db, eventBus) {
   // G4b: the lineage-tip goal run for a task (query-backed, reliable ordering).
   function getNewestGoalRun(taskId) {
     return stmts.getNewestGoalRun.get(taskId) || null;
+  }
+  function getNewestAttemptRun(taskId) {
+    return stmts.getNewestAttemptRun.get(taskId) || null;
   }
   // G2b: runs with a retained 'captured' remote deliverable workspace (boot re-harvest).
   function listCapturedDeliverableRuns() {
@@ -2397,15 +2494,16 @@ function createRunService(db, eventBus) {
   }
 
   return {
-    listRuns, getRun, createRun, findRetryAttempt, insertRetryRun,
+    listRuns, getRun, buildRunRow, insertRunRow, readRunRow, emitRunCreated, createRun, findRetryAttempt, insertRetryRun,
     updateRunStatus, markRunStarted, updateRunResult, updateGoalCapture, setSessionSnapshot, sumProjectCost, rejectQueuedRun, setGoalActive, setGoalWorkspacePath,
     updateGoalAcceptance, setDeliverableState,
     setGoalJudgeActive, casJudgePending, finalizeJudge, casJudgeExpiredToError,
+    isJudgeDeadlineExpired,
     persistGoalVerdictTx,
     listPendingGoalEffects, markGoalEffectSent, listRunIdsWithPendingGoalEffects,
     listUnverdictedTerminalGoalRunIds, listVerdictedTerminalGoalRunIds,
-    getGoalRetryParentFingerprint, getGoalRetryParent,
-    listReviewableGoalRunsWithoutReview, getNewestGoalRun, listCapturedDeliverableRuns,
+    getGoalRetryParent,
+    listReviewableGoalRunsWithoutReview, getNewestGoalRun, getNewestAttemptRun, listCapturedDeliverableRuns,
     countRunning, countRunningOnNode, countRunningTotalOnNode,
     getOldestQueued, getOldestQueuedOnNode, getOldestQueuedReadyOnNode,
     getOldestMaterializableOnNode,
@@ -2425,6 +2523,7 @@ function createRunService(db, eventBus) {
     updateRunMcpConfig,
     updateRunPreset,
     resolveOperatorConversationId: resolveOperatorConversationIdWithDb,
+    resolveOperatorConversationIdWithDb,
     ensurePrimaryOperatorInstanceForProject,
     getOperatorInstance,
     assertActiveOperatorInstance,

@@ -8,9 +8,15 @@ function assertHumanSameOrigin(req) {
   if (!req.auth || req.auth.method !== 'cookie') throw new ForbiddenError('cookie auth required');
   const origin = req.headers.origin;
   if (!origin) return;
-  let originHost;
-  try { originHost = new URL(origin).host; } catch { throw new ForbiddenError('cross-origin write blocked'); }
-  if (!req.headers.host || originHost.toLowerCase() !== String(req.headers.host).toLowerCase()) {
+  let requestOrigin;
+  let suppliedOrigin;
+  try {
+    suppliedOrigin = new URL(origin).origin;
+    requestOrigin = new URL(`${req.protocol}://${req.headers.host}`).origin;
+  } catch {
+    throw new ForbiddenError('cross-origin write blocked');
+  }
+  if (!req.headers.host || suppliedOrigin.toLowerCase() !== requestOrigin.toLowerCase()) {
     throw new ForbiddenError('cross-origin write blocked');
   }
 }
@@ -38,6 +44,24 @@ function createOperatorSchedulesRouter({ operatorScheduleService, operatorSchedu
     res.json({ schedule });
   }));
 
+  router.put('/operator-schedules/:id/precheck', asyncHandler(async (req, res) => {
+    assertHumanSameOrigin(req);
+    const body = req.body || {};
+    const schedule = operatorScheduleService.attachPrecheck(req.params.id, {
+      checkId: body.check_id,
+      expectedRevision: body.expected_revision,
+    });
+    res.json({ schedule });
+  }));
+
+  router.delete('/operator-schedules/:id/precheck', asyncHandler(async (req, res) => {
+    assertHumanSameOrigin(req);
+    const schedule = operatorScheduleService.detachPrecheck(req.params.id, {
+      expectedRevision: req.body?.expected_revision,
+    });
+    res.json({ schedule });
+  }));
+
   router.delete('/operator-schedules/:id', asyncHandler(async (req, res) => {
     assertHumanSameOrigin(req);
     const schedule = operatorScheduleService.archiveSchedule(req.params.id);
@@ -54,6 +78,11 @@ function createOperatorSchedulesRouter({ operatorScheduleService, operatorSchedu
   router.get('/operator-schedules/:id/invocations', asyncHandler(async (req, res) => {
     const invocations = operatorScheduleService.listInvocations(req.params.id, req.query.limit);
     res.json({ invocations });
+  }));
+
+  router.get('/operator-schedules/:id/occurrences', asyncHandler(async (req, res) => {
+    const occurrences = operatorScheduleService.listOccurrences(req.params.id, req.query.limit);
+    res.json({ occurrences });
   }));
 
   return router;

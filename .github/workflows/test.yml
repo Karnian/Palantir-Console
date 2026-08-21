@@ -1,0 +1,43 @@
+# Unit-suite gate (#426).
+#
+# Why this exists: every gate in this repo was local + manual. That is how a
+# real regression hid for a whole session -- a canonical `runs` column list
+# that migration 092 invalidated failed on every run, and it was triaged by
+# hand as "one of the known flakes" four times because the suite genuinely did
+# fail 1-3 DIFFERENT tests per run under the default parallelism.
+#
+# A gate is only worth having once the suite is deterministic, so that landed
+# first (see scripts/run-tests.mjs: --test-concurrency=4). Measured before
+# turning this on: 3541/3541 green three runs in a row.
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same branch supersedes the old run.
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # package.json engines is ^22 and .nvmrc pins 22. better-sqlite3 ships
+          # prebuilds per ABI, so the major must match what the lockfile expects.
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      # pretest (scripts/ensure-sqlite-binding.mjs) rebuilds the better-sqlite3
+      # native binding only if the prebuild did not load. Kept implicit -- an
+      # unconditional rebuild here would mask a broken prebuild.
+      - run: npm test
