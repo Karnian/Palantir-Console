@@ -555,6 +555,7 @@ test('boot resume: canonical operator:oi_* Operator is resumed, not stopped (A0)
     is_manager: true,
     manager_layer: 'operator',
     manager_adapter: 'claude-code',
+    agent_profile_id: 'claude-code',
     conversation_id: canonicalConvId,
     operator_instance_id: instanceId,
     prompt: 'PM canon',
@@ -570,9 +571,8 @@ test('boot resume: canonical operator:oi_* Operator is resumed, not stopped (A0)
       strictMcpConfig: true,
     },
   });
-  // Operator runs intentionally have no agent_profile_id. Changing the
-  // name-sorted fallback profile after the fresh spawn must not escalate the
-  // resumed session to that mutable value.
+  // This models a pre-round-4 Operator that has a profile id but no envPolicy
+  // snapshot. The mutable legacy fallback must remain observable.
   agentProfileService.updateProfile('claude-code', {
     permission_mode: 'bypassPermissions',
     args_template: '-p {prompt}',
@@ -633,6 +633,14 @@ test('boot resume: canonical operator:oi_* Operator is resumed, not stopped (A0)
   assert.equal(opResume.opts.mcpConfig, 'locked.json');
   assert.equal(opResume.opts.strictMcpConfig, true);
   assert.equal(rs.getRun(opRun.id).status, 'running', 'canonical Operator stays running (not stopped)');
+  const unpinnedEvent = rs.getRunEvents(opRun.id)
+    .find((row) => row.event_type === 'operator:resume_profile_unpinned');
+  assert.ok(unpinnedEvent, 'legacy profile fallback must be observable');
+  assert.deepEqual(JSON.parse(unpinnedEvent.payload_json), {
+    operator_instance_id: instanceId,
+    adapter: 'claude-code',
+    has_agent_profile_id: true,
+  });
 });
 
 test('boot resume sentinel rejection stops Operator and records its diagnostic code', async (t) => {

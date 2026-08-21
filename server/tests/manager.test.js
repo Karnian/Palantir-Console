@@ -414,7 +414,7 @@ test('resolveClaudeAuth fails closed when --bare native auth cannot be materiali
 
   assert.equal(r.canAuth, false);
   assert.equal(r.env.ANTHROPIC_API_KEY, undefined);
-  assert.match(r.diagnostics[0], /--bare requires a materialized API credential/);
+  assert.match(r.diagnostics[0], /--bare requires a materialized ANTHROPIC_API_KEY/);
 });
 
 test('resolveClaudeAuth accepts explicit --settings as a --bare apiKeyHelper contract', () => {

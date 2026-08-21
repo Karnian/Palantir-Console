@@ -1,0 +1,918 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const path = require('node:path');
+const os = require('node:os');
+const { createApp } = require('../app');
+const { invokeApp } = require('./helpers/invokeApp');
+
+// Keep the branch's fluent request style without opening a loopback listener;
+// the sandbox intentionally forbids loopback binds.
+function request(app) {
+  const build = (method, requestPath) => {
+    const state = { headers: {}, body: undefined };
+    const chain = {
+      set(name, value) {
+        state.headers[name] = value;
+        if (String(name).toLowerCase() === 'cookie') {
+          state.headers.Host ||= 'console.test';
+          state.headers.Origin ||= 'http://console.test';
+        }
+        return chain;
+      },
+      send(body) {
+        state.body = body;
+        return chain;
+      },
+      then(resolve, reject) {
+        return invokeApp(app, {
+          method,
+          path: requestPath,
+          headers: state.headers,
+          body: state.body,
+        }).then(resolve, reject);
+      },
+    };
+    return chain;
+  };
+  return {
+    get: (requestPath) => build('GET', requestPath),
+    post: (requestPath) => build('POST', requestPath),
+    patch: (requestPath) => build('PATCH', requestPath),
+    delete: (requestPath) => build('DELETE', requestPath),
+  };
+}
+
+// Declaring a provider widens what a spawned agent may receive, so these routes
+// are cookie-only — the same gate model policy writes use.
+const COOKIE = ['Cookie', 'palantir_token=secret-token'];
+const { buildManagerSpawnEnv } = require('../services/authResolver');
+
+async function createTestApp(t) {
+  const storageRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'pal-envp-storage-'));
+  const fsRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'pal-envp-fs-'));
+  const dbDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pal-envp-db-'));
+  const dbPath = path.join(dbDir, 'test.db');
+  const app = createApp({
+    storageRoot,
+    fsRoot,
+    dbPath,
+    opencodeBin: 'opencode',
+    authToken: 'secret-token',
+    authResolverOpts: {
+      hasKeychain: () => false,
+      hasCredentialsFile: () => false,
+    },
+  });
+  app.__providerTestDbPath = dbPath;
+  t.after(async () => {
+    if (app.shutdown) app.shutdown();
+    await fs.rm(storageRoot, { recursive: true, force: true });
+    await fs.rm(fsRoot, { recursive: true, force: true });
+    await fs.rm(dbDir, { recursive: true, force: true });
+  });
+  return app;
+}
+
+test('migration seeds no providers and leaves unbound profile responses unchanged', async (t) => {
+  const app = await createTestApp(t);
+  const providers = await request(app).get('/api/environment-providers').set(...COOKIE);
+  assert.equal(providers.status, 200);
+  assert.deepEqual(providers.body.providers, []);
+
+  const profile = app.services.agentProfileService.getProfile('codex');
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(profile, 'environment_provider_ids'),
+    false,
+  );
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(profile, 'effective_env_allowlist'),
+    false,
+  );
+  assert.equal(
+    profile.env_allowlist,
+    '["CODEX_API_KEY","OPENAI_API_KEY"]',
+  );
+});
+
+test('provider CRUD stores operator-declared keys and exposes secret classification', async (t) => {
+  const app = await createTestApp(t);
+  const created = await request(app).post('/api/environment-providers').set(...COOKIE).send({
+    name: 'declared-custom',
+    env_keys: [
+      'CUSTOM_PROVIDER_REGION',
+      'CUSTOM_PROVIDER_API_KEY',
+      'AWS_SECRET_ACCESS_KEY',
+    ],
+    description: 'operator supplied, not a built-in provider',
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  assert.ok(created.body.provider.id.startsWith('envp_'));
+  assert.deepEqual(created.body.provider.env_keys, [
+    'CUSTOM_PROVIDER_REGION',
+    'CUSTOM_PROVIDER_API_KEY',
+    'AWS_SECRET_ACCESS_KEY',
+  ]);
+  assert.deepEqual(created.body.provider.secret_env_keys, [
+    'CUSTOM_PROVIDER_API_KEY',
+    'AWS_SECRET_ACCESS_KEY',
+  ]);
+
+  const id = created.body.provider.id;
+  const updated = await request(app)
+    .patch(`/api/environment-providers/${id}`)
+    .set(...COOKIE)
+    .send({ env_keys: ['CUSTOM_PROVIDER_REGION', 'CUSTOM_PROVIDER_PROJECT'] });
+  assert.equal(updated.status, 200);
+  assert.deepEqual(updated.body.provider.env_keys, [
+    'CUSTOM_PROVIDER_REGION',
+    'CUSTOM_PROVIDER_PROJECT',
+  ]);
+
+  const fetched = await request(app).get(`/api/environment-providers/${id}`).set(...COOKIE);
+  assert.equal(fetched.status, 200);
+  assert.equal(fetched.body.provider.name, 'declared-custom');
+});
+
+test('profile binding merges only non-secret provider keys until env_allowlist explicitly approves secrets', async (t) => {
+  const app = await createTestApp(t);
+  const created = await request(app).post('/api/environment-providers').set(...COOKIE).send({
+    name: 'declarative-bedrock-example',
+    env_keys: [
+      'CLAUDE_CODE_USE_BEDROCK',
+      'AWS_REGION',
+      'AWS_SECRET_ACCESS_KEY',
+    ],
+  });
+  const providerId = created.body.provider.id;
+
+  const bound = await request(app).patch('/api/agents/claude-code').set(...COOKIE).send({
+    environment_provider_ids: [providerId],
+  });
+  assert.equal(bound.status, 200, JSON.stringify(bound.body));
+  assert.deepEqual(bound.body.agent.environment_provider_ids, [providerId]);
+  assert.deepEqual(bound.body.agent.effective_env_allowlist, [
+    'CLAUDE_CODE_OAUTH_TOKEN',
+    'ANTHROPIC_API_KEY',
+    'ANTHROPIC_BASE_URL',
+    'CLAUDE_CODE_USE_BEDROCK',
+    'AWS_REGION',
+  ]);
+  assert.deepEqual(
+    bound.body.agent.environment_providers[0].withheld_secret_env_keys,
+    ['AWS_SECRET_ACCESS_KEY'],
+  );
+
+  const approved = await request(app).patch('/api/agents/claude-code').set(...COOKIE).send({
+    env_allowlist: JSON.stringify([
+      'CLAUDE_CODE_OAUTH_TOKEN',
+      'ANTHROPIC_API_KEY',
+      'ANTHROPIC_BASE_URL',
+      'AWS_SECRET_ACCESS_KEY',
+    ]),
+  });
+  assert.equal(approved.status, 200);
+  assert.ok(approved.body.agent.effective_env_allowlist.includes('AWS_SECRET_ACCESS_KEY'));
+  assert.deepEqual(
+    approved.body.agent.environment_providers[0].withheld_secret_env_keys,
+    [],
+  );
+});
+
+test('provider validation and referenced delete fail closed', async (t) => {
+  const app = await createTestApp(t);
+  const invalid = await request(app).post('/api/environment-providers').set(...COOKIE).send({
+    name: 'invalid',
+    env_keys: ['VALID_ENV', 'not-valid'],
+  });
+  assert.equal(invalid.status, 400);
+
+  const created = await request(app).post('/api/environment-providers').set(...COOKIE).send({
+    name: 'referenced',
+    env_keys: ['CUSTOM_REGION'],
+  });
+  const providerId = created.body.provider.id;
+  await request(app).patch('/api/agents/codex').set(...COOKIE).send({
+    environment_provider_ids: [providerId],
+  });
+
+  const refs = await request(app)
+    .get(`/api/environment-providers/${providerId}/references`)
+    .set(...COOKIE);
+  assert.equal(refs.status, 200);
+  assert.ok(refs.body.references.agent_profiles.some((profile) => profile.id === 'codex'));
+
+  const deletion = await request(app).delete(`/api/environment-providers/${providerId}`).set(...COOKIE);
+  assert.equal(deletion.status, 409);
+  assert.ok(deletion.body.details.agent_profiles.some((profile) => profile.id === 'codex'));
+});
+
+test('manager dropped-env diagnostic annotates provider ownership without values', () => {
+  const lines = [];
+  const originalWarn = console.warn;
+  console.warn = (line) => lines.push(String(line));
+  try {
+    buildManagerSpawnEnv({
+      baseEnv: {
+        AWS_SECRET_ACCESS_KEY: 'must-not-appear',
+        CUSTOM_PROVIDER_REGION: 'ap-test-1',
+      },
+      envAllowlist: ['CUSTOM_PROVIDER_REGION'],
+      providerEnv: [{
+        id: 'envp_observed',
+        name: 'operator-provider',
+        envKeys: ['AWS_SECRET_ACCESS_KEY', 'CUSTOM_PROVIDER_REGION'],
+      }],
+      vendor: 'claude-code',
+      diagnosticContext: 'manager:test:provider',
+    });
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /manager_spawn_env_dropped/);
+  assert.match(lines[0], /"id":"envp_observed"/);
+  assert.match(lines[0], /"name":"operator-provider"/);
+  assert.match(lines[0], /"keys":\["AWS_SECRET_ACCESS_KEY"\]/);
+  assert.doesNotMatch(lines[0], /must-not-appear|ap-test-1/);
+});
+
+test('secret classification is not defeated by case or by missing separators', () => {
+  const {
+    isProviderSecretEnvKey,
+    resolveProviderEnvPolicy,
+  } = require('../services/providerEnvPolicy');
+  // The names an operator types are not constrained to UPPER_SNAKE_CASE, and
+  // ENV_VAR_NAME_RE accepts any case. A classifier that only recognises the
+  // tidy spelling waves through the untidy spelling of the same credential.
+  for (const key of [
+    'AWS_SECRET_ACCESS_KEY',
+    'SECRETKEY',
+    'MY_SECRETKEY',
+    'stripeSecretKey',
+    'awsSecretAccessKey',
+    'githubToken',
+    'my_api_key',
+    'VaultPassword',
+    'CLIENT_PRIVATE_CERT',
+    'DOCKER_AUTH_CONFIG',
+    'HTTP_AUTHORIZATION',
+    'GITHUB_PAT',
+    'REGISTRY_CREDENTIALS',
+    'REQUEST_COOKIE',
+    'WEBHOOK_SIGNATURE',
+    'SSH_PRIVATE_KEY',
+    'AWS_ACCESS_KEY',
+    'AWS_SECRET_KEY',
+    'PGPASSWORD',
+    'MYSQL_PWD',
+    'PGPASSFILE',
+    'NPM_TOKEN',
+    'GH_TOKEN',
+    'GITHUB_TOKEN',
+  ]) {
+    assert.equal(isProviderSecretEnvKey(key), true, `${key} must require explicit approval`);
+  }
+  // Still lets ordinary configuration through, or the feature is pointless.
+  for (const key of [
+    'CLAUDE_CODE_USE_BEDROCK',
+    'AWS_REGION',
+    'HTTP_PROXY',
+    'MODEL_NAME',
+    'CACHE_KEYS_DIR',
+    'AUTHOR',
+    'PATH',
+    'PATTERN',
+    'KEYBOARD_LAYOUT',
+    'KEYS_DIR',
+    'MY_TOOL_REGION',
+    'REFRESH_INTERVAL',
+    'SESSION_TIMEOUT',
+    'AUTH_MODE',
+    'LOGIN_SESSION',
+    'OAUTH_REFRESH',
+  ]) {
+    assert.equal(isProviderSecretEnvKey(key), false, `${key} must not need approval`);
+  }
+
+  // MUTATION: an AUTH-shaped credential is withheld from an empty profile
+  // allowlist and reaches the spawn boundary only after explicit approval.
+  const provider = {
+    id: 'envp_registry',
+    name: 'registry',
+    env_keys: JSON.stringify(['DOCKER_AUTH_CONFIG']),
+  };
+  const withheld = resolveProviderEnvPolicy('[]', [provider], {
+    DOCKER_AUTH_CONFIG: '{"auths":{"registry":{"auth":"BASE64_USER_PASS"}}}',
+  });
+  assert.equal(withheld.effectiveKeys.includes('DOCKER_AUTH_CONFIG'), false);
+  assert.deepEqual(withheld.providers[0].withheldSecretKeys, ['DOCKER_AUTH_CONFIG']);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(buildManagerSpawnEnv({
+      baseEnv: { DOCKER_AUTH_CONFIG: 'must-not-forward' },
+      envAllowlist: withheld.effectiveKeys,
+      providerEnv: withheld.providers,
+      vendor: 'codex',
+    }), 'DOCKER_AUTH_CONFIG'),
+    false,
+  );
+
+  const approved = resolveProviderEnvPolicy(
+    '["DOCKER_AUTH_CONFIG"]',
+    [provider],
+    { DOCKER_AUTH_CONFIG: 'approved-registry-auth' },
+  );
+  assert.ok(approved.effectiveKeys.includes('DOCKER_AUTH_CONFIG'));
+  assert.equal(buildManagerSpawnEnv({
+    baseEnv: { DOCKER_AUTH_CONFIG: 'approved-registry-auth' },
+    envAllowlist: approved.effectiveKeys,
+    providerEnv: approved.providers,
+    vendor: 'codex',
+  }).DOCKER_AUTH_CONFIG, 'approved-registry-auth');
+
+  // MUTATION: joined and suffixed credential nouns are withheld until the
+  // profile explicitly approves them, while ambiguous config words inherit.
+  const compoundSecretKeys = [
+    'PGPASSWORD',
+    'MYSQL_PWD',
+    'PGPASSFILE',
+    'NPM_TOKEN',
+    'GH_TOKEN',
+    'GITHUB_TOKEN',
+  ];
+  const benignKeys = [
+    'REFRESH_INTERVAL',
+    'SESSION_TIMEOUT',
+    'AUTH_MODE',
+    'AUTHOR',
+    'PATTERN',
+    'KEYBOARD',
+    'KEYS_DIR',
+    'MY_TOOL_REGION',
+  ];
+  const compoundProvider = {
+    id: 'envp_compound_secrets',
+    name: 'database-and-package-auth',
+    env_keys: JSON.stringify([...compoundSecretKeys, ...benignKeys]),
+  };
+  const compoundWithheld = resolveProviderEnvPolicy('[]', [compoundProvider], {
+    PGPASSWORD: 'db-secret',
+  });
+  assert.deepEqual(
+    compoundWithheld.providers[0].withheldSecretKeys,
+    compoundSecretKeys,
+  );
+  assert.deepEqual(compoundWithheld.providers[0].inheritedKeys, benignKeys);
+  for (const key of compoundSecretKeys) {
+    assert.equal(compoundWithheld.effectiveKeys.includes(key), false, key);
+  }
+  for (const key of benignKeys) {
+    assert.equal(compoundWithheld.effectiveKeys.includes(key), true, key);
+  }
+  const pgApproved = resolveProviderEnvPolicy(
+    '["PGPASSWORD"]',
+    [compoundProvider],
+    { PGPASSWORD: 'db-secret' },
+  );
+  assert.equal(buildManagerSpawnEnv({
+    baseEnv: { PGPASSWORD: 'db-secret' },
+    envAllowlist: pgApproved.effectiveKeys,
+    providerEnv: pgApproved.providers,
+    vendor: 'codex',
+  }).PGPASSWORD, 'db-secret');
+});
+
+test('declaring a provider is a human action, not something a bearer token can do', async (t) => {
+  const app = await createTestApp(t);
+  const body = { name: 'bearer-declared', env_keys: ['SOME_REGION'] };
+
+  // PALANTIR_PM_TOKEN is bearer-only and unscoped, and a goal-mode Operator's
+  // own spawn env legitimately contains it. Without this gate an Operator could
+  // declare a provider, bind it to its profile, and widen its own effective
+  // allowlist for the next spawn with no human in the loop.
+  const bearer = await request(app)
+    .post('/api/environment-providers')
+    .set('Authorization', 'Bearer secret-token')
+    .send(body);
+  assert.equal(bearer.status, 403, JSON.stringify(bearer.body));
+
+  const crossOrigin = await request(app)
+    .post('/api/environment-providers')
+    .set(...COOKIE)
+    .set('Origin', 'http://evil.example')
+    .send(body);
+  assert.equal(crossOrigin.status, 403);
+
+  // MUTATION: same host is still cross-origin when the scheme differs.
+  const wrongScheme = await request(app)
+    .post('/api/environment-providers')
+    .set(...COOKIE)
+    .set('Origin', 'https://console.test')
+    .send(body);
+  assert.equal(wrongScheme.status, 403);
+
+  // MUTATION: cookie provenance alone is insufficient; provider writes require
+  // a positive same-origin Origin header.
+  const noOrigin = await invokeApp(app, {
+    method: 'POST',
+    path: '/api/environment-providers',
+    headers: {
+      Cookie: 'palantir_token=secret-token',
+      Host: 'console.test',
+    },
+    body,
+  });
+  assert.equal(noOrigin.status, 403, JSON.stringify(noOrigin.body));
+
+  assert.equal(
+    (await request(app).get('/api/environment-providers').set(...COOKIE)).body.providers.length,
+    0,
+    'neither attempt may have created anything',
+  );
+
+  const created = await request(app)
+    .post('/api/environment-providers')
+    .set(...COOKIE)
+    .send({ name: 'human-declared', env_keys: ['HUMAN_APPROVED_REGION'] });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  const providerId = created.body.provider.id;
+
+  const bearerBinding = await request(app)
+    .patch('/api/agents/claude-code')
+    .set('Authorization', 'Bearer secret-token')
+    .send({ environment_provider_ids: [providerId] });
+  assert.equal(bearerBinding.status, 403, JSON.stringify(bearerBinding.body));
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(
+      app.services.agentProfileService.getProfile('claude-code'),
+      'environment_provider_ids',
+    ),
+    false,
+    'bearer binding must not mutate the profile',
+  );
+
+  const cookieBinding = await request(app)
+    .patch('/api/agents/claude-code')
+    .set(...COOKIE)
+    .send({ environment_provider_ids: [providerId] });
+  assert.equal(cookieBinding.status, 200, JSON.stringify(cookieBinding.body));
+  assert.deepEqual(cookieBinding.body.agent.environment_provider_ids, [providerId]);
+});
+
+test('MUTATION: process-loader provider keys are rejected and legacy rows resolve closed', async (t) => {
+  const app = await createTestApp(t);
+  for (const key of ['NODE_OPTIONS', 'LD_PRELOAD']) {
+    const rejected = await request(app)
+      .post('/api/environment-providers')
+      .set(...COOKIE)
+      .send({ name: `denied-${key}`, env_keys: ['SAFE_REGION', key] });
+    assert.equal(rejected.status, 400, JSON.stringify(rejected.body));
+    assert.match(rejected.body.message || rejected.body.error || '', /denied|process|runtime/i);
+  }
+
+  const Database = require('better-sqlite3');
+  const rawDb = new Database(app.__providerTestDbPath);
+  t.after(() => rawDb.close());
+  rawDb.prepare(`
+    INSERT INTO environment_providers (id, name, env_keys)
+    VALUES (?, ?, ?)
+  `).run('envp_legacy_denied', 'legacy-denied', JSON.stringify([
+    'SAFE_REGION',
+    'NODE_OPTIONS',
+  ]));
+  app.services.agentProfileService.updateProfile('codex', {
+    env_allowlist: JSON.stringify(['NODE_OPTIONS']),
+    environment_provider_ids: ['envp_legacy_denied'],
+  });
+  const policy = app.services.agentProfileService.resolveEnvPolicy('codex');
+  assert.equal(policy.valid, false);
+  assert.ok(policy.blockedKeys.includes('NODE_OPTIONS'));
+  assert.equal(policy.effectiveKeys.includes('NODE_OPTIONS'), false);
+
+  const spawnAttempt = await request(app)
+    .post('/api/manager/start')
+    .set(...COOKIE)
+    .send({
+      prompt: 'must not spawn with a legacy denied provider row',
+      agent_profile_id: 'codex',
+    });
+  assert.equal(spawnAttempt.status, 400, JSON.stringify(spawnAttempt.body));
+  assert.equal(spawnAttempt.body.error, 'manager_profile_env_allowlist_invalid');
+  assert.equal(
+    app.services.runService.listRuns().some((run) => run.is_manager),
+    false,
+    'invalid policy must fail before a manager run or child is created',
+  );
+});
+
+test('MUTATION: a secret-shaped gate is presence-only and its value is never stored or returned', async (t) => {
+  const app = await createTestApp(t);
+  const rejected = await request(app)
+    .post('/api/environment-providers')
+    .set(...COOKIE)
+    .send({
+      name: 'secret-valued-gate',
+      env_keys: ['CUSTOM_PROVIDER_API_KEY'],
+      gate_env_key: 'CUSTOM_PROVIDER_API_KEY',
+      gate_env_value: 'must-never-persist',
+    });
+  assert.equal(rejected.status, 400, JSON.stringify(rejected.body));
+
+  const rejectedPgPassword = await request(app)
+    .post('/api/environment-providers')
+    .set(...COOKIE)
+    .send({
+      name: 'pgpassword-valued-gate',
+      env_keys: ['PGPASSWORD'],
+      gate_env_key: 'PGPASSWORD',
+      gate_env_value: 'db-secret-canary',
+    });
+  assert.equal(rejectedPgPassword.status, 400, JSON.stringify(rejectedPgPassword.body));
+
+  const created = await request(app)
+    .post('/api/environment-providers')
+    .set(...COOKIE)
+    .send({
+      name: 'secret-presence-gate',
+      env_keys: ['CUSTOM_PROVIDER_API_KEY'],
+      gate_env_key: 'CUSTOM_PROVIDER_API_KEY',
+    });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  assert.equal(created.body.provider.gate_env_value, null);
+
+  const Database = require('better-sqlite3');
+  const rawDb = new Database(app.__providerTestDbPath);
+  t.after(() => rawDb.close());
+  const row = rawDb.prepare(
+    'SELECT gate_env_value FROM environment_providers WHERE id = ?',
+  ).get(created.body.provider.id);
+  assert.equal(row.gate_env_value, null);
+
+  rawDb.prepare(`
+    INSERT INTO environment_providers (
+      id, name, env_keys, gate_env_key, gate_env_value
+    ) VALUES (?, ?, ?, ?, ?)
+  `).run(
+    'envp_legacy_secret_gate',
+    'legacy-pgpassword-gate',
+    JSON.stringify(['PGPASSWORD']),
+    'PGPASSWORD',
+    'db-secret-canary',
+  );
+  assert.equal(
+    app.services.environmentProviderService
+      .getProvider('envp_legacy_secret_gate').gate_env_value,
+    null,
+  );
+
+  const previousGate = process.env.PGPASSWORD;
+  process.env.PGPASSWORD = 'present-but-not-the-poisoned-value';
+  t.after(() => {
+    if (previousGate === undefined) delete process.env.PGPASSWORD;
+    else process.env.PGPASSWORD = previousGate;
+  });
+  app.services.agentProfileService.updateProfile('claude-code', {
+    env_allowlist: JSON.stringify(['PGPASSWORD']),
+    environment_provider_ids: ['envp_legacy_secret_gate'],
+  });
+  const policy = app.services.agentProfileService.resolveEnvPolicy('claude-code');
+  assert.equal(policy.providers[0].active, true, 'secret gate falls back to presence');
+  assert.equal(policy.providers[0].gateEnvValue, null);
+
+  const providerRoute = await request(app)
+    .get('/api/environment-providers/envp_legacy_secret_gate')
+    .set(...COOKIE);
+  assert.equal(providerRoute.status, 200);
+  assert.equal(providerRoute.body.provider.gate_env_value, null);
+  assert.doesNotMatch(JSON.stringify(providerRoute.body), /db-secret-canary/);
+
+  const agentsRoute = await request(app).get('/api/agents').set(...COOKIE);
+  assert.equal(agentsRoute.status, 200);
+  assert.doesNotMatch(JSON.stringify(agentsRoute.body), /db-secret-canary/);
+  const hydrated = agentsRoute.body.agents.find((agent) => agent.id === 'claude-code');
+  assert.equal(hydrated.environment_providers[0].gate_env_value, null);
+  assert.equal(hydrated.environment_providers[0].active, true);
+});
+
+// #518 blocker 3. The human/Origin guard protected `environment_provider_ids` --
+// WHICH providers are attached -- but a provider secret becomes APPROVED only
+// when the profile's `env_allowlist` names it. Guarding the attachment alone let
+// a bearer promote the secret with an allowlist-only write.
+async function bindSecretProvider(app) {
+  const created = await request(app).post('/api/environment-providers').set(...COOKIE).send({
+    name: `secret-approval-${Math.random().toString(16).slice(2)}`,
+    env_keys: ['CLAUDE_CODE_USE_BEDROCK', 'AWS_SECRET_ACCESS_KEY'],
+    gate_env_key: 'CLAUDE_CODE_USE_BEDROCK',
+    gate_env_value: '1',
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  const bound = await request(app).patch('/api/agents/claude-code').set(...COOKIE).send({
+    environment_provider_ids: [created.body.provider.id],
+  });
+  assert.equal(bound.status, 200, JSON.stringify(bound.body));
+  return created.body.provider.id;
+}
+
+const approvedFor = (agent, providerId) => (agent.environment_providers || [])
+  .find((p) => p.id === providerId)?.approved_secret_env_keys || [];
+
+// Approval also needs the provider's gate to be live in the host env, otherwise
+// an allowlisted secret is simply inert and the assertion would prove nothing.
+function withActiveGate(t) {
+  const previous = process.env.CLAUDE_CODE_USE_BEDROCK;
+  process.env.CLAUDE_CODE_USE_BEDROCK = '1';
+  t.after(() => {
+    if (previous === undefined) delete process.env.CLAUDE_CODE_USE_BEDROCK;
+    else process.env.CLAUDE_CODE_USE_BEDROCK = previous;
+  });
+}
+
+test('a bearer cannot approve a provider secret through env_allowlist alone', async (t) => {
+  const app = await createTestApp(t);
+  const providerId = await bindSecretProvider(app);
+
+  const attempt = await request(app).patch('/api/agents/claude-code')
+    .set('Authorization', 'Bearer secret-token')
+    .send({ env_allowlist: '["AWS_SECRET_ACCESS_KEY"]' });
+  assert.equal(attempt.status, 403, JSON.stringify(attempt.body));
+
+  const after = await request(app).get('/api/agents/claude-code').set(...COOKIE);
+  assert.deepEqual(approvedFor(after.body.agent, providerId), [],
+    'the refused write must not have promoted the secret');
+});
+
+test('a human with a same-origin cookie still approves it', async (t) => {
+  withActiveGate(t);
+  const app = await createTestApp(t);
+  const providerId = await bindSecretProvider(app);
+
+  const allowed = await request(app).patch('/api/agents/claude-code').set(...COOKIE)
+    .send({ env_allowlist: '["AWS_SECRET_ACCESS_KEY"]' });
+  assert.equal(allowed.status, 200, JSON.stringify(allowed.body));
+  assert.deepEqual(approvedFor(allowed.body.agent, providerId), ['AWS_SECRET_ACCESS_KEY']);
+});
+
+test('ordinary allowlist edits and de-escalation stay open to a bearer', async (t) => {
+  // The guard is on the effect, not the field name: gating every env_allowlist
+  // write would break bearer automation that never touches a secret.
+  withActiveGate(t);
+  const app = await createTestApp(t);
+  const providerId = await bindSecretProvider(app);
+
+  const ordinary = await request(app).patch('/api/agents/claude-code')
+    .set('Authorization', 'Bearer secret-token')
+    .send({ env_allowlist: '["AWS_REGION"]' });
+  assert.equal(ordinary.status, 200, JSON.stringify(ordinary.body));
+
+  // Approve as a human first.
+  await request(app).patch('/api/agents/claude-code').set(...COOKIE)
+    .send({ env_allowlist: '["AWS_SECRET_ACCESS_KEY"]' });
+
+  // Carrying an ALREADY-approved secret through while adding an ordinary key is
+  // not an escalation -- the human already approved it. Gating on mere presence
+  // instead of on what is newly added would refuse this.
+  const carried = await request(app).patch('/api/agents/claude-code')
+    .set('Authorization', 'Bearer secret-token')
+    .send({ env_allowlist: '["AWS_SECRET_ACCESS_KEY","AWS_REGION"]' });
+  assert.equal(carried.status, 200, JSON.stringify(carried.body));
+  assert.deepEqual(approvedFor(carried.body.agent, providerId), ['AWS_SECRET_ACCESS_KEY']);
+
+  // Removal is de-escalation.
+  const removed = await request(app).patch('/api/agents/claude-code')
+    .set('Authorization', 'Bearer secret-token')
+    .send({ env_allowlist: '[]' });
+  assert.equal(removed.status, 200, JSON.stringify(removed.body));
+  assert.deepEqual(approvedFor(removed.body.agent, providerId), []);
+});
+
+test('creating a profile that pre-approves a secret is a human write too', async (t) => {
+  const app = await createTestApp(t);
+  const attempt = await request(app).post('/api/agents')
+    .set('Authorization', 'Bearer secret-token')
+    .send({
+      name: 'preapproved', type: 'codex', command: 'codex',
+      env_allowlist: '["AWS_SECRET_ACCESS_KEY"]',
+    });
+  assert.equal(attempt.status, 403, JSON.stringify(attempt.body));
+});
+
+// #518 blocker 1. A profile whose provider resolved to an empty effective list --
+// an inactive gate is the ordinary way that happens -- fell back to ambient
+// defaults, so the host's ANTHROPIC_API_KEY reached the child anyway. The
+// operator said "auth comes from Bedrock"; with the gate off the answer is no
+// auth, not a silent different credential.
+const { resolveManagerAuth } = require('../services/authResolver');
+
+function authFor(app, profileId, extra = {}) {
+  const policy = app.services.agentProfileService.resolveEnvPolicy(profileId);
+  return {
+    policy,
+    ctx: resolveManagerAuth('claude-code', {
+      envAllowlist: policy.effectiveKeys,
+      providers: policy.providers,
+      allowDefaultAuth: policy.allowDefaultAuth,
+      blockedEnvKeys: policy.blockedKeys,
+      hasKeychain: () => false,
+      ...extra,
+    }),
+  };
+}
+
+function withAmbientKey(t) {
+  const previousKey = process.env.ANTHROPIC_API_KEY;
+  const previousGate = process.env.CLAUDE_CODE_USE_BEDROCK;
+  process.env.ANTHROPIC_API_KEY = 'ambient-secret';
+  delete process.env.CLAUDE_CODE_USE_BEDROCK;
+  t.after(() => {
+    if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = previousKey;
+    if (previousGate === undefined) delete process.env.CLAUDE_CODE_USE_BEDROCK;
+    else process.env.CLAUDE_CODE_USE_BEDROCK = previousGate;
+  });
+}
+
+test('an inactive auth provider does not fall back to ambient credentials', async (t) => {
+  withAmbientKey(t);
+  const app = await createTestApp(t);
+  const provider = await request(app).post('/api/environment-providers').set(...COOKIE).send({
+    name: `inactive-auth-${Math.random().toString(16).slice(2)}`,
+    env_keys: ['CLAUDE_CODE_USE_BEDROCK', 'AWS_SECRET_ACCESS_KEY'],
+    gate_env_key: 'CLAUDE_CODE_USE_BEDROCK',
+    gate_env_value: '1',
+  });
+  await request(app).patch('/api/agents/claude-code').set(...COOKIE)
+    .send({ env_allowlist: '[]', environment_provider_ids: [provider.body.provider.id] });
+
+  const { policy, ctx } = authFor(app, 'claude-code');
+  assert.deepEqual(policy.effectiveKeys, [], 'the gate is off, so nothing is effective');
+  assert.equal(policy.allowDefaultAuth, false, 'an auth declaration turns ambient defaults off');
+  assert.equal(ctx.env.ANTHROPIC_API_KEY, undefined, 'the ambient key must not reach the child');
+  assert.equal(ctx.canAuth, false, 'refusing loudly beats spawning with a credential nobody chose');
+});
+
+test('a config-only provider still leaves default auth alone', async (t) => {
+  // Adding a region variable is not a statement about credentials. Treating any
+  // attached provider as an auth declaration broke this, so it is pinned here
+  // next to the case above -- the two define the boundary together.
+  withAmbientKey(t);
+  const app = await createTestApp(t);
+  const provider = await request(app).post('/api/environment-providers').set(...COOKIE).send({
+    name: `config-only-${Math.random().toString(16).slice(2)}`,
+    env_keys: ['CUSTOM_REGION'],
+  });
+  await request(app).patch('/api/agents/claude-code').set(...COOKIE)
+    .send({ env_allowlist: '[]', environment_provider_ids: [provider.body.provider.id] });
+
+  const { policy, ctx } = authFor(app, 'claude-code');
+  assert.equal(policy.allowDefaultAuth, true);
+  assert.equal(ctx.env.ANTHROPIC_API_KEY, 'ambient-secret');
+});
+
+test('a config-only provider with a gate is still config-only', async (t) => {
+  // The gate is a generic schema, not an auth signal. Treating "has a gate" as
+  // "speaks about credentials" cut off authentication for a provider that only
+  // toggles a feature flag -- adversarial review's counter-example.
+  withAmbientKey(t);
+  const app = await createTestApp(t);
+  const provider = await request(app).post('/api/environment-providers').set(...COOKIE).send({
+    name: `gated-config-${Math.random().toString(16).slice(2)}`,
+    env_keys: ['CUSTOM_FEATURE_ENABLED', 'CUSTOM_REGION'],
+    gate_env_key: 'CUSTOM_FEATURE_ENABLED',
+    gate_env_value: '1',
+  });
+  await request(app).patch('/api/agents/claude-code').set(...COOKIE)
+    .send({ env_allowlist: '[]', environment_provider_ids: [provider.body.provider.id] });
+
+  const { policy, ctx } = authFor(app, 'claude-code');
+  assert.equal(policy.allowDefaultAuth, true, 'a feature-flag gate is not an auth declaration');
+  assert.equal(ctx.env.ANTHROPIC_API_KEY, 'ambient-secret');
+});
+
+test('declaring only an endpoint does not cut off authentication', async (t) => {
+  // ANTHROPIC_BASE_URL redirects WHERE the credential goes; it supplies none and
+  // cannot make canAuth true alone. Pointing at a proxy while still using the
+  // ambient key is a real setup, so this must behave like config, not credentials.
+  withAmbientKey(t);
+  const app = await createTestApp(t);
+  const provider = await request(app).post('/api/environment-providers').set(...COOKIE).send({
+    name: `base-url-${Math.random().toString(16).slice(2)}`,
+    env_keys: ['ANTHROPIC_BASE_URL'],
+  });
+  await request(app).patch('/api/agents/claude-code').set(...COOKIE)
+    .send({ env_allowlist: '[]', environment_provider_ids: [provider.body.provider.id] });
+
+  assert.equal(authFor(app, 'claude-code').policy.allowDefaultAuth, true);
+});
+
+test('declaring a credential key itself is an auth declaration', async (t) => {
+  withAmbientKey(t);
+  const app = await createTestApp(t);
+  const provider = await request(app).post('/api/environment-providers').set(...COOKIE).send({
+    name: `oauth-${Math.random().toString(16).slice(2)}`,
+    env_keys: ['CLAUDE_CODE_OAUTH_TOKEN'],
+  });
+  await request(app).patch('/api/agents/claude-code').set(...COOKIE)
+    .send({ env_allowlist: '[]', environment_provider_ids: [provider.body.provider.id] });
+
+  assert.equal(authFor(app, 'claude-code').policy.allowDefaultAuth, false);
+});
+
+test('a provider handing over an unrelated secret does not cut off model auth', async (t) => {
+  // A database password is a secret, but it says nothing about how the agent
+  // authenticates to its model. An earlier rule treated any declared secret as
+  // an auth declaration; a reverse regression showed that branch never fired on
+  // the cases under test, and reasoning it through showed it was also wrong.
+  withAmbientKey(t);
+  const app = await createTestApp(t);
+  const provider = await request(app).post('/api/environment-providers').set(...COOKIE).send({
+    name: `db-secret-${Math.random().toString(16).slice(2)}`,
+    env_keys: ['PGPASSWORD'],
+  });
+  await request(app).patch('/api/agents/claude-code').set(...COOKIE)
+    .send({ env_allowlist: '[]', environment_provider_ids: [provider.body.provider.id] });
+
+  const { policy, ctx } = authFor(app, 'claude-code');
+  assert.equal(policy.allowDefaultAuth, true, 'an unrelated secret is not an auth declaration');
+  assert.equal(ctx.env.ANTHROPIC_API_KEY, 'ambient-secret');
+});
+
+test('the refusal explains itself instead of reporting a generic missing credential', async (t) => {
+  // Fail-closed without a reason is an operator cliff: the spawn stops and the
+  // message blames the environment rather than the declaration that withheld it.
+  withAmbientKey(t);
+  const app = await createTestApp(t);
+  const provider = await request(app).post('/api/environment-providers').set(...COOKIE).send({
+    name: `diagnostic-${Math.random().toString(16).slice(2)}`,
+    env_keys: ['CLAUDE_CODE_USE_BEDROCK', 'AWS_SECRET_ACCESS_KEY'],
+    gate_env_key: 'CLAUDE_CODE_USE_BEDROCK',
+    gate_env_value: '1',
+  });
+  await request(app).patch('/api/agents/claude-code').set(...COOKIE)
+    .send({ env_allowlist: '[]', environment_provider_ids: [provider.body.provider.id] });
+
+  const { ctx } = authFor(app, 'claude-code');
+  assert.equal(ctx.canAuth, false);
+  // Assert on the phrase only the exclusion diagnostic produces. The generic
+  // "No Claude credentials found..." line also names ANTHROPIC_API_KEY, so
+  // matching the key alone passed even with the diagnostic suppressed.
+  assert.ok(
+    ctx.diagnostics.some((line) => line.includes('excluded these present env vars')
+      && line.includes('ANTHROPIC_API_KEY')),
+    `the refusal must name what it withheld; got ${JSON.stringify(ctx.diagnostics)}`,
+  );
+});
+
+test('an isolated preset does not recover a host login the profile did not declare', async (t) => {
+  // The plain CLI spawn reads HOME itself and no env policy can stop it, but the
+  // isolated path materializes the credential HERE. Adversarial review was right
+  // that this one is inside our reach, so declining is not out of scope.
+  const { resolveClaudeAuthForIsolated } = require('../services/authResolver');
+  const nativeHooks = {
+    hasKeychain: () => true,
+    readKeychainToken: async () => 'host-keychain-token',
+    hasCredentialsFile: () => true,
+    readCredentialsFileToken: async () => 'host-credentials-file-token',
+  };
+
+  const declared = await resolveClaudeAuthForIsolated({
+    envAllowlist: [], providers: [], allowDefaultAuth: false, blockedEnvKeys: [], ...nativeHooks,
+  });
+  assert.equal(declared.canAuth, false, 'a declared policy must not fall back to a host login');
+  assert.deepEqual(declared.env, {});
+  assert.equal(declared.sources.some((s) => s.startsWith('keychain:')), false);
+
+  // A profile that declared nothing keeps the existing behavior.
+  const undeclared = await resolveClaudeAuthForIsolated({
+    envAllowlist: [], providers: [], blockedEnvKeys: [], ...nativeHooks,
+  });
+  assert.equal(undeclared.canAuth, true);
+});
+
+test('a restricted allowlist blocks the host login even without an explicit flag', async (t) => {
+  // liveDistiller passes only { envAllowlist }. The allow-set already refuses
+  // default credentials for a non-empty list, but the isolated native fallback
+  // used a parallel rule (allowDefaultAuth !== false) and disagreed -- so the
+  // host keychain was materialized for a profile that restricted its env.
+  const { resolveClaudeAuthForIsolated } = require('../services/authResolver');
+  const nativeHooks = {
+    hasKeychain: () => true,
+    readKeychainToken: async () => 'host-keychain-token',
+    hasCredentialsFile: () => true,
+    readCredentialsFileToken: async () => 'host-credentials-file-token',
+  };
+
+  const restricted = await resolveClaudeAuthForIsolated({
+    envAllowlist: ['SOMETHING_ELSE'], providers: [], blockedEnvKeys: [], ...nativeHooks,
+  });
+  assert.equal(restricted.canAuth, false, 'a restricted allowlist must not recover a host login');
+  assert.equal(restricted.sources.some((s) => s.startsWith('keychain:')), false);
+
+  // Saying nothing at all still falls back, which is the pre-existing contract.
+  const unrestricted = await resolveClaudeAuthForIsolated({
+    providers: [], blockedEnvKeys: [], ...nativeHooks,
+  });
+  assert.equal(unrestricted.canAuth, true);
+});

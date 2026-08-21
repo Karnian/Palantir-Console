@@ -1265,13 +1265,65 @@ function createLifecycleService({
       actorTokens,
     });
     const profile = agentProfileService.getProfile(agentProfileId);
+    const profileEnvPolicy = typeof agentProfileService.resolveEnvPolicy === 'function'
+      ? agentProfileService.resolveEnvPolicy(profile)
+      : null;
+    if (profileEnvPolicy && !profileEnvPolicy.valid) {
+      runService.addRunEvent(run.id, 'spawn:provider_env_policy_invalid', JSON.stringify({
+        profile_id: profile.id,
+        reason: 'invalid or denied provider declaration',
+      }));
+      const err = new Error('provider env policy is invalid; refusing worker spawn');
+      err.status = 400;
+      err.code = 'PROVIDER_ENV_POLICY_INVALID';
+      throw err;
+    }
+    if (
+      isRemoteNode
+      && profileEnvPolicy?.providers?.some((provider) => provider.gateEnvKey)
+    ) {
+      // The controller resolved this gate from controller process.env, while a
+      // remote executor would source declared values from the node login env.
+      // Until node-side gate evaluation exists, assuming parity is unsafe.
+      runService.addRunEvent(run.id, 'spawn:remote_provider_gate_unsupported', JSON.stringify({
+        profile_id: profile.id,
+        node_id: run.node_id,
+        reason: 'provider gates are controller-scoped',
+      }));
+      const err = new Error(
+        'remote provider gate rejected: controller-scoped gates cannot authorize node-sourced credentials',
+      );
+      err.status = 400;
+      err.code = 'REMOTE_PROVIDER_GATE_UNSUPPORTED';
+      throw err;
+    }
+    const effectiveProfileEnvKeys = profileEnvPolicy
+      ? stripWorkerApiBaseKeys(profileEnvPolicy.effectiveKeys)
+      : parseEnvAllowlistArray(profile.env_allowlist);
+    const effectiveProfileEnvAllowlist = JSON.stringify(effectiveProfileEnvKeys);
     try {
       runService.setSessionSnapshot(run.id, {
         sessionModel: profile.model || null,
         sessionEffort: profile.reasoning_effort || null,
         sessionPermissionMode: resolveClaudePermissionMode(profile) || null,
+        sessionEnvPolicy: {
+          effectiveKeys: effectiveProfileEnvKeys,
+          providers: profileEnvPolicy?.providers || [],
+          allowDefaultAuth: profileEnvPolicy?.allowDefaultAuth === true,
+          blockedKeys: profileEnvPolicy?.blockedKeys || [],
+        },
       });
-    } catch { /* annotate-only */ }
+    } catch (err) {
+      // Loud, but not fatal. The manager/Operator paths fail closed because
+      // boot resume READS their snapshot as the authority -- losing it there
+      // widens the resumed env. Nothing resumes a worker from this snapshot
+      // (every reader of session_claude_options_json is in routes/manager.js),
+      // so for a worker it is observability. Failing the run instead cost the
+      // whole drain: one unwritable snapshot stopped every queued run.
+      try {
+        runService.addRunEvent(run.id, 'worker:env_snapshot_unwritable', JSON.stringify({ reason: err.message }));
+      } catch { /* best-effort diagnostic */ }
+    }
     const adapterName = resolveAdapterName(profile);
 
     runService.addRunEvent(run.id, 'queue:dequeued', JSON.stringify({
@@ -1464,12 +1516,13 @@ function createLifecycleService({
     // provenance still exists. Preset and skill-pack MCP configs came through
     // operator-controlled template CRUD and retain auto-forwarding. Project MCP
     // files (including repo_relpath) never grant themselves host-env access:
-    // their bearer key must already be in the operator-managed profile
-    // env_allowlist. mergeMcp3 erases this provenance, so collection and policy
-    // enforcement must happen before the merge.
+    // their bearer key must already be in the operator-managed profile's
+    // effective env policy (explicit env_allowlist plus non-secret provider
+    // declarations). mergeMcp3 erases this provenance, so collection and
+    // policy enforcement must happen before the merge.
     const trustedBearerEnvKeys = [];
     const bearerEnvFailures = [];
-    const explicitProfileEnvKeys = new Set(parseEnvAllowlistArray(profile.env_allowlist));
+    const explicitProfileEnvKeys = new Set(effectiveProfileEnvKeys);
     const effectiveAliases = new Set();
     const mcpSources = [
       { source: 'preset', config: presetMcp, autoAllow: true },
@@ -1772,7 +1825,7 @@ function createLifecycleService({
         // message surfaces in the response.
         let isolatedOpts = null;
         let spawnEnv = buildWorkerEnv(
-          parseEnvAllowlist(profile.env_allowlist, trustedBearerEnvKeys),
+          parseEnvAllowlist(effectiveProfileEnvAllowlist, trustedBearerEnvKeys),
         );
         let presetAuthCleanup = null;
         // A detached remote `--bare` worker must resolve auth on the pod. The
@@ -1785,7 +1838,14 @@ function createLifecycleService({
           && !(presetResolution && presetResolution.isolated)
         ) {
           const auth = _authResolver.resolveClaudeAuth({
-            envAllowlist: parseEnvAllowlistArray(profile.env_allowlist),
+            // The SAME effective keys the spawn env is built from. Reading the
+            // raw column here made a worker whose credentials come only from a
+            // declared provider fail auth before spawn, while the isolated
+            // branch below and the Manager/Operator paths accepted it (#457).
+            envAllowlist: effectiveProfileEnvKeys,
+            providerEnv: profileEnvPolicy?.valid ? profileEnvPolicy.providers : undefined,
+            allowDefaultAuth: profileEnvPolicy?.valid ? profileEnvPolicy.allowDefaultAuth : undefined,
+            blockedEnvKeys: profileEnvPolicy?.valid ? profileEnvPolicy.blockedKeys : undefined,
             ..._authResolverOpts,
             bare: true,
             settings: templateOptions.settings,
@@ -1805,7 +1865,10 @@ function createLifecycleService({
         }
         if (presetResolution && presetResolution.isolated) {
           const auth = await _authResolver.resolveClaudeAuthForIsolated({
-            envAllowlist: parseEnvAllowlistArray(profile.env_allowlist),
+            envAllowlist: effectiveProfileEnvKeys,
+            providerEnv: profileEnvPolicy?.providers,
+            allowDefaultAuth: profileEnvPolicy?.allowDefaultAuth,
+            blockedEnvKeys: profileEnvPolicy?.blockedKeys,
             ..._authResolverOpts,
           });
           runService.addRunEvent(run.id, 'preset:auth_sources', JSON.stringify({
@@ -1888,7 +1951,7 @@ function createLifecycleService({
               maxTurns: templateOptions.maxTurns ?? undefined,
               isManager: false,
               envAllowlist: [
-                ...parseEnvAllowlistArray(profile.env_allowlist),
+                ...effectiveProfileEnvKeys,
                 ...trustedBearerEnvKeys,
               ],
               ...(!isRemoteNode ? {
@@ -2085,7 +2148,7 @@ function createLifecycleService({
             stdin: workerInvocation.stdin,
             cwd,
             env: buildWorkerEnv(
-              parseEnvAllowlist(profile.env_allowlist, trustedBearerEnvKeys),
+              parseEnvAllowlist(effectiveProfileEnvAllowlist, trustedBearerEnvKeys),
             ),
             // Remote clean-env execution must preserve allowlisted variables
             // that exist only in the pod login shell. Values present on the
@@ -2093,7 +2156,7 @@ function createLifecycleService({
             // explicit env -i assignments.
             envAllowlist: isRemoteNode
               ? [...new Set([
-                ...parseEnvAllowlistArray(profile.env_allowlist),
+                ...effectiveProfileEnvKeys,
                 ...(Array.isArray(trustedBearerEnvKeys) ? trustedBearerEnvKeys : []),
               ])]
               : undefined,
@@ -2430,15 +2493,20 @@ function createLifecycleService({
 
   // Raw allowlist (array) for callers that need the key set, not the
   // materialized env map.
+  // This endpoint is selected by the server and is meaningful only with a
+  // run-bound worker capability. Never ask a remote executor to recover an
+  // ambient pod value for it; the executor enforces the same boundary. Applies
+  // to EVERY source of worker env keys — the raw column and a declared
+  // environment provider policy alike (#457).
+  function stripWorkerApiBaseKeys(keys) {
+    return Array.isArray(keys)
+      ? keys.filter(k => typeof k === 'string' && !isWorkerApiBaseKey(k))
+      : [];
+  }
+
   function parseEnvAllowlistArray(allowlistJson) {
     try {
-      const arr = JSON.parse(allowlistJson || '[]');
-      // This endpoint is selected by the server and is meaningful only with a
-      // run-bound worker capability. Never ask a remote executor to recover an
-      // ambient pod value for it; the executor enforces the same boundary.
-      return Array.isArray(arr)
-        ? arr.filter(k => typeof k === 'string' && !isWorkerApiBaseKey(k))
-        : [];
+      return stripWorkerApiBaseKeys(JSON.parse(allowlistJson || '[]'));
     } catch {
       return [];
     }

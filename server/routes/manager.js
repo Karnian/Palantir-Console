@@ -67,48 +67,183 @@ function parseMcpTools(capabilitiesJson) {
 // #431: boot resume must resolve the SAME profile env_allowlist a fresh spawn
 // does, or an allowlisted custom variable silently disappears after a restart.
 //
-// A malformed allowlist degrades to `undefined` (base allowlist only) rather
-// than throwing. Throwing here would be caught by the per-run resume handler
-// and mark an otherwise healthy manager stopped — one bad profile row taking
-// down resume for every manager sharing its adapter. The fresh spawn paths
-// already swallow the same parse error, and diverging would recreate exactly
-// the fresh/resume asymmetry this function exists to remove. `undefined` is
-// the safe direction: it grants no extra keys.
-function resolveResumeAgentProfile(agentProfileService, { profileId, adapterType } = {}) {
-  if (!agentProfileService) return null;
-  let profile = null;
-  try {
-    if (profileId && typeof agentProfileService.getProfile === 'function') {
-      profile = agentProfileService.getProfile(profileId);
-    } else if (typeof agentProfileService.listProfiles === 'function') {
-      profile = agentProfileService.listProfiles().find((candidate) => candidate.type === adapterType) || null;
-    }
-  } catch { /* treat an unreadable profile as "no allowlist" */ }
-  return profile;
+// A malformed provider policy is a hard spawn failure. Falling back to an
+// undefined allowlist would re-enable adapter defaults and widen the boundary.
+function invalidResumePolicy(message, cause) {
+  const policyError = new Error(`invalid provider env policy: ${message}`);
+  policyError.code = 'PROVIDER_ENV_POLICY_INVALID';
+  if (cause) policyError.cause = cause;
+  return policyError;
 }
 
-function resolveResumeEnvAllowlist(agentProfileService, options = {}) {
-  const profile = resolveResumeAgentProfile(agentProfileService, options);
-  if (!profile || !profile.env_allowlist) return undefined;
+function resolveResumeAgentProfile(
+  agentProfileService,
+  { profileId, adapterType } = {},
+) {
+  if (!agentProfileService) {
+    if (profileId) {
+      throw invalidResumePolicy(`persisted profile ${profileId} cannot be resolved`);
+    }
+    return null;
+  }
   try {
-    const parsed = JSON.parse(profile.env_allowlist);
+    if (profileId) {
+      if (typeof agentProfileService.getProfile !== 'function') {
+        throw new Error('profile service cannot resolve a persisted profile id');
+      }
+      return agentProfileService.getProfile(profileId);
+    }
+    if (typeof agentProfileService.listProfiles === 'function') {
+      return agentProfileService.listProfiles()
+        .find((candidate) => candidate.type === adapterType) || null;
+    }
+    return null;
+  } catch (err) {
+    if (err?.code === 'PROVIDER_ENV_POLICY_INVALID') throw err;
+    throw invalidResumePolicy(
+      `profile ${profileId || adapterType || 'unknown'} is missing or unreadable: ${err.message}`,
+      err,
+    );
+  }
+}
+
+// #457: a declared environment provider supersedes the raw env_allowlist
+// column. The policy carries the same effective key set PLUS provenance and the
+// default-auth / blocked-key decisions the resolver needs, so boot resume must
+// read it rather than re-parsing the column.
+function resolveResumeEnvPolicy(agentProfileService, options = {}) {
+  let profile = null;
+  try {
+    const snapshot = resolveSessionEnvPolicySnapshot(options.sessionClaudeOptionsJson);
+    if (snapshot) {
+      // The snapshot is the env authority. A still-present pinned profile is
+      // inspected only to preserve the fail-closed poisoned-row guard; none of
+      // its current keys are used to recompute or widen the saved decision.
+      validatePersistedResumeProfile(agentProfileService, options.profileId);
+      return snapshot;
+    }
+    profile = resolveResumeAgentProfile(agentProfileService, options);
+    if (!profile) return undefined;
+    if (typeof agentProfileService.resolveEnvPolicy === 'function') {
+      const policy = agentProfileService.resolveEnvPolicy(profile);
+      if (!policy.valid) throw new Error('env policy contains invalid JSON');
+      return {
+        envAllowlist: policy.effectiveKeys,
+        providers: policy.providers,
+        allowDefaultAuth: policy.allowDefaultAuth,
+        blockedEnvKeys: policy.blockedKeys,
+      };
+    }
+    const parsed = JSON.parse(profile.env_allowlist || '[]');
     if (!Array.isArray(parsed)) throw new Error('not an array');
-    return parsed;
+    return {
+      envAllowlist: parsed,
+      providers: [],
+      allowDefaultAuth: parsed.length === 0,
+      blockedEnvKeys: [],
+    };
   } catch (err) {
     console.warn(
       `[security] manager_env_allowlist_unreadable ${JSON.stringify({
-        profile_id: profile.id,
+        profile_id: profile?.id || options.profileId || null,
         adapter: options.adapterType,
         reason: err && err.message,
       })}`
     );
-    return undefined;
+    throw invalidResumePolicy(err && err.message, err);
   }
+}
+
+function resolveSessionEnvPolicySnapshot(sessionClaudeOptionsJson) {
+  if (sessionClaudeOptionsJson == null) return null;
+  let options;
+  try {
+    options = JSON.parse(sessionClaudeOptionsJson);
+  } catch (err) {
+    throw invalidResumePolicy(`invalid session options snapshot: ${err.message}`, err);
+  }
+  if (!options || typeof options !== 'object' || Array.isArray(options)) {
+    throw invalidResumePolicy('invalid session options snapshot');
+  }
+  if (!Object.prototype.hasOwnProperty.call(options, 'envPolicy')) return null;
+  const snapshot = options.envPolicy;
+  if (
+    !snapshot
+    || typeof snapshot !== 'object'
+    || Array.isArray(snapshot)
+    || snapshot.version !== 2
+    || (snapshot.effectiveKeys !== null && !Array.isArray(snapshot.effectiveKeys))
+    || !Array.isArray(snapshot.providers)
+    || typeof snapshot.allowDefaultAuth !== 'boolean'
+    || !Array.isArray(snapshot.blockedKeys)
+    || (snapshot.effectiveKeys || []).some((key) => typeof key !== 'string')
+    || snapshot.blockedKeys.some((key) => typeof key !== 'string')
+  ) {
+    throw invalidResumePolicy('invalid session env policy snapshot');
+  }
+  for (const provider of snapshot.providers) {
+    if (
+      !provider
+      || typeof provider !== 'object'
+      || Array.isArray(provider)
+      || typeof provider.active !== 'boolean'
+      || !Array.isArray(provider.envKeys)
+      || !Array.isArray(provider.approvedSecretKeys)
+      || provider.envKeys.some((key) => typeof key !== 'string')
+      || provider.approvedSecretKeys.some((key) => typeof key !== 'string')
+    ) {
+      throw invalidResumePolicy('invalid provider entry in session env policy snapshot');
+    }
+  }
+  return {
+    envAllowlist: snapshot.effectiveKeys === null
+      ? undefined
+      : [...snapshot.effectiveKeys],
+    providers: JSON.parse(JSON.stringify(snapshot.providers)),
+    allowDefaultAuth: snapshot.allowDefaultAuth,
+    blockedEnvKeys: [...snapshot.blockedKeys],
+    fromSnapshot: true,
+  };
+}
+
+function validatePersistedResumeProfile(agentProfileService, profileId) {
+  if (!profileId) return;
+  if (!agentProfileService || typeof agentProfileService.getProfile !== 'function') {
+    throw invalidResumePolicy(`persisted profile ${profileId} cannot be validated`);
+  }
+  let profile;
+  try {
+    profile = agentProfileService.getProfile(profileId);
+  } catch (err) {
+    // ON DELETE SET NULL normally removes the id. Still accept a raw/imported
+    // stale id whose row is gone when an authoritative snapshot exists.
+    if (err?.status === 404) return;
+    throw invalidResumePolicy(`persisted profile ${profileId} is unreadable: ${err.message}`, err);
+  }
+  try {
+    if (typeof agentProfileService.resolveEnvPolicy === 'function') {
+      const policy = agentProfileService.resolveEnvPolicy(profile);
+      if (!policy?.valid) throw new Error('env policy contains invalid JSON');
+      return;
+    }
+    const parsed = JSON.parse(profile.env_allowlist || '[]');
+    if (!Array.isArray(parsed)) throw new Error('env_allowlist must be an array');
+  } catch (err) {
+    throw invalidResumePolicy(`persisted profile ${profileId} is poisoned: ${err.message}`, err);
+  }
+}
+
+// The array form the rest of the resume path (and its regression test) expects.
+// Kept for the narrow resume regression tests and legacy callers. Invalid
+// policy now throws so no caller can silently regain default auth.
+function resolveResumeEnvAllowlist(agentProfileService, options = {}) {
+  return resolveResumeEnvPolicy(agentProfileService, options)?.envAllowlist;
 }
 
 function resolveResumePermissionMode(agentProfileService, options = {}) {
   if (options.adapterType !== 'claude-code') return undefined;
   if (options.sessionPermissionMode) return options.sessionPermissionMode;
+  if (options.hasEnvPolicySnapshot) return 'bypassPermissions';
   const profile = resolveResumeAgentProfile(agentProfileService, options);
   return profile
     ? resolveClaudePermissionMode(profile)
@@ -259,14 +394,17 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
             buildManagerSystemPromptModule({ adapter, port, token: !!token, layer: 'top', adapterType, specialistAvailable: isSpecialistAvailable(), apiBaseUrl: promptApiEndpoints.local }),
             buildTopIdentitySection({ topRunId: r.id }), // MD-2a: resumed Top's own run id
           ].filter(Boolean).join('\n\n');
-          const envAllowlist = resolveResumeEnvAllowlist(agentProfileService, {
+          const envPolicy = resolveResumeEnvPolicy(agentProfileService, {
             profileId: r.agent_profile_id,
             adapterType,
+            sessionClaudeOptionsJson: r.session_claude_options_json,
           });
+          const envAllowlist = envPolicy?.envAllowlist;
           const permissionMode = resolveResumePermissionMode(agentProfileService, {
             profileId: r.agent_profile_id,
             adapterType,
             sessionPermissionMode: r.session_permission_mode,
+            hasEnvPolicySnapshot: envPolicy?.fromSnapshot === true,
           });
           const templateOptions = resolveResumeClaudeTemplateOptions(agentProfileService, {
             profileId: r.agent_profile_id,
@@ -275,6 +413,9 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
           });
           const authCtx = resolveManagerAuth(adapterType, {
             envAllowlist,
+            providerEnv: envPolicy?.providers,
+            allowDefaultAuth: envPolicy?.allowDefaultAuth,
+            blockedEnvKeys: envPolicy?.blockedEnvKeys,
             ...authResolverOpts,
             bare: templateOptions?.bare === true,
             settings: templateOptions?.settings,
@@ -286,6 +427,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
             vendor: adapterType,
             scrubHumanToken: actorTokens.separated,
             diagnosticContext: 'manager:resume:top',
+            providerEnv: envPolicy?.providers,
           });
           if (authCtx.canAuth) {
             const spawnEnv = applyManagerCredentialPolicy(
@@ -327,6 +469,14 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
             console.log(`[boot] Resumed top manager run=${r.id} session=${r.claude_session_id}`);
           }
         } catch (err) {
+          if (err?.code === 'PROVIDER_ENV_POLICY_INVALID') {
+            try {
+              runService.addRunEvent(r.id, 'manager:resume_env_policy_invalid', JSON.stringify({
+                adapter: adapterType,
+                reason: err.message,
+              }));
+            } catch { /* best-effort boot diagnostic */ }
+          }
           console.warn(`[boot] Failed to resume top manager run=${r.id}: ${err.message}`);
         }
       }
@@ -577,22 +727,60 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                 // (P5-S4c) — resolve auth for the run's ACTUAL adapter, not a
                 // hardcoded 'codex' (a local Claude Operator would otherwise be
                 // stopped/misauthed via Codex auth). (Codex P5-S4c BLOCKER.)
-                const envAllowlist = resolveResumeEnvAllowlist(agentProfileService, {
+                // Runs created before #457 have no pinned profile id. Preserve
+                // their pre-existing adapter fallback so upgrades do not stop
+                // every live Operator, but make that mutable legacy state
+                // observable. New runs persist the complete env decision; a
+                // deleted profile is then safe, while an existing poisoned row
+                // remains a hard failure.
+                const envPolicy = resolveResumeEnvPolicy(agentProfileService, {
+                  profileId: r.agent_profile_id,
                   adapterType,
+                  sessionClaudeOptionsJson: r.session_claude_options_json,
                 });
+                if (!envPolicy?.fromSnapshot) {
+                  try {
+                    runService.addRunEvent(
+                      r.id,
+                      'operator:resume_profile_unpinned',
+                      JSON.stringify({
+                        operator_instance_id: operatorInstanceId || r.operator_instance_id || null,
+                        adapter: adapterType,
+                        has_agent_profile_id: Boolean(r.agent_profile_id),
+                      }),
+                    );
+                  } catch { /* best-effort legacy-state diagnostic */ }
+                }
+                if (
+                  isRemoteNode
+                  && envPolicy?.providers?.some((provider) => provider.gateEnvKey)
+                ) {
+                  const err = new Error(
+                    'remote provider gate rejected: gates are controller-scoped and cannot authorize node-sourced credentials',
+                  );
+                  err.code = 'REMOTE_PROVIDER_GATE_UNSUPPORTED';
+                  throw err;
+                }
+                const envAllowlist = envPolicy?.envAllowlist;
                 const permissionMode = resolveResumePermissionMode(agentProfileService, {
+                  profileId: r.agent_profile_id,
                   adapterType,
                   sessionPermissionMode: r.session_permission_mode,
+                  hasEnvPolicySnapshot: envPolicy?.fromSnapshot === true,
                 });
                 const templateOptions = resolveResumeClaudeTemplateOptions(
                   agentProfileService,
                   {
+                    profileId: r.agent_profile_id,
                     adapterType,
                     sessionClaudeOptionsJson: r.session_claude_options_json,
                   },
                 );
                 const authCtx = resolveManagerAuth(adapterType, {
                   envAllowlist,
+                  providerEnv: envPolicy?.providers,
+                  allowDefaultAuth: envPolicy?.allowDefaultAuth,
+                  blockedEnvKeys: envPolicy?.blockedEnvKeys,
                   ...authResolverOpts,
                   // Remote Claude resumes materialize `--bare` auth on the pod,
                   // not from the controller's credential stores.
@@ -606,6 +794,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                   vendor: adapterType,
                   scrubHumanToken: actorTokens.separated || goalActive,
                   diagnosticContext: 'manager:resume:operator',
+                  providerEnv: envPolicy?.providers,
                 });
                 // A REMOTE Operator authenticates on the pod (~/.codex), not the
                 // control plane — resume it even when control-plane Codex auth is
@@ -645,7 +834,8 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                       ? templateOptions.disallowedTools
                       : undefined,
                     maxBudgetUsd: templateOptions?.maxBudgetUsd || undefined,
-                    mcpConfig: r.session_claude_options_json != null
+                    mcpConfig: adapterType === 'claude-code'
+                      && r.session_claude_options_json != null
                       ? (templateOptions?.mcpConfig || undefined)
                       : mergeClaudeMcpConfigs(
                         templateOptions?.mcpConfig,
@@ -702,6 +892,18 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
             }
           }
         } catch (err) {
+          if (
+            err?.code === 'PROVIDER_ENV_POLICY_INVALID'
+            || err?.code === 'REMOTE_PROVIDER_GATE_UNSUPPORTED'
+          ) {
+            try {
+              runService.addRunEvent(r.id, 'manager:resume_env_policy_invalid', JSON.stringify({
+                adapter: adapterType,
+                reason: err.message,
+                remote: err.code === 'REMOTE_PROVIDER_GATE_UNSUPPORTED',
+              }));
+            } catch { /* best-effort boot diagnostic */ }
+          }
           console.warn(`[boot] Failed to resume PM run=${r.id}: ${err.message}`);
           try {
             runService.addRunEvent(r.id, 'error', JSON.stringify({
@@ -840,13 +1042,31 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
     // Fail-closed on malformed env_allowlist: a user who hand-edits the row
     // and corrupts it must NOT silently re-enable all default credentials.
     let envAllowlist;
-    if (resolvedProfile && resolvedProfile.env_allowlist) {
+    let envPolicy;
+    if (resolvedProfile) {
       try {
-        const parsed = JSON.parse(resolvedProfile.env_allowlist);
-        if (!Array.isArray(parsed)) {
-          throw new Error('env_allowlist must be a JSON array');
+        if (
+          agentProfileService
+          && typeof agentProfileService.resolveEnvPolicy === 'function'
+        ) {
+          const policy = agentProfileService.resolveEnvPolicy(resolvedProfile);
+          if (!policy.valid) {
+            throw new Error('env policy contains invalid JSON');
+          }
+          envPolicy = policy;
+          envAllowlist = policy.effectiveKeys;
+        } else {
+          const parsed = JSON.parse(resolvedProfile.env_allowlist || '[]');
+          if (!Array.isArray(parsed)) {
+            throw new Error('env_allowlist must be a JSON array');
+          }
+          envAllowlist = parsed;
+          envPolicy = {
+            providers: [],
+            allowDefaultAuth: parsed.length === 0,
+            blockedKeys: [],
+          };
         }
-        envAllowlist = parsed;
       } catch (parseErr) {
         startingManager = false;
         return res.status(400).json({
@@ -861,8 +1081,12 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       // fall through to the resolver's defaults.
       envAllowlist = undefined;
     }
+    const providerEnv = envPolicy?.providers || [];
     const authCtx = resolveManagerAuth(adapterType, {
       envAllowlist,
+      providerEnv,
+      allowDefaultAuth: envPolicy?.allowDefaultAuth,
+      blockedEnvKeys: envPolicy?.blockedKeys,
       ...authResolverOpts,
       bare: claudeTemplateOptions?.bare === true,
       settings: claudeTemplateOptions?.settings,
@@ -874,6 +1098,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
       vendor: adapterType,
       scrubHumanToken: actorTokens.separated,
       diagnosticContext: 'manager:fresh:top',
+      providerEnv,
     });
     if (!authCtx.canAuth) {
       startingManager = false;
@@ -1009,6 +1234,12 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
           sessionModel: eff.model,
           sessionEffort: eff.effort,
           sessionPermissionMode: permissionMode || null,
+          sessionEnvPolicy: {
+            effectiveKeys: Array.isArray(envAllowlist) ? envAllowlist : null,
+            providers: providerEnv,
+            allowDefaultAuth: envPolicy?.allowDefaultAuth === true,
+            blockedKeys: envPolicy?.blockedKeys || [],
+          },
           sessionClaudeOptions: claudeTemplateOptions
             ? {
                 tools: claudeTemplateOptions.tools,
@@ -1037,7 +1268,12 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
               }
             : null,
         });
-      } catch { /* annotate-only */ }
+      } catch (err) {
+        try {
+          runService.addRunEvent(runId, 'manager:env_snapshot_unwritable', JSON.stringify({ reason: err.message }));
+        } catch { /* best-effort diagnostic */ }
+        throw err;
+      }
 
       const { sessionRef } = adapter.startSession(runId, {
         // For Claude (persistent process) the prompt argument is the FIRST

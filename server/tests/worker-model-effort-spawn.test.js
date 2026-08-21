@@ -270,7 +270,7 @@ test('claude --bare worker fails before spawn when native auth cannot be materia
 
   await assert.rejects(
     () => executeWorker(harness, profileId, 'Claude bare auth unavailable'),
-    /--bare requires a materialized API credential/,
+    /--bare requires a materialized ANTHROPIC_API_KEY/,
   );
   assert.equal(harness.streamJsonEngine.spawned.length, 0);
 });

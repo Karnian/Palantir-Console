@@ -11,7 +11,11 @@ const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
 const express = require('express');
 
-const { buildManagerSpawnEnv } = require('../services/authResolver');
+const {
+  buildManagerSpawnEnv,
+  resolveClaudeAuth,
+  resolveClaudeAuthForIsolated,
+} = require('../services/authResolver');
 const {
   PROCESS_BASE_ENV_KEYS,
   WORKER_BASE_ENV_KEYS,
@@ -590,6 +594,110 @@ async function createManagerDbHarness(t, name) {
   };
 }
 
+async function startFreshManager(harness, {
+  profileId = 'claude-code',
+  authResolverOpts = {
+    hasKeychain: () => false,
+    hasCredentialsFile: () => false,
+  },
+} = {}) {
+  const { createManagerRouter } = require('../routes/manager');
+  const app = express();
+  app.use(express.json());
+  app.use('/api/manager', createManagerRouter({
+    runService: harness.runService,
+    managerAdapterFactory: harness.managerAdapterFactory,
+    managerRegistry: harness.managerRegistry,
+    conversationService: harness.conversationService,
+    agentProfileService: harness.agentProfileService,
+    authResolverOpts,
+  }));
+  const response = await invokeApp(app, {
+    method: 'POST',
+    path: '/api/manager/start',
+    body: {
+      prompt: `fresh ${profileId} provider test`,
+      agent_profile_id: profileId,
+    },
+  });
+  return {
+    response,
+    call: harness.calls.find((entry) => !entry.opts.resumeSessionId),
+  };
+}
+
+test('MUTATION: deleted pinned profile resumes from its env-policy snapshot without fallback widening', async (t) => {
+  await withProcessEnv({
+    PIN_ONLY: 'pinned-value',
+    FALLBACK_ONLY: 'fallback-value',
+  }, async () => {
+    const harness = await createManagerDbHarness(t, 'palantir-env-snapshot-delete');
+    harness.agentProfileService.updateProfile('claude-code', {
+      name: 'ZZZ pinned Claude',
+      env_allowlist: JSON.stringify(['PIN_ONLY']),
+    });
+    const fresh = await startFreshManager(harness, {
+      authResolverOpts: {
+        hasKeychain: () => true,
+        hasCredentialsFile: () => false,
+      },
+    });
+    assert.equal(fresh.response.status, 201, JSON.stringify(fresh.response.body));
+    assert.equal(fresh.call.opts.env.PIN_ONLY, 'pinned-value');
+    assert.equal(hasOwn(fresh.call.opts.env, 'FALLBACK_ONLY'), false);
+
+    const runId = harness.managerRegistry.getActiveRunId('top');
+    const freshRun = harness.runService.getRun(runId);
+    const snapshot = JSON.parse(freshRun.session_claude_options_json).envPolicy;
+    assert.deepEqual(snapshot.effectiveKeys, ['PIN_ONLY']);
+    // v2: allowDefaultAuth changed meaning, so a snapshot written under the old
+    // rule must not be replayed. Pinning the number here means a future meaning
+    // change cannot ship without deciding what happens to existing sessions.
+    assert.equal(snapshot.version, 2);
+    harness.runService.updateClaudeSessionId(runId, 'resume-pinned-env-snapshot');
+    harness.agentProfileService.deleteProfile('claude-code');
+    assert.equal(harness.runService.getRun(runId).agent_profile_id, null);
+    harness.agentProfileService.createProfile({
+      name: 'AAA fallback Claude',
+      type: 'claude-code',
+      command: 'claude',
+      args_template: '-p {prompt}',
+      env_allowlist: JSON.stringify(['FALLBACK_ONLY']),
+    });
+
+    const { createManagerRouter } = require('../routes/manager');
+    const { createManagerRegistry } = require('../services/managerRegistry');
+    const { createConversationService } = require('../services/conversationService');
+    const resumeCalls = [];
+    const resumeAdapter = createMockManagerAdapter(resumeCalls);
+    const resumeFactory = { getAdapter: () => resumeAdapter };
+    const resumeRegistry = createManagerRegistry({ runService: harness.runService });
+    const resumeConversationService = createConversationService({
+      runService: harness.runService,
+      managerRegistry: resumeRegistry,
+      managerAdapterFactory: resumeFactory,
+      lifecycleService: null,
+    });
+    createManagerRouter({
+      runService: harness.runService,
+      managerAdapterFactory: resumeFactory,
+      managerRegistry: resumeRegistry,
+      conversationService: resumeConversationService,
+      agentProfileService: harness.agentProfileService,
+      authResolverOpts: {
+        hasKeychain: () => true,
+        hasCredentialsFile: () => false,
+      },
+    });
+
+    const resumed = resumeCalls.find((call) => call.runId === runId);
+    assert.ok(resumed, 'deleted-profile run must resume from its own snapshot');
+    assert.deepEqual(resumed.opts.envAllowlist, ['PIN_ONLY']);
+    assert.equal(resumed.opts.env.PIN_ONLY, 'pinned-value');
+    assert.equal(hasOwn(resumed.opts.env, 'FALLBACK_ONLY'), false);
+  });
+});
+
 test('fresh Top and boot-resumed Top/Operator use the same profile env_allowlist', async (t) => {
   await withProcessEnv({
     PROFILE_RESUME_ENV: 'profile-visible',
@@ -711,6 +819,495 @@ test('fresh Top and boot-resumed Top/Operator use the same profile env_allowlist
   });
 });
 
+test('MUTATION: Claude auth contract accepts an allowlisted cloud mode, while arbitrary Claude/Codex secrets only forward', async (t) => {
+  await withProcessEnv({
+    PALANTIR_SKIP_HOST_CREDENTIALS: '1',
+    CLAUDE_CODE_USE_BEDROCK: '1',
+    AWS_REGION: 'ap-northeast-2',
+    AWS_SECRET_ACCESS_KEY: 'bedrock-approved-secret',
+    CUSTOM_CODEX_REGION: 'custom-1',
+    CUSTOM_CODEX_API_KEY: 'custom-approved-secret',
+    CUSTOM_CLAUDE_API_KEY: 'custom-claude-secret',
+    CLAUDE_CODE_OAUTH_TOKEN: undefined,
+    ANTHROPIC_API_KEY: undefined,
+    CODEX_API_KEY: undefined,
+    OPENAI_API_KEY: undefined,
+  }, async () => {
+    const { createEnvironmentProviderService } = require('../services/environmentProviderService');
+    const cases = [
+      {
+        profileId: 'claude-code',
+        provider: {
+          name: 'review-bedrock-auth',
+          env_keys: [
+            'CLAUDE_CODE_USE_BEDROCK',
+            'AWS_REGION',
+            'AWS_SECRET_ACCESS_KEY',
+          ],
+          gate_env_key: 'CLAUDE_CODE_USE_BEDROCK',
+        },
+        approvedKey: 'AWS_SECRET_ACCESS_KEY',
+        expectedKeys: [
+          'CLAUDE_CODE_USE_BEDROCK',
+          'AWS_REGION',
+          'AWS_SECRET_ACCESS_KEY',
+        ],
+      },
+    ];
+
+    for (const entry of cases) {
+      const harness = await createManagerDbHarness(
+        t,
+        `palantir-provider-only-${entry.profileId}`,
+      );
+      const provider = createEnvironmentProviderService(harness.db)
+        .createProvider(entry.provider);
+      harness.agentProfileService.updateProfile(entry.profileId, {
+        env_allowlist: JSON.stringify([entry.approvedKey]),
+        environment_provider_ids: [provider.id],
+      });
+
+      const { response, call } = await startFreshManager(harness, {
+        profileId: entry.profileId,
+      });
+      assert.equal(response.status, 201, JSON.stringify(response.body));
+      assert.ok(call, `${entry.profileId} provider-only spawn must be captured`);
+      for (const key of entry.expectedKeys) {
+        assert.equal(call.opts.env[key], process.env[key], `${key} must reach the child`);
+      }
+    }
+
+    const custom = await createManagerDbHarness(t, 'palantir-provider-custom-codex');
+    const customProvider = createEnvironmentProviderService(custom.db).createProvider({
+      name: 'review-codex-custom-auth',
+      env_keys: ['CUSTOM_CODEX_REGION', 'CUSTOM_CODEX_API_KEY'],
+    });
+    custom.agentProfileService.updateProfile('codex', {
+      env_allowlist: JSON.stringify(['CUSTOM_CODEX_API_KEY']),
+      environment_provider_ids: [customProvider.id],
+    });
+    const deniedAuth = await startFreshManager(custom, { profileId: 'codex' });
+    assert.equal(deniedAuth.response.status, 400, JSON.stringify(deniedAuth.response.body));
+    assert.equal(deniedAuth.response.body.error, 'manager_auth_unavailable');
+    assert.equal(deniedAuth.call, undefined);
+
+    // With real adapter auth present, the arbitrary approved secret is still
+    // forwarded; it simply is not itself the reason preflight succeeds.
+    await withProcessEnv({ OPENAI_API_KEY: 'real-codex-auth' }, async () => {
+      custom.agentProfileService.updateProfile('codex', {
+        env_allowlist: JSON.stringify(['OPENAI_API_KEY', 'CUSTOM_CODEX_API_KEY']),
+      });
+      const allowedForward = await startFreshManager(custom, { profileId: 'codex' });
+      assert.equal(allowedForward.response.status, 201, JSON.stringify(allowedForward.response.body));
+      assert.equal(allowedForward.call.opts.env.OPENAI_API_KEY, 'real-codex-auth');
+      assert.equal(
+        allowedForward.call.opts.env.CUSTOM_CODEX_API_KEY,
+        'custom-approved-secret',
+      );
+    });
+
+    const customClaude = await createManagerDbHarness(
+      t,
+      'palantir-provider-custom-claude',
+    );
+    const customClaudeProvider = createEnvironmentProviderService(customClaude.db)
+      .createProvider({
+        name: 'review-claude-custom-auth',
+        env_keys: ['CUSTOM_CLAUDE_API_KEY'],
+      });
+    customClaude.agentProfileService.updateProfile('claude-code', {
+      env_allowlist: JSON.stringify(['CUSTOM_CLAUDE_API_KEY']),
+      environment_provider_ids: [customClaudeProvider.id],
+    });
+    const deniedClaudeAuth = await startFreshManager(customClaude, {
+      profileId: 'claude-code',
+    });
+    assert.equal(
+      deniedClaudeAuth.response.status,
+      400,
+      JSON.stringify(deniedClaudeAuth.response.body),
+    );
+    assert.equal(deniedClaudeAuth.response.body.error, 'manager_auth_unavailable');
+    assert.equal(deniedClaudeAuth.call, undefined);
+
+    await withProcessEnv({ ANTHROPIC_API_KEY: 'real-claude-auth' }, async () => {
+      customClaude.agentProfileService.updateProfile('claude-code', {
+        env_allowlist: JSON.stringify([
+          'ANTHROPIC_API_KEY',
+          'CUSTOM_CLAUDE_API_KEY',
+        ]),
+      });
+      const allowedClaudeForward = await startFreshManager(customClaude, {
+        profileId: 'claude-code',
+      });
+      assert.equal(
+        allowedClaudeForward.response.status,
+        201,
+        JSON.stringify(allowedClaudeForward.response.body),
+      );
+      assert.equal(
+        allowedClaudeForward.call.opts.env.CUSTOM_CLAUDE_API_KEY,
+        'custom-claude-secret',
+      );
+    });
+
+    const resumed = await createManagerDbHarness(
+      t,
+      'palantir-provider-only-resume-claude',
+    );
+    const resumedProvider = createEnvironmentProviderService(resumed.db)
+      .createProvider({
+        name: 'review-bedrock-auth-resume',
+        env_keys: [
+          'CLAUDE_CODE_USE_BEDROCK',
+          'AWS_REGION',
+          'AWS_SECRET_ACCESS_KEY',
+        ],
+        gate_env_key: 'CLAUDE_CODE_USE_BEDROCK',
+      });
+    resumed.agentProfileService.updateProfile('claude-code', {
+      env_allowlist: JSON.stringify(['AWS_SECRET_ACCESS_KEY']),
+      environment_provider_ids: [resumedProvider.id],
+    });
+    const stale = resumed.runService.createRun({
+      is_manager: true,
+      prompt: 'provider-only resume',
+      agent_profile_id: 'claude-code',
+      manager_adapter: 'claude-code',
+      manager_layer: 'top',
+      conversation_id: 'top',
+    });
+    resumed.runService.updateRunStatus(stale.id, 'running', { force: true });
+    resumed.runService.updateClaudeSessionId(stale.id, 'provider-only-resume');
+    const { createManagerRouter } = require('../routes/manager');
+    createManagerRouter({
+      runService: resumed.runService,
+      managerAdapterFactory: resumed.managerAdapterFactory,
+      managerRegistry: resumed.managerRegistry,
+      conversationService: resumed.conversationService,
+      agentProfileService: resumed.agentProfileService,
+      authResolverOpts: {
+        hasKeychain: () => false,
+        hasCredentialsFile: () => false,
+      },
+    });
+    const resumedCall = resumed.calls.find((entry) => entry.runId === stale.id);
+    assert.ok(resumedCall, 'provider-only Top must resume without standard auth');
+    assert.equal(resumedCall.opts.env.CLAUDE_CODE_USE_BEDROCK, '1');
+    assert.equal(resumedCall.opts.env.AWS_REGION, 'ap-northeast-2');
+    assert.equal(
+      resumedCall.opts.env.AWS_SECRET_ACCESS_KEY,
+      'bedrock-approved-secret',
+    );
+  });
+});
+
+test('MUTATION: normal and isolated Claude auth use the same provider policy contract', async () => {
+  const baseEnv = {
+    PALANTIR_SKIP_HOST_CREDENTIALS: '1',
+    CLAUDE_CODE_OAUTH_TOKEN: undefined,
+    ANTHROPIC_API_KEY: undefined,
+    CLAUDE_CODE_USE_BEDROCK: undefined,
+    CLAUDE_CODE_USE_VERTEX: undefined,
+    CLAUDE_CODE_USE_FOUNDRY: undefined,
+  };
+  const cases = [
+    {
+      name: 'approved OAuth token',
+      env: { CLAUDE_CODE_OAUTH_TOKEN: 'oauth-canary' },
+      envAllowlist: ['CLAUDE_CODE_OAUTH_TOKEN'],
+      providerEnv: [{
+        id: 'envp_oauth',
+        active: true,
+        approvedSecretKeys: ['CLAUDE_CODE_OAUTH_TOKEN'],
+      }],
+      expected: true,
+    },
+    {
+      name: 'approved Anthropic API key',
+      env: { ANTHROPIC_API_KEY: 'api-canary' },
+      envAllowlist: ['ANTHROPIC_API_KEY'],
+      providerEnv: [{
+        id: 'envp_api',
+        active: true,
+        approvedSecretKeys: ['ANTHROPIC_API_KEY'],
+      }],
+      expected: true,
+    },
+    {
+      name: 'provider-only allowlisted Bedrock cloud mode',
+      env: { CLAUDE_CODE_USE_BEDROCK: '1' },
+      envAllowlist: ['CLAUDE_CODE_USE_BEDROCK'],
+      providerEnv: [{
+        id: 'envp_bedrock',
+        active: true,
+        inheritedKeys: ['CLAUDE_CODE_USE_BEDROCK'],
+      }],
+      expected: true,
+    },
+    {
+      name: 'nothing available',
+      env: {},
+      envAllowlist: ['CUSTOM_NON_AUTH_CONFIG'],
+      providerEnv: [],
+      expected: false,
+    },
+  ];
+
+  for (const entry of cases) {
+    await withProcessEnv({ ...baseEnv, ...entry.env }, async () => {
+      const options = {
+        envAllowlist: entry.envAllowlist,
+        providerEnv: entry.providerEnv,
+        allowDefaultAuth: false,
+        hasKeychain: () => false,
+        hasCredentialsFile: () => false,
+      };
+      const normal = resolveClaudeAuth({ ...options, bare: true });
+      const isolated = await resolveClaudeAuthForIsolated({
+        ...options,
+        prefer: 'env',
+      });
+      assert.equal(normal.canAuth, entry.expected, `${entry.name}: normal`);
+      assert.equal(isolated.canAuth, entry.expected, `${entry.name}: isolated`);
+      assert.equal(isolated.canAuth, normal.canAuth, `${entry.name}: parity`);
+      if (isolated.apiKeyHelperSettings) isolated.apiKeyHelperSettings.cleanup();
+    });
+  }
+});
+
+test('review 2: binding a config-only provider preserves empty-allowlist default auth for Claude and Codex', async (t) => {
+  await withProcessEnv({
+    PALANTIR_SKIP_HOST_CREDENTIALS: '1',
+    ANTHROPIC_API_KEY: 'default-claude-auth',
+    OPENAI_API_KEY: 'default-codex-auth',
+    CUSTOM_REGION: 'provider-region',
+    CLAUDE_CODE_OAUTH_TOKEN: undefined,
+    CODEX_API_KEY: undefined,
+  }, async () => {
+    const { createEnvironmentProviderService } = require('../services/environmentProviderService');
+    for (const [profileId, authKey] of [
+      ['claude-code', 'ANTHROPIC_API_KEY'],
+      ['codex', 'OPENAI_API_KEY'],
+    ]) {
+      const harness = await createManagerDbHarness(
+        t,
+        `palantir-provider-default-auth-${profileId}`,
+      );
+      const provider = createEnvironmentProviderService(harness.db).createProvider({
+        name: `config-only-${profileId}`,
+        env_keys: ['CUSTOM_REGION'],
+      });
+      harness.agentProfileService.updateProfile(profileId, {
+        env_allowlist: '[]',
+        environment_provider_ids: [provider.id],
+      });
+
+      const { response, call } = await startFreshManager(harness, { profileId });
+      assert.equal(response.status, 201, JSON.stringify(response.body));
+      assert.ok(call);
+      assert.equal(call.opts.env[authKey], process.env[authKey]);
+      assert.equal(call.opts.env.CUSTOM_REGION, 'provider-region');
+    }
+  });
+});
+
+test('review 3: an inactive provider gate suppresses approved secrets and config in the actual manager child', async (t) => {
+  await withProcessEnv({
+    CLAUDE_CODE_USE_BEDROCK: undefined,
+    AWS_REGION: 'ap-northeast-2',
+    AWS_SECRET_ACCESS_KEY: 'must-stay-ambient',
+  }, async () => {
+    const { createEnvironmentProviderService } = require('../services/environmentProviderService');
+    const harness = await createManagerDbHarness(t, 'palantir-provider-gate-off');
+    const provider = createEnvironmentProviderService(harness.db).createProvider({
+      name: 'gated-bedrock',
+      env_keys: [
+        'CLAUDE_CODE_USE_BEDROCK',
+        'AWS_REGION',
+        'AWS_SECRET_ACCESS_KEY',
+      ],
+      gate_env_key: 'CLAUDE_CODE_USE_BEDROCK',
+      gate_env_value: '1',
+    });
+    harness.agentProfileService.updateProfile('claude-code', {
+      env_allowlist: JSON.stringify(['AWS_SECRET_ACCESS_KEY']),
+      environment_provider_ids: [provider.id],
+    });
+
+    const { response, call } = await startFreshManager(harness, {
+      authResolverOpts: {
+        hasKeychain: () => true,
+        hasCredentialsFile: () => false,
+      },
+    });
+    assert.equal(response.status, 201, JSON.stringify(response.body));
+    assert.ok(call);
+    for (const key of [
+      'CLAUDE_CODE_USE_BEDROCK',
+      'AWS_REGION',
+      'AWS_SECRET_ACCESS_KEY',
+    ]) {
+      assert.equal(hasOwn(call.opts.env, key), false, `${key} must stay absent`);
+    }
+    const profile = harness.agentProfileService.getProfile('claude-code');
+    assert.equal(profile.environment_providers[0].active, false);
+    assert.deepEqual(profile.effective_env_allowlist, []);
+  });
+});
+
+test('review 4: NULL env_allowlist applies provider policy to fresh and resumed manager children', async (t) => {
+  await withProcessEnv({
+    NULL_POLICY_REGION: 'null-policy-region',
+  }, async () => {
+    const { createManagerRouter } = require('../routes/manager');
+    const { createEnvironmentProviderService } = require('../services/environmentProviderService');
+    const authResolverOpts = {
+      hasKeychain: () => true,
+      hasCredentialsFile: () => false,
+    };
+    const configure = (harness, name) => {
+      const provider = createEnvironmentProviderService(harness.db).createProvider({
+        name,
+        env_keys: ['NULL_POLICY_REGION'],
+      });
+      harness.agentProfileService.updateProfile('claude-code', {
+        env_allowlist: null,
+        environment_provider_ids: [provider.id],
+      });
+    };
+
+    const fresh = await createManagerDbHarness(t, 'palantir-null-policy-fresh');
+    configure(fresh, 'null-policy-fresh');
+    const freshResult = await startFreshManager(fresh, { authResolverOpts });
+    assert.equal(
+      freshResult.response.status,
+      201,
+      JSON.stringify(freshResult.response.body),
+    );
+    assert.ok(freshResult.call);
+    assert.equal(freshResult.call.opts.env.NULL_POLICY_REGION, 'null-policy-region');
+
+    const resumed = await createManagerDbHarness(t, 'palantir-null-policy-resume');
+    configure(resumed, 'null-policy-resume');
+    const stale = resumed.runService.createRun({
+      is_manager: true,
+      prompt: 'resume null provider policy',
+      agent_profile_id: 'claude-code',
+      manager_adapter: 'claude-code',
+      manager_layer: 'top',
+      conversation_id: 'top',
+    });
+    resumed.runService.updateRunStatus(stale.id, 'running', { force: true });
+    resumed.runService.updateClaudeSessionId(stale.id, 'resume-null-provider');
+    createManagerRouter({
+      runService: resumed.runService,
+      managerAdapterFactory: resumed.managerAdapterFactory,
+      managerRegistry: resumed.managerRegistry,
+      conversationService: resumed.conversationService,
+      agentProfileService: resumed.agentProfileService,
+      authResolverOpts,
+    });
+    const resumedCall = resumed.calls.find((entry) => entry.runId === stale.id);
+    assert.ok(resumedCall);
+    assert.equal(resumedCall.opts.env.NULL_POLICY_REGION, 'null-policy-region');
+    assert.deepEqual(resumedCall.opts.env, freshResult.call.opts.env);
+  });
+});
+
+test('fresh and resumed managers inherit declared provider env while provider-only secrets remain dropped and attributed', async (t) => {
+  await withProcessEnv({
+    PROVIDER_MANAGER_REGION: 'manager-region',
+    AWS_SECRET_ACCESS_KEY: 'manager-secret-must-not-be-logged',
+  }, async () => {
+    const warnings = [];
+    const originalWarn = console.warn;
+    console.warn = (line) => warnings.push(String(line));
+    try {
+      const { createManagerRouter } = require('../routes/manager');
+      const { createEnvironmentProviderService } = require('../services/environmentProviderService');
+      const configureProvider = (harness) => {
+        const provider = createEnvironmentProviderService(harness.db).createProvider({
+          name: 'manager-declared-provider',
+          env_keys: ['PROVIDER_MANAGER_REGION', 'AWS_SECRET_ACCESS_KEY'],
+        });
+        harness.agentProfileService.updateProfile('claude-code', {
+          environment_provider_ids: [provider.id],
+        });
+      };
+      const authResolverOpts = {
+        hasKeychain: () => true,
+        hasCredentialsFile: () => false,
+      };
+
+      const fresh = await createManagerDbHarness(t, 'palantir-provider-env-fresh');
+      configureProvider(fresh);
+      const freshApp = express();
+      freshApp.use(express.json());
+      freshApp.use('/api/manager', createManagerRouter({
+        runService: fresh.runService,
+        managerAdapterFactory: fresh.managerAdapterFactory,
+        managerRegistry: fresh.managerRegistry,
+        conversationService: fresh.conversationService,
+        agentProfileService: fresh.agentProfileService,
+        authResolverOpts,
+      }));
+      const response = await invokeApp(freshApp, {
+        method: 'POST',
+        path: '/api/manager/start',
+        body: {
+          prompt: 'fresh provider allowlist',
+          agent_profile_id: 'claude-code',
+        },
+      });
+      assert.equal(response.status, 201, JSON.stringify(response.body));
+      const freshCall = fresh.calls.find((call) => !call.opts.resumeSessionId);
+      assert.ok(freshCall);
+
+      const resumed = await createManagerDbHarness(t, 'palantir-provider-env-resume');
+      configureProvider(resumed);
+      const stale = resumed.runService.createRun({
+        is_manager: true,
+        prompt: 'resume provider allowlist',
+        agent_profile_id: 'claude-code',
+        manager_adapter: 'claude-code',
+        manager_layer: 'top',
+        conversation_id: 'top',
+      });
+      resumed.runService.updateRunStatus(stale.id, 'running', { force: true });
+      resumed.runService.updateClaudeSessionId(stale.id, 'resume-provider-session');
+      createManagerRouter({
+        runService: resumed.runService,
+        managerAdapterFactory: resumed.managerAdapterFactory,
+        managerRegistry: resumed.managerRegistry,
+        conversationService: resumed.conversationService,
+        agentProfileService: resumed.agentProfileService,
+        authResolverOpts,
+      });
+      const resumedCall = resumed.calls.find((call) => call.runId === stale.id);
+      assert.ok(resumedCall);
+
+      for (const captured of [freshCall, resumedCall]) {
+        assert.equal(captured.opts.env.PROVIDER_MANAGER_REGION, 'manager-region');
+        assert.equal(hasOwn(captured.opts.env, 'AWS_SECRET_ACCESS_KEY'), false);
+      }
+      assert.deepEqual(resumedCall.opts.env, freshCall.opts.env);
+
+      for (const context of ['manager:fresh:top', 'manager:resume:top']) {
+        const line = warnings.find((entry) => (
+          entry.includes(`"context":"${context}"`)
+          && entry.includes('"name":"manager-declared-provider"')
+          && entry.includes('AWS_SECRET_ACCESS_KEY')
+        ));
+        assert.ok(line, `missing provider-attributed diagnostic for ${context}`);
+        assert.doesNotMatch(line, /manager-secret-must-not-be-logged/);
+      }
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+});
+
 test('fresh and resume security diagnostics are emitted before an unavailable-auth gate', async (t) => {
   await withProcessEnv({
     PALANTIR_SKIP_HOST_CREDENTIALS: '1',
@@ -783,12 +1380,8 @@ test('fresh and resume security diagnostics are emitted before an unavailable-au
   });
 });
 
-// codex adversarial review (PR A, SERIOUS): a malformed profile env_allowlist
-// must not make boot resume behave differently from a fresh spawn. The first
-// implementation threw here; the per-run resume handler caught it and marked an
-// otherwise healthy manager stopped, so one bad profile row could stop resume
-// for every manager sharing its adapter while fresh spawns sailed past.
-test('a malformed profile env_allowlist degrades identically on fresh and resume', () => {
+// MUTATION: malformed policy must never widen resume back to default auth.
+test('MUTATION: a malformed profile env_allowlist fails closed on resume', () => {
   const { __testables } = require('../routes/manager');
   const resolveResumeEnvAllowlist = __testables && __testables.resolveResumeEnvAllowlist;
   assert.ok(resolveResumeEnvAllowlist, 'resolveResumeEnvAllowlist must be exported for test');
@@ -801,12 +1394,19 @@ test('a malformed profile env_allowlist degrades identically on fresh and resume
       const svc = {
         listProfiles: () => [{ id: 'ap_broken', type: 'codex', env_allowlist: broken }],
       };
-      const result = resolveResumeEnvAllowlist(svc, { adapterType: 'codex' });
-      assert.equal(result, undefined, `malformed allowlist ${broken} must degrade to undefined`);
+      assert.throws(
+        () => resolveResumeEnvAllowlist(svc, { adapterType: 'codex' }),
+        (err) => err.code === 'PROVIDER_ENV_POLICY_INVALID',
+        `malformed allowlist ${broken} must fail closed`,
+      );
     }
-    // A profile whose row cannot even be read must not throw either.
+    // MUTATION: a profile whose row cannot be read is a hard resume failure;
+    // returning undefined here would restore adapter defaults.
     const throwing = { listProfiles: () => { throw new Error('db gone'); } };
-    assert.equal(resolveResumeEnvAllowlist(throwing, { adapterType: 'codex' }), undefined);
+    assert.throws(
+      () => resolveResumeEnvAllowlist(throwing, { adapterType: 'codex' }),
+      (err) => err.code === 'PROVIDER_ENV_POLICY_INVALID',
+    );
 
     // Degradation is observable, and never echoes an allowlist value.
     assert.ok(
@@ -822,4 +1422,72 @@ test('a malformed profile env_allowlist degrades identically on fresh and resume
     listProfiles: () => [{ id: 'ap_ok', type: 'codex', env_allowlist: '["KEEP_ME"]' }],
   };
   assert.deepEqual(resolveResumeEnvAllowlist(good, { adapterType: 'codex' }), ['KEEP_ME']);
+});
+
+test('MUTATION: boot resume records an event and stops on invalid provider policy', async (t) => {
+  const harness = await createManagerDbHarness(t, 'palantir-invalid-policy-resume');
+  harness.db.prepare(
+    'UPDATE agent_profiles SET env_allowlist = ? WHERE id = ?',
+  ).run('{broken provider policy', 'claude-code');
+  const stale = harness.runService.createRun({
+    is_manager: true,
+    prompt: 'invalid provider resume',
+    agent_profile_id: 'claude-code',
+    manager_adapter: 'claude-code',
+    manager_layer: 'top',
+    conversation_id: 'top',
+  });
+  harness.runService.updateRunStatus(stale.id, 'running', { force: true });
+  harness.runService.updateClaudeSessionId(stale.id, 'invalid-policy-resume');
+
+  const { createManagerRouter } = require('../routes/manager');
+  createManagerRouter({
+    runService: harness.runService,
+    managerAdapterFactory: harness.managerAdapterFactory,
+    managerRegistry: harness.managerRegistry,
+    conversationService: harness.conversationService,
+    agentProfileService: harness.agentProfileService,
+    authResolverOpts: {
+      hasKeychain: () => true,
+      hasCredentialsFile: () => false,
+    },
+  });
+
+  assert.equal(harness.runService.getRun(stale.id).status, 'stopped');
+  assert.equal(harness.calls.some((call) => call.runId === stale.id), false);
+  assert.ok(
+    harness.runService.getRunEvents(stale.id)
+      .some((event) => event.event_type === 'manager:resume_env_policy_invalid'),
+  );
+});
+
+test('a Top manager spawn is refused when its env snapshot cannot be persisted', async (t) => {
+  // Drives the real manager route. The manager path fails CLOSED because boot
+  // resume reads this snapshot as the authority -- a run that starts without one
+  // resumes through profile fallback, which is the widening the pin prevents.
+  // (The worker path is deliberately non-fatal; nothing resumes a worker from it.)
+  await withProcessEnv({
+    PALANTIR_SKIP_HOST_CREDENTIALS: '1',
+    ANTHROPIC_API_KEY: 'snapshot-refusal-auth',
+    CLAUDE_CODE_OAUTH_TOKEN: undefined,
+  }, async () => {
+    const harness = await createManagerDbHarness(t, 'palantir-manager-snapshot-refusal');
+    // An empty allowlist lets the ambient key authenticate, so the request gets
+    // PAST auth and actually reaches the snapshot write. Without this the spawn
+    // is refused at 400 manager_auth_unavailable and the test proves nothing --
+    // it passed even with the fail-closed throw removed.
+    harness.agentProfileService.updateProfile('claude-code', { env_allowlist: '[]' });
+
+    const control = await startFreshManager(harness);
+    assert.equal(control.status ?? control.response.status, 201,
+      `the control spawn must succeed, else the refusal below is meaningless: ${JSON.stringify(control.response?.body)}`);
+
+    const second = await createManagerDbHarness(t, 'palantir-manager-snapshot-refusal-2');
+    second.agentProfileService.updateProfile('claude-code', { env_allowlist: '[]' });
+    second.runService.setSessionSnapshot = () => { throw new Error('injected snapshot failure'); };
+
+    const { response, call } = await startFreshManager(second);
+    assert.notEqual(response.status, 201, `spawn must be refused; got ${JSON.stringify(response.body)}`);
+    assert.equal(call, undefined, 'no adapter session may be started without a persisted pin');
+  });
 });

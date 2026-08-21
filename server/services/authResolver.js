@@ -445,8 +445,74 @@ function bootstrapClaudeAuthFromEnv({ logger = console } = {}) {
  *                                apiKeyHelper in this child-local file.
  * @returns {{ canAuth: boolean, env: object, sources: string[], diagnostics: string[] }}
  */
+// The single place that decides whether ambient default credentials apply.
+//
+// "Empty list" is only an inference about a caller that said nothing. An
+// explicit false is a DECISION -- the profile declared where auth comes from --
+// and must beat it, otherwise an empty effective list silently re-opens ambient
+// auth. Callers that pass nothing keep the old inference, so this is additive.
+//
+// Every consumer must read the answer from here. The isolated resolver derived
+// its own variant (allowDefaultAuth !== false) and the two disagreed for a
+// non-empty allowlist with no explicit flag -- the shape liveDistiller actually
+// passes -- so a restricted profile still had a host login recovered for it.
+function shouldUseDefaultAuth(envAllowlist, allowDefaultAuth) {
+  const inferred = !Array.isArray(envAllowlist) || envAllowlist.length === 0;
+  return allowDefaultAuth === undefined ? inferred : allowDefaultAuth === true;
+}
+
+function resolveAuthAllowSet(
+  envAllowlist,
+  defaultAuthKeys,
+  { allowDefaultAuth, blockedEnvKeys = [] } = {},
+) {
+  const useDefaults = shouldUseDefaultAuth(envAllowlist, allowDefaultAuth);
+  const allow = new Set(useDefaults ? defaultAuthKeys : []);
+  if (Array.isArray(envAllowlist)) {
+    for (const key of envAllowlist) allow.add(key);
+  }
+  if (Array.isArray(blockedEnvKeys)) {
+    for (const key of blockedEnvKeys) allow.delete(key);
+  }
+  return allow;
+}
+
+function resolveProviderAuthSources(providerEnv, allow, adapterAuthKeys) {
+  const sources = [];
+  if (!Array.isArray(providerEnv)) return sources;
+  const accepted = new Set(adapterAuthKeys || []);
+  for (const provider of providerEnv) {
+    if (!provider || provider.active === false) continue;
+    const keys = Array.isArray(provider.approvedSecretKeys)
+      ? provider.approvedSecretKeys
+      : [];
+    for (const key of keys) {
+      if (
+        accepted.has(key)
+        &&
+        allow.has(key)
+        && process.env[key]
+        && !sources.some((source) => source.key === key)
+      ) {
+        sources.push({
+          key,
+          source: `provider-env:${provider.id || provider.name || 'declared'}:${key}`,
+        });
+      }
+    }
+  }
+  return sources;
+}
+
 function resolveClaudeAuth({
   envAllowlist,
+  providerEnv,
+  // Undefined must stay undefined so resolveAuthAllowSet can tell "caller said
+  // nothing" (infer from the list) from "caller decided no" (a declared
+  // policy). Defaulting to false here made every unspecified call look like a
+  // decision and cut off ambient auth for callers that never had a policy.
+  allowDefaultAuth,
+  blockedEnvKeys,
   hasKeychain = hasClaudeKeychainCredentials,
   hasCredentialsFile = hasClaudeLinuxCredentials,
   bare = false,
@@ -458,9 +524,15 @@ function resolveClaudeAuth({
   const sources = [];
   const diagnostics = [];
 
-  const allow = Array.isArray(envAllowlist) && envAllowlist.length > 0
-    ? new Set(envAllowlist)
-    : new Set([...CLAUDE_AUTH_KEYS, ...CLAUDE_PROVIDER_AUTH_ENV_KEYS]);
+  // The cloud-provider auth-mode keys stay part of the DEFAULT set, as on main:
+  // a profile that declares no allowlist must still be able to authenticate
+  // through Bedrock/Vertex/Foundry. resolveAuthAllowSet adds this branch's
+  // allowDefaultAuth / blockedEnvKeys handling on top.
+  const allow = resolveAuthAllowSet(
+    envAllowlist,
+    [...CLAUDE_AUTH_KEYS, ...CLAUDE_PROVIDER_AUTH_ENV_KEYS],
+    { allowDefaultAuth, blockedEnvKeys },
+  );
 
   // (1) Direct env vars
   if (process.env.CLAUDE_CODE_OAUTH_TOKEN && allow.has('CLAUDE_CODE_OAUTH_TOKEN')) {
@@ -510,6 +582,21 @@ function resolveClaudeAuth({
   const credentialsFile = hasCredentialsFile();
   if (credentialsFile) sources.push('file:~/.claude/.credentials.json');
 
+  // Claude's adapter contract has exactly two credential forms:
+  //   1. a direct CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY; or
+  //   2. an allowlisted cloud mode selector (Bedrock/Vertex/Foundry), whose
+  //      provider credential chain Claude resolves inside the child.
+  // Provider declaration is provenance, not a third auth form. It may confirm
+  // one of the two direct keys above, but an arbitrary approved secret never
+  // flips canAuth. Cloud selectors are exact-key matched above.
+  const declaredProviderAuth = resolveProviderAuthSources(
+    providerEnv,
+    allow,
+    ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY'],
+  );
+  sources.push(...declaredProviderAuth.map((entry) => entry.source));
+  const hasDeclaredProviderAuth = declaredProviderAuth.length > 0;
+
   if (bare && !env.ANTHROPIC_API_KEY) {
     let token = env.CLAUDE_CODE_OAUTH_TOKEN || null;
     if (token) {
@@ -548,14 +635,19 @@ function resolveClaudeAuth({
   if (settingsAuth) sources.push('cli:--settings');
 
   const canAuth = bare
-    ? hasProviderAuth || !!env.ANTHROPIC_API_KEY || settingsAuth
+    ? hasProviderAuth || hasDeclaredProviderAuth || !!env.ANTHROPIC_API_KEY || settingsAuth
     : hasProviderAuth
+      || hasDeclaredProviderAuth
       || !!(env.CLAUDE_CODE_OAUTH_TOKEN || env.ANTHROPIC_API_KEY || keychain || credentialsFile);
   if (!canAuth) {
     diagnostics.push(bare
-      ? 'Claude --bare requires a materialized API credential, an allowlisted cloud-provider auth mode, or apiKeyHelper via --settings, but none was available. Enable CLAUDE_CODE_USE_BEDROCK/CLAUDE_CODE_USE_VERTEX/CLAUDE_CODE_USE_FOUNDRY with its provider credentials, set ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN, refresh `claude login` credentials, or provide explicit settings with apiKeyHelper.'
-      : 'No Claude credentials found. Enable an allowlisted CLAUDE_CODE_USE_BEDROCK/CLAUDE_CODE_USE_VERTEX/CLAUDE_CODE_USE_FOUNDRY provider auth mode, set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY, run `claude login` (populates the macOS keychain, or ~/.claude/.credentials.json on Linux/Windows), or start the server once from inside a Claude Code session to seed .claude-auth.json.');
-    if (Array.isArray(envAllowlist) && envAllowlist.length > 0) {
+      ? 'Claude --bare requires a materialized ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN, an allowlisted Claude cloud-provider auth mode, or apiKeyHelper via --settings, but none was available.'
+      : 'No Claude credentials found. Enable an allowlisted Claude cloud-provider auth mode, set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY, run `claude login`, or seed .claude-auth.json.');
+    // Also explain the empty-allowlist case. A profile whose auth provider is
+    // inactive now resolves to an empty list and refuses ambient credentials --
+    // without this the operator only sees "No credentials found" and cannot
+    // tell that their own declaration is what withheld the present key.
+    if (Array.isArray(envAllowlist) && (envAllowlist.length > 0 || allowDefaultAuth === false)) {
       const blocked = [
         'CLAUDE_CODE_OAUTH_TOKEN',
         'ANTHROPIC_API_KEY',
@@ -575,14 +667,24 @@ function resolveClaudeAuth({
  * Resolve auth for a Codex manager session (PR4 will use this — kept here so
  * PR2 establishes the contract for both adapters).
  */
-function resolveCodexAuth({ envAllowlist } = {}) {
+function resolveCodexAuth({
+  envAllowlist,
+  providerEnv,
+  // Undefined must stay undefined so resolveAuthAllowSet can tell "caller said
+  // nothing" (infer from the list) from "caller decided no" (a declared
+  // policy). Defaulting to false here made every unspecified call look like a
+  // decision and cut off ambient auth for callers that never had a policy.
+  allowDefaultAuth,
+  blockedEnvKeys,
+} = {}) {
   const env = {};
   const sources = [];
   const diagnostics = [];
 
-  const allow = Array.isArray(envAllowlist) && envAllowlist.length > 0
-    ? new Set(envAllowlist)
-    : new Set(CODEX_AUTH_KEYS);
+  const allow = resolveAuthAllowSet(envAllowlist, CODEX_AUTH_KEYS, {
+    allowDefaultAuth,
+    blockedEnvKeys,
+  });
 
   if (process.env.CODEX_API_KEY && allow.has('CODEX_API_KEY')) {
     env.CODEX_API_KEY = process.env.CODEX_API_KEY;
@@ -601,10 +703,20 @@ function resolveCodexAuth({ envAllowlist } = {}) {
   } catch { /* ignore */ }
   if (hasCodexFile) sources.push(`file:${CODEX_AUTH_FILE}`);
 
-  const canAuth = !!(env.CODEX_API_KEY || env.OPENAI_API_KEY || hasCodexFile);
+  // Custom approved secrets are forwarded by the spawn allowlist, but cannot
+  // authenticate Codex unless the Codex adapter consumes their exact key name.
+  const providerAuth = resolveProviderAuthSources(providerEnv, allow, CODEX_AUTH_KEYS);
+  sources.push(...providerAuth.map((entry) => entry.source));
+
+  const canAuth = !!(
+    env.CODEX_API_KEY
+    || env.OPENAI_API_KEY
+    || hasCodexFile
+    || providerAuth.length > 0
+  );
   if (!canAuth) {
     diagnostics.push(`No Codex credentials found. Set CODEX_API_KEY/OPENAI_API_KEY or run \`codex login\` to create ${CODEX_AUTH_FILE}.`);
-    if (Array.isArray(envAllowlist) && envAllowlist.length > 0) {
+    if (Array.isArray(envAllowlist) && (envAllowlist.length > 0 || allowDefaultAuth === false)) {
       const blocked = CODEX_AUTH_KEYS.filter(k => process.env[k] && !allow.has(k));
       if (blocked.length > 0) {
         diagnostics.push(`Profile env_allowlist excluded these present env vars: ${blocked.join(', ')}.`);
@@ -672,9 +784,9 @@ async function readClaudeKeychainToken() {
  * allowlisted cloud-provider mode instead keeps its provider credential chain
  * child-resolved and needs no Anthropic token materialization.
  *
- * Token source priority (first hit wins) — normative per
+ * Direct-token source priority (first hit wins) — normative per
  * docs/specs/worker-preset-and-plugin-injection.md §6.9:
- *   1. env `ANTHROPIC_API_KEY`
+ *   1. env `ANTHROPIC_API_KEY`, then `CLAUDE_CODE_OAUTH_TOKEN`
  *   2. `.claude-auth.json` — `ANTHROPIC_API_KEY` if present, else OAuth
  *      token (API accepts OAuth access tokens in the API-key slot —
  *      confirmed by Phase 10A spike, PR #87).
@@ -704,6 +816,13 @@ async function readClaudeKeychainToken() {
  */
 async function resolveClaudeAuthForIsolated({
   envAllowlist,
+  providerEnv,
+  // Undefined must stay undefined so resolveAuthAllowSet can tell "caller said
+  // nothing" (infer from the list) from "caller decided no" (a declared
+  // policy). Defaulting to false here made every unspecified call look like a
+  // decision and cut off ambient auth for callers that never had a policy.
+  allowDefaultAuth,
+  blockedEnvKeys,
   hasKeychain = hasClaudeKeychainCredentials,
   readKeychainToken = readClaudeKeychainToken,
   hasCredentialsFile = hasClaudeLinuxCredentials,
@@ -714,9 +833,14 @@ async function resolveClaudeAuthForIsolated({
   const sources = [];
   const diagnostics = [];
 
-  const allow = Array.isArray(envAllowlist) && envAllowlist.length > 0
-    ? new Set(envAllowlist)
-    : new Set([...CLAUDE_AUTH_KEYS, ...CLAUDE_PROVIDER_AUTH_ENV_KEYS]);
+  // Isolated workers consume the exact same resolved provider policy as the
+  // normal --bare path. The only difference below is how native credentials
+  // are materialized for an isolated child.
+  const allow = resolveAuthAllowSet(
+    envAllowlist,
+    [...CLAUDE_AUTH_KEYS, ...CLAUDE_PROVIDER_AUTH_ENV_KEYS],
+    { allowDefaultAuth, blockedEnvKeys },
+  );
 
   const providerAuth = resolveClaudeProviderAuthEnv(allow);
   if (providerAuth.sources.length > 0) {
@@ -734,15 +858,31 @@ async function resolveClaudeAuthForIsolated({
     token = process.env.ANTHROPIC_API_KEY;
     sources.push('env:ANTHROPIC_API_KEY');
   }
+  if (
+    !token
+    && process.env.CLAUDE_CODE_OAUTH_TOKEN
+    && allow.has('CLAUDE_CODE_OAUTH_TOKEN')
+  ) {
+    token = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    sources.push('env:CLAUDE_CODE_OAUTH_TOKEN');
+  }
+
+  // Consume provider provenance under the same adapter-specific contract as
+  // resolveClaudeAuth. The ambient value above is the credential; this only
+  // records that the resolved policy explicitly approved and activated it.
+  const declaredProviderAuth = resolveProviderAuthSources(
+    providerEnv,
+    allow,
+    ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY'],
+  );
+  sources.push(...declaredProviderAuth.map((entry) => entry.source));
 
   if (!token) {
-    // Read the on-disk file directly with the broadest allowlist — once we
-    // are in the isolated path we WILL materialize the token, and the
-    // allowlist exists to restrict what leaks into the child env, not to
-    // constrain which on-disk fields we may read.
+    // The normal resolver also reads only fields admitted by the resolved
+    // policy. Isolated presets must not recover an excluded file credential.
     let fileEnv = {};
     try {
-      fileEnv = readClaudeAuthFile(new Set(CLAUDE_AUTH_KEYS));
+      fileEnv = readClaudeAuthFile(allow);
     } catch { /* ignore */ }
     if (fileEnv.ANTHROPIC_API_KEY) {
       token = fileEnv.ANTHROPIC_API_KEY;
@@ -756,7 +896,14 @@ async function resolveClaudeAuthForIsolated({
     }
   }
 
-  if (!token) {
+  // A profile that declared where auth comes from must not have a host login
+  // recovered for it. Unlike the plain CLI spawn -- where Claude reads HOME
+  // itself and no env policy can stop it -- the isolated path materializes the
+  // credential HERE, so this is the layer that can and should decline. Derived
+  // from the same decision the allow-set used, never a parallel rule.
+  const nativeFallbackAllowed = shouldUseDefaultAuth(envAllowlist, allowDefaultAuth);
+
+  if (!token && nativeFallbackAllowed) {
     if (hasKeychain()) {
       // sources note added after success only — the probe alone isn't
       // proof of extraction.
@@ -768,7 +915,7 @@ async function resolveClaudeAuthForIsolated({
     }
   }
 
-  if (!token) {
+  if (!token && nativeFallbackAllowed) {
     // Linux fallback: ~/.claude/.credentials.json (no system keychain).
     if (hasCredentialsFile()) {
       const fileToken = await readCredentialsFileToken();
@@ -781,7 +928,7 @@ async function resolveClaudeAuthForIsolated({
 
   if (!token) {
     diagnostics.push(
-      'Isolated preset requires Claude auth. Set ANTHROPIC_API_KEY, run Palantir from a Claude Code session to seed .claude-auth.json, run `claude login` (macOS keychain, or ~/.claude/.credentials.json on Linux/Windows).',
+      'Isolated preset requires an allowlisted ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN or Claude cloud-provider auth mode. Alternatively seed .claude-auth.json or run `claude login` (macOS keychain, or ~/.claude/.credentials.json on Linux/Windows).',
     );
     return { canAuth: false, env: {}, sources, diagnostics };
   }
@@ -867,6 +1014,7 @@ function buildManagerSpawnEnv({
   authEnv = {},
   envAllowlist,
   bearerEnvKeys,
+  providerEnv,
   vendor,
   scrubHumanToken = false,
   diagnosticContext,
@@ -917,12 +1065,29 @@ function buildManagerSpawnEnv({
       .filter((key) => baseEnv[key] != null && !Object.prototype.hasOwnProperty.call(env, key))
       .sort();
     if (droppedKeys.length > 0) {
+      const droppedSet = new Set(droppedKeys);
+      const providerMatches = Array.isArray(providerEnv)
+        ? providerEnv.map((provider) => ({
+          id: provider && provider.id,
+          name: provider && provider.name,
+          keys: Array.isArray(provider && provider.envKeys)
+            ? provider.envKeys.filter((key) => droppedSet.has(key)).sort()
+            : [],
+        })).filter((provider) => provider.keys.length > 0)
+        : [];
+      const diagnostic = {
+        context: diagnosticContext,
+        vendor: resolveAgentVendor(vendor),
+        keys: droppedKeys,
+      };
+      // Keep the no-provider diagnostic byte-identical. Provider annotations
+      // exist only when an operator declaration actually explains a dropped
+      // key, and they contain names only, never process-env values.
+      if (providerMatches.length > 0) {
+        diagnostic.providers = providerMatches;
+      }
       console.warn(
-        `[security] manager_spawn_env_dropped ${JSON.stringify({
-          context: diagnosticContext,
-          vendor: resolveAgentVendor(vendor),
-          keys: droppedKeys,
-        })}`
+        `[security] manager_spawn_env_dropped ${JSON.stringify(diagnostic)}`
       );
     }
   }
