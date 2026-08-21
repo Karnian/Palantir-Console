@@ -7,9 +7,10 @@ function managerCanAccessRun(grant, run, { runService } = {}) {
   if (!grant) return false;
   if (grant.layer === 'top') return !run.is_manager;
   // Anything that is not Top is treated as an operator-layer grant, matching
-  // managerCapabilityRequestAllowed's `layer !== 'top'` convention. Requiring
-  // the literal 'operator' would deny every legacy 'pm' grant outright, which
-  // mint() still accepts.
+  // managerCapabilityRequestAllowed's `layer !== 'top'` convention. mint() now
+  // normalizes the legacy 'pm' spelling away, so this is equivalent to checking
+  // for 'operator' -- kept as `!== 'top'` so the two allowlists stay written the
+  // same way and cannot drift apart again.
   if (run.is_manager) return false;
   // Both ids must be real. `null === null` would otherwise read as ownership
   // for a legacy worker with no parent whenever a grant carried no run id.
