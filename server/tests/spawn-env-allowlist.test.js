@@ -1460,3 +1460,34 @@ test('MUTATION: boot resume records an event and stops on invalid provider polic
       .some((event) => event.event_type === 'manager:resume_env_policy_invalid'),
   );
 });
+
+test('a Top manager spawn is refused when its env snapshot cannot be persisted', async (t) => {
+  // Drives the real manager route. The manager path fails CLOSED because boot
+  // resume reads this snapshot as the authority -- a run that starts without one
+  // resumes through profile fallback, which is the widening the pin prevents.
+  // (The worker path is deliberately non-fatal; nothing resumes a worker from it.)
+  await withProcessEnv({
+    PALANTIR_SKIP_HOST_CREDENTIALS: '1',
+    ANTHROPIC_API_KEY: 'snapshot-refusal-auth',
+    CLAUDE_CODE_OAUTH_TOKEN: undefined,
+  }, async () => {
+    const harness = await createManagerDbHarness(t, 'palantir-manager-snapshot-refusal');
+    // An empty allowlist lets the ambient key authenticate, so the request gets
+    // PAST auth and actually reaches the snapshot write. Without this the spawn
+    // is refused at 400 manager_auth_unavailable and the test proves nothing --
+    // it passed even with the fail-closed throw removed.
+    harness.agentProfileService.updateProfile('claude-code', { env_allowlist: '[]' });
+
+    const control = await startFreshManager(harness);
+    assert.equal(control.status ?? control.response.status, 201,
+      `the control spawn must succeed, else the refusal below is meaningless: ${JSON.stringify(control.response?.body)}`);
+
+    const second = await createManagerDbHarness(t, 'palantir-manager-snapshot-refusal-2');
+    second.agentProfileService.updateProfile('claude-code', { env_allowlist: '[]' });
+    second.runService.setSessionSnapshot = () => { throw new Error('injected snapshot failure'); };
+
+    const { response, call } = await startFreshManager(second);
+    assert.notEqual(response.status, 201, `spawn must be refused; got ${JSON.stringify(response.body)}`);
+    assert.equal(call, undefined, 'no adapter session may be started without a persisted pin');
+  });
+});

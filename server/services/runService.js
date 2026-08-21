@@ -593,6 +593,9 @@ function createRunService(db, eventBus, questionService = null) {
           session_claude_options_json = ?
       WHERE id = ?
     `),
+    getSessionSnapshot: db.prepare(`
+      SELECT session_claude_options_json FROM runs WHERE id = ?
+    `),
     // Phase 3 (cost cap): total recorded cost of a project's task-linked runs.
     sumProjectCost: db.prepare(`
       SELECT COALESCE(SUM(r.cost_usd), 0) AS total
@@ -2139,8 +2142,18 @@ function createRunService(db, eventBus, questionService = null) {
       sessionEnvPolicy,
     } = {},
   ) {
-    getRun(id);
-    let persistedOptions = sessionClaudeOptions;
+    // envPolicy is a reserved field with its own validated channel. Accepting it
+    // inside the generic options bag would let a caller plant the FIRST pin
+    // unvalidated and unnormalized -- write-once protects an existing pin, so a
+    // planted one becomes the immutable authority resume trusts.
+    if (
+      sessionClaudeOptions
+      && typeof sessionClaudeOptions === 'object'
+      && Object.prototype.hasOwnProperty.call(sessionClaudeOptions, 'envPolicy')
+    ) {
+      throw new BadRequestError('envPolicy must be supplied through sessionEnvPolicy');
+    }
+    let requestedEnvPolicy;
     if (sessionEnvPolicy !== undefined) {
       const effectiveKeys = sessionEnvPolicy && sessionEnvPolicy.effectiveKeys;
       const providers = sessionEnvPolicy && sessionEnvPolicy.providers;
@@ -2163,30 +2176,54 @@ function createRunService(db, eventBus, questionService = null) {
       if (providers.some((provider) => !provider || typeof provider !== 'object' || Array.isArray(provider))) {
         throw new BadRequestError('session env policy providers must contain objects');
       }
-      persistedOptions = {
-        ...(sessionClaudeOptions || {}),
-        envPolicy: {
+      requestedEnvPolicy = {
           // 2: allowDefaultAuth changed meaning. A v1 snapshot recorded the old
           // rule, under which an inactive auth provider still permitted ambient
           // credentials. The snapshot is authoritative on resume by design, so a
           // stale one cannot be trusted -- resume refuses it instead of silently
           // replaying a decision made under the vulnerable rule.
-          version: 2,
-          effectiveKeys: effectiveKeys === null ? null : [...effectiveKeys],
-          providers: JSON.parse(JSON.stringify(providers)),
-          allowDefaultAuth: sessionEnvPolicy.allowDefaultAuth === true,
-          blockedKeys: [...blockedKeys],
-        },
+        version: 2,
+        effectiveKeys: effectiveKeys === null ? null : [...effectiveKeys],
+        providers: JSON.parse(JSON.stringify(providers)),
+        allowDefaultAuth: sessionEnvPolicy.allowDefaultAuth === true,
+        blockedKeys: [...blockedKeys],
       };
     }
-    stmts.setSessionSnapshot.run(
-      sessionModel,
-      sessionEffort,
-      sessionPermissionMode,
-      persistedOptions == null ? null : JSON.stringify(persistedOptions),
-      id,
-    );
-    return stmts.getById.get(id);
+    const persist = db.transaction(() => {
+      const current = stmts.getSessionSnapshot.get(id);
+      if (!current) throw new NotFoundError(`Run not found: ${id}`);
+      let existingOptions = null;
+      if (current.session_claude_options_json) {
+        try { existingOptions = JSON.parse(current.session_claude_options_json); } catch { existingOptions = null; }
+      }
+      const existingEnvPolicy = existingOptions?.envPolicy;
+      if (
+        existingEnvPolicy !== undefined
+        && requestedEnvPolicy !== undefined
+        && JSON.stringify(existingEnvPolicy) !== JSON.stringify(requestedEnvPolicy)
+      ) {
+        throw new ConflictError('session env policy snapshot is immutable');
+      }
+      const persistedOptions = sessionClaudeOptions == null
+        ? (existingOptions || null)
+        : { ...sessionClaudeOptions };
+      if (existingEnvPolicy !== undefined) {
+        if (persistedOptions) persistedOptions.envPolicy = existingEnvPolicy;
+      } else if (requestedEnvPolicy !== undefined) {
+        if (persistedOptions) persistedOptions.envPolicy = requestedEnvPolicy;
+        else existingOptions = { envPolicy: requestedEnvPolicy };
+      }
+      const finalOptions = persistedOptions || existingOptions;
+      stmts.setSessionSnapshot.run(
+        sessionModel,
+        sessionEffort,
+        sessionPermissionMode,
+        finalOptions == null ? null : JSON.stringify(finalOptions),
+        id,
+      );
+      return stmts.getById.get(id);
+    });
+    return persist();
   }
 
   // Stamp the single per-run goal-activation decision (0|1) at spawn time.

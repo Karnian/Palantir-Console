@@ -555,6 +555,7 @@ test('boot resume: canonical operator:oi_* Operator is resumed, not stopped (A0)
     is_manager: true,
     manager_layer: 'operator',
     manager_adapter: 'claude-code',
+    agent_profile_id: 'claude-code',
     conversation_id: canonicalConvId,
     operator_instance_id: instanceId,
     prompt: 'PM canon',
@@ -570,9 +571,8 @@ test('boot resume: canonical operator:oi_* Operator is resumed, not stopped (A0)
       strictMcpConfig: true,
     },
   });
-  // MUTATION: this models an Operator created before agent_profile_id was
-  // persisted. It must retain the adapter fallback while the immutable session
-  // snapshot prevents mutable profile options from changing the resumed CLI.
+  // This models a pre-round-4 Operator that has a profile id but no envPolicy
+  // snapshot. The mutable legacy fallback must remain observable.
   agentProfileService.updateProfile('claude-code', {
     permission_mode: 'bypassPermissions',
     args_template: '-p {prompt}',
@@ -639,6 +639,7 @@ test('boot resume: canonical operator:oi_* Operator is resumed, not stopped (A0)
   assert.deepEqual(JSON.parse(unpinnedEvent.payload_json), {
     operator_instance_id: instanceId,
     adapter: 'claude-code',
+    has_agent_profile_id: true,
   });
 });
 

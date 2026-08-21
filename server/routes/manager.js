@@ -738,7 +738,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                   adapterType,
                   sessionClaudeOptionsJson: r.session_claude_options_json,
                 });
-                if (!r.agent_profile_id && !envPolicy?.fromSnapshot) {
+                if (!envPolicy?.fromSnapshot) {
                   try {
                     runService.addRunEvent(
                       r.id,
@@ -746,6 +746,7 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
                       JSON.stringify({
                         operator_instance_id: operatorInstanceId || r.operator_instance_id || null,
                         adapter: adapterType,
+                        has_agent_profile_id: Boolean(r.agent_profile_id),
                       }),
                     );
                   } catch { /* best-effort legacy-state diagnostic */ }
@@ -1267,7 +1268,12 @@ function createManagerRouter({ runService, streamJsonEngine, managerAdapterFacto
               }
             : null,
         });
-      } catch { /* annotate-only */ }
+      } catch (err) {
+        try {
+          runService.addRunEvent(runId, 'manager:env_snapshot_unwritable', JSON.stringify({ reason: err.message }));
+        } catch { /* best-effort diagnostic */ }
+        throw err;
+      }
 
       const { sessionRef } = adapter.startSession(runId, {
         // For Claude (persistent process) the prompt argument is the FIRST

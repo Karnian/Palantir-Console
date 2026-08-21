@@ -1081,7 +1081,12 @@ function createOperatorSpawnService({
                 }
               : null,
           });
-        } catch { /* annotate-only */ }
+        } catch (err) {
+          try {
+            runService.addRunEvent(runId, 'operator:env_snapshot_unwritable', JSON.stringify({ reason: err.message }));
+          } catch { /* best-effort diagnostic */ }
+          throw err;
+        }
 
         const startOpts = {
           systemPrompt,

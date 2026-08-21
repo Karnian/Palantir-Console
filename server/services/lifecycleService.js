@@ -1306,8 +1306,24 @@ function createLifecycleService({
         sessionModel: profile.model || null,
         sessionEffort: profile.reasoning_effort || null,
         sessionPermissionMode: resolveClaudePermissionMode(profile) || null,
+        sessionEnvPolicy: {
+          effectiveKeys: effectiveProfileEnvKeys,
+          providers: profileEnvPolicy?.providers || [],
+          allowDefaultAuth: profileEnvPolicy?.allowDefaultAuth === true,
+          blockedKeys: profileEnvPolicy?.blockedKeys || [],
+        },
       });
-    } catch { /* annotate-only */ }
+    } catch (err) {
+      // Loud, but not fatal. The manager/Operator paths fail closed because
+      // boot resume READS their snapshot as the authority -- losing it there
+      // widens the resumed env. Nothing resumes a worker from this snapshot
+      // (every reader of session_claude_options_json is in routes/manager.js),
+      // so for a worker it is observability. Failing the run instead cost the
+      // whole drain: one unwritable snapshot stopped every queued run.
+      try {
+        runService.addRunEvent(run.id, 'worker:env_snapshot_unwritable', JSON.stringify({ reason: err.message }));
+      } catch { /* best-effort diagnostic */ }
+    }
     const adapterName = resolveAdapterName(profile);
 
     runService.addRunEvent(run.id, 'queue:dequeued', JSON.stringify({
