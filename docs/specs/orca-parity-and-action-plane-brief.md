@@ -1,5 +1,7 @@
 # Orca 파리티 + Action Control Plane — 트랙 brief
 
+> **⚠️ 개정 (2026-10-08)**: 이 문서의 **§0 전제("Orca 대체")와 §4 착수 순서는 [`instruction-centric-direction-brief.md`](./instruction-centric-direction-brief.md) 가 대체한다**. §1·§5·§6·§7 은 유지하고, §5-3 의 lineage 는 그 문서 §3.2 에서 다시 판정한다.
+
 > **상태**: v1 초안 (2026-08-02). Codex 4라운드 교차검토 완료, 사용자 lock-in 완료.
 > **전제 확정**: Palantir 로 **Orca 를 대체**한다. 범위는 코드 작업이 아니라 **코드 + 일상 업무 전반**을 아우르는 에이전트 오케스트레이션 플랫폼이다.
 > 계층은 Master → Operator → Worker 를 유지하고, 매니저를 통한 **전체 관리·통제·보고**가 제품의 축이다. 인프라 학습(메모리)도 중요 축이다.
