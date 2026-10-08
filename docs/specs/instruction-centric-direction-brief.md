@@ -1,6 +1,6 @@
 # 지시 중심 관제 — 방향 brief
 
-> **상태**: v5 (2026-10-08). **사용자 lock-in 대기.** codex 적대검토 이력은 §11.
+> **상태**: v5 **LOCKED** (2026-10-08 사용자 lock-in, PR #574). codex 적대검토 이력은 §11.
 > **문서 우선순위**: 이 문서는 [`orca-parity-and-action-plane-brief.md`](./orca-parity-and-action-plane-brief.md)(이하 OP)의 **§0 전제와 §4 착수 순서를 대체**한다.
 > OP 의 §1(Orca 실측), §5(안 할 것), §6(리스크), §7(한 문장)은 유지한다. 다만 §5-3 의 "세션 lineage" 금지는 §3.2 에서 다시 판정한다.
 > OP §5-4 의 `orcaExecutor` 기각은 그대로다. 이 brief 에서 Orca 와의 연결은 **관측 전용**이다.
