@@ -24,7 +24,7 @@
 | 14 | **OP 5단계**: T1 durable 질문/승인 mailbox → inbound event inbox → T5 durable review ledger → T2 worker progress → **T3 DAG(마지막)** | 동 brief §4 "5단계 이후" | ⏳ 대기 — **T1 은 `POST /runs/:id/input` 기반 설계 금지**(`remoteSshExecutor.sendInput` 이 스텁이라 fleet 에서 조용히 실패). 워커가 long-poll 로 가져가는 구조 + question class enum(Operator 가능 vs cookie-only) | PR 다수 |
 | 15 | backlog Ready 섹션 잔여 항목 | `docs/backlog.md` | ⏳ OP 트랙 이후 | 협의 |
 | 16 | **지시 중심 관제 I0a — 구현 brief 작성·설계검토** | [`specs/i0a-session-snapshot-board-brief.md`](./specs/i0a-session-snapshot-board-brief.md) | ✅ **완료** (2026-10-08) — brief v7, codex 설계검토 R1~R7(NO-GO×5 → GO×2). 실측으로 정정한 전제: Claude 출력 래퍼에 `turnOrigin=human`, Codex `Desktop+exec`, Codex `payload.id` 존재 | brief 1개 |
-| 17 | **I0a 구현** — PR1 읽기 모듈+정책 / PR2 endpoint+보드+runbook | 동 brief §8 | ⏸ **사용자 spec 승인 대기** (§3 확인 지점). 착수 전 확인: codev2 에 repo checkout·Node 18+ 가 있는지 (brief §9-Q1) | PR 2개 |
+| 17 | **I0a 구현** — PR1 읽기 모듈+정책 / PR2 endpoint+보드+runbook | 동 brief §8 | 🔨 **사용자 spec 승인 (2026-10-08)**. 원격은 repo checkout 없이 ssh stdin 번들로 실행하도록 개정했다(brief v10, codex R8~R10 GO). codev2 = `codev@codev2`, Node v22 실측. 다음 = PR1 codex-goal 위임 | PR 2개 |
 
 순서 근거: F-1 은 소형이라 이 프로토콜 자체의 파일럿. G 트랙은 페이즈 의존 순서 (G1+G2 만으로도 독립 가치, G3 가 본체). 원격/하드웨어가 필요한 것 (G2b/G3b) 은 뒤로.
 
