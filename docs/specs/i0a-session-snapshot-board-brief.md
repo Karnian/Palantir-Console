@@ -1,6 +1,6 @@
 # I0a — 여러 머신 세션 스냅샷 보드 (구현 brief)
 
-> **상태**: v7 — **codex 설계검토 GO (R1~R7, 2026-10-08). 사용자 spec 승인 대기.** 승인 전에는 구현에 착수하지 않는다 (큐 #16→#17, `goal-session-protocol.md` §3).
+> **상태**: v10 — **사용자 spec 승인 (2026-10-08)**. 원격 실행을 **ssh stdin 번들 방식으로 개정**했다(§2.3, §4. 원격 repo checkout 불필요). codex 설계검토 **GO** (R1~R7 원안, R8~R10 개정분). 구현은 codex-goal 위임으로 진행한다 (큐 #17, §8).
 > **상위 문서**: [`instruction-centric-direction-brief.md`](./instruction-centric-direction-brief.md) (LOCKED). 이 문서는 그중 §3.1 데이터 원칙, §5 사용성, §6 성공 기준, §7 I0/I0a 를 구현 수준으로 구체화한다.
 > 상위 문서가 "구현 brief 에서 정한다"고 넘긴 네 가지를 여기서 확정한다: 반출 도구, 허용 필드, 측정 절차, U0 수치.
 
@@ -12,7 +12,7 @@
 
 | 범위 안 | 범위 밖 (I0b 이후) |
 |---|---|
-| 작업 머신에서 1회 실행하는 **읽기 모듈**(snapshot CLI) | 상주 수집기, 증분 읽기, 훅 |
+| **읽기 모듈**(snapshot CLI). 로컬은 직접 실행, 원격은 **ssh stdin 으로 단일 파일 번들을 보내 실행**한다(원격 설치·repo checkout 0, §2.3) | 상주 수집기, 증분 읽기, 훅 |
 | 사람 지시 판별 parser (Claude, Codex) | 의미 병합, LLM 목적 요약 |
 | 반출 정책: 재귀 allowlist, 문자열 슬롯별 살균, 머신 측 제외·삭제 | ingestion capability, 운영 DB 쓰기 |
 | 읽기 전용 endpoint (기본 off) + 보드 화면 | 관리 에이전트, attention |
@@ -127,11 +127,13 @@
 
 ## 2. 읽기 모듈 (snapshot CLI)
 
-- **위치**: `scripts/session-snapshot.mjs`.
-  - npm 의존성이 없고 Node 18 이상에서 돈다.
+- **위치**:
+  - CLI 진입점 `scripts/session-snapshot.mjs` — Mac 에서만 돈다. 번들 생성, 실행기 spawn, 응답 검증, 파일 기록, exclude 확인 입력을 맡는다(§2.3).
+  - 읽기 본체 `scripts/lib/sessionSnapshotReader.cjs` — parser, 연결, 제외 적용, 스냅샷 조립, `observe.json` 관리. **번들에 들어가는 쪽**이다.
   - 반출 정책은 공유 모듈 `server/services/observeSnapshotPolicy.js` 에 둔다. 서버도 같은 모듈로 재검증한다.
-  - 살균은 `memorySanitize.redactSecrets` 를 import 해서 쓴다. 로직을 복제하지 않는다.
-  - 원격 머신에는 repo checkout 이 있다고 전제한다(§9-Q1).
+  - 살균은 `memorySanitize.redactSecrets` 를 require 해서 쓴다. 로직을 복제하지 않는다.
+  - npm 의존성이 없고 Node 18 이상에서 돈다. 시작할 때 Node major 를 검사하고, 미달이면 고정 코드 `node_unsupported` 로 끝낸다.
+  - **원격 머신에는 Node 만 있으면 된다.** repo checkout 도, 파일 설치도 필요 없다(§2.3). 원격에 남는 것은 `observe.json` 하나뿐이다.
 - **읽는 경로**: Claude·Codex transcript 디렉터리 두 종류만 허용한다(기본 `~/.claude/projects`, `~/.codex/sessions`). 다른 종류의 경로는 거부한다. 심볼릭 링크는 따라가지 않는다. 파일 수와 파일당 바이트에 상한을 둔다.
 - **머신 측 설정** `~/.config/palantir/observe.json` (0600):
   - `machine_id`: 최초 실행 때 생성하는 랜덤 값. hostname 과 무관하다.
@@ -141,7 +143,14 @@
   - **삭제 신원은 경로나 salt 에 의존하지 않는다.** Claude 는 `claude:<sessionId>:u<uuid>`, Codex 는 id 가 있으면 `codex:<session_id>:i<payload.id>`, 없으면 `codex:<session_id>:n<순번>`(+ 로컬 지문, §1.2) 이다. 파일 rename, 파일 이동, salt 회전이 있어도 삭제가 유지된다. 재실행해도 그대로 적용된다.
   - `local_key`: 지문 전용 랜덤 키. `path_salt` 를 회전해도 바뀌지 않는다.
 - **Orca**: 같은 실행 안에서 `orca worktree ps --json` / `orca terminal list --json` 을 호출한다. 그 머신의 Orca runtime 을 쓴다. 실패하면 고정 코드(`orca_unavailable` 등)를 coverage 에 기록하고 계속 진행한다.
-- **출력**: `<machine_id>.json` **하나**를 원자적으로 덮어쓴다(tmp + rename). 권한은 0600, 기본 위치는 `~/.local/state/palantir/snapshots/` 다. 머신당 파일이 하나이므로 같은 머신의 예전 스냅샷이 쌓이지 않는다. stdout 에는 요약 숫자만 쓴다.
+- **출력**:
+  - 번들은 결과를 stdout envelope 으로만 낸다(§2.3). **실행 머신의 디스크에는 스냅샷·중간본을 쓰지 않는다.** 실행 머신에서 쓰는 것은 `observe.json`(+ 잠금·tmp)뿐이다.
+  - Mac 이 검증을 통과한 스냅샷만 보드 디렉터리(`--out-dir`, 기본 `PALANTIR_OBSERVE_SNAPSHOT_DIR`)에 `<machine_id>.json` **하나**로 원자적으로 덮어쓴다(같은 디렉터리의 tmp + rename). 파일 권한은 0600, 디렉터리 권한은 0700 이다. 머신당 파일이 하나이므로 예전 스냅샷이 쌓이지 않는다.
+- **`observe.json` 갱신 규칙**:
+  - 모든 쓰기는 **잠금**(`observe.json.lock`, `O_EXCL`) 안에서 한다. 순서: 최신 파일을 다시 읽음 → 키 지문 검증 → **변경을 합집합으로만 반영**(제외·삭제 규칙은 단조 증가, 기존 항목은 지우지 않음) → tmp + rename.
+  - 잠금이 이미 있으면 기다리지 않고 `config_busy` 로 끝낸다. 오래된 잠금 처리는 runbook 에 적는다.
+  - 최초 실행의 설정 생성도 같은 규칙을 따른다.
+  - `local_key` 가 없거나 키 지문이 맞지 않으면 **새 키를 만들지 않는다.** `key_unavailable` 로 끝낸다. 예외는 최초 실행(파일이 아예 없음) 하나다.
 
 ### 2.1 반출 정책 — 재귀 allowlist, 문자열 슬롯별 처리
 
@@ -178,6 +187,51 @@
 - **유일성**: 하나의 Orca `paneKey` 가 둘 이상의 세션과 맞으면 둘 다 `ambiguous` 로 처리한다. 세션이 둘 이상의 pane 과 맞을 때도 `ambiguous` 다.
 - **화면 표시**: `prompt_exact` 이면서 시간 조건과 유일성을 모두 만족할 때만 "Orca 터미널 연결됨 (스냅샷 시점 관측)"으로 표시한다. 그 밖에는 모두 "연결 불명"이다.
 
+### 2.3 실행 경로 — 번들 하나, 로컬·원격 공통
+
+원격 머신(codev2 등)은 Palantir 노드 등록과 무관하게 **ssh 로 접속만 되면** 붙일 수 있다. 원본 transcript 를 ssh 로 끌어오지 않는다. **번들을 그 머신에서 실행하고, 살균이 끝난 결과만 돌려받는다.** 원본은 머신 밖으로 나가지 않는다(상위 §3.1). 노드 executor 의 `exposed_roots` 는 넓히지 않는다(상위 §7 I2).
+
+**실행 경로는 하나다.** 로컬(Mac)도 원격과 같은 번들을 같은 방식으로 실행한다. 차이는 실행기뿐이다.
+
+| 대상 | 실행기 (argv 배열 spawn, 셸 경유 없음) |
+|---|---|
+| 로컬 | `process.execPath --no-warnings -` |
+| 원격 | `ssh -o BatchMode=yes -- <host> <node> --no-warnings -` |
+
+`<node>` 는 기본 `node`, 또는 `--remote-node <절대경로>` 다. **원격 명령 문자열은 이 고정 토큰뿐이다.** 동적 값은 원격 명령에 넣지 않는다.
+
+- **요청은 번들 안의 데이터다.**
+  - Mac 은 요청 객체(작업 종류, `--now`, exclude 대상, `orca_bin` 등)를 만든다. 이를 번들 맨 앞에 `const REQUEST = <JSON.stringify 결과>;` 한 줄로 넣는다.
+  - 번들 안 reader 는 이 요청을 **다시 검증**한다. 작업 종류는 닫힌 enum, 각 필드는 문법·길이 상한을 따르고, 모르는 키는 거부한다. 검증에 실패하면 오류 envelope 을 낸다.
+  - cwd 접두사 같은 사용자 입력도 이 경로로만 전달한다.
+- **번들**: Mac 이 실행할 때마다 메모리에서 만든다. 커밋하지 않는다.
+  - 대상은 **고정 manifest** 다: `memorySanitize.js`, `observeSnapshotPolicy.js`, `sessionSnapshotReader.cjs`, 번들 launcher.
+  - 작은 모듈 레지스트리로 감싼다. **런타임 resolver** 는 manifest 안 상대경로와 내장 모듈 allowlist(`node:fs`, `node:path`, `node:os`, `node:crypto`, `node:child_process`)만 해석하고, 그 밖은 throw 한다.
+  - **정적 검사**: manifest 소스에 리터럴이 아닌 `require(`, `module.require`, `import(`, `process.binding` 이 있으면 번들 생성이 고정 코드로 실패한다.
+  - `reader_build` 는 **출처 추적값**이다. 정의는 SHA-256(정규 인코딩 `["palantir.snapshot-bundle/1", [경로, 바이트 길이, 바이트]…]`, manifest 경로순)의 앞 16 hex 이고, 문법은 `^[0-9a-f]{16}$` 다. REQUEST 줄은 해시 입력에 포함하지 않는다. Mac 은 받은 응답의 `reader_build` 가 **자기가 보낸 번들의 값과 같은지** 확인한다.
+- **응답 프로토콜 — stdout 의 envelope 하나.**
+  - 번들은 stdout 에 JSON envelope **하나만** 쓴다. 작업이 끝나고 완성·검증한 뒤에 한 번만 쓴다.
+  - envelope 종류는 닫힌 스키마 세 가지다: 스냅샷(§3), exclude 조회 결과(§4), 상태 envelope `{ "schema": "palantir.snapshot-status/1", "machine_id", "reader_build", "code": ENUM, "counts": {ENUM: INT} }`.
+  - 오류도 상태 envelope 의 **고정 code** 로만 낸다.
+- **stderr 차단 — 원격에서 한다.**
+  - launcher 는 시작하자마자 다음을 처리한다: `process.stderr.write` 를 no-op 으로 교체, `uncaughtException`·`unhandledRejection` 처리기 설치, `--no-warnings` 와 함께 `warning` 리스너 제거.
+  - 예외가 나면 **stdout 에 아직 아무것도 쓰지 않았을 때만** 상태 envelope `internal_error` 를 쓴다. 이미 썼다면 아무것도 덧붙이지 않고 종료한다.
+  - 번들이 띄우는 Orca 자식 프로세스는 stdout·stderr 를 모두 pipe 로 받는다. 이 출력은 허용 키만 파싱하고, 나머지는 버린다. 자식 출력을 그대로 전달하지 않는다.
+  - Mac 은 원격 stderr 를 **표시도 저장도 하지 않는다.** 바이트 수만 센다.
+  - 남는 신뢰 전제: launcher 실행 전 Node 자체 출력과 원격 셸 시작 출력은 번들 코드와 환경에서만 나오며 transcript 데이터를 담지 않는다.
+- **Mac 수신**:
+  - 상한: stdout 16MB(초과하면 즉시 kill), 실행 시간 120초.
+  - 종료 코드가 0 이 아니거나, 상한을 넘거나, envelope 이 하나가 아니거나, 스키마·정책 검증(§5.5 와 같은 모듈, `finalize(x) === x`)에 실패하면 **아무것도 쓰지 않는다. 기존 파일도 보존한다.**
+  - 스냅샷이면 `<machine_id>.json` 을 원자적으로 쓴다(§2 출력).
+  - 상태 envelope 의 `code` 는 **정확한 코드 목록**에서, `counts` 는 키 목록·정수 범위에서 확인한 뒤 표시한다.
+- **입력 검증 (Mac)**: 검증에 실패하면 spawn 0회다.
+  - `--host` 는 `^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+$` 또는 `^[A-Za-z0-9._-]+$` 만 허용하고, `-` 로 시작하면 거부한다.
+  - `--remote-node` 는 `^/[A-Za-z0-9._/-]+$` 만 허용한다.
+- **spawn 가드**:
+  - Mac 쪽 spawn 지점(실행기, ssh)은 `spawnGuard.assertSpawnAllowed` 를 거친다. 테스트는 `server/tests/fixtures/bin/` 의 가짜 ssh 를 쓴다. 가짜 ssh 는 로컬에서 `process.execPath` 로 번들을 실행한다.
+  - 번들 안 Orca spawn 은 `REQUEST.orca_bin` 으로 주입한다. 테스트는 fixture 가짜 orca 의 절대경로를 넣는다. Mac 은 가드가 켜져 있으면 이 경로도 `assertSpawnAllowed` 로 검사한 뒤에 넣는다. 번들 안 reader 는 `NODE_TEST_CONTEXT` 나 `PALANTIR_BLOCK_REAL_SPAWN` 이 보이면 절대경로가 아닌 `orca_bin` 을 spawn 하지 않고 `orca_unavailable` 로 처리한다.
+- **보드 위치**: I0a 보드는 명령을 실행하는 Mac 에서 띄운다. 폰은 tailnet 으로 그 보드에 접속한다. 다른 머신에서 보드를 띄우는 경우는 I0b(codev1 push)에서 다룬다.
+
 ---
 
 ## 3. 스냅샷 스키마 v1
@@ -187,7 +241,7 @@
   "schema": "palantir.session-snapshot/1",
   "machine": { "id": "ID", "label": "LABEL" },
   "generated_at": "TIME", "window_since": "TIME",
-  "reader_version": "ENUM", "redaction_version": "INT", "policy_version": "INT",
+  "reader_version": "ENUM", "reader_build": "ID", "redaction_version": "INT", "policy_version": "INT",
   "coverage": {
     "claude": { "files_scanned": 0, "files_skipped": 0, "files_failed": 0, "records_unknown": 0,
                 "records_unverified": 0, "excluded_sessions": 0, "deleted_instructions": 0,
@@ -210,7 +264,8 @@
   "instructions": [ { "id": "INSTR_ID",             // claude:<sid>:u<uuid> | codex:<sid>:i<id> | codex:<sid>:n<순번>
                       "session_key": "ID", "seq": 0, "ts": "TIME",
                       "kind": "human|slash|shell|reply", "text": "TEXT", "text_missing": false, "truncated": false,
-                      "redacted": false, "attachments": 0, "unknown_blocks": 0 } ],
+                      "redacted": false, "attachments": 0, "unknown_blocks": 0,
+                      "ref": "ID" } ],                // 등록 참조, §4
   "orca": { "worktrees": [ { "worktree_id": "ID", "repo_label": "LABEL", "path_id": "OPAQUE",
                              "branch": "LABEL", "status": "ENUM", "last_activity_at": "TIME", "live_terminals": 0,
                              "agents": [ { "pane_key": "ID", "state": "ENUM", "agent_type": "ENUM",
@@ -220,22 +275,33 @@
 }
 ```
 
-`machine.id` 가 identity 다. `label` 은 화면 표시용일 뿐이다.
+`machine.id` 가 identity 다. `label` 은 화면 표시용일 뿐이다. `reader_build` 는 `^[0-9a-f]{16}$` 다(§2.3). `ref` 는 `HMAC(local_key, 정규 인코딩 ["palantir.instr-ref/1", machine.id, INSTR_ID, 지시의 지문, ts])` 의 앞 16 hex 이고, 서버는 문법만 검증한다.
 
 ---
 
-## 4. 반출 (Mac 과 codev2 → 보드가 도는 곳)
+## 4. 반출 (Mac 과 codev2 → 보드가 도는 Mac)
 
-- **이동**: tailnet 위의 `scp`(ssh 인증·암호화)로 보드 인스턴스의 `PALANTIR_OBSERVE_SNAPSHOT_DIR` 에 **같은 파일명 `<machine_id>.json` 으로 덮어쓴다**. 디렉터리 권한은 0700 이다.
+- **이동**:
+  - Mac 은 로컬 모드로 `PALANTIR_OBSERVE_SNAPSHOT_DIR` 에 직접 쓴다.
+  - codev2 는 Mac 에서 `remote --host codev@codev2 snapshot` 으로 받아 같은 디렉터리에 쓴다(§2.3). scp 단계는 없다.
+  - 파일명은 둘 다 `<machine_id>.json` 이고 덮어쓴다. 디렉터리 권한은 0700 이다.
 - **제외·삭제 등록** (I0a 에는 보드 삭제 버튼이 없다):
-  1. 보드에서 지시 신원(`INSTR_ID`)을 복사한다.
-  2. 작업 머신에서 `node scripts/session-snapshot.mjs exclude --instruction <INSTR_ID>` 를 실행한다(세션·cwd 접두사 제외도 같은 하위 명령).
-  3. CLI 가 **현재 원본에서 그 지시를 다시 찾는다.** `u`/`i` 신원은 신원으로, `n<순번>` 은 순번으로 찾는다. 찾은 원본의 시각과 첫 줄(살균본)을 보여 주고 사용자 확인을 받는다. 확인을 받은 뒤에만 신원 또는 지문을 `observe.json` 에 기록한다. `n` 은 지문 동치 범위 안내도 함께 띄운다. 보드에 표시된 스냅샷이 오래돼 순번이 어긋났다면 이 확인 단계에서 걸러진다.
-  4. 스냅샷을 다시 생성한다.
-  5. 같은 파일명으로 덮어쓴다.
-  6. 보드를 새로고침한다.
-- **중간 사본**: runbook 은 `scp` 직접 전송만 허용한다. 다른 경유지를 쓰지 않는다.
-- **평가 종료 시 삭제**: 작업 머신마다 출력 파일과 보드 디렉터리를 지운다. `path_salt` 를 회전하면 `path_gen` 이 올라가 옛 경로 id 와의 연결이 끊긴다. 지시 삭제 신원은 salt 와 무관하므로 **삭제 목록은 회전 뒤에도 유지**된다.
+  1. 보드에서 **등록 지정자** `<INSTR_ID>#<ref>` 를 복사한다. 세션·cwd 접두사 제외는 지정자 없이 대상 값을 직접 준다.
+  2. Mac 에서 `node scripts/session-snapshot.mjs [remote --host <user@host>] exclude --instruction <INSTR_ID>#<ref>` 를 실행한다.
+  3. **조회 실행**(번들, 기록 0):
+     - 현재 원본에서 그 지시를 다시 찾는다. `u`/`i` 신원은 신원으로, `n<순번>` 은 순번으로 찾는다.
+     - 찾은 지시의 `ref` 를 다시 계산한다. **보드의 `ref` 와 다르면** `target_changed` 로 끝낸다. 보드를 본 뒤 조회하기 전에 원본이 다시 쓰여 순번이 다른 지시를 가리키게 된 경우다.
+     - 일치하면 조회 envelope 을 돌려준다. 이 envelope 은 닫힌 스키마다: `{ "schema": "palantir.snapshot-exclude-preview/1", "machine_id", "reader_build", "op": ENUM, "target": INSTR_ID|"session:<ID>"|"cwd", "ts": TIME|null, "preview": TEXT(첫 줄, ≤200, §2.1 고정점)|null, "equiv_count": INT, "token": "^[0-9a-f]{64}$" }`. cwd 접두사 원값, 경로, 키, 지문 입력은 넣지 않는다. Mac 은 이 envelope 도 §5.5 와 같은 방식으로 검증한 뒤에 표시한다.
+     - `token` = `HMAC(local_key, 정규 인코딩 ["palantir.exclude-confirm/1", machine_id, op, 대상의 정규 인코딩, reader_build, 대상 지문, ts])`. `+` 연결은 쓰지 않는다.
+  4. **확인**: 사용자 확인 입력은 **Mac 의 터미널**에서 받는다(기본값 No). 원격 stdin 은 번들 전송에 쓰이므로 원격 tty 를 쓰지 않는다.
+  5. **기록 실행**(번들 재전송, 요청에 `token` 포함):
+     - 조회와 같은 과정으로 대상을 다시 찾고 토큰을 다시 계산한다.
+     - 원본이 바뀌었거나, 번들 빌드나 머신이 다르거나, 대상이 다르면 `confirm_mismatch` 로 거부하고 기록하지 않는다.
+     - 일치하면 **검증한 그 신원과 지문**을 §2 갱신 규칙(잠금, 합집합)으로 기록한다.
+     - 같은 토큰을 다시 써도 결과는 같다(멱등 — 이미 있는 항목은 합집합이라 변화 없음). 만료는 두지 않는다.
+  6. 스냅샷을 다시 생성해 같은 파일명으로 덮어쓰고, 보드를 새로고침한다.
+- **중간 사본 없음**: 스냅샷은 실행기 stdout 으로만 이동한다. 실행 머신의 디스크, 공유 위치, 다른 경유지에는 쓰지 않는다.
+- **평가 종료 시 삭제**: 보드 디렉터리(Mac)를 지운다. 원격에는 스냅샷 파일이 없다. `observe.json` 은 삭제 목록을 담고 있으므로 지우지 않는다. `path_salt` 를 회전하면 `path_gen` 이 올라가 옛 경로 id 와의 연결이 끊긴다. 지시 삭제 신원은 salt 와 무관하므로 **삭제 목록은 회전 뒤에도 유지**된다.
 - 보드는 브라우저 저장소(localStorage·IndexedDB)를 쓰지 않는다. 데이터는 다음 경우에 메모리에서 해제한다: 라우트 이탈, 로그아웃(401 bounce), 탭 종료.
 - 실제 명령은 runbook 단락으로 문서화한다(PR2).
 
@@ -304,7 +370,7 @@
   - 2행: **세션 최초 지시** 첫 줄. 최근 지시와 같으면 생략한다. 복구할 수 없으면 "최초 지시 복구 불가"를 표시한다.
   - 메타: 머신 · repo · git branch · 마지막 관측 시각(상대 + 절대) · 지시 수 · AI 제목(라벨 표시) · Orca 연결(연결됨 / 불명) · Orca agent `state`(스냅샷 시점) · 경고 배지(형식 미검증, compact 이력, unknown 비율).
   - 상태는 항상 "스냅샷 시점 관측"으로 표시한다. 단정 표현은 쓰지 않는다.
-- **펼침 — 지시 타임라인**: 시각 · 종류 · 텍스트 · 잘림·살균 표시 · 첨부 개수.
+- **펼침 — 지시 타임라인**: 시각 · 종류 · 텍스트 · 잘림·살균 표시 · 첨부 개수 · 등록 지정자 `<INSTR_ID>#<ref>` 복사(§4).
 - **검색** (상단 입력 하나, 클라이언트에서 즉시):
   - 대상: 지시 텍스트와 AI 제목.
   - 정규화: NFC + 소문자 변환. 공백을 남긴 형태와 공백을 제거한 형태를 둘 다 비교한다. 부분 문자열 매칭이다.
@@ -329,17 +395,18 @@
 | 제외·삭제 | 세션 / cwd 접두사 / 지시 단위 → 해당 0건 + **나머지 정확 개수**. Codex id 있음 → `i` 신원, id 없음 → `n` 신원. **id 없는 세션 반례 2종(`A,B₁,B₂`→`B₁,B₂`, `A,B₁,B₂,B₃` 에서 B₂ 삭제 후 `A,B₂,B₃`) → 같은 지문 전부 제외, 삭제 내용 재등장 0, **지문이 다른** 내용은 정확 개수 보존**. 내부 공백만 다른 텍스트는 별개 지문. 키 교체 → 해당 세션 보류. `exclude` CLI 의 원본 재확인 → 순번이 어긋난 등록 거부. 첨부 전용 동일 메시지도 지문으로 제외. `local_key` 누락 → 해당 세션 보류(`withheld_sessions`). replacement_history 에 원본과 같은 `payload.id` 를 가진 복제 → 추가 0건. INSTR_ID 정규식을 생성기·설정·서버가 공유. 연결된 Orca title 차단. **파일 rename·salt 회전 후에도 삭제 유지.** 재실행 유지, 같은 파일명 덮어쓰기 |
 | 연결 | exact 8자 경계, prefix 24자 경계, 빈 prompt, 시간창 밖, pane 중복 → ambiguous, Orca 실패 → 코드 |
 | 경로 경계 | 허용 외 경로, symlink, 파일 수·바이트 상한 |
+| 번들·원격 | **원격 경로 전체를 가짜 ssh 로**(가짜 ssh 는 `process.execPath -r <쓰기 계측 preload> -` 로 번들을 실행한다). 먼저 비영 결과를 선단언한다: 합성 HOME 의 **정확한 지시 값·개수**, 기존 스냅샷 파일 바이트, 기존 삭제 규칙. 그다음 확인할 것: 정상 → 파일 1개 원자적 기록, `reader_build` 가 Mac 기대값과 같음. **로컬 실행기와 원격 실행기로 같은 HOME 을 읽은 결과가 바이트 동일**(`--now` 고정). **실패 시 기록 0·기존 바이트 보존**: stdout 16MB 초과, 시간 초과, 종료 코드 ≠ 0, envelope 2개, 깨진 JSON, 정책 위반(sentinel 미살균), `reader_build` 불일치. **stderr**: 번들 안에서 sentinel 을 담은 예외를 던지고 경고를 발생시킨 뒤에도 원격 stderr 바이트가 0 이고, stdout 은 `internal_error` envelope 하나. Orca 가짜 바이너리의 stderr sentinel → 출력 0. 상태 envelope 의 모르는 code/count 키 → 표시 0. **쓰기 계측**: 실행 머신의 실제 쓰기 연산(open-for-write·rename·unlink·mkdir) 대상이 config 디렉터리의 `observe.json`·잠금·tmp 뿐임(최초 실행의 생성 1건 선단언). **입력**: `--host`(`-oProxyCommand=…`, 공백, `;`, 빈 값)·`--remote-node`(상대경로, 메타문자) → spawn 0. 원격 명령 argv 가 고정 토큰과 정확히 같음. 셸 메타문자·따옴표·`$(…)` 를 담은 cwd 접두사 → REQUEST 데이터로만 전달되어 원격에서 그대로 비교됨. 모르는 REQUEST 키 → 거부. **번들 폐쇄**: manifest 밖 require·비리터럴 require·`import(` → 번들 생성 실패, 런타임 resolver 가 allowlist 밖 내장 모듈 거부. Node major 미달 → `node_unsupported`. **exclude**: 조회 기록 0. **조회 전 재작성**(`A,B,C`→`A,C`, 보드는 옛 `n2`=B) → `target_changed`. 조회와 기록 사이 원본 변경·빌드 변경·다른 머신 키·다른 대상 → `confirm_mismatch` + 기록 0. 일치 → 기록 1, 같은 토큰 재사용 → 변화 0. `local_key` 누락이나 지문 불일치 → `key_unavailable` + 새 키 생성 0. **동시 A·B 등록**(잠금 경합 포함) → 둘 다 남거나 하나가 `config_busy` 로 실패하고, 어느 쪽이든 기존 규칙 손실 0. Mac 확인 기본값 No. **spawn 가드 음성**(가드 활성, spawn 계측으로 실제 실행 차단): fixture 밖 ssh 경로 → `PALANTIR_SPAWN_BLOCKED` + 실행기 spawn 0. fixture 밖 절대경로 `orca_bin`(예: `/bin/true`) → Mac 이 거부, **실행기 spawn 0 + Orca spawn 0**. 비절대경로 `orca_bin` 을 REQUEST 에 직접 넣어 번들을 실행 → reader 가 spawn 0 + `orca_unavailable`. 그 전에 fixture 경로로 각각 spawn 1회를 선단언한다 |
 | endpoint (`createApp` 통합) | 부팅 봉인: 디렉터리 + 토큰 + 루트 검사 조합별 on/off. off → 무인증·cookie·bearer 모두 404(하위 경로 포함) + **FS 접근 0**(spy). on → cookie 200 / bearer(human·PM·worker) 403. machineId 정규식, symlink, **lstat 후 symlink 교체(dev/ino 불일치) → 거부**, 비정규 파일, 루트 realpath 변경 → 503, 바이트 상한, 정책 위반(미살균·모르는 키) → 422, 정상 생성 출력 → 200(고정점), no-store, 전역 auth·SSE 무변경 |
 | UI | 카드(최근/최초, 생략, 복구 3상태), 타임라인, 검색 순위(공백 변형·부분어·대상 우선·동점 규칙 결정성), coverage, 부분 로드 실패, abort, **XSS fixture 가 텍스트로만 렌더**. 활성 상태 pending/on/off/error: 빈 hash 에서만 기본 경로 적용, 명시 hash 보존, 1.5초 fallback 은 hash 를 쓰지 않음, **fallback 이후 늦은 on 이면 nav 만 노출하고 화면 전환 0**, 늦은 off 이면 변화 0, 사용자 이동 보존 |
 | 게이트 | `npm test` 그린. 기존 a11y·visual 매트릭스는 **observe off 상태 그대로 유지**한다(baseline 변화 0). observe UI spec 은 `server/tests/e2e/observe/` 에 둔다. 기존 project 들은 이 디렉터리를 `testIgnore` 로 제외하고, 새 `observe` project 는 이 디렉터리만 `testMatch` 로 잡는다(상호 배타). 전용 webServer 는 `PALANTIR_TOKEN` + observe on + 합성 스냅샷으로 띄운다. **observe 전용 setup project** 가 `POST /api/auth/login` 을 호출하고, 그 결과인 cookie storageState 는 observe project 에서만 쓴다. 대상은 `#work`(라이트/다크 × 데스크톱/모바일)와 "작업" nav 가 보이는 공통 chrome 이며 `@a11y`·`@visual` 태그를 유지한다. 실행은 `npm run test:observe-ui` 이고, **기존 a11y·visual 과 같은 수동 게이트**다(CI 는 `npm test` 만). contrast waiver 는 불가 |
 
-**역회귀**(구현을 되돌리면 실패해야 하는 항목): 결정표 행 4·6·7 순서, Codex run_mode(source) 판정, 주입 블록 필터, unknown 블록 비승격, replacement_history 무시, Orca 텍스트 필드 차단, 문자열 슬롯 고정점, salt 무관 삭제 신원, offGate 위치(auth 앞) + 봉인 상태(FS 0), cookie-only, 서버 정책 재검증, O_NOFOLLOW + dev/ino 대조, XSS 렌더, 빈 hash 에서만 적용되는 기본 경로.
+**역회귀**(구현을 되돌리면 실패해야 하는 항목): Mac 의 실행기·ssh·`orca_bin` 가드 호출(각각 제거하면 음성 테스트 실패), reader 의 비절대 `orca_bin` 차단, 번들 런타임 resolver 폐쇄, launcher stderr 차단, 수신 후 정책 재검증(기록 전), 실패 시 기존 파일 보존, `ref` 대조(`target_changed`), 확인 토큰 재검증, `observe.json` 잠금·합집합 갱신, 키 누락 시 키 생성 0, 결정표 행 4·6·7 순서, Codex run_mode(source) 판정, 주입 블록 필터, unknown 블록 비승격, replacement_history 무시, Orca 텍스트 필드 차단, 문자열 슬롯 고정점, salt 무관 삭제 신원, offGate 위치(auth 앞) + 봉인 상태(FS 0), cookie-only, 서버 정책 재검증, O_NOFOLLOW + dev/ino 대조, XSS 렌더, 빈 hash 에서만 적용되는 기본 경로.
 
 ---
 
 ## 8. 작업 단위 (codex-goal 위임)
 
-1. **PR1 — 읽기 모듈 + 정책 모듈**: `scripts/session-snapshot.mjs`, `server/services/observeSnapshotPolicy.js`, parser, 연결, 단위 테스트.
+1. **PR1 — 읽기 모듈 + 정책 모듈 + 실행 경로**: `scripts/session-snapshot.mjs`, `scripts/lib/sessionSnapshotReader.cjs`, `server/services/observeSnapshotPolicy.js`, parser, 연결, 번들·launcher·실행기(§2.3), envelope 검증, `observe.json` 갱신 규칙, exclude 조회·기록, 가짜 ssh·orca fixture, 단위 테스트.
 2. **PR2 — endpoint + 보드 + runbook**: `routes/observe.js`(auth 앞 offGate), `WorkBoardView`, 진입 분기, UI·통합 테스트, a11y/visual, 반출 runbook 단락.
 
 단위마다: codex-goal 위임 → 호스트 외부검증(RED→GREEN, 역회귀) → codex 적대리뷰 PASS → merge.
@@ -350,7 +417,7 @@
 
 | # | 질문 | 기본값 |
 |---|---|---|
-| Q1 | codev2 에 repo checkout 과 Node 18 이상이 있나 | 착수 전에 사용자에게 확인한다. 없으면 PR1 에서 단일 파일 번들을 검토한다 |
+| Q1 | ~~codev2 에 repo checkout 과 Node 18 이상이 있나~~ | **해소 (2026-10-08)**: checkout 은 필요 없다(§2.3). `codev@codev2` 에 Node v22.23.2(`~/.local/bin`, 비대화형 ssh PATH 에 잡힘), `~/.claude/projects`, `~/.codex/sessions`, Orca CLI 가 있음을 실측했다 |
 | Q2 | Orca 터미널 딥링크가 있나 | 없으면 터미널 제목(살균본)과 handle 을 표시한다 |
 | Q3 | AI 제목을 얼마나 강조하나 | 라벨을 붙인 보조 정보로 둔다. U2 결과로 재판단한다 |
 | Q4 | `codex_exec` 제외가 맞나 | 기본 제외 + 개수 표시. 측정에서 누락이 보이면 포함 옵션을 켠다 |
@@ -363,11 +430,11 @@
 
 | 항목 | 기준 |
 |---|---|
-| 스냅샷 생성 (머신당) | ≤ 60초 |
+| 스냅샷 생성 (머신당) | ≤ 60초. Mac 명령 시작부터 검증된 파일의 rename 완료까지 잰다. 원격은 번들 생성·ssh 연결·전송·실행·수신·검증을 모두 포함한다(매 수집마다 발생) |
 | 보드 첫 로드 (스냅샷 목록 → 카드 표시) | 데스크톱 ≤ 3초, 폰(tailnet) ≤ 5초 |
 | 서버 재시작 후 보드 준비 | ≤ 5초 |
 | 검색 응답 (클라이언트, 검색어 10개 p95) | ≤ 200ms |
-| 최초 1회 준비(observe.json, 전송, 로그인) | 측정하고 보고만 한다. 1회성이므로 기준은 두지 않는다 |
+| 최초 1회 준비(observe.json 생성, ssh 키 확인, 보드 로그인) | 측정하고 보고만 한다. 1회성이므로 기준은 두지 않는다 |
 | 반영 지연 | I0a 에서는 제외한다. I0b 에서 측정한다 |
 
 **절차**: 상위 §6 의 공통 규칙(4분류 집계, 정확도/만족도 분리, 최소 표본, 전체 분모, 표본 교대)을 따른다.
@@ -430,3 +497,16 @@
   - `exclude` CLI 로 등록하는 절차를 정했다. 원본을 다시 확인하고 사용자 확인을 받은 뒤에 기록한다(§4).
   - §7 의 잔존 문구 2건을 정정했다.
 - **R7 (v7)**: **GO** — R6 의 5건이 모두 닫혔고, 새 BLOCKER/SERIOUS 는 없다. 설계검토를 종료한다.
+- **v8 개정 (사용자 결정, 2026-10-08)**: 원격 머신에 repo checkout 을 요구하던 전제(§9-Q1)를 없앴다. 사용자가 "작업공간 추가는 ssh 로 하지 않느냐"고 짚었다. 원본을 ssh 로 끌어오는 방식은 상위 §3.1(원본 반출 금지)·§7 I2(`exposed_roots` 비확대) 위반이라 버렸다. 대신 **번들을 ssh stdin 으로 보내 그 머신에서 실행하고, 살균 결과만 받는다.** scp 단계는 없어졌다.
+- **R8 (v8)**: **NO-GO** — BLOCKER 2, SERIOUS 6, MODERATE 1. 모두 v8 개정이 만든 경계 공백이었다. v9 반영:
+  - 원격 stderr 정규식 필터는 allowlist 가 아니다. 게다가 필터링 시점에는 이미 머신 밖이다 → **원격 launcher 에서 stderr 를 차단**하고, 결과는 stdout envelope 하나로만 낸다. 오류는 고정 code 로만 내고, Mac 은 stderr 를 버린다(§2.3).
+  - exclude 조회 응답에 반출 스키마가 없었다 → 닫힌 preview envelope 을 정의하고, Mac 도 검증하게 했다(§4).
+  - exclude 의 동적 인자(cwd 등)가 원격 명령으로 들어갈 수 있었다 → **요청은 번들 안의 REQUEST 데이터**로 보내고 원격에서 재검증한다. 원격 명령은 고정 토큰뿐이다(§2.3).
+  - 조회 **전**에 재작성된 순번은 토큰으로 걸러지지 않았다 → 스냅샷에 지시별 `ref` 를 넣고, 보드는 `<INSTR_ID>#<ref>` 를 복사하게 했다. 조회에서 `ref` 가 다르면 `target_changed` (§3, §4, §6).
+  - 토큰 입력의 정규 인코딩이 없었고, 머신·작업·대상 구분과 키 누락 처리도 없었다 → 도메인 태그를 단 정규 튜플로 바꿨다. 키가 없거나 맞지 않으면 키를 새로 만들지 않고 `key_unavailable` 로 끝낸다. 토큰은 멱등이다(§2, §4).
+  - `observe.json` 을 동시에 쓰면 삭제가 유실될 수 있었다 → 잠금 아래 다시 읽고 **합집합으로만 반영**하게 했다(§2).
+  - `reader_build` 는 정책 동일성을 증명하지 못했다 → 출처 추적값으로 정의를 좁혔다. 문법과 Mac 기대값 대조, 런타임 resolver 폐쇄를 넣었고, **로컬도 같은 번들·실행 경로를 쓰도록** 실행 경로를 하나로 합쳤다(§2.3).
+  - 테스트가 쓰기 0 과 spawn 가드를 증명하지 못했다 → 쓰기 연산 계측 preload, 비영 선단언, 번들 안 Orca spawn 주입(`orca_bin`)과 가드 경로를 정했다(§2.3, §7).
+  - U0 측정 경계를 Mac 명령 시작부터 rename 완료까지로 정의했다(§10).
+- **R9 (v9)**: **NO-GO** — SERIOUS 1. R8 의 9건 중 8건은 닫혔다. 남은 1건은 spawn 가드에 음성 테스트가 없다는 것이다. 가짜 실행 파일로 성공 경로만 검사하면, 가드 호출을 지워도 테스트가 통과한다. v10 반영: fixture 밖 ssh·`orca_bin` 을 넣었을 때 spawn 0 임을 확인하는 음성 테스트(비영 선단언 포함)와 역회귀 항목을 추가했다(§7).
+- **R10 (v10)**: **GO** — R9 의 1건이 닫혔고 새 BLOCKER/SERIOUS 는 없다. 개정분 검토를 종료한다.
