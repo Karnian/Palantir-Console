@@ -40,6 +40,8 @@
 
 ### OP. Orca 파리티 + Action Control Plane 트랙 (2026-08-02 착수)
 
+- **⚠️ 방향 개정안 (2026-10-08, 사용자 lock-in 대기)**: [`specs/instruction-centric-direction-brief.md`](./specs/instruction-centric-direction-brief.md) — 전제를 "Orca 대체"에서 **"Orca 개념을 가치 순서대로 흡수 + 상위 레이어(지시·관리 에이전트)"** 로 바꾸고, 착수 순서를 지시 중심 단계 I0~I5 로 대체한다. 1순위는 세션 파악(세션이 많을 때, 세션이 길 때). codex 5R → GO. 큐 #16.
+
 - **Spec**: [`docs/specs/orca-parity-and-action-plane-brief.md`](./specs/orca-parity-and-action-plane-brief.md) (Codex 4R 교차검토 + 사용자 lock-in). 진행 큐는 [`goal-session-protocol.md`](./goal-session-protocol.md) #9~14.
 - **전제**: Palantir 로 **Orca 를 대체**한다. 범위는 코드 작업이 아니라 **코드 + 일상 업무 전반**. 매니저를 통한 전체 관리·통제·보고가 축.
 - **0단계 R-1 ✅ 완료**(#498): goal 태스크 완료 지시를 서버 권한 경계와 일치. **R-2+R-3(cost cap)은 ⏸ DEFER** — 최소안이 cap 을 고치지 않고 표면화만 하는데 `budget_usd` 사용처가 없다. 재개 조건은 brief §4.
