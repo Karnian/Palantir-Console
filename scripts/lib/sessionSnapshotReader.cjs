@@ -385,7 +385,7 @@ function classifyClaudeRecord(record) {
     return {
       kind: 'slash',
       text: [name, args].filter(Boolean).join(' '),
-      displayText: formatCommandWrapperText(text),
+      displayText: text,
       attachments
     };
   }
@@ -535,7 +535,7 @@ function compareRecordTimes(left, right) {
   return (left.ts || '').localeCompare(right.ts || '') || left.position - right.position;
 }
 
-function parseFile(provider, records, providerCoverage) {
+function parseFile(provider, records, providerCoverage, config = {}) {
   // Spec §1.2/§1.4: parse a nonwithheld file in original order before timestamp display sorting.
   const ordered = records.map((record, position) => ({
     record,
@@ -641,13 +641,13 @@ function parseFile(provider, records, providerCoverage) {
         providerCoverage.records_unverified++;
         continue;
       }
-      items.push({
+      items.push(compactInstruction(config, {
         ...classification,
         id: `claude:${sessionId}:u${record.uuid}`,
         ts: timestamp,
         position,
         structure: [['text', normalizeDeletionText(classification.text)], ['attachments', classification.attachments]]
-      });
+      }));
     } else {
       if (record.type === 'session_meta') {
         metaBefore = true;
@@ -685,13 +685,13 @@ function parseFile(provider, records, providerCoverage) {
         providerCoverage.records_unverified++;
         continue;
       }
-      items.push({
+      items.push(compactInstruction(config, {
         ...classification,
         id: `codex:${sessionId}:${suffix}`,
         ts: timestamp,
         position,
         structure: [...classification.structure, ['attachments', classification.attachments]]
-      });
+      }));
     }
   }
   // Spec §1.2/§1.4: timestamp display ordering cannot alter n identities or recovery evidence.
@@ -703,7 +703,7 @@ function parseFile(provider, records, providerCoverage) {
     cwd,
     branch,
     run_mode,
-    title,
+    title: title === null ? null : snapshotPolicy.finalizeText(title, 200).value,
     items,
     unknown,
     first: first || 'unknown',
@@ -711,6 +711,25 @@ function parseFile(provider, records, providerCoverage) {
     firstAt: times[0],
     lastAt: times[times.length - 1]
   };
+}
+
+// Spec §2.1: sanitize the original context before removing command wrappers.
+function finalizeInstructionText(rawText) {
+  const original = snapshotPolicy.finalizeText(rawText);
+  const text = original.redacted ? rawText : formatCommandWrapperText(rawText);
+  const finalized = original.redacted ? original : snapshotPolicy.finalizeText(text);
+  return { text: finalized.value, text_missing: !text, truncated: text.length > 2000,
+    redacted: finalized.redacted };
+}
+
+// Spec §1.4/§2/§3: compute identity before discarding unbounded text and block structure.
+function compactInstruction(config, instruction) {
+  instruction.fp = computeInstructionFingerprint(config, instruction);
+  instruction.ref = computeInstructionRef(config, instruction);
+  const display = finalizeInstructionText(instruction.displayText ?? instruction.text);
+  delete instruction.structure;
+  delete instruction.displayText;
+  return Object.assign(instruction, display);
 }
 
 // Spec §1.2: content identity uses block structure, NFC/trim text, and attachment count.
@@ -792,7 +811,7 @@ function countInvalidTimeRecords(records) {
     && !snapshotPolicy.isSafeTimestamp(record.timestamp)).length;
 }
 
-function parseIndependentTranscript(provider, records, providerCoverage) {
+function parseIndependentTranscript(provider, records, providerCoverage, config) {
   // Host R5: a single file cannot assign instructions from multiple explicit session identities.
   const mixedSession = hasMixedSessionIdentities(provider, records);
   if (mixedSession) {
@@ -809,7 +828,7 @@ function parseIndependentTranscript(provider, records, providerCoverage) {
   }
   let session;
   try {
-    session = parseFile(provider, records, providerCoverage);
+    session = parseFile(provider, records, providerCoverage, config);
   } catch {
     // Spec §1: malformed candidates cannot abort unrelated sessions.
     providerCoverage.files_failed++;
@@ -840,7 +859,7 @@ function inspectTranscriptIdentity(provider, data) {
 }
 
 // Spec §1.4: use complete prefix records; unresolved identities fall back to one bounded full read.
-function readTranscriptIdentity(provider, fileDescriptor, fileSize) {
+function readTranscriptIdentity(provider, fileDescriptor, fileSize, verifySidechain) {
   const prefix = Buffer.alloc(Math.min(fileSize, IDENTITY_PREFIX_BYTES));
   let bytesRead = 0;
   while (bytesRead < prefix.length) {
@@ -854,10 +873,45 @@ function readTranscriptIdentity(provider, fileDescriptor, fileSize) {
   const completeFile = bytesRead < prefix.length || fileSize <= bytesRead;
   const completeEnd = completeFile ? bytesRead : data.lastIndexOf(10) + 1;
   const identity = inspectTranscriptIdentity(provider, data.subarray(0, completeEnd).toString('utf8'));
-  if (!isIdentityComponent(identity.sessionId) && !completeFile) {
+  if (!completeFile && (!isIdentityComponent(identity.sessionId) || verifySidechain && identity.sidechainOnly)) {
     return inspectTranscriptIdentity(provider, readTranscriptData(fileDescriptor));
   }
   return identity;
+}
+
+// Spec §1.4: preserved mtimes require a complete tail record to prove the file is outside the window.
+function readTranscriptTailTime(fileDescriptor, fileSize) {
+  const start = Math.max(0, fileSize - IDENTITY_PREFIX_BYTES);
+  const buffer = Buffer.alloc(fileSize - start);
+  let bytesRead = 0;
+  while (bytesRead < buffer.length) {
+    const count = fs.readSync(fileDescriptor, buffer, bytesRead, buffer.length - bytesRead, start + bytesRead);
+    if (count === 0) {
+      break;
+    }
+    bytesRead += count;
+  }
+  const data = buffer.subarray(0, bytesRead);
+  const firstComplete = start === 0 ? 0 : data.indexOf(10) + 1;
+  if (start > 0 && firstComplete === 0) {
+    return null;
+  }
+  const lines = data.subarray(firstComplete).toString('utf8').split('\n');
+  for (let index = lines.length - 1; index >= 0; index--) {
+    try {
+      const record = JSON.parse(lines[index]);
+      return isRecordObject(record) ? toIsoTimestamp(record.timestamp) : null;
+    } catch {}
+  }
+  return null;
+}
+
+function isTranscriptOutsideWindow(stats, fileDescriptor, windowSince) {
+  if (stats.mtimeMs >= windowSince) {
+    return false;
+  }
+  const tailTime = readTranscriptTailTime(fileDescriptor, stats.size);
+  return tailTime !== null && Date.parse(tailTime) < windowSince;
 }
 
 function readTranscriptData(fileDescriptor) {
@@ -874,7 +928,7 @@ function isClaudeSubagentFile(provider, file, sidechainOnly) {
 }
 
 // Spec §2: verify the enumerated inode before reading; only one file's records remain in scope.
-function summarizeTranscriptFile(provider, file, providerCoverage, windowSince) {
+function summarizeTranscriptFile(provider, file, providerCoverage, windowSince, config = {}) {
   let fileDescriptor;
   try {
     fileDescriptor = fs.openSync(file.file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
@@ -883,8 +937,9 @@ function summarizeTranscriptFile(provider, file, providerCoverage, windowSince) 
       || openedStats.size > MAX_FILE_BYTES) {
       throw Error();
     }
-    if (file.stats.mtimeMs < windowSince) {
-      const identity = readTranscriptIdentity(provider, fileDescriptor, openedStats.size);
+    if (isTranscriptOutsideWindow(openedStats, fileDescriptor, windowSince)) {
+      const identity = readTranscriptIdentity(provider, fileDescriptor, openedStats.size,
+        isClaudeSubagentFile(provider, file.file, true));
       providerCoverage.files_scanned++;
       if (isClaudeSubagentFile(provider, file.file, identity.sidechainOnly)) {
         providerCoverage.files_skipped++;
@@ -901,7 +956,7 @@ function summarizeTranscriptFile(provider, file, providerCoverage, windowSince) 
       return null;
     }
     const sessionId = transcriptSessionId(provider, records);
-    const parsed = parseIndependentTranscript(provider, records, providerCoverage);
+    const parsed = parseIndependentTranscript(provider, records, providerCoverage, config);
     return { file: file.file, sessionId, ...parsed };
   } catch {
     providerCoverage.files_failed++;
@@ -928,7 +983,7 @@ function scanSessions(readerOptions, config) {
   for (const [provider, root] of roots) {
     for (const file of listFiles(root, coverage[provider], budget)) {
       const summary = summarizeTranscriptFile(provider, file, coverage[provider],
-        +readerOptions.now - 14 * 86400000);
+        +readerOptions.now - 14 * 86400000, config);
       if (summary) {
         groupTranscriptFiles(groups, provider, summary);
       }
@@ -972,12 +1027,6 @@ function scanSessions(readerOptions, config) {
     }
     return inWindow;
   });
-  for (const session of selectedSessions) {
-    for (const instruction of session.items) {
-      instruction.fp = computeInstructionFingerprint(config, instruction);
-      instruction.ref = computeInstructionRef(config, instruction);
-    }
-  }
   return { all: selectedSessions, coverage };
 }
 
@@ -1030,18 +1079,18 @@ function buildSnapshotSession(config, parsedSession, key, kept) {
 }
 
 function buildSnapshotInstruction(instruction, key, index) {
-  const text = instruction.displayText ?? formatCommandWrapperText(instruction.text);
-  const finalizedText = snapshotPolicy.finalizeText(text);
+  const display = instruction.redacted === undefined
+    ? finalizeInstructionText(instruction.displayText ?? instruction.text) : instruction;
   return {
     id: instruction.id,
     session_key: key,
     seq: index + 1,
     ts: instruction.ts,
     kind: instruction.kind,
-    text: finalizedText.value,
-    text_missing: !text,
-    truncated: text.length > 2000,
-    redacted: finalizedText.redacted,
+    text: display.text,
+    text_missing: display.text_missing,
+    truncated: display.truncated,
+    redacted: display.redacted,
     attachments: instruction.attachments,
     unknown_blocks: instruction.unknown_blocks || 0,
     ref: instruction.ref

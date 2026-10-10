@@ -511,7 +511,8 @@ test('recursive allowlist and every exported string slot is sanitized', testCont
     ok: true
   });
   assert.equal(snapshot.instructions[0].text, 'preserved safe [REDACTED]');
-  assert.equal(snapshot.sessions[0].orca_link.confirmed, true);
+  assert.equal(snapshot.sessions[0].orca_link.confirmed, false);
+  assert.equal(snapshot.sessions[0].orca_link.evidence, 'cwd_only');
   assert.equal(JSON.stringify(snapshot).includes(SECRET_SENTINEL), false);
   assert.equal(JSON.stringify(snapshot).includes('/private/'), false);
   const paths = [['machine'], ['coverage', 'orca'], ['sessions', 0], ['instructions', 0], ['orca', 'worktrees',
@@ -2306,7 +2307,7 @@ function trackTranscriptReads(testContext, file) {
 }
 
 for (const provider of ['claude', 'codex']) {
-  test(`PR1c ${provider} old files read at most 64KB; recent and future mtimes read fully`, testContext => {
+  test(`PR1c ${provider} old files read at most 128KB; recent and future mtimes read fully`, testContext => {
     const fixture = createFixture(testContext);
     const rows = provider === 'claude' ? [
       claudeUserRecord('old instruction', { timestamp: OLD_RECORD_TIMESTAMP })
@@ -2316,7 +2317,8 @@ for (const provider of ['claude', 'codex']) {
     ];
     const file = fixture.file(provider, 'large', [
       ...rows,
-      { type: 'assistant', timestamp: OLD_RECORD_TIMESTAMP, padding: 'x'.repeat(4 * 1024 * 1024) }
+      { type: 'assistant', timestamp: OLD_RECORD_TIMESTAMP, padding: 'x'.repeat(4 * 1024 * 1024) },
+      { type: 'assistant', timestamp: OLD_RECORD_TIMESTAMP }
     ]);
     const size = fs.statSync(file).size;
     assert.ok(size > 4 * 1024 * 1024);
@@ -2326,7 +2328,7 @@ for (const provider of ['claude', 'codex']) {
     const old = snapshotReader.runSnapshot(fixture.options);
     assert.equal(old.sessions.length, 0);
     assert.ok(totals.bytes > 0);
-    assert.ok(totals.bytes <= 64 * 1024);
+    assert.ok(totals.bytes <= 128 * 1024);
     assert.equal(totals.fullReads, 0);
     assert.equal(old.coverage[provider].files_scanned, 1);
     if (provider === 'claude') {
@@ -2384,7 +2386,7 @@ function loadReaderWithInternals() {
   const source = fs.readFileSync(filename, 'utf8');
   loaded._compile(source + '\nmodule.exports.testInternals = '
     + '{ listFiles, summarizeTranscriptFile, groupTranscriptFiles, parseFile, '
-    + 'computeInstructionFingerprint, computeInstructionRef, buildSnapshotInstruction };', filename);
+    + 'computeInstructionFingerprint, computeInstructionRef, buildSnapshotInstruction, scanSessions };', filename);
   return loaded.exports.testInternals;
 }
 
@@ -2520,7 +2522,7 @@ for (const provider of ['claude', 'codex']) {
     assert.equal(snapshot.sessions.length, 0);
     assert.equal(snapshot.instructions.length, 0);
     assert.equal(totals.fullReads, 1);
-    assert.equal(totals.bytes, 64 * 1024 + fs.statSync(old).size);
+    assert.equal(totals.bytes, 128 * 1024 + fs.statSync(old).size);
     assert.equal(snapshot.coverage[provider].records_unknown, 0);
     assert.equal(snapshot.coverage[provider].records_unverified, 0);
   });
@@ -2895,7 +2897,7 @@ test('PR1c E absent or nonstring AI titles remain null', testContext => {
   assert.deepEqual(snapshot.sessions.map(session => session.ai_title), [null, null]);
 });
 
-test('PR1c E slash display prefers command-name and sanitizes arguments after formatting', testContext => {
+test('PR1c E slash display formats clean wrappers and preserves sanitized originals', testContext => {
   const fixture = createFixture(testContext);
   const cases = [
     ['<command-message>deep-research</command-message>', '/deep-research'],
@@ -2907,7 +2909,7 @@ test('PR1c E slash display prefers command-name and sanitizes arguments after fo
       + '<command-message>ignored</command-message>', '/review scripts/lib'],
     ['<command-message>review</command-message><command-args>scripts/lib</command-args>', '/review scripts/lib'],
     [`<command-message>review</command-message><command-args>${SECRET_SENTINEL}</command-args>`,
-      '/review [REDACTED]']
+      '<command-message>review</command-message><command-args>[REDACTED]</command-args>']
   ];
   fixture.file('claude', 'slash', cases.map(([text], index) => claudeUserRecord(text, {
     uuid: `slash-${index}`, origin: undefined
@@ -2960,7 +2962,7 @@ test('PR1c E slash display changes preserve legacy fingerprints refs and registe
   fixture.save(config);
   const internals = loadReaderWithInternals();
   const coverage = Object.fromEntries(snapshotPolicy.COVERAGE_KEYS.claude.map(key => [key, 0]));
-  const parsed = internals.parseFile('claude', records, coverage);
+  const parsed = internals.parseFile('claude', records, coverage, config);
   assert.equal(parsed.items.length, 3);
   const fingerprints = [
     '4ef6c039330c29a8d356506f85ba1e55f5fe215bea725b8d051d9d0474197177',
@@ -2968,22 +2970,20 @@ test('PR1c E slash display changes preserve legacy fingerprints refs and registe
     '4048bb79b0e935da8f75be561104cff749885406cba0b282f43a106d3fd91bef'
   ];
   const refs = ['0d41f97426049275', 'c86dd5f327d369d9', 'a7d9b3a58fa39071'];
-  const legacyTexts = ['/deep-research', '///review scripts/lib', `review ${SECRET_SENTINEL}`];
   for (const [index, instruction] of parsed.items.entries()) {
-    assert.equal(instruction.text, legacyTexts[index]);
-    instruction.fp = internals.computeInstructionFingerprint(config, instruction);
+    assert.equal(Object.hasOwn(instruction, 'structure'), false);
     assert.equal(instruction.fp, fingerprints[index]);
-    assert.equal(internals.computeInstructionRef(config, instruction), refs[index]);
+    assert.equal(instruction.ref, refs[index]);
   }
   const snapshot = snapshotReader.runSnapshot(fixture.options);
   assert.equal(snapshot.instructions.length, 3);
   assert.deepEqual(snapshot.instructions.map(item => item.ref), refs);
   assert.deepEqual(snapshot.instructions.map(item => item.text), [
-    '/deep-research', '/review scripts/lib', '/review [REDACTED]'
+    '/deep-research', '/review scripts/lib', snapshotPolicy.finalizeText(texts[2]).value
   ]);
   const target = { kind: 'instruction', instrId: 'claude:s:uslash-1', ref: refs[1] };
   const preview = snapshotReader.excludeQuery({ ...fixture.options, target });
-  assert.equal(preview.preview, legacyTexts[1]);
+  assert.equal(preview.preview, '/review scripts/lib');
   const result = snapshotReader.excludeCommit({ ...fixture.options, target, token: preview.token });
   assert.equal(result.counts.registered, 1);
   const excluded = snapshotReader.runSnapshot(fixture.options);
@@ -3005,15 +3005,15 @@ test('PR1c correction 1 human command wrappers preserve legacy fingerprint ref a
   fixture.save(config);
   const internals = loadReaderWithInternals();
   const coverage = Object.fromEntries(snapshotPolicy.COVERAGE_KEYS.claude.map(key => [key, 0]));
-  const parsed = internals.parseFile('claude', [record], coverage);
+  const parsed = internals.parseFile('claude', [record], coverage, config);
   assert.equal(parsed.items.length, 1);
   const instruction = parsed.items[0];
   assert.equal(instruction.kind, 'human');
-  assert.equal(instruction.text, text);
-  instruction.fp = internals.computeInstructionFingerprint(config, instruction);
+  assert.equal(instruction.text, '/review scripts/lib');
+  assert.equal(Object.hasOwn(instruction, 'structure'), false);
   assert.equal(instruction.fp, '09ba6cf30247bdc65057edb2e3df860bc83976aa2f092014760f724bf1be8f14');
   const ref = '230bb5cd26e1217d';
-  assert.equal(internals.computeInstructionRef(config, instruction), ref);
+  assert.equal(instruction.ref, ref);
   const snapshot = snapshotReader.runSnapshot(fixture.options);
   assert.equal(snapshot.instructions.length, 1);
   assert.equal(snapshot.instructions[0].id, 'claude:s:uhuman-wrapper');
@@ -3041,7 +3041,8 @@ test('PR1c correction 1 human wrapper-only text accepts every order and sanitize
   assert.equal(snapshot.instructions.length, 7);
   assert.deepEqual(snapshot.instructions.map(item => item.kind), records.map(() => 'human'));
   assert.deepEqual(snapshot.instructions.map(item => item.text), [
-    ...orders.map(() => '/review scripts/lib'), '/review [REDACTED]'
+    ...orders.map(() => '/review scripts/lib'),
+    '<command-message>review</command-message><command-args>[REDACTED]</command-args>'
   ]);
   assert.equal(snapshot.instructions.at(-1).redacted, true);
   assert.equal(JSON.stringify(snapshot).includes(SECRET_SENTINEL), false);
@@ -3072,4 +3073,167 @@ test('PR1c correction 1 wrappers with outside text preserve the original display
   assert.equal(snapshot.instructions.length, cases.length);
   assert.deepEqual(snapshot.instructions.map(item => item.kind), cases.map(([, kind]) => kind));
   assert.deepEqual(snapshot.instructions.map(item => item.text), cases.map(([text]) => text));
+});
+
+for (const kind of ['slash', 'human']) {
+  test(`PR1c R1 wrapper formatting preserves original sanitization context for ${kind}`, testContext => {
+    const fixture = createFixture(testContext);
+    const origin = kind === 'human' ? { kind: 'human' } : undefined;
+    const normal = '<command-name>/review</command-name><command-args>scripts/lib</command-args>';
+    const attack = '<command-name>/review</command-name><command-args>password="LEAK_ME</command-args>'
+      + '<command-message>"</command-message>';
+    fixture.file('claude', 'wrappers', [
+      claudeUserRecord(normal, { uuid: 'normal', origin }),
+      claudeUserRecord(attack, { uuid: 'attack', origin })
+    ]);
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(snapshot.instructions.length, 2);
+    assert.equal(snapshot.instructions[0].text, '/review scripts/lib');
+    assert.equal(snapshot.instructions[0].kind, kind);
+    assert.equal(snapshotPolicy.finalizeText(attack).redacted, true);
+    assert.equal(JSON.stringify(snapshot).includes('LEAK_ME'), false);
+    assert.equal(snapshot.instructions[1].text, snapshotPolicy.finalizeText(attack).value);
+    assert.equal(snapshot.instructions[1].kind, kind);
+    assert.equal(snapshot.instructions[1].redacted, true);
+  });
+}
+
+test('PR1c R1 old subagent prefix cannot prove all records are sidechain', testContext => {
+  const fixture = createFixture(testContext);
+  const prefix = Array.from({ length: 800 }, function sidechainRecord() {
+    return { type: 'assistant', sessionId: 's', isSidechain: true, timestamp: OLD_RECORD_TIMESTAMP,
+      padding: 'x'.repeat(80) };
+  });
+  const old = fixture.file('claude', 's/subagents/agent-mixed', [
+    ...prefix, claudeUserRecord('old main', { timestamp: OLD_RECORD_TIMESTAMP })
+  ]);
+  assert.ok(Buffer.byteLength(prefix.map(record => JSON.stringify(record)).join('\n')) > 64 * 1024);
+  setTranscriptMtime(old, OLD_RECORD_TIMESTAMP);
+  fixture.file('claude', 'recent', [claudeUserRecord('recent main')]);
+  const totals = trackTranscriptReads(testContext, old);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.coverage.claude.multi_file_withheld, 1);
+  assert.equal(snapshot.coverage.claude.files_skipped, 0);
+  assert.equal(snapshot.sessions.length, 0);
+  assert.equal(snapshot.instructions.length, 0);
+  assert.equal(totals.fullReads, 1);
+  assert.equal(snapshot.coverage.claude.records_unknown, 0);
+});
+
+for (const provider of ['claude', 'codex']) {
+  test(`PR1c R1 ${provider} preserved old mtime cannot change snapshot refs or exclusion tokens`, testContext => {
+    const fixture = createFixture(testContext);
+    const rows = provider === 'claude' ? [claudeUserRecord('recent instruction')]
+      : [codexSessionMeta(), codexMessage('recent instruction')];
+    const file = fixture.file(provider, 'recent', rows);
+    const before = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(before.instructions.length, 1);
+    const target = instructionTarget(before.instructions[0]);
+    const preview = snapshotReader.excludeQuery({ ...fixture.options, target });
+    setTranscriptMtime(file, OLD_RECORD_TIMESTAMP);
+    const after = snapshotReader.runSnapshot(fixture.options);
+    assert.deepEqual(after, before);
+    const rechecked = snapshotReader.excludeQuery({ ...fixture.options, target });
+    assert.deepEqual(rechecked, preview);
+    const committed = snapshotReader.excludeCommit({ ...fixture.options, target, token: preview.token });
+    assert.equal(committed.code, 'ok');
+    assert.equal(committed.counts.registered, 1);
+    assert.equal(snapshotReader.runSnapshot(fixture.options).instructions.length, 0);
+  });
+}
+
+test('PR1c R1 missing tail timestamp reads fully while old tail timestamps keep identity-only coverage',
+  testContext => {
+  const fixture = createFixture(testContext);
+  const recent = fixture.file('claude', 'a-recent', [
+    claudeUserRecord('recent instruction'),
+    { type: 'assistant', padding: 'x'.repeat(128 * 1024) }
+  ]);
+  setTranscriptMtime(recent, OLD_RECORD_TIMESTAMP);
+  const totals = trackTranscriptReads(testContext, recent);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.instructions.length, 1);
+  assert.equal(snapshot.instructions[0].text, 'recent instruction');
+  assert.equal(totals.fullReads, 1);
+  fs.unlinkSync(recent);
+  const old = fixture.file('claude', 'b-old', [
+    claudeUserRecord('unknown old', { origin: undefined, timestamp: OLD_RECORD_TIMESTAMP }),
+    { type: 'assistant', timestamp: OLD_RECORD_TIMESTAMP, padding: 'x'.repeat(128 * 1024) },
+    { type: 'assistant', timestamp: OLD_RECORD_TIMESTAMP }
+  ]);
+  setTranscriptMtime(old, OLD_RECORD_TIMESTAMP);
+  const oldTotals = trackTranscriptReads(testContext, old);
+  const outside = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(outside.instructions.length, 0);
+  assert.equal(outside.coverage.claude.records_unknown, 0);
+  assert.equal(outside.coverage.claude.records_unverified, 0);
+  assert.equal(oldTotals.fullReads, 0);
+  assert.equal(oldTotals.bytes, 128 * 1024);
+});
+
+function countStoredStringCharacters(value) {
+  if (typeof value === 'string') {
+    return value.length;
+  }
+  if (!value || typeof value !== 'object') {
+    return 0;
+  }
+  return Object.values(value).reduce((sum, entry) => sum + countStoredStringCharacters(entry), 0);
+}
+
+test('PR1c R1 large instructions retain bounded sanitized text and pre-change fingerprints and refs', testContext => {
+  const fixture = createFixture(testContext);
+  const body = 'LARGE_HUMAN_SENTINEL_' + 'x'.repeat(2 * 1024 * 1024) + '\npassword="PRIVATE_LARGE_VALUE"';
+  for (const provider of ['claude', 'codex']) {
+    for (let index = 0; index < 3; index++) {
+      fixture.file(provider, `large-${index}`, provider === 'claude' ? [
+        claudeUserRecord(body, { sessionId: `large-${index}`, uuid: 'large' })
+      ] : [codexSessionMeta({ id: `large-${index}` }), codexMessage(body)]);
+    }
+  }
+  const config = snapshotReader.loadConfig(fixture.options);
+  config.machine_id = 'fixture-machine';
+  config.local_key = 'b'.repeat(64);
+  config.key_fingerprint = crypto.createHash('sha256').update(config.local_key).digest('hex');
+  fixture.save(config);
+  const { scanSessions } = loadReaderWithInternals();
+  const scanned = scanSessions(fixture.options, config);
+  assert.equal(scanned.all.length, 6);
+  const items = scanned.all.flatMap(session => session.items);
+  assert.equal(items.length, 6);
+  const storedCharacters = countStoredStringCharacters(scanned);
+  testContext.diagnostic(`Retained ${storedCharacters} string characters for ${items.length} instructions`);
+  assert.ok(storedCharacters <= items.length * 2400);
+  for (const session of scanned.all) {
+    const item = session.items[0];
+    assert.equal(item.text.length, 2000);
+    assert.equal(item.redacted, true);
+    assert.equal(item.truncated, true);
+    assert.equal(Object.hasOwn(item, 'structure'), false);
+    assert.equal(Object.hasOwn(item, 'displayText'), false);
+    assert.equal(snapshotPolicy.finalizeText(item.text).value, item.text);
+    assert.equal(item.fp, '32292a1c53fa996395405d287acf5850e86891f52b16df37fc2675c78803a1fc');
+    if (session.sid === 'large-0') {
+      assert.equal(item.ref, session.provider === 'claude' ? '4fac5f99c15c819c' : '5fb366e753bb839b');
+    }
+  }
+  assert.equal(JSON.stringify(scanned).includes('PRIVATE_LARGE_VALUE'), false);
+});
+
+test('PR1c R1 Orca evidence uses bounded sanitized instruction text', testContext => {
+  const fixture = createFixture(testContext);
+  const cases = [
+    ['ordinary word '.repeat(250), 'ordinary word '.repeat(250), 'prompt_prefix'],
+    ['review password="ORCA_PRIVATE_VALUE"', 'review password="ORCA_PRIVATE_VALUE"', 'cwd_only'],
+    ['review password="ORCA_PRIVATE_VALUE"', 'review [REDACTED]', 'prompt_exact']
+  ];
+  for (const [text, prompt, evidence] of cases) {
+    fixture.file('claude', 'link', [claudeUserRecord(text)]);
+    fixture.options.runOrca = orcaRunner([orcaWorktree(prompt)], [orcaTerminal()]);
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(snapshot.instructions.length, 1);
+    assert.equal(snapshot.sessions[0].orca_link.evidence, evidence);
+    assert.equal(snapshot.sessions[0].orca_link.confirmed, evidence === 'prompt_exact');
+    assert.equal(JSON.stringify(snapshot).includes('ORCA_PRIVATE_VALUE'), false);
+  }
 });
