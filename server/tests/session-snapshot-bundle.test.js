@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { fixture } = require('./fixtures/session-snapshot/helpers.cjs');
+const { fixture, recordingSpawn } = require('./fixtures/session-snapshot/helpers.cjs');
 const api = import('../../scripts/lib/sessionSnapshotBundle.mjs');
 async function execute(f, request = f.request, extra = {}, overrides) {
   const m = await api;
@@ -103,7 +103,30 @@ test('manifest static closure and runtime closure are enforced', async t => {
     sshBin: f.env.PALANTIR_OBSERVE_SSH_BIN, env: f.env });
   assert.equal(JSON.parse(result.stdout).code, 'internal_error');
 });
-test('closed request, old Node, status validation, direct bare Orca guard and executor guard', async t => {
+test('manifest rejects additional builtin and native loading tokens', async t => {
+  const f = fixture(t);
+  const m = await api;
+  const good = await execute(f);
+  exactSnapshot(good.envelope);
+  for (const source of ["process.getBuiltinModule('node:net')",
+    "const createRequire = function () {};", "process.dlopen(module, '/synthetic/native.node')"]) {
+    await t.test(source, () => {
+      assert.throws(() => m.buildBundle({ request: f.request,
+        sourceOverrides: { 'scripts/lib/sessionSnapshotReader.cjs': source } }), { code: 'bundle_rejected' });
+    });
+  }
+});
+test('runtime removes builtin lookup before compiling manifest modules', async t => {
+  const f = fixture(t);
+  const source = "process['getBuiltin' + 'Module']('node:net'); " +
+    "process.stdout.write(JSON.stringify('BYPASS_MARKER') + '\\n');";
+  const response = await execute(f, f.request, {}, { 'scripts/lib/sessionSnapshotReader.cjs': source });
+  assert.equal(response.envelope.code, 'internal_error');
+  assert.equal(response.result.exitCode, 1);
+  assert.equal(response.result.stderrBytes, 0);
+  assert.equal(response.result.stdout.includes('BYPASS_MARKER'), false);
+});
+test('closed request, simulated old major, status validation, bare Orca and executor guards', async t => {
   const f = fixture(t);
   const m = await api;
   const good = await execute(f);
@@ -148,10 +171,10 @@ test('closed request, old Node, status validation, direct bare Orca guard and ex
     sshBin: f.env.PALANTIR_OBSERVE_SSH_BIN, env: f.env, spawnImpl: countedSpawn });
   assert.equal(counted.exitCode, 0);
   assert.equal(spawns, 1);
-  spawns = 0;
-  assert.throws(() => m.runExecutor({ target: f.target, bundle: good.bundle, sshBin: '/usr/bin/ssh',
-    spawnImpl: countedSpawn }), { code: 'PALANTIR_SPAWN_BLOCKED' });
-  assert.equal(spawns, 0);
+  const denied = recordingSpawn(t);
+  await assert.rejects(async () => m.runExecutor({ target: f.target, bundle: good.bundle, sshBin: '/usr/bin/ssh',
+    env: f.env, spawnImpl: denied.spawnImpl }), { code: 'PALANTIR_SPAWN_BLOCKED' });
+  assert.equal(denied.calls.length, 0);
 });
 test('remote write probe permits only config, lock and temporary config writes', async t => {
   const f = fixture(t);
@@ -242,7 +265,7 @@ test('reader compiled in global scope cannot see registry or bundle source varia
     native: 'undefined', globalModule: 'undefined', globalExports: 'undefined',
     filename: 'undefined', dirname: 'undefined', functionRequire: 'undefined' });
 });
-test('old Node rejects before compiling other manifest modules; modern compile errors stay silent', async t => {
+test('simulated old major rejects before compiling other modules; modern compile errors stay silent', async t => {
   const f = fixture(t);
   const good = await execute(f);
   exactSnapshot(good.envelope);
@@ -334,7 +357,7 @@ test('executor resolves bare ssh using the spawn environment before guarding', a
   const executable = path.join(outside, name);
   fs.writeFileSync(executable, '#!' + process.execPath + '\n', { mode: 0o700 });
   let spawns = 0;
-  const spawnImpl = () => { spawns++; throw new Error('spawn_should_not_run'); };
+  const denied = recordingSpawn(t);
   const parentPath = process.env.PATH;
   t.after(() => { process.env.PATH = parentPath; });
   process.env.PATH = path.dirname(f.env.PALANTIR_OBSERVE_SSH_BIN);
@@ -349,17 +372,16 @@ test('executor resolves bare ssh using the spawn environment before guarding', a
   assert.equal(allowed.exitCode, 0);
   assert.equal(spawns, 1);
   assert.equal(spawnedCommand, fs.realpathSync(f.env.PALANTIR_OBSERVE_SSH_BIN));
-  spawns = 0;
   await assert.rejects(async () => m.runExecutor({ target: f.target, bundle: good.bundle, sshBin: name,
-    env: { ...f.env, PATH: outside }, spawnImpl }), error => {
+    env: { ...f.env, PATH: outside }, spawnImpl: denied.spawnImpl }), error => {
     assert.equal(error.code, 'PALANTIR_SPAWN_BLOCKED');
     assert.equal(error.details.resolvedCommand, fs.realpathSync(executable));
     return true;
   });
-  assert.equal(spawns, 0);
+  assert.equal(denied.calls.length, 0);
   assert.throws(() => m.runExecutor({ target: f.target, bundle: good.bundle, sshBin: 'missing-ssh',
-    env: { ...f.env, PATH: outside }, spawnImpl }), { code: 'ENOENT' });
-  assert.equal(spawns, 0);
+    env: { ...f.env, PATH: outside }, spawnImpl: denied.spawnImpl }), { code: 'ENOENT' });
+  assert.equal(denied.calls.length, 0);
 });
 test('atomic snapshot collision preserves the temporary file owned by another writer', async t => {
   const f = fixture(t);
@@ -403,7 +425,7 @@ test('atomic snapshot cleans its own failed write and does not unlink after a su
   assert.equal(fs.readFileSync(other, 'utf8'), 'other writer');
   assert.deepEqual(fs.readFileSync(file), before);
 });
-test('Node 10 bootstrap without globalThis rejects before compiling modern reader source', async t => {
+test('simulated old major without globalThis rejects before compiling modern reader source', async t => {
   const f = fixture(t);
   const m = await api;
   const bundle = m.buildBundle({ request: f.request,

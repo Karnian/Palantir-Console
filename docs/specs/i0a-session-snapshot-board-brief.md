@@ -132,7 +132,7 @@
   - 읽기 본체 `scripts/lib/sessionSnapshotReader.cjs` — parser, 연결, 제외 적용, 스냅샷 조립, `observe.json` 관리. **번들에 들어가는 쪽**이다.
   - 반출 정책은 공유 모듈 `server/services/observeSnapshotPolicy.js` 에 둔다. 서버도 같은 모듈로 재검증한다.
   - 살균은 `memorySanitize.redactSecrets` 를 require 해서 쓴다. 로직을 복제하지 않는다.
-  - npm 의존성이 없고 Node 18 이상에서 돈다. 시작할 때 Node major 를 검사하고, 미달이면 고정 코드 `node_unsupported` 로 끝낸다.
+  - npm 의존성이 없고 Node 18 이상에서 돈다. 시작할 때 Node major 를 검사하고, 미달이면 고정 코드 `node_unsupported` 로 끝낸다. 이 코드는 Node 14.18 이상에서 보장한다. 그보다 오래된 Node(`node:` 접두사 require 미지원)에서는 일반 실패로 끝나고, Mac 은 아무것도 기록하지 않는다.
   - **원격 머신에는 Node 만 있으면 된다.** repo checkout 도, 파일 설치도 필요 없다(§2.3). 원격에 남는 것은 `observe.json` 하나뿐이다.
 - **읽는 경로**: Claude·Codex transcript 디렉터리 두 종류만 허용한다(기본 `~/.claude/projects`, `~/.codex/sessions`). 다른 종류의 경로는 거부한다. 심볼릭 링크는 따라가지 않는다. 파일 수와 파일당 바이트에 상한을 둔다.
 - **머신 측 설정** `~/.config/palantir/observe.json` (0600):
@@ -208,7 +208,7 @@
 - **번들**: Mac 이 실행할 때마다 메모리에서 만든다. 커밋하지 않는다.
   - 대상은 **고정 manifest** 다: `memorySanitize.js`, `observeSnapshotPolicy.js`, `sessionSnapshotReader.cjs`, 번들 launcher.
   - 작은 모듈 레지스트리로 감싼다. **런타임 resolver** 는 manifest 안 상대경로와 내장 모듈 allowlist(`node:fs`, `node:path`, `node:os`, `node:crypto`, `node:child_process`)만 해석하고, 그 밖은 throw 한다.
-  - **정적 검사**: manifest 소스에 리터럴이 아닌 `require(`, `module.require`, `import(`, `process.binding` 이 있으면 번들 생성이 고정 코드로 실패한다.
+  - **정적 검사**: manifest 소스에 리터럴이 아닌 `require(`, `module.require`, `import(`, `process.binding`, `getBuiltinModule`, `createRequire`, `process.dlopen` 이 있으면 번들 생성이 고정 코드로 실패한다. 런타임도 모듈 컴파일 전에 `process.getBuiltinModule` 을 없앤다.
   - **위협 모델 (PR1b 확정)**: 정적 검사와 런타임 resolver 는 **검토된 manifest 코드가 실수로 import 를 넓히는 것**을 막는다. 악의적인 manifest 코드를 격리하지는 않는다(manifest 는 이 repo 의 코드다). 그 범위 안에서 다음을 둔다: 모듈은 전역 스코프에서 strict mode 로 지연 컴파일한다(`new Function`, 런타임 클로저·호출 스택 비노출). 실행 전에 전역 `require`·`module`·`exports` 를 지운다. 내장 allowlist 는 null-prototype 객체로 조회한다. prototype 변조 같은 적대적 코드 경로는 다루지 않는다.
   - `reader_build` 는 **출처 추적값**이다. 정의는 SHA-256(정규 인코딩 `["palantir.snapshot-bundle/1", [경로, 바이트 길이, 바이트]…]`, manifest 경로순)의 앞 16 hex 이고, 문법은 `^[0-9a-f]{16}$` 다. REQUEST 줄은 해시 입력에 포함하지 않는다. Mac 은 받은 응답의 `reader_build` 가 **자기가 보낸 번들의 값과 같은지** 확인한다.
 - **응답 프로토콜 — stdout 의 envelope 하나.**
@@ -525,3 +525,4 @@
   - launcher 가 스스로 만드는 상태 envelope(`request_invalid`·`node_unsupported`·`internal_error`·reader 오류 변환)은 `machine_id` 를 `unknown` 으로 고정한다. 설정 파일을 다시 읽어 반출하면 정책 검사를 거치지 않은 값이 나갈 수 있었다.
   - 실행기는 실행 파일을 **spawn 에 넘길 env 의 PATH 로** 절대경로까지 해석한 뒤, 그 경로로 가드 검사와 spawn 을 함께 한다.
   - exclude 도 `--now` 를 받는다. 조회와 기록은 같은 now 를 쓴다.
+  - R2: `process.getBuiltinModule`·`createRequire` 로 import 를 넓히는 경로를 정적 검사와 런타임 양쪽에서 막았다. spawn 가드 음성 테스트는 실제 spawn 을 부르지 않는 기록 전용 스텁으로 바꿨다(가드를 지워도 fixture 밖 프로그램이 실행되지 않음). `node_unsupported` 보장 범위를 Node 14.18 이상으로 좁혔다.

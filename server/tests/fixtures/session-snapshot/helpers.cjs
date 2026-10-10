@@ -2,7 +2,8 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { Readable } = require('node:stream');
+const { Readable, PassThrough } = require('node:stream');
+const { EventEmitter } = require('node:events');
 const { spawn } = require('node:child_process');
 const NOW = '2026-10-08T03:00:00.000Z';
 const BIN = path.resolve(__dirname, '../bin');
@@ -27,13 +28,33 @@ function fixture(t) {
   return { root, home, config, env, request, write, out: path.join(root, 'out'),
     target: { kind: 'remote', host: 'synthetic@host', remoteNode: '/synthetic/node' } };
 }
-function capture(input = '') {
+function capture(input = '', executorSpawn = spawn) {
   let output = '';
   let errors = '';
   let spawns = 0;
   return { stdin: Readable.from([input]), stdout: { write(text) { output += text; } },
     stderr: { write(text) { errors += text; } },
-    spawnImpl(...args) { spawns++; return spawn(...args); },
+    spawnImpl(...args) { spawns++; return executorSpawn(...args); },
     output: () => output, errors: () => errors, spawns: () => spawns };
 }
-module.exports = { fixture, capture, NOW, BIN };
+function recordingSpawn(t) {
+  const calls = [];
+  function spawnImpl(command, args, options) {
+    calls.push({ command, args, options });
+    t.diagnostic(JSON.stringify({ stubCommand: command, args, realSpawns: 0 }));
+    const child = new EventEmitter();
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.stdin.resume();
+    child.kill = () => false;
+    setImmediate(() => {
+      child.stdout.end();
+      child.stderr.end();
+      child.emit('close', 1, null);
+    });
+    return child;
+  }
+  return { calls, spawnImpl };
+}
+module.exports = { fixture, capture, recordingSpawn, NOW, BIN };

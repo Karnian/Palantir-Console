@@ -27,6 +27,7 @@ function rejectBundle() {
 }
 function checkSource(name, source) {
   if (/module\s*\.\s*require|import\s*\(|process\s*\.\s*binding/.test(source)) rejectBundle();
+  if (/\b(?:getBuiltinModule|createRequire)\b|process\s*\.\s*dlopen\b/.test(source)) rejectBundle();
   for (const match of source.matchAll(/\brequire\s*\(\s*([^)]*)\)/g)) {
     const literal = /^(['"])([^'"\n]*)\1\s*$/.exec(match[1]);
     if (!literal || !resolveModule(name, literal[2])) rejectBundle();
@@ -43,6 +44,7 @@ export function buildBundle({ request, sourceOverrides = {} }) {
 (function snapshotRuntime(request) {
   'use strict';
   const nativeRequire = require;
+  if (typeof process.getBuiltinModule === 'function') delete process.getBuiltinModule;
   const runtimeGlobal = typeof globalThis !== 'undefined' ? globalThis : global;
   const BUILTINS = Object.create(null);
   ${JSON.stringify(builtins)}.forEach(function allowBuiltin(name) { BUILTINS[name] = true; });

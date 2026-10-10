@@ -2,15 +2,16 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { fixture, capture, NOW } = require('./fixtures/session-snapshot/helpers.cjs');
+const { spawnSync } = require('node:child_process');
+const { fixture, capture, recordingSpawn, NOW } = require('./fixtures/session-snapshot/helpers.cjs');
 const api = import('../../scripts/lib/sessionSnapshotBundle.mjs');
 const cli = import('../../scripts/session-snapshot.mjs');
 function args(f, extra = []) {
   return ['remote', '--host', 'synthetic@host', 'snapshot', '--now', NOW,
     '--out-dir', f.out, '--orca-bin', f.request.orca_bin, ...extra];
 }
-async function invoke(f, argv, input = '', env = f.env) {
-  const io = capture(input);
+async function invoke(f, argv, input = '', env = f.env, executorSpawn) {
+  const io = capture(input, executorSpawn);
   const code = await (await cli).main(argv, { ...io, env });
   return { ...io, code };
 }
@@ -57,25 +58,28 @@ test('CLI writes a snapshot and preserves exact existing bytes on every rejected
 test('Mac validation and Orca guard reject before spawn; target metacharacters remain request data', async t => {
   const f = fixture(t);
   await initialize(f);
+  const denied = recordingSpawn(t);
   for (const host of ['-oProxyCommand=x', 'space host', 'a;b', '']) {
     const result = await invoke(f, ['remote', '--host', host, 'snapshot', '--out-dir', f.out,
-      '--orca-bin', f.request.orca_bin]);
+      '--orca-bin', f.request.orca_bin], '', f.env, denied.spawnImpl);
     assert.equal(result.code, 2);
     assert.equal(result.spawns(), 0);
   }
   for (const node of ['relative/node', '/$(x)']) {
-    const result = await invoke(f, [...args(f), '--remote-node', node]);
+    const result = await invoke(f, [...args(f), '--remote-node', node], '', f.env, denied.spawnImpl);
     assert.equal(result.code, 2);
     assert.equal(result.spawns(), 0);
   }
   for (const argv of [['snapshot'], [...args(f), '--now', 'bad'],
-    ['snapshot', '--out-dir', f.out, '--orca-bin', '/bin/true']]) {
+    ['snapshot', '--now', NOW, '--out-dir', f.out, '--orca-bin', '/bin/true']]) {
     const before = fs.readFileSync(f.env.FAKE_ORCA_SPAWN_LOG);
-    const result = await invoke(f, argv);
+    const result = await invoke(f, argv, '', f.env, denied.spawnImpl);
     assert.equal(result.code, 2);
     assert.equal(result.spawns(), 0);
+    if (argv.includes('/bin/true')) assert.equal(result.errors(), 'PALANTIR_SPAWN_BLOCKED\n');
     assert.deepEqual(fs.readFileSync(f.env.FAKE_ORCA_SPAWN_LOG), before);
   }
+  assert.equal(denied.calls.length, 0);
   const malicious = 'claude:s;"$(x)';
   const argv = exclusionArgs(f);
   argv[argv.indexOf('claude:s')] = malicious;
@@ -84,6 +88,26 @@ test('Mac validation and Orca guard reject before spawn; target metacharacters r
   assert.equal(result.spawns(), 1);
   assert.match(result.output(), /request_invalid/);
   assert.equal(fs.readFileSync(f.env.FAKE_SSH_ARGV_LOG, 'utf8').includes(malicious), false);
+});
+test('CLI entrypoint propagates invalid input exit status and writes a real fixture snapshot', async t => {
+  const f = fixture(t);
+  const entrypoint = path.resolve(__dirname, '../../scripts/session-snapshot.mjs');
+  const invalid = spawnSync(process.execPath, [entrypoint, 'remote', '--host', '-bad', 'snapshot',
+    '--now', NOW, '--out-dir', f.out, '--orca-bin', f.request.orca_bin], { env: f.env, encoding: 'utf8' });
+  assert.equal(invalid.error, undefined);
+  assert.equal(invalid.status, 2);
+  assert.equal(invalid.stdout, '');
+  assert.equal(invalid.stderr, 'request_invalid\n');
+  assert.equal(fs.existsSync(f.out), false);
+  const valid = spawnSync(process.execPath, [entrypoint, ...args(f)], { env: f.env, encoding: 'utf8' });
+  assert.equal(valid.error, undefined);
+  assert.equal(valid.status, 0, valid.stderr);
+  const files = fs.readdirSync(f.out);
+  assert.equal(files.length, 1);
+  const snapshot = JSON.parse(fs.readFileSync(path.join(f.out, files[0])));
+  assert.equal(snapshot.sessions.length, 1);
+  assert.equal(snapshot.instructions.length, 1);
+  assert.equal(snapshot.instructions[0].text, 'Synthetic instruction A');
 });
 test('exclude query is read only, default No never spawns commit, yes registers once', async t => {
   const f = fixture(t);
