@@ -43,7 +43,7 @@
 
 - **큐**: `queue-operation` 은 지시로 내보내지 않고 coverage 에 `queued_enqueued / dequeued / removed` 개수만 기록한다. 실제로 전달된 입력은 행 9 의 `promptSource=queued` 로 잡힌다. 큐에서 제거된 입력은 "취소된 입력" 개수로만 남는다.
 - **`ai-title`**: 세션의 `ai_title` 로 쓴다. §2.1 의 TEXT 정책을 적용하고 파일 안 마지막 값을 쓴다. 실제 레코드에는 `timestamp` 가 없다(`type, aiTitle, sessionId` 만) — 시각을 요구하지 않는다.
-- **명령 래퍼 표시**: 지시 텍스트가 `<command-name>`·`<command-message>`·`<command-args>` 래퍼로만 이뤄져 있으면 표시 텍스트를 `/name args` 로 정리한다(분류·지문·ref·삭제 신원은 원문 기준 그대로).
+- **명령 래퍼 표시**: reader 는 표시를 정리하지 않는다 — 지시 텍스트는 **원문 전체를 살균**한 결과다(래퍼 태그가 남는다). 보기 좋은 `/name args` 표시는 화면이 이미 살균된 텍스트에서 태그를 걷어 만든다. 지문·ref 는 slash 지시도 원문 전체를 포함한다(표시가 바뀌는 모든 변경이 ref 변경이 되게). reader 단계 정리는 PR1c 리뷰 R1~R3 에서 같은 계열(살균 문맥 파괴, 지문 밖 문장, 긴 인자 소실)이 반복돼 범위를 줄여 닫았다.
 - **순서와 신원**: 순서는 `timestamp` → 파일 내 위치로 정한다. 세션 신원은 `sessionId`, **레코드 신원은 `uuid`** 다(§2 삭제 신원).
 
 ### 1.2 Codex — 세션 포함 여부와 실행 방식을 따로 판정한 뒤, 메시지·블록 단위로 판별
@@ -535,4 +535,4 @@
   - R4: 같은 계열(주석을 끼운 `process.binding`·`dlopen`·`require`)이 다시 나왔다 → 정적 검사를 **형태 추적에서 단어 규칙으로** 바꿔 계열 전체를 닫았다(§2.3). 그 밖에 CLI timeout 뒤 기존 파일 보존, 큰 정상 envelope 의 flush 를 테스트로 고정했다.
   - R5: 정적 검사 계열은 닫힘. timeout 때 ssh 자손이 파이프를 쥐면 끝나지 않던 문제 → 프로세스 그룹 kill + 파이프 닫기 + 2초 backstop. 로컬 실행기의 가드 호출을 호출 기록으로 검증.
 - **PR2a (2026-10-10)**: endpoint + runbook. codex 코드 적대리뷰 R1~R3 NO-GO → R4 GO. 반영: 파일명도 정책 ID 슬롯(비밀값 탐지)으로 거르기, `O_NONBLOCK`(FIFO 교체 대기), 목록 파일 수 상한 256, 상세의 정확한 파일명 대조(대소문자 무시 FS), 루트 설정값 글자 그대로 비교·공개 폴더 안 거부, 정적 서빙의 디코딩 기준 `/api` 제외, CLI 의 공개 폴더 출력 거부, cookie 아닌 요청은 오류 종류와 무관하게 403(단일 규칙). 범위 밖으로 확정: 죽은 manager capability 요청 때 전역 auth 의 `probeActive` 정리(전역 auth 기존 동작, "전역 auth 무변경").
-- **PR1c (2026-10-10, 실데이터 검증으로 발견)**: Mac 실데이터(Claude 1.6GB·Codex 5.6GB)에서 번들이 V8 힙 4GB OOM 으로 죽었다 — 합성 fixture 로는 드러나지 않았다. 고친 것: 창 밖 파일은 신원만, 창 안 파일은 한 번에 하나씩 파싱 후 원본 폐기(10.8초, 정상 종료). 하위 에이전트 파일 제외(codev2 보류 20→0), `--label`, Orca CLI 실제 envelope·숫자 시각·`tabId:leafId` 연결, `ai-title` 시각 미요구(AI 제목 0/153 → Mac 65/96), 명령 래퍼 표시 정리.
+- **PR1c (2026-10-10, 실데이터 검증으로 발견)**: Mac 실데이터(Claude 1.6GB·Codex 5.6GB)에서 번들이 V8 힙 4GB OOM 으로 죽었다 — 합성 fixture 로는 드러나지 않았다. 고친 것: 창 밖 파일은 신원만, 창 안 파일은 한 번에 하나씩 파싱 후 원본 폐기(10.8초, 정상 종료). 하위 에이전트 파일 제외(codev2 보류 20→0), `--label`, Orca CLI 실제 envelope·숫자 시각·`tabId:leafId` 연결, `ai-title` 시각 미요구(AI 제목 0/153 → Mac 65/96). 명령 래퍼 표시 정리는 리뷰 R1~R3 에서 같은 계열 결함이 반복돼 reader 에서 빼고 화면으로 옮겼다. Orca 연결 비교는 원문(정규화) 해시·접두어 기준(§2.2).

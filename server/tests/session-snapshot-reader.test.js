@@ -279,7 +279,8 @@ test('Claude ordered decision table explicitly protects rows 4,6,7, queue and ti
   const snapshot = snapshotReader.runSnapshot(testFixture.options);
   assert.equal(snapshot.instructions.length, 7);
   assert.deepEqual(snapshot.instructions.map(instruction => instruction.text), [
-    'normal', '/good arg', '/not-absent',
+    'normal', '<command-name>/good</command-name><command-args>arg</command-args>',
+    '<command-name>/not-absent</command-name>',
     'echo safe', 'pasted safe', 'queued safe', ''
   ]);
   assert.equal(snapshot.instructions[2].kind, 'human');
@@ -511,8 +512,8 @@ test('recursive allowlist and every exported string slot is sanitized', testCont
     ok: true
   });
   assert.equal(snapshot.instructions[0].text, 'preserved safe [REDACTED]');
-  assert.equal(snapshot.sessions[0].orca_link.confirmed, false);
-  assert.equal(snapshot.sessions[0].orca_link.evidence, 'cwd_only');
+  assert.equal(snapshot.sessions[0].orca_link.confirmed, true);
+  assert.equal(snapshot.sessions[0].orca_link.evidence, 'prompt_exact');
   assert.equal(JSON.stringify(snapshot).includes(SECRET_SENTINEL), false);
   assert.equal(JSON.stringify(snapshot).includes('/private/'), false);
   const paths = [['machine'], ['coverage', 'orca'], ['sessions', 0], ['instructions', 0], ['orca', 'worktrees',
@@ -1300,7 +1301,7 @@ test('review 3 human-origin command wrapper falls through to human while absent 
   assert.equal(snapshot.instructions[0].text, 'safe preserved');
   assert.equal(snapshot.instructions.length, 3);
   assert.deepEqual(snapshot.instructions.map(instruction => instruction.kind), ['human', 'human', 'slash']);
-  assert.equal(snapshot.instructions[1].text, '/help');
+  assert.equal(snapshot.instructions[1].text, '<command-name>/help</command-name>');
   assert.equal(snapshot.coverage.claude.records_unknown, 1);
 });
 
@@ -2899,28 +2900,28 @@ test('PR1c E absent or nonstring AI titles remain null', testContext => {
   assert.deepEqual(snapshot.sessions.map(session => session.ai_title), [null, null]);
 });
 
-test('PR1c E slash display formats commands after original-context sanitization', testContext => {
+test('PR1c E slash display preserves sanitized raw command wrappers', testContext => {
   const fixture = createFixture(testContext);
   const cases = [
-    ['<command-message>deep-research</command-message>', '/deep-research'],
-    ['<command-name>deep-research</command-name><command-message>ignored</command-message>'
-      + '<command-args></command-args>', '/deep-research'],
-    ['<command-message>ignored</command-message><command-args>scripts/lib</command-args>'
-      + '<command-name>///review</command-name>', '/review scripts/lib'],
-    ['<command-name>/review</command-name><command-args>scripts/lib</command-args>'
-      + '<command-message>ignored</command-message>', '/review scripts/lib'],
-    ['<command-message>review</command-message><command-args>scripts/lib</command-args>', '/review scripts/lib'],
-    [`<command-message>review</command-message><command-args>${SECRET_SENTINEL}</command-args>`,
-      '/review [REDACTED]']
+    '<command-message>deep-research</command-message>',
+    '<command-name>deep-research</command-name><command-message>ignored</command-message>'
+      + '<command-args></command-args>',
+    '<command-message>ignored</command-message><command-args>scripts/lib</command-args>'
+      + '<command-name>///review</command-name>',
+    '<command-name>/review</command-name><command-args>scripts/lib</command-args>'
+      + '<command-message>ignored</command-message>',
+    '<command-message>review</command-message><command-args>scripts/lib</command-args>',
+    `<command-message>review</command-message><command-args>${SECRET_SENTINEL}</command-args>`
   ];
-  fixture.file('claude', 'slash', cases.map(([text], index) => claudeUserRecord(text, {
+  fixture.file('claude', 'slash', cases.map((text, index) => claudeUserRecord(text, {
     uuid: `slash-${index}`, origin: undefined
   })));
   const snapshot = snapshotReader.runSnapshot(fixture.options);
   assert.equal(snapshot.sessions.length, 1);
   assert.equal(snapshot.instructions.length, cases.length);
   assert.deepEqual(snapshot.instructions.map(item => item.kind), cases.map(() => 'slash'));
-  assert.deepEqual(snapshot.instructions.map(item => item.text), cases.map(([, expected]) => expected));
+  assert.deepEqual(snapshot.instructions.map(item => item.text),
+    cases.map(text => snapshotPolicy.finalizeText(text).value));
   assert.equal(snapshot.instructions.at(-1).redacted, true);
   assert.equal(JSON.stringify(snapshot).includes(SECRET_SENTINEL), false);
   for (const item of snapshot.instructions) {
@@ -2928,7 +2929,7 @@ test('PR1c E slash display formats commands after original-context sanitization'
   }
 });
 
-test('PR1c E already-classified slash display accepts every tag order and preserves tagless text', () => {
+test('PR1c E already-classified slash display preserves every tag order and tagless text', () => {
   const { buildSnapshotInstruction } = loadReaderWithInternals();
   const tags = ['<command-name>/review</command-name>', '<command-message>ignored</command-message>',
     '<command-args>scripts/lib</command-args>'];
@@ -2939,14 +2940,14 @@ test('PR1c E already-classified slash display accepts every tag order and preser
     const text = order.map(index => tags[index]).join('\n');
     const displayed = buildSnapshotInstruction({ ...instruction, text }, 'session-key', 0);
     assert.equal(displayed.kind, 'slash');
-    assert.equal(displayed.text, '/review scripts/lib');
+    assert.equal(displayed.text, text);
   }
   const text = '/legacy scripts/lib';
   assert.equal(buildSnapshotInstruction({ ...instruction, text }, 'session-key', 0).text, text);
 });
 
-// Spec §2/§3: frozen pre-E fingerprints and refs preserve existing board deletion targets.
-test('PR1c E slash display changes preserve legacy fingerprints refs and registered exclusions', testContext => {
+// Spec §2/§3: full raw slash text defines content identity; UUID exclusions remain stable.
+test('PR1c E slash raw fingerprints and refs retain UUID exclusion behavior', testContext => {
   const fixture = createFixture(testContext);
   const texts = [
     '<command-message>deep-research</command-message><command-name>/deep-research</command-name>'
@@ -2967,11 +2968,11 @@ test('PR1c E slash display changes preserve legacy fingerprints refs and registe
   const parsed = internals.parseFile('claude', records, coverage, config);
   assert.equal(parsed.items.length, 3);
   const fingerprints = [
-    '4ef6c039330c29a8d356506f85ba1e55f5fe215bea725b8d051d9d0474197177',
-    'd9eeeef2c1906e74d481c23fb031a4b0e164b730f2a9cc0da8f5f2f229da8572',
-    '4048bb79b0e935da8f75be561104cff749885406cba0b282f43a106d3fd91bef'
+    '94eb5f2b817a556ad742fa3d2d2b0bea12e96ac35d01ff0b2dd7d55667a37094',
+    '0740567e608dcb3f9cc3eb84f04774273bb27a7ff2973537a39c491aa51286cb',
+    '28a5f010bef82768ce706cc6857c5548d475b9d3c4c819d9464a1c9fed046c15'
   ];
-  const refs = ['0d41f97426049275', 'c86dd5f327d369d9', 'a7d9b3a58fa39071'];
+  const refs = ['014a92d7966c8433', '228dfccb7b62036c', '2380af646df14750'];
   for (const [index, instruction] of parsed.items.entries()) {
     assert.equal(Object.hasOwn(instruction, 'structure'), false);
     assert.equal(instruction.fp, fingerprints[index]);
@@ -2980,12 +2981,11 @@ test('PR1c E slash display changes preserve legacy fingerprints refs and registe
   const snapshot = snapshotReader.runSnapshot(fixture.options);
   assert.equal(snapshot.instructions.length, 3);
   assert.deepEqual(snapshot.instructions.map(item => item.ref), refs);
-  assert.deepEqual(snapshot.instructions.map(item => item.text), [
-    '/deep-research', '/review scripts/lib', '/review [REDACTED]'
-  ]);
+  assert.deepEqual(snapshot.instructions.map(item => item.text),
+    texts.map(text => snapshotPolicy.finalizeText(text).value));
   const target = { kind: 'instruction', instrId: 'claude:s:uslash-1', ref: refs[1] };
   const preview = snapshotReader.excludeQuery({ ...fixture.options, target });
-  assert.equal(preview.preview, '/review scripts/lib');
+  assert.equal(preview.preview, snapshotPolicy.finalizeText(texts[1], 200).value);
   const result = snapshotReader.excludeCommit({ ...fixture.options, target, token: preview.token });
   assert.equal(result.counts.registered, 1);
   const excluded = snapshotReader.runSnapshot(fixture.options);
@@ -2993,7 +2993,7 @@ test('PR1c E slash display changes preserve legacy fingerprints refs and registe
   assert.deepEqual(excluded.instructions.map(item => item.ref), [refs[0], refs[2]]);
 });
 
-// Spec §1.1/§2: display formatting must preserve human classification and content identity.
+// Spec §1.1/§2: raw display preserves human classification and content identity.
 test('PR1c correction 1 human command wrappers preserve legacy fingerprint ref and deletion identity', testContext => {
   const fixture = createFixture(testContext);
   const text = ' \n<command-message>ignored</command-message><command-name>///review</command-name>'
@@ -3011,7 +3011,7 @@ test('PR1c correction 1 human command wrappers preserve legacy fingerprint ref a
   assert.equal(parsed.items.length, 1);
   const instruction = parsed.items[0];
   assert.equal(instruction.kind, 'human');
-  assert.equal(instruction.text, '/review scripts/lib');
+  assert.equal(instruction.text, snapshotPolicy.finalizeText(text).value);
   assert.equal(Object.hasOwn(instruction, 'structure'), false);
   assert.equal(instruction.fp, '09ba6cf30247bdc65057edb2e3df860bc83976aa2f092014760f724bf1be8f14');
   const ref = '230bb5cd26e1217d';
@@ -3021,14 +3021,14 @@ test('PR1c correction 1 human command wrappers preserve legacy fingerprint ref a
   assert.equal(snapshot.instructions[0].id, 'claude:s:uhuman-wrapper');
   assert.equal(snapshot.instructions[0].kind, 'human');
   assert.equal(snapshot.instructions[0].ref, ref);
-  assert.equal(snapshot.instructions[0].text, '/review scripts/lib');
+  assert.equal(snapshot.instructions[0].text, snapshotPolicy.finalizeText(text).value);
   const target = { kind: 'instruction', instrId: 'claude:s:uhuman-wrapper', ref };
   const preview = snapshotReader.excludeQuery({ ...fixture.options, target });
   assert.equal(snapshotReader.excludeCommit({ ...fixture.options, target, token: preview.token }).counts.registered, 1);
   assert.equal(snapshotReader.runSnapshot(fixture.options).instructions.length, 0);
 });
 
-test('PR1c correction 1 human wrapper-only text accepts every order and sanitizes command arguments', testContext => {
+test('PR1c correction 1 human raw wrapper text preserves every order and sanitizes command arguments', testContext => {
   const fixture = createFixture(testContext);
   const tags = ['<command-name>/review</command-name>', '<command-message>ignored</command-message>',
     '<command-args>scripts/lib</command-args>'];
@@ -3042,10 +3042,8 @@ test('PR1c correction 1 human wrapper-only text accepts every order and sanitize
   const snapshot = snapshotReader.runSnapshot(fixture.options);
   assert.equal(snapshot.instructions.length, 7);
   assert.deepEqual(snapshot.instructions.map(item => item.kind), records.map(() => 'human'));
-  assert.deepEqual(snapshot.instructions.map(item => item.text), [
-    ...orders.map(() => '/review scripts/lib'),
-    '<command-message>review</command-message><command-args>[REDACTED]</command-args>'
-  ]);
+  assert.deepEqual(snapshot.instructions.map(item => item.text),
+    records.map(record => snapshotPolicy.finalizeText(record.message.content).value));
   assert.equal(snapshot.instructions.at(-1).redacted, true);
   assert.equal(JSON.stringify(snapshot).includes(SECRET_SENTINEL), false);
   for (const item of snapshot.instructions) {
@@ -3053,7 +3051,7 @@ test('PR1c correction 1 human wrapper-only text accepts every order and sanitize
   }
 });
 
-test('PR1c correction 1 outside text remains human display while slash projects only commands', testContext => {
+test('PR1c correction 1 outside text remains in human and slash displays', testContext => {
   const fixture = createFixture(testContext);
   const wrapper = '<command-message>review</command-message><command-name>/review</command-name>'
     + '<command-args>scripts/lib</command-args>';
@@ -3075,11 +3073,11 @@ test('PR1c correction 1 outside text remains human display while slash projects 
   assert.equal(snapshot.instructions.length, cases.length);
   assert.deepEqual(snapshot.instructions.map(item => item.kind), cases.map(([, kind]) => kind));
   assert.deepEqual(snapshot.instructions.map(item => item.text),
-    cases.map(([text, kind]) => kind === 'slash' ? '/review scripts/lib' : text));
+    cases.map(([text]) => snapshotPolicy.finalizeText(text).value));
 });
 
 for (const kind of ['slash', 'human']) {
-  test(`PR1c R1 wrapper formatting preserves original sanitization context for ${kind}`, testContext => {
+  test(`PR1c R1 raw wrappers preserve original sanitization context for ${kind}`, testContext => {
     const fixture = createFixture(testContext);
     const origin = kind === 'human' ? { kind: 'human' } : undefined;
     const normal = '<command-name>/review</command-name><command-args>scripts/lib</command-args>';
@@ -3091,12 +3089,11 @@ for (const kind of ['slash', 'human']) {
     ]);
     const snapshot = snapshotReader.runSnapshot(fixture.options);
     assert.equal(snapshot.instructions.length, 2);
-    assert.equal(snapshot.instructions[0].text, '/review scripts/lib');
+    assert.equal(snapshot.instructions[0].text, normal);
     assert.equal(snapshot.instructions[0].kind, kind);
     assert.equal(snapshotPolicy.finalizeText(attack).redacted, true);
     assert.equal(JSON.stringify(snapshot).includes('LEAK_ME'), false);
-    assert.equal(snapshot.instructions[1].text, kind === 'slash' ? '/review'
-      : snapshotPolicy.finalizeText(attack).value);
+    assert.equal(snapshot.instructions[1].text, snapshotPolicy.finalizeText(attack).value);
     assert.equal(snapshot.instructions[1].kind, kind);
     assert.equal(snapshot.instructions[1].redacted, true);
   });
@@ -3207,7 +3204,7 @@ test('PR1c R1 large instructions retain bounded sanitized text and pre-change fi
   assert.equal(items.length, 6);
   const storedCharacters = countStoredStringCharacters(scanned);
   testContext.diagnostic(`Retained ${storedCharacters} string characters for ${items.length} instructions`);
-  assert.ok(storedCharacters <= items.length * 2400);
+  assert.ok(storedCharacters <= items.length * 2400 + scanned.all.length * (4096 + 64));
   for (const session of scanned.all) {
     const item = session.items[0];
     assert.equal(item.text.length, 2000);
@@ -3224,12 +3221,12 @@ test('PR1c R1 large instructions retain bounded sanitized text and pre-change fi
   assert.equal(JSON.stringify(scanned).includes('PRIVATE_LARGE_VALUE'), false);
 });
 
-test('PR1c R1 Orca evidence uses bounded sanitized instruction text', testContext => {
+test('PR1c R1 Orca evidence uses full raw instruction identity', testContext => {
   const fixture = createFixture(testContext);
   const cases = [
-    ['ordinary word '.repeat(250), 'ordinary word '.repeat(250), 'prompt_prefix'],
-    ['review password="ORCA_PRIVATE_VALUE"', 'review password="ORCA_PRIVATE_VALUE"', 'cwd_only'],
-    ['review password="ORCA_PRIVATE_VALUE"', 'review [REDACTED]', 'prompt_exact']
+    ['ordinary word '.repeat(250), 'ordinary word '.repeat(250), 'prompt_exact'],
+    ['review password="ORCA_PRIVATE_VALUE"', 'review password="ORCA_PRIVATE_VALUE"', 'prompt_exact'],
+    ['review password="ORCA_PRIVATE_VALUE"', 'review [REDACTED]', 'cwd_only']
   ];
   for (const [text, prompt, evidence] of cases) {
     fixture.file('claude', 'link', [claudeUserRecord(text)]);
@@ -3242,21 +3239,24 @@ test('PR1c R1 Orca evidence uses bounded sanitized instruction text', testContex
   }
 });
 
-test('PR1c R2 slash display ignores outside sentences without changing refs or confirmation tokens', testContext => {
+test('PR1c R3 slash outside sentences change raw display refs and confirmation tokens', testContext => {
   const fixture = createFixture(testContext);
   const wrapper = '<command-name>/review</command-name><command-args>scripts/lib</command-args>';
   fixture.file('claude', 'slash', [claudeUserRecord(wrapper + ' Outside sentence A.', { origin: undefined })]);
   const before = snapshotReader.runSnapshot(fixture.options);
   assert.equal(before.instructions.length, 1);
   assert.equal(before.instructions[0].kind, 'slash');
-  assert.equal(before.instructions[0].text, '/review scripts/lib');
+  assert.equal(before.instructions[0].text, wrapper + ' Outside sentence A.');
   const target = instructionTarget(before.instructions[0]);
   const preview = snapshotReader.excludeQuery({ ...fixture.options, target });
   fixture.file('claude', 'slash', [claudeUserRecord(wrapper + ' Outside sentence B.', { origin: undefined })]);
   const after = snapshotReader.runSnapshot(fixture.options);
-  assert.deepEqual(after.instructions, before.instructions);
-  assert.deepEqual(snapshotReader.excludeQuery({ ...fixture.options, target }), preview);
-  assert.equal(snapshotReader.excludeCommit({ ...fixture.options, target, token: preview.token }).counts.registered, 1);
+  assert.equal(after.instructions[0].text, wrapper + ' Outside sentence B.');
+  assert.notEqual(after.instructions[0].ref, before.instructions[0].ref);
+  assertReaderError(() => snapshotReader.excludeQuery({ ...fixture.options, target }), 'target_changed');
+  const result = snapshotReader.excludeCommit({ ...fixture.options, target, token: preview.token });
+  assert.equal(result.code, 'confirm_mismatch');
+  assert.equal(result.counts.registered, 0);
 });
 
 for (const provider of ['claude', 'codex']) {
@@ -3443,4 +3443,106 @@ test('PR1c R2 partial Orca inventories cannot confirm links or assign terminal h
   assert.equal(capped.coverage.orca.state, 'partial');
   assert.equal(capped.sessions[0].orca_link.confirmed, false);
   assert.equal(capped.sessions[0].orca_link.terminal_handle, null);
+});
+
+test('PR1c R3 slash raw context changes refs and invalidates exclusion confirmations', testContext => {
+  const fixture = createFixture(testContext);
+  const wrapper = '<command-name>/review</command-name>';
+  const beforeText = wrapper + ' password="<command-args>LEAK_ME</command-args>"';
+  const afterText = wrapper + ' memo="<command-args>LEAK_ME</command-args>"';
+  fixture.file('claude', 'slash', [claudeUserRecord(beforeText, { origin: undefined })]);
+  const before = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(before.instructions.length, 1);
+  assert.equal(before.instructions[0].kind, 'slash');
+  assert.equal(JSON.stringify(before).includes('LEAK_ME'), false);
+  const target = instructionTarget(before.instructions[0]);
+  const preview = snapshotReader.excludeQuery({ ...fixture.options, target });
+  fixture.file('claude', 'slash', [claudeUserRecord(afterText, { origin: undefined })]);
+  const after = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(after.instructions.length, 1);
+  assert.notEqual(after.instructions[0].ref, before.instructions[0].ref);
+  assert.equal(after.instructions[0].id, before.instructions[0].id);
+  assertReaderError(() => snapshotReader.excludeQuery({ ...fixture.options, target }), 'target_changed');
+  const configBefore = fs.readFileSync(path.join(fixture.options.configDir, 'observe.json'));
+  const committed = snapshotReader.excludeCommit({ ...fixture.options, target, token: preview.token });
+  assert.equal(committed.code, 'confirm_mismatch');
+  assert.equal(committed.counts.registered, 0);
+  assert.deepEqual(fs.readFileSync(path.join(fixture.options.configDir, 'observe.json')), configBefore);
+  assert.equal(before.instructions[0].text, snapshotPolicy.finalizeText(beforeText).value);
+  assert.equal(after.instructions[0].text, snapshotPolicy.finalizeText(afterText).value);
+});
+
+test('PR1c R3 long slash arguments keep the sanitized raw prefix and report truncation', testContext => {
+  const fixture = createFixture(testContext);
+  const text = '<command-name>/review</command-name><command-args>LONG_ARGS_' + 'x'.repeat(2100)
+    + ' password="LONG_PRIVATE_VALUE"</command-args>';
+  fixture.file('claude', 'long-slash', [claudeUserRecord(text, { origin: undefined })]);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.instructions.length, 1);
+  const instruction = snapshot.instructions[0];
+  assert.equal(instruction.kind, 'slash');
+  assert.equal(instruction.text, snapshotPolicy.finalizeText(text).value);
+  assert.equal(instruction.text.includes('LONG_ARGS_'), true);
+  assert.equal(instruction.text.length, 2000);
+  assert.equal(instruction.truncated, true);
+  assert.equal(instruction.redacted, true);
+  assert.equal(JSON.stringify(snapshot).includes('LONG_PRIVATE_VALUE'), false);
+  assert.equal(snapshotPolicy.finalizeText(instruction.text).value, instruction.text);
+});
+
+test('PR1c R3 Orca compares the full raw instruction instead of its 2000-character display', testContext => {
+  const fixture = createFixture(testContext);
+  fixture.file('claude', 'long-link', [claudeUserRecord('ordinary instruction')]);
+  fixture.options.runOrca = orcaRunner([orcaWorktree('ordinary instruction')], [orcaTerminal()]);
+  assert.equal(snapshotReader.runSnapshot(fixture.options).sessions[0].orca_link.confirmed, true);
+  const text = 'ordinary '.repeat(300);
+  fixture.file('claude', 'long-link', [claudeUserRecord(text)]);
+  fixture.options.runOrca = orcaRunner([orcaWorktree(text.slice(0, 2000))], [orcaTerminal()]);
+  const prefix = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(prefix.instructions.length, 1);
+  assert.equal(prefix.sessions[0].orca_link.evidence, 'prompt_prefix');
+  assert.equal(prefix.sessions[0].orca_link.confirmed, false);
+  fixture.options.runOrca = orcaRunner([orcaWorktree(text)], [orcaTerminal()]);
+  const exact = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(exact.sessions[0].orca_link.evidence, 'prompt_exact');
+  assert.equal(exact.sessions[0].orca_link.confirmed, true);
+});
+
+test('PR1c R3 raw link summaries retain only the last chronological instruction and a 4096-character prefix',
+  testContext => {
+  const fixture = createFixture(testContext);
+  const text = 'Cafe\u0301\t' + 'ordinary  word\n'.repeat(600) + 'last raw suffix';
+  const normalized = text.normalize('NFC').replace(/\s+/g, ' ').trim();
+  const earlier = '2026-10-08T01:00:00.000Z';
+  const { scanSessions } = loadReaderWithInternals();
+  for (const provider of ['claude', 'codex']) {
+    const file = fixture.file(provider, 'last-link', provider === 'claude' ? [
+      claudeUserRecord(text, { uuid: 'later' }),
+      claudeUserRecord('earlier instruction', { uuid: 'earlier', timestamp: earlier })
+    ] : [codexSessionMeta(), codexMessage(text, { id: 'later' }),
+      { ...codexMessage('earlier instruction', { id: 'earlier' }), timestamp: earlier }]);
+    const config = snapshotReader.loadConfig(fixture.options);
+    const scanned = scanSessions(fixture.options, config);
+    assert.equal(scanned.all.length, 1);
+    const parsed = scanned.all[0];
+    assert.equal(parsed.items.length, 2);
+    assert.deepEqual(Object.keys(parsed.link_text).sort(), ['hash', 'length', 'prefix']);
+    assert.equal(parsed.link_text.hash, crypto.createHash('sha256').update(normalized).digest('hex'));
+    assert.equal(parsed.link_text.length, normalized.length);
+    assert.equal(parsed.link_text.prefix, normalized.slice(0, 4096));
+    assert.equal(parsed.link_text.prefix.length, 4096);
+    assert.equal(parsed.items.some(item => Object.hasOwn(item, 'link_text')), false);
+    assert.ok(countStoredStringCharacters(scanned) < 8000);
+    fixture.options.runOrca = orcaRunner([orcaWorktree(normalized)], [orcaTerminal()]);
+    const exact = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(exact.sessions[0].orca_link.evidence, 'prompt_exact');
+    assert.equal(exact.sessions[0].orca_link.confirmed, true);
+    fixture.options.runOrca = orcaRunner([orcaWorktree(normalized + ' different suffix')], [orcaTerminal()]);
+    const prefix = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(prefix.sessions[0].orca_link.evidence, 'prompt_prefix');
+    assert.equal(prefix.sessions[0].orca_link.confirmed, false);
+    assert.equal(JSON.stringify(exact).includes('last raw suffix'), false);
+    assert.equal(JSON.stringify(exact).includes('link_text'), false);
+    fs.unlinkSync(file);
+  }
 });

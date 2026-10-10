@@ -341,20 +341,6 @@ function retainString(value, max) {
   return typeof value === 'string' ? Buffer.from(value.slice(0, max), 'utf16le').toString('utf16le') : null;
 }
 
-// Spec §1.1/§2: human wrappers must cover the text; slash display projects command fields only.
-function formatCommandWrapperText(text, wrapperOnly = true) {
-  if (wrapperOnly && text.replace(/<command-(name|message|args)>[\s\S]*?<\/command-\1>/g, '').trim()) {
-    return text;
-  }
-  const name = text.match(/<command-name>([\s\S]*?)<\/command-name>/)?.[1]
-    ?? text.match(/<command-message>([\s\S]*?)<\/command-message>/)?.[1];
-  if (name === undefined) {
-    return wrapperOnly ? text : '';
-  }
-  const args = text.match(/<command-args>([\s\S]*?)<\/command-args>/)?.[1] || '';
-  return '/' + name.trim().replace(/^\/+/, '') + (args ? ' ' + args : '');
-}
-
 // Spec §1.1: first matching row wins; output and origin conflicts precede slash/shell wrappers.
 function classifyClaudeRecord(record) {
   const content = record.message?.content;
@@ -384,15 +370,7 @@ function classifyClaudeRecord(record) {
     } : null;
   }
   if (slash && record.origin === undefined) {
-    const name = text.match(/<command-name>([\s\S]*?)<\/command-name>/)?.[1] || text.match(
-      /<command-message>([\s\S]*?)<\/command-message>/)?.[1] || '';
-    const args = text.match(/<command-args>([\s\S]*?)<\/command-args>/)?.[1] || '';
-    return {
-      kind: 'slash',
-      text: [name, args].filter(Boolean).join(' '),
-      displayText: text,
-      attachments
-    };
+    return { kind: 'slash', text, attachments };
   }
   if (shell) {
     return {
@@ -562,6 +540,7 @@ function parseFile(provider, records, providerCoverage, config = {}) {
   let run_mode = 'interactive';
   let title = null;
   const items = [];
+  const linkState = {};
   let unknown = 0;
   let compact = false;
   let compactBefore = false;
@@ -652,7 +631,7 @@ function parseFile(provider, records, providerCoverage, config = {}) {
         ts: timestamp,
         position,
         structure: [['text', normalizeDeletionText(classification.text)], ['attachments', classification.attachments]]
-      }));
+      }, linkState));
     } else {
       if (record.type === 'session_meta') {
         metaBefore = true;
@@ -696,7 +675,7 @@ function parseFile(provider, records, providerCoverage, config = {}) {
         ts: timestamp,
         position,
         structure: [...classification.structure, ['attachments', classification.attachments]]
-      }));
+      }, linkState));
     }
   }
   // Spec §1.2/§1.4: timestamp display ordering cannot alter n identities or recovery evidence.
@@ -714,6 +693,7 @@ function parseFile(provider, records, providerCoverage, config = {}) {
     run_mode: retainString(run_mode, 32),
     title: title === null ? null : retainString(snapshotPolicy.finalizeText(title, 200).value, 200),
     items,
+    link_text: linkState.text || null,
     unknown,
     first: retainString(first || 'unknown', 32),
     compact: compact && !items.length,
@@ -722,23 +702,33 @@ function parseFile(provider, records, providerCoverage, config = {}) {
   };
 }
 
-// Spec §2.1: sanitize the original context before removing command wrappers.
-function finalizeInstructionText(rawText, kind) {
-  const original = snapshotPolicy.finalizeText(rawText);
-  const text = kind === 'slash' ? formatCommandWrapperText(original.redacted ? original.value : rawText, false)
-    : original.redacted ? rawText : formatCommandWrapperText(rawText);
-  const finalized = original.redacted && kind !== 'slash' ? original : snapshotPolicy.finalizeText(text);
-  return { text: retainString(finalized.value, 2000), text_missing: !text, truncated: text.length > 2000,
-    redacted: original.redacted || finalized.redacted };
+// Spec §2.1: sanitize the complete instruction before truncating its display.
+function finalizeInstructionText(rawText) {
+  const finalized = snapshotPolicy.finalizeText(rawText);
+  return { text: retainString(finalized.value, 2000), text_missing: !rawText, truncated: rawText.length > 2000,
+    redacted: finalized.redacted };
+}
+
+// Spec §2.2: retain only a digest, length and bounded local prefix of normalized raw text.
+function summarizeLinkText(rawText) {
+  const normalized = normalizeLinkText(rawText);
+  return {
+    hash: retainString(crypto.createHash('sha256').update(normalized).digest('hex'), 64),
+    length: normalized.length,
+    prefix: retainString(normalized, 4096)
+  };
 }
 
 // Spec §1.4/§2/§3: compute identity before discarding unbounded text and block structure.
-function compactInstruction(config, instruction) {
+function compactInstruction(config, instruction, linkState) {
+  if (!linkState.last || compareRecordTimes(instruction, linkState.last) >= 0) {
+    linkState.last = { ts: instruction.ts, position: instruction.position };
+    linkState.text = summarizeLinkText(instruction.text);
+  }
   instruction.fp = computeInstructionFingerprint(config, instruction);
   instruction.ref = computeInstructionRef(config, instruction);
-  const display = finalizeInstructionText(instruction.displayText ?? instruction.text, instruction.kind);
+  const display = finalizeInstructionText(instruction.text);
   delete instruction.structure;
-  delete instruction.displayText;
   instruction.id = retainString(instruction.id, 160);
   instruction.ts = retainString(instruction.ts, 24);
   instruction.kind = retainString(instruction.kind, 32);
@@ -1098,7 +1088,7 @@ function buildSnapshotSession(config, parsedSession, key, kept) {
 
 function buildSnapshotInstruction(instruction, key, index) {
   const display = instruction.redacted === undefined
-    ? finalizeInstructionText(instruction.displayText ?? instruction.text) : instruction;
+    ? finalizeInstructionText(instruction.text) : instruction;
   return {
     id: instruction.id,
     session_key: key,
@@ -1396,7 +1386,7 @@ function parseOrcaWorktrees(worktrees, config, out, orcaCoverage, outputBudget) 
       exportedAgents.push(projectedAgent);
       localAgents.push({
         pane: agent.paneKey,
-        prompt: typeof agent.prompt === 'string' ? normalizeLinkText(agent.prompt) : '',
+        prompt: summarizeLinkText(typeof agent.prompt === 'string' ? agent.prompt : ''),
         cwd: rawPath,
         time: Date.parse(stateStartedAt || updatedAt)
       });
@@ -1432,17 +1422,17 @@ function parseOrcaWorktrees(worktrees, config, out, orcaCoverage, outputBudget) 
 function buildOrcaLinkCandidates(all, agents) {
   const edges = [];
   for (const parsedSession of all) {
-    const last = parsedSession.items[parsedSession.items.length - 1];
+    const text = parsedSession.link_text;
     for (const agent of agents) {
       if (parsedSession.cwd === null || parsedSession.cwd !== agent.cwd) {
         continue;
       }
-      const text = last ? normalizeLinkText(last.text) : '';
       let evidence = 'cwd_only';
-      if (text && agent.prompt && text === agent.prompt && text.length >= 8) {
+      if (text && text.hash === agent.prompt.hash && text.length >= 8) {
         evidence = 'prompt_exact';
-      } else if (text && agent.prompt && (text.startsWith(agent.prompt) || agent.prompt.startsWith(text))
-        && Math.min(text.length, agent.prompt.length) >= 24) {
+      } else if (text && Math.min(text.length, agent.prompt.length) >= 24
+        && text.prefix.slice(0, Math.min(text.length, agent.prompt.length, 4096))
+          === agent.prompt.prefix.slice(0, Math.min(text.length, agent.prompt.length, 4096))) {
         evidence = 'prompt_prefix';
       }
       const inTime = agent.time >= Date.parse(parsedSession.firstAt) && agent.time <= Date.parse(parsedSession
