@@ -1412,11 +1412,11 @@ function summarizeTranscriptFile(provider, file, providerCoverage, windowSince, 
   try {
     fileDescriptor = fs.openSync(file.file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
     const openedStats = fs.fstatSync(fileDescriptor);
+    observation.limited = openedStats.size > STREAM_LIMITS.smallFileBytes;
     if (openedStats.dev !== file.stats.dev || openedStats.ino !== file.stats.ino) {
       throw Error();
     }
     observation.size = openedStats.size;
-    observation.limited = openedStats.size > STREAM_LIMITS.smallFileBytes;
     const outsideWindow = isTranscriptOutsideWindow(openedStats, fileDescriptor, windowSince);
     if (outsideWindow) {
       identity = readTranscriptIdentity(provider, fileDescriptor, openedStats.size, subagentSid !== null, observation, true);

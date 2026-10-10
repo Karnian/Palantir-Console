@@ -5596,3 +5596,43 @@ test('PR1d R6 small unreadable transcript fails without large-file withholding',
   assert.equal(snapshot.coverage.claude.link_blocked, 1);
   assert.equal(snapshot.sessions.length, 0);
 });
+
+for (const failure of ['inode', 'fstat']) {
+  test(`PR1d R7 large transcript ${failure} failure counts only confirmed size`, t => {
+    const fixture = createFixture(t);
+    const file = fixture.file('claude', 'large', [{}]);
+    fs.truncateSync(file, snapshotReader.MAX_FILE_BYTES + 1);
+    const originalOpen = fs.openSync, originalFstat = fs.fstatSync;
+    let descriptor, statCalls = 0;
+    t.mock.method(fs, 'openSync', function(filename, ...args) {
+      const fd = originalOpen(filename, ...args);
+      if (filename === file) descriptor = fd;
+      return fd;
+    });
+    t.mock.method(fs, 'fstatSync', function(fd, ...args) {
+      if (fd !== descriptor) return originalFstat(fd, ...args);
+      statCalls++;
+      if (failure === 'fstat') throw Object.assign(new Error(), { code: 'EIO' });
+      const stats = originalFstat(fd, ...args);
+      return { ...stats, ino: stats.ino + 1 };
+    });
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(statCalls, 1);
+    assert.equal(snapshot.coverage.claude.files_failed, 1);
+    assert.equal(snapshot.coverage.claude.large_file_withheld, failure === 'inode' ? 1 : 0);
+    assert.equal(snapshot.coverage.claude.link_blocked, 1);
+    assert.equal(snapshot.sessions.length, 0);
+  });
+}
+
+test('PR1d R7 large unreadable transcript has no fstat-confirmed size', t => {
+  const fixture = createFixture(t);
+  const file = fixture.file('claude', 'unreadable', [{}]);
+  fs.truncateSync(file, snapshotReader.MAX_FILE_BYTES + 1);
+  fs.chmodSync(file, 0);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.coverage.claude.files_failed, 1);
+  assert.equal(snapshot.coverage.claude.large_file_withheld, 0);
+  assert.equal(snapshot.coverage.claude.link_blocked, 1);
+  assert.equal(snapshot.sessions.length, 0);
+});

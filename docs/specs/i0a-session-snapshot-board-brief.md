@@ -132,6 +132,7 @@
 ---
 
 - **PR1d 두 읽기 경로**: 창 판정은 그대로다. 시작 크기 16MB 이하는 main 의 fd 상한+1 바이트 읽기와 버퍼 파싱을 유지한다. 내부 lookahead·검증 재읽기·새 줄/신원/지시 상한은 없다. 읽은 결과가 16MB 초과면 `files_failed`·provider 요약 실패다. B/C/D 와 정확 workflow 예외만 추가하며 정렬·순번·지문·삭제 확인 토큰·최초 지시 판정은 main 과 같다. 16MB 초과는 시작 fstat 크기 S0 바이트까지만 단일 패스로 읽는다(이후 append 는 다음 스냅샷). 원문·레코드는 처리 직후 버리고 처음 + 최근 200 지시와 상한 내 메타데이터만 남긴다. 늦은 신원·cwd·시각·부모 참조는 EOF 에서 확정한다. 줄 8MB·읽기 256MB·메타데이터/지시 100000 상한은 이 경로에만 적용하고 테스트에서 조정할 수 있다. S0 전 EOF·상한·읽기 실패는 `large_file_withheld` 와 요약 실패다. 끝에서 fd 의 시작 dev/ino 유지·size≥S0 와 경로 stat 의 시작 dev/ino 일치를 확인한 뒤에만 요약 성공·workflow skip 을 확정한다. S0 경계의 개행 없는 미완성 JSON 줄은 `records_unverified` 만 센다. **append-only 전제·수용 한계**: 같은 inode 의 제자리 덮어쓰기와 truncate 후 재증가는 검출하지 못한다. snapshot·exclude 는 같은 경로와 첫 신원 선택기(Claude 첫 유효 sessionId, Codex 첫 session_meta id)를 쓴다. 실패해도 완전한 레코드에서 관측한 첫 신원 하나는 그룹에 남긴다. 후속 sid 형제는 반출될 수 있으나 해당 provider 연결은 차단한다. 대표 cwd 는 공통 함수로 Claude 첫 문자열 cwd, Codex 첫 session_meta cwd(비문자열이면 "") 하나만 쓴다. main 의 상세 복원 재읽기는 유지하며 내용·cwd·시각·요약이 달라지거나 실패하면 provider 연결을 차단한다.
+- **large_file_withheld 집계**: fstat 으로 크기 > 16MB 를 확인한 뒤 보류된 파일만 센다(inode 불일치 포함). open/fstat 자체 실패는 열거 시점 lstat 크기와 무관하게 `files_failed` 만 센다. provider 요약 실패 판정은 그대로다.
 
 ## 2. 읽기 모듈 (snapshot CLI)
 
