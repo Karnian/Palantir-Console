@@ -955,3 +955,53 @@ test('endpoint: R2 malformed ID is 400 for cookies and 403 for human and PM bear
     assertError(await request(app).get(url).set('Authorization', `Bearer ${token}`), 403, 'cookie auth required');
   }
 });
+
+test('route: R3 every non-auth error requires cookie auth', () => {
+  const parseError = Object.assign(new SyntaxError('fixture'), { type: 'entity.parse.failed' });
+  const charsetError = Object.assign(new Error('fixture'), { type: 'charset.unsupported' });
+  for (const [error, status] of [[parseError, 400], [charsetError, 500], [new Error('fixture'), 500],
+    [new AppError('observe_root_changed', 503), 503]]) {
+    const response = {
+      headersSent: false,
+      set: function setHeader() { return this; },
+      status: function setStatus(value) { this.statusCode = value; return this; },
+      json: function setBody(body) { this.body = body; return this; },
+    };
+    observeErrorHandler(error, { auth: { method: 'cookie' } }, response);
+    assert.equal(response.statusCode, status);
+    for (const auth of [{ method: 'bearer' }, { method: 'worker' }, { method: 'none' }, undefined]) {
+      observeErrorHandler(error, { auth }, response);
+      assert.equal(response.statusCode, 403);
+      assert.deepEqual(response.body, { error: 'cookie auth required', reason: 'cookie auth required' });
+    }
+  }
+});
+
+test('endpoint: R3 body errors preserve cookie 400 and reject other credentials before data access', async (t) => {
+  const fx = fixture(t);
+  const app = makeApp(fx);
+  assert.equal((await cookieGet(app, LIST)).body.snapshots.length, 1);
+  assertError(await cookieGet(app, LIST).set('Content-Type', 'application/json').send('{'), 400, 'request_invalid');
+  const worker = app.services.workerProposalTokenService.mint('run_fixture', { projectId: 'project_fixture' });
+  assert.ok(worker.length > 0);
+  assert.equal(app.services.workerProposalTokenService.verify(worker).runId, 'run_fixture');
+  const spy = spyFs(['realpathSync', 'readdirSync', 'lstatSync', 'openSync', 'readSync']);
+  try {
+    assert.equal((await cookieGet(app, LIST)).body.snapshots.length, 1);
+    for (const count of Object.values(spy.calls)) assert.ok(count > 0);
+    spy.reset();
+    for (const token of [TOKEN, PM_TOKEN, worker]) {
+      for (const type of ['application/json', 'application/json; charset=x-unknown']) {
+        const response = await request(app).get(LIST).set('Authorization', `Bearer ${token}`)
+          .set('Content-Type', type).send('{');
+        const reason = token === worker ? 'authentication_failed' : 'cookie auth required';
+        assertError(response, 403, reason);
+      }
+    }
+    assertError(await request(app).get(LIST).set('Content-Type', 'application/json').send('{'),
+      401, 'authentication_required');
+    for (const count of Object.values(spy.calls)) assert.equal(count, 0);
+  } finally {
+    spy.restore();
+  }
+});

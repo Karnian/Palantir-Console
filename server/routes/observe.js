@@ -67,7 +67,7 @@ function observeErrorHandler(error, req, res, next) {
     const code = error.message === 'cookie auth required' ? 'cookie auth required' : 'authentication_failed';
     return res.status(403).json({ error: code, reason: code });
   }
-  if ((error instanceof URIError || error.message === 'invalid_machine_id') && req.auth?.method !== 'cookie') {
+  if (req.auth?.method !== 'cookie') {
     return res.status(403).json({ error: 'cookie auth required', reason: 'cookie auth required' });
   }
   if (Object.hasOwn(ERROR_STATUS, error.message)) {

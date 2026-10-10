@@ -1790,7 +1790,12 @@ function createApp(options = {}) {
   // Middleware
   // Spec §5.2: gate before auth and body parsing, even for malformed POST bodies.
   app.use('/api/observe', createObserveOffGate(observeState));
-  app.use(express.json({ limit: '2mb' }));
+  const parseJson = express.json({ limit: '2mb' });
+  app.use(function parseNonObserveJson(req, res, next) {
+    // Spec §5.3: observe authenticates before parsing bodies.
+    if (/^\/api\/observe(?:\/|$)/i.test(req.path)) return next();
+    return parseJson(req, res, next);
+  });
   app.use((req, res, next) => {
     // All assets self-hosted: vendor/ has Preact/HTM/marked/DOMPurify,
     // vendor/fonts/ has Inter woff2. No external CDN dependencies.
@@ -1878,6 +1883,7 @@ function createApp(options = {}) {
     },
   });
   app.use('/api', auth);
+  app.use('/api/observe', parseJson);
   app.use('/api/observe', createObserveRouter({ state: observeState, store: options.observeSnapshotStore }));
   app.use('/api/observe', observeErrorHandler);
   app.use('/api/agent-context', createAgentContextRouter({
