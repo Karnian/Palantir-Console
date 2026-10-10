@@ -628,3 +628,19 @@ test('PR1c B direct invalid labels and labels on exclusion requests are rejected
     assert.equal(result.envelope.code, 'request_invalid');
   }
 });
+
+test('PR1c D fake Orca executes actual envelopes through the bundle and projects topology links', async t => {
+  const f = fixture(t);
+  const { envelope } = await execute(f);
+  exactSnapshot(envelope);
+  assert.deepEqual(envelope.coverage.orca, { state: 'ok', code: null });
+  assert.equal(envelope.orca.worktrees.length, 1);
+  assert.equal(envelope.orca.terminals.length, 1);
+  assert.equal(envelope.orca.worktrees[0].live_terminals, 1);
+  assert.equal(envelope.orca.worktrees[0].last_activity_at, '2026-10-08T02:00:00.000Z');
+  assert.equal(envelope.orca.terminals[0].last_output_at, '2026-10-08T02:00:00.000Z');
+  assert.equal(envelope.sessions[0].orca_link.confirmed, true);
+  assert.equal(envelope.sessions[0].orca_link.pane_key, 'fixture-tab:fixture-leaf');
+  assert.equal(envelope.sessions[0].orca_link.terminal_handle, 'term_fixture');
+  assert.equal(JSON.stringify(envelope).includes('FAKE_ORCA_PRIVATE_TEXT'), false);
+});

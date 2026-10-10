@@ -1150,23 +1150,51 @@ function runSnapshot(inputOptions) {
   return result;
 }
 
+// Spec §2.2 / §2.3: project successful CLI envelopes; retain bare-array compatibility.
+function parseOrcaResponse(response, collection) {
+  if (Array.isArray(response)) {
+    return { items: response, truncated: false };
+  }
+  if (!isRecordObject(response) || response.ok !== true || !isRecordObject(response.result)
+    || !Array.isArray(response.result[collection])) {
+    return null;
+  }
+  return { items: response.result[collection], truncated: response.result.truncated === true };
+}
+
+// Spec §2.1: Orca also uses epoch milliseconds; transcript TIME rules stay separate.
+function toOrcaIsoTimestamp(value) {
+  if (typeof value !== 'number') {
+    return toIsoTimestamp(value);
+  }
+  const date = new Date(value);
+  return Number.isFinite(value) && Number.isFinite(+date) ? toIsoTimestamp(date.toISOString()) : null;
+}
+
+function orcaTerminalPaneKey(terminal) {
+  if (typeof terminal.tabId === 'string' && typeof terminal.leafId === 'string') {
+    return `${terminal.tabId}:${terminal.leafId}`;
+  }
+  return terminal.tabId === undefined && terminal.leafId === undefined ? terminal.paneKey : null;
+}
+
 function readOrca(readerOptions, config, all, coverage, outputBudget) {
   const out = {
     worktrees: [],
     terminals: []
   };
   const run = readerOptions.runOrca || defaultRunOrca;
-  let worktrees;
-  let terminals;
+  let worktreeResponseData;
+  let terminalResponseData;
   try {
     const worktreeResponse = run(['worktree', 'ps', '--json']);
     const terminalResponse = run(['terminal', 'list', '--json']);
     if (typeof worktreeResponse !== 'string' || typeof terminalResponse !== 'string') {
       return out;
     }
-    worktrees = JSON.parse(worktreeResponse);
-    terminals = JSON.parse(terminalResponse);
-    if (!Array.isArray(worktrees) || !Array.isArray(terminals)) {
+    worktreeResponseData = parseOrcaResponse(JSON.parse(worktreeResponse), 'worktrees');
+    terminalResponseData = parseOrcaResponse(JSON.parse(terminalResponse), 'terminals');
+    if (!worktreeResponseData || !terminalResponseData) {
       return out;
     }
   } catch {
@@ -1176,7 +1204,10 @@ function readOrca(readerOptions, config, all, coverage, outputBudget) {
     state: 'ok',
     code: null
   };
-  if (worktrees.length > snapshotPolicy.SNAPSHOT_LIMITS.worktrees
+  const worktrees = worktreeResponseData.items;
+  const terminals = terminalResponseData.items;
+  if (worktreeResponseData.truncated || terminalResponseData.truncated
+    || worktrees.length > snapshotPolicy.SNAPSHOT_LIMITS.worktrees
     || terminals.length > snapshotPolicy.SNAPSHOT_LIMITS.terminals) {
     markOrcaPartial(coverage.orca);
   }
@@ -1226,12 +1257,13 @@ function parseOrcaWorktrees(worktrees, config, out, orcaCoverage, outputBudget) 
       markOrcaPartial(orcaCoverage);
       continue;
     }
-    const when = toIsoTimestamp(worktree.lastActivityAt);
+    const when = toOrcaIsoTimestamp(worktree.lastActivityAt);
     if (!when) {
       markOrcaPartial(orcaCoverage);
       continue;
     }
-    const liveTerminals = worktree.liveTerminals === undefined ? 0 : worktree.liveTerminals;
+    const liveTerminals = worktree.liveTerminalCount === undefined
+      ? (worktree.liveTerminals === undefined ? 0 : worktree.liveTerminals) : worktree.liveTerminalCount;
     if (!snapshotPolicy.isSafeInteger(liveTerminals)) {
       markOrcaPartial(orcaCoverage);
       continue;
@@ -1247,7 +1279,9 @@ function parseOrcaWorktrees(worktrees, config, out, orcaCoverage, outputBudget) 
         markOrcaPartial(orcaCoverage);
         continue;
       }
-      if (!safeId(agent.paneKey) || !(toIsoTimestamp(agent.stateStartedAt) || toIsoTimestamp(agent.updatedAt))) {
+      const stateStartedAt = toOrcaIsoTimestamp(agent.stateStartedAt);
+      const updatedAt = toOrcaIsoTimestamp(agent.updatedAt);
+      if (!safeId(agent.paneKey) || !(stateStartedAt || updatedAt)) {
         markOrcaPartial(orcaCoverage);
         continue;
       }
@@ -1255,8 +1289,8 @@ function parseOrcaWorktrees(worktrees, config, out, orcaCoverage, outputBudget) 
         pane_key: agent.paneKey,
         state: mapOrcaEnum('agent_state', agent.state),
         agent_type: mapOrcaEnum('agent_type', agent.agentType),
-        state_started_at: toIsoTimestamp(agent.stateStartedAt) || toIsoTimestamp(agent.updatedAt),
-        updated_at: toIsoTimestamp(agent.updatedAt) || toIsoTimestamp(agent.stateStartedAt),
+        state_started_at: stateStartedAt || updatedAt,
+        updated_at: updatedAt || stateStartedAt,
         interrupted: agent.interrupted === true
       };
       if (!snapshotPolicy.validateOrcaAgent(projectedAgent).ok) {
@@ -1268,7 +1302,7 @@ function parseOrcaWorktrees(worktrees, config, out, orcaCoverage, outputBudget) 
         pane: agent.paneKey,
         prompt: typeof agent.prompt === 'string' ? normalizeLinkText(agent.prompt) : '',
         cwd: rawPath,
-        time: Date.parse(toIsoTimestamp(agent.stateStartedAt) || toIsoTimestamp(agent.updatedAt))
+        time: Date.parse(stateStartedAt || updatedAt)
       });
     }
     const projectedWorktree = {
@@ -1355,16 +1389,17 @@ function parseOrcaTerminals(terminals, edges, ids, out, orcaCoverage, outputBudg
       markOrcaPartial(orcaCoverage);
       continue;
     }
-    if (!safeId(terminal.handle) || !ids.has(terminal.worktreeId) || !toIsoTimestamp(terminal.lastOutputAt)) {
+    if (!safeId(terminal.handle) || !ids.has(terminal.worktreeId) || !toOrcaIsoTimestamp(terminal.lastOutputAt)) {
       markOrcaPartial(orcaCoverage);
       continue;
     }
-    const related = edges.filter(edge => edge.agent.pane === terminal.paneKey);
+    const paneKey = orcaTerminalPaneKey(terminal);
+    const related = edges.filter(edge => edge.agent.pane === paneKey);
     const projectedTerminal = {
       handle: terminal.handle,
       worktree_id: ids.get(terminal.worktreeId),
       agent_identity: mapOrcaEnum('agent_type', terminal.agentIdentity),
-      last_output_at: toIsoTimestamp(terminal.lastOutputAt),
+      last_output_at: toOrcaIsoTimestamp(terminal.lastOutputAt),
       connected: terminal.connected === true
     };
     if (!snapshotPolicy.validateOrcaTerminal(projectedTerminal).ok
@@ -1374,7 +1409,7 @@ function parseOrcaTerminals(terminals, edges, ids, out, orcaCoverage, outputBudg
     }
     out.terminals.push(projectedTerminal);
     for (const edge of related) {
-      if (edge.session.output?.orca_link.pane_key === terminal.paneKey) {
+      if (edge.session.output?.orca_link.pane_key === paneKey) {
         edge.session.output.orca_link.terminal_handle = terminal.handle;
       }
     }

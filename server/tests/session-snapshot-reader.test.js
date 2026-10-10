@@ -137,24 +137,29 @@ function registerInstructionExclusion(testFixture, instruction) {
   }).counts.registered, 1);
   return preview;
 }
-function orcaRunner(worktrees, terminals) {
-  return args => JSON.stringify(args[0] === 'worktree' ? worktrees : terminals);
+function orcaResponse(collection, items, extra = {}) {
+  return { id: 'synthetic-response', ok: true,
+    result: { [collection]: items, totalCount: items.length, truncated: false, ...extra }, _meta: {} };
 }
-function orcaWorktree(prompt, pane = 'p', extra = {}) {
+function orcaRunner(worktrees, terminals) {
+  return args => JSON.stringify(args[0] === 'worktree'
+    ? orcaResponse('worktrees', worktrees) : orcaResponse('terminals', terminals));
+}
+function orcaWorktree(prompt, pane = 'p:leaf', extra = {}) {
   return {
     worktreeId: 'w',
     path: '/sensitive/repo',
     branch: 'main',
     status: 'active',
-    lastActivityAt: RECORD_TIMESTAMP,
-    liveTerminals: 1,
+    lastActivityAt: Date.parse(RECORD_TIMESTAMP),
+    liveTerminalCount: 1,
     agents: [{
       paneKey: pane,
       prompt,
       state: 'running',
       agentType: 'claude',
-      stateStartedAt: RECORD_TIMESTAMP,
-      updatedAt: RECORD_TIMESTAMP,
+      stateStartedAt: Date.parse(RECORD_TIMESTAMP),
+      updatedAt: Date.parse(RECORD_TIMESTAMP),
       ...extra
     }]
   };
@@ -163,10 +168,11 @@ function orcaTerminal(extra = {}) {
   return {
     handle: 'h',
     worktreeId: 'w',
-    paneKey: 'p',
+    tabId: 'p',
+    leafId: 'leaf',
     agentIdentity: 'claude',
     title: 'safe terminal title',
-    lastOutputAt: RECORD_TIMESTAMP,
+    lastOutputAt: Date.parse(RECORD_TIMESTAMP),
     connected: true,
     ...extra
   };
@@ -191,10 +197,10 @@ function installUnknownCwdTitleFixture(testFixture) {
   testFixture.file('claude', 'safe', [claudeUserRecord('abcdefgh', { sessionId: 'T' })]);
   testFixture.options.runOrca = orcaRunner([
     { ...orcaWorktree('WITHHELD_TEXT'), worktreeId: 'unknown', path: '/repo' },
-    orcaWorktree('abcdefgh', 'safe-pane')
+    orcaWorktree('abcdefgh', 'safe-pane:leaf')
   ], [
     orcaTerminal({ worktreeId: 'unknown', handle: 'unknown', title: 'WITHHELD_TEXT' }),
-    orcaTerminal({ paneKey: 'safe-pane', title: 'safe title before withholding' })
+    orcaTerminal({ tabId: 'safe-pane', title: 'safe title before withholding' })
   ]);
 }
 
@@ -468,31 +474,32 @@ test('recursive allowlist and every exported string slot is sanitized', testCont
     timestamp: RECORD_TIMESTAMP,
     aiTitle: SECRET_SENTINEL
   }]);
-  testFixture.options.runOrca = args => JSON.stringify(args[0] === 'worktree' ? [{
+  testFixture.options.runOrca = orcaRunner([{
     worktreeId: 'w::/private/' + SECRET_SENTINEL,
     path: '/private/' + SECRET_SENTINEL,
     repoLabel: SECRET_SENTINEL,
     branch: SECRET_SENTINEL,
     status: 'active',
-    lastActivityAt: RECORD_TIMESTAMP,
-    liveTerminals: 1,
+    lastActivityAt: Date.parse(RECORD_TIMESTAMP),
+    liveTerminalCount: 1,
     agents: [{
-      paneKey: 'p',
+      paneKey: 'p:leaf',
       state: 'running',
       agentType: 'claude',
-      stateStartedAt: RECORD_TIMESTAMP,
-      updatedAt: RECORD_TIMESTAMP,
+      stateStartedAt: Date.parse(RECORD_TIMESTAMP),
+      updatedAt: Date.parse(RECORD_TIMESTAMP),
       prompt: 'preserved safe ' + SECRET_SENTINEL,
       displayName: SECRET_SENTINEL,
       toolInput: SECRET_SENTINEL
     }]
-  }] : [{
+  }], [{
     handle: 'h',
     worktreeId: 'w::/private/' + SECRET_SENTINEL,
-    paneKey: 'p',
+    tabId: 'p',
+    leafId: 'leaf',
     agentIdentity: 'claude',
     title: SECRET_SENTINEL,
-    lastOutputAt: RECORD_TIMESTAMP,
+    lastOutputAt: Date.parse(RECORD_TIMESTAMP),
     connected: true,
     preview: SECRET_SENTINEL
   }]);
@@ -820,8 +827,8 @@ test('Orca exact 8/prefix 24 boundaries, normalization, time window and both dir
   testFixture.file('claude', 'a', [claudeUserRecord('abcdefgh')]);
   for (const [when, want] of [['2026-10-08T02:10:00.000Z', true], ['2026-10-08T02:10:00.001Z', false],
     ['2026-10-08T01:59:59.999Z', false]]) {
-    testFixture.options.runOrca = orcaRunner([orcaWorktree('abcdefgh', 'p', {
-      stateStartedAt: when
+    testFixture.options.runOrca = orcaRunner([orcaWorktree('abcdefgh', 'p:leaf', {
+      stateStartedAt: Date.parse(when)
     })], [orcaTerminal()]);
     assert.equal(snapshotReader.runSnapshot(testFixture.options).sessions[0].orca_link.confirmed, want);
   }
@@ -836,7 +843,7 @@ test('Orca exact 8/prefix 24 boundaries, normalization, time window and both dir
   const worktree = orcaWorktree('abcdefgh');
   worktree.agents.push({
     ...worktree.agents[0],
-    paneKey: 'second'
+    paneKey: 'second:leaf'
   });
   testFixture.options.runOrca = orcaRunner([worktree], [orcaTerminal()]);
   snapshot = snapshotReader.runSnapshot(testFixture.options);
@@ -1044,7 +1051,7 @@ test("reader uses exactly the two injected Orca calls, performs no process spawn
   testFixture.file('claude', 'a', [claudeUserRecord('abcdefgh')]);
   testFixture.options.runOrca = args => {
     calls.push(args);
-    return JSON.stringify(args[0] === 'worktree' ? [orcaWorktree('abcdefgh')] : [orcaTerminal()]);
+    return orcaRunner([orcaWorktree('abcdefgh')], [orcaTerminal()])(args);
   };
   const child = require('node:child_process');
   const saved = {};
@@ -1249,13 +1256,13 @@ test('review 2 excluded old and missing transcripts cannot reexport Orca termina
     worktreeId: 'old-worktree',
     path: '/old/repo'
   };
-  oldWorktree.agents[0].paneKey = 'old-pane';
+  oldWorktree.agents[0].paneKey = 'old-pane:leaf';
   testFixture.options.runOrca = orcaRunner(
     [orcaWorktree('abcdefgh'), oldWorktree],
     [orcaTerminal(), orcaTerminal({
       handle: 'old-terminal',
       worktreeId: 'old-worktree',
-      paneKey: 'old-pane',
+      tabId: 'old-pane',
       title: 'excluded old text'
     })]
   );
@@ -1522,11 +1529,11 @@ test('R2 4 withheld multi-file sessions omit terminal titles at every file cwd',
   testFixture.options.runOrca = orcaRunner([
     { ...orcaWorktree('A'), worktreeId: 'public', path: '/work/public' },
     { ...orcaWorktree('B'), worktreeId: 'private', path: '/work/private' },
-    orcaWorktree('abcdefgh', 'safe-pane')
+    orcaWorktree('abcdefgh', 'safe-pane:leaf')
   ], [
     orcaTerminal({ worktreeId: 'public', handle: 'public', title: 'A original title' }),
     orcaTerminal({ worktreeId: 'private', handle: 'private', title: 'B original title' }),
-    orcaTerminal({ paneKey: 'safe-pane', title: 'safe preserved title' })
+    orcaTerminal({ tabId: 'safe-pane', title: 'safe preserved title' })
   ]);
   const snapshot = snapshotReader.runSnapshot(testFixture.options);
   assert.equal(snapshot.instructions.length, 1);
@@ -1665,7 +1672,7 @@ for (const direction of ['real-prefix', 'alias-prefix']) {
     })]);
     fixture.options.runOrca = orcaRunner([
       { ...orcaWorktree('excluded'), path: targetCwd },
-      { ...orcaWorktree('preserved', 'safe-pane'), worktreeId: 'safe-tree', path: boundaryCwd }
+      { ...orcaWorktree('preserved', 'safe-pane:leaf'), worktreeId: 'safe-tree', path: boundaryCwd }
     ], [orcaTerminal(), orcaTerminal({ handle: 'safe-handle', worktreeId: 'safe-tree' })]);
     const before = snapshotReader.runSnapshot(fixture.options);
     assert.equal(before.instructions.length, 3);
@@ -1827,7 +1834,7 @@ test('R7 Orca INT overflow rejects only that worktree and reports partial covera
   fixture.file('claude', 'safe', [claudeUserRecord('preserved')]);
   fixture.options.runOrca = orcaRunner([
     { ...orcaWorktree('preserved'), worktreeId: 'safe' },
-    { ...orcaWorktree('bad'), worktreeId: 'bad', liveTerminals: 1000000001 }
+    { ...orcaWorktree('bad'), worktreeId: 'bad', liveTerminalCount: 1000000001 }
   ], [orcaTerminal({ worktreeId: 'safe' }), orcaTerminal({ handle: 'bad', worktreeId: 'bad' })]);
   const snapshot = snapshotReader.runSnapshot(fixture.options);
   assert.equal(snapshot.instructions.length, 1);
@@ -1898,7 +1905,7 @@ test('R7 seeded 200 mixed transcript and Orca inputs preserve all four normal in
     fixture.file('codex', 'affected', codexRecords);
     fixture.file('codex', 'normal', [codexSessionMeta({ id: 'normalcodex' }), codexMessage('D'), codexMessage('F')]);
     const badWorktree = { ...orcaWorktree('bad'), worktreeId: 'bad' };
-    const worktreeField = ['liveTerminals', 'lastActivityAt', 'worktreeId', 'path'][nextRandom() % 4];
+    const worktreeField = ['liveTerminalCount', 'lastActivityAt', 'worktreeId', 'path'][nextRandom() % 4];
     badWorktree[worktreeField] = randomValue();
     const badAgent = { ...orcaWorktree('bad').agents[0], paneKey: randomValue(), updatedAt: randomValue() };
     badWorktree.agents.push(badAgent);
@@ -2673,3 +2680,172 @@ for (const missing of ['file', 'key']) {
     else assert.equal(JSON.stringify(fixture.config()), JSON.stringify(changed));
   });
 }
+
+const ORCA_TEXT_SENTINEL = 'ORCA_PRIVATE_TEXT_SENTINEL';
+
+function installActualOrcaFixture(testContext) {
+  const fixture = createFixture(testContext);
+  fixture.file('claude', 'main', [claudeUserRecord('abcdefgh')]);
+  const worktree = {
+    ...orcaWorktree('abcdefgh', 'synthetic-tab:synthetic-leaf'),
+    worktreeId: 'synthetic-tree::/sensitive/repo', liveTerminalCount: 3,
+    displayName: ORCA_TEXT_SENTINEL, comment: ORCA_TEXT_SENTINEL, preview: ORCA_TEXT_SENTINEL,
+    title: ORCA_TEXT_SENTINEL, prompt: ORCA_TEXT_SENTINEL, taskTitle: ORCA_TEXT_SENTINEL
+  };
+  Object.assign(worktree.agents[0], {
+    updatedAt: Date.parse(RECORD_TIMESTAMP) + 123,
+    displayName: ORCA_TEXT_SENTINEL, taskTitle: ORCA_TEXT_SENTINEL, title: ORCA_TEXT_SENTINEL,
+    preview: ORCA_TEXT_SENTINEL, lastAssistantMessage: ORCA_TEXT_SENTINEL,
+    toolName: ORCA_TEXT_SENTINEL, toolInput: { content: ORCA_TEXT_SENTINEL }
+  });
+  const other = { ...orcaWorktree(ORCA_TEXT_SENTINEL, 'other-tab:other-leaf'),
+    worktreeId: 'other-tree::/other/repo', path: '/other/repo' };
+  const terminal = orcaTerminal({ worktreeId: worktree.worktreeId,
+    tabId: 'synthetic-tab', leafId: 'synthetic-leaf', handle: 'term_synthetic',
+    title: ORCA_TEXT_SENTINEL, preview: ORCA_TEXT_SENTINEL, displayName: ORCA_TEXT_SENTINEL,
+    comment: ORCA_TEXT_SENTINEL, lastAssistantMessage: ORCA_TEXT_SENTINEL,
+    prompt: ORCA_TEXT_SENTINEL, taskTitle: ORCA_TEXT_SENTINEL, toolInput: ORCA_TEXT_SENTINEL });
+  const responses = {
+    worktree: orcaResponse('worktrees', [worktree, other]),
+    terminal: orcaResponse('terminals', [terminal, orcaTerminal({ worktreeId: other.worktreeId,
+      tabId: 'other-tab', leafId: 'other-leaf', handle: 'term_other' })])
+  };
+  responses.worktree.result.hostScope = { private: ORCA_TEXT_SENTINEL };
+  responses.terminal.result.topologyRevisions = { private: ORCA_TEXT_SENTINEL };
+  responses.worktree._meta = { private: ORCA_TEXT_SENTINEL };
+  fixture.options.runOrca = args => JSON.stringify(responses[args[0]]);
+  return { fixture, responses };
+}
+
+function assertActualOrcaSnapshot(snapshot) {
+  assert.deepEqual(snapshot.coverage.orca, { state: 'ok', code: null });
+  assert.equal(snapshot.orca.worktrees.length, 2);
+  assert.equal(snapshot.orca.terminals.length, 2);
+  const worktree = snapshot.orca.worktrees[0];
+  assert.equal(worktree.live_terminals, 3);
+  assert.equal(worktree.last_activity_at, RECORD_TIMESTAMP);
+  assert.equal(worktree.agents[0].state_started_at, RECORD_TIMESTAMP);
+  assert.equal(worktree.agents[0].updated_at, '2026-10-08T02:00:00.123Z');
+  assert.equal(snapshot.orca.terminals[0].last_output_at, RECORD_TIMESTAMP);
+  assert.deepEqual(snapshot.sessions[0].orca_link, {
+    evidence: 'prompt_exact', confirmed: true,
+    pane_key: 'synthetic-tab:synthetic-leaf', terminal_handle: 'term_synthetic'
+  });
+  assert.deepEqual(Object.keys(worktree).sort(), [
+    'agents', 'branch', 'last_activity_at', 'live_terminals', 'path_id', 'repo_label', 'status', 'worktree_id'
+  ]);
+  assert.deepEqual(Object.keys(worktree.agents[0]).sort(), [
+    'agent_type', 'interrupted', 'pane_key', 'state', 'state_started_at', 'updated_at'
+  ]);
+  assert.deepEqual(Object.keys(snapshot.orca.terminals[0]).sort(), [
+    'agent_identity', 'connected', 'handle', 'last_output_at', 'worktree_id'
+  ]);
+  assert.equal(JSON.stringify(snapshot).includes(ORCA_TEXT_SENTINEL), false);
+}
+
+test('PR1c D actual Orca envelopes project numeric times, counts, topology links and exact allowlists', testContext => {
+  const { fixture } = installActualOrcaFixture(testContext);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assertActualOrcaSnapshot(snapshot);
+  assert.equal(snapshotPolicy.validateSnapshot(snapshot).ok, true);
+  assert.equal(JSON.stringify(snapshot.orca).includes('/sensitive/repo'), false);
+});
+
+test('PR1c D failed or malformed envelopes from either Orca command remain unavailable', testContext => {
+  const { fixture, responses } = installActualOrcaFixture(testContext);
+  assertActualOrcaSnapshot(snapshotReader.runSnapshot(fixture.options));
+  for (const command of ['worktree', 'terminal']) {
+    const original = responses[command];
+    const collection = command === 'worktree' ? 'worktrees' : 'terminals';
+    for (const invalid of [
+      { ...original, ok: false }, { ...original, ok: 'true' }, { result: original.result },
+      { ...original, result: null }, { ...original, result: [] },
+      { ...original, result: { [collection]: {} } }, { ...original, result: {} },
+      { ...original, result: { [collection]: null } }
+    ]) {
+      responses[command] = invalid;
+      const snapshot = snapshotReader.runSnapshot(fixture.options);
+      assert.deepEqual(snapshot.coverage.orca, { state: 'unavailable', code: 'orca_unavailable' });
+      assert.deepEqual(snapshot.orca, { worktrees: [], terminals: [] });
+      assert.equal(JSON.stringify(snapshot).includes(ORCA_TEXT_SENTINEL), false);
+    }
+    responses[command] = original;
+  }
+});
+
+test('PR1c D truncation of either collection preserves projected items and marks partial', testContext => {
+  const { fixture, responses } = installActualOrcaFixture(testContext);
+  assertActualOrcaSnapshot(snapshotReader.runSnapshot(fixture.options));
+  for (const command of ['worktree', 'terminal']) {
+    responses[command].result.truncated = true;
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.deepEqual(snapshot.coverage.orca, { state: 'partial', code: 'orca_unavailable' });
+    assert.equal(snapshot.orca.worktrees.length, 2);
+    assert.equal(snapshot.orca.terminals.length, 2);
+    assert.equal(snapshot.sessions[0].orca_link.terminal_handle, 'term_synthetic');
+    assert.equal(JSON.stringify(snapshot).includes(ORCA_TEXT_SENTINEL), false);
+    responses[command].result.truncated = false;
+  }
+});
+
+test('PR1c D terminal topology requires two strings and takes precedence over a legacy pane key', testContext => {
+  const { fixture, responses } = installActualOrcaFixture(testContext);
+  assertActualOrcaSnapshot(snapshotReader.runSnapshot(fixture.options));
+  const terminal = responses.terminal.result.terminals[0];
+  terminal.paneKey = 'synthetic-tab:synthetic-leaf';
+  for (const [tabId, leafId] of [
+    [null, 'synthetic-leaf'], ['synthetic-tab', 42], [undefined, 'synthetic-leaf'],
+    ['synthetic-tab', undefined], ['another-tab', 'synthetic-leaf']
+  ]) {
+    terminal.tabId = tabId;
+    terminal.leafId = leafId;
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(snapshot.coverage.orca.state, 'ok');
+    assert.equal(snapshot.sessions[0].orca_link.terminal_handle, null);
+  }
+  terminal.tabId = 'synthetic-tab';
+  terminal.leafId = 'synthetic-leaf';
+  terminal.paneKey = 'wrong:legacy';
+  assert.equal(snapshotReader.runSnapshot(fixture.options).sessions[0].orca_link.terminal_handle, 'term_synthetic');
+});
+
+test('PR1c D numeric Orca TIME bounds stay enforced and numeric transcript timestamps stay invalid', testContext => {
+  const { fixture, responses } = installActualOrcaFixture(testContext);
+  assertActualOrcaSnapshot(snapshotReader.runSnapshot(fixture.options));
+  const worktree = responses.worktree.result.worktrees[0];
+  for (const invalidTime of [NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER, 253402300800000]) {
+    worktree.lastActivityAt = invalidTime;
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(snapshot.coverage.orca.state, 'partial');
+    assert.equal(snapshot.orca.worktrees.length, 1);
+    assert.equal(snapshot.orca.terminals.length, 1);
+  }
+  worktree.lastActivityAt = Date.parse(RECORD_TIMESTAMP);
+  fixture.file('claude', 'numeric', [claudeUserRecord('NUMERIC_TRANSCRIPT_MUST_NOT_EXPORT', {
+    sessionId: 'numeric', timestamp: Date.parse(RECORD_TIMESTAMP)
+  })]);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assertActualOrcaSnapshot(snapshot);
+  assert.equal(snapshot.coverage.claude.invalid_time_withheld, 1);
+  assert.equal(snapshot.sessions.length, 1);
+  assert.equal(JSON.stringify(snapshot).includes('NUMERIC_TRANSCRIPT_MUST_NOT_EXPORT'), false);
+});
+
+test('PR1c D bare arrays and legacy Orca field names retain their previous projections', testContext => {
+  const fixture = createFixture(testContext);
+  fixture.file('claude', 'main', [claudeUserRecord('abcdefgh')]);
+  const worktree = orcaWorktree('abcdefgh', 'legacy-pane');
+  delete worktree.liveTerminalCount;
+  worktree.liveTerminals = 7;
+  worktree.lastActivityAt = RECORD_TIMESTAMP;
+  worktree.agents[0].stateStartedAt = RECORD_TIMESTAMP;
+  worktree.agents[0].updatedAt = RECORD_TIMESTAMP;
+  const terminal = orcaTerminal({ paneKey: 'legacy-pane', lastOutputAt: RECORD_TIMESTAMP });
+  delete terminal.tabId;
+  delete terminal.leafId;
+  fixture.options.runOrca = args => JSON.stringify(args[0] === 'worktree' ? [worktree] : [terminal]);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.coverage.orca.state, 'ok');
+  assert.equal(snapshot.orca.worktrees[0].live_terminals, 7);
+  assert.equal(snapshot.sessions[0].orca_link.terminal_handle, 'h');
+});
