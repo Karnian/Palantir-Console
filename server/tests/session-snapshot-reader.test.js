@@ -4580,3 +4580,123 @@ for (const [variant, extra] of [
     }
   });
 }
+
+test('PR1d R5 complete overlong newline within one chunk withholds the session and its small sibling', t => {
+  const fixture = createFixture(t);
+  const previous = snapshotReader.STREAM_LIMITS.lineBytes;
+  t.after(() => { snapshotReader.STREAM_LIMITS.lineBytes = previous; });
+  snapshotReader.STREAM_LIMITS.lineBytes = 1000;
+  const file = fixture.file('claude', 'a-long', [claudeUserRecord('x'.repeat(2000))]);
+  fs.appendFileSync(file, '\n');
+  const bytes = fs.readFileSync(file);
+  assert.ok(bytes.length < 256 * 1024);
+  assert.ok(bytes.length - 1 > snapshotReader.STREAM_LIMITS.lineBytes);
+  assert.equal(bytes.at(-1), 10);
+  fixture.file('claude', 'b-small', [claudeUserRecord('small sibling must stay withheld', { uuid: 'sibling' })]);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.coverage.claude.large_file_withheld, 1);
+  assert.equal(snapshot.coverage.claude.files_failed, 1);
+  assert.equal(snapshot.coverage.claude.multi_file_withheld, 1);
+  assert.equal(snapshot.sessions.length, 0);
+  assert.equal(snapshot.instructions.length, 0);
+});
+
+test('PR1d R5 workflow journal skips exactly once without parse failure or group membership', t => {
+  const fixture = createFixture(t);
+  fixture.file('claude', 'project/main', [claudeUserRecord('main instruction survives')]);
+  const journal = fixture.file('claude', 'project/s/subagents/workflows/wf_1/journal', [
+    { type: 'launched' }, { type: 'started' }, { type: 'result' }
+  ]);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.coverage.claude.files_scanned, 2);
+  assert.equal(snapshot.coverage.claude.files_skipped, 1);
+  assert.equal(snapshot.coverage.claude.files_failed, 0);
+  assert.equal(snapshot.coverage.claude.multi_file_withheld, 0);
+  assert.deepEqual(snapshot.sessions.map(session => session.session_id), ['s']);
+  assert.deepEqual(snapshot.instructions.map(instruction => instruction.text), ['main instruction survives']);
+  const internals = loadReaderWithInternals();
+  const counters = Object.fromEntries(snapshotPolicy.COVERAGE_KEYS.claude.map(key => [key, 0]));
+  const summary = internals.summarizeTranscriptFile('claude', { file: journal, stats: fs.lstatSync(journal),
+    root: path.join(fixture.options.homeDir, '.claude/projects') }, counters,
+    +SNAPSHOT_TIME - 14 * 86400000, fixture.config());
+  assert.equal(summary, null, 'journal is removed before transcript grouping');
+  assert.equal(counters.files_scanned, 1);
+  assert.equal(counters.files_skipped, 1);
+  assert.equal(counters.files_failed, 0);
+});
+
+for (const variant of ['session-id', 'other-type']) {
+  test(`PR1d R5 workflow journal ${variant} is a regular transcript participating in grouping`, t => {
+    const fixture = createFixture(t);
+    fixture.file('claude', 'project/main', [claudeUserRecord('main instruction')]);
+    const rows = variant === 'session-id'
+      ? [{ type: 'result', sessionId: 's', cwd: '/sensitive/repo', timestamp: RECORD_TIMESTAMP }]
+      : [{ type: 'unexpected-workflow-event' }];
+    const journal = fixture.file('claude', 'project/s/subagents/workflows/wf_1/journal', rows);
+    const config = snapshotReader.loadConfig(fixture.options);
+    const internals = loadReaderWithInternals();
+    const counters = Object.fromEntries(snapshotPolicy.COVERAGE_KEYS.claude.map(key => [key, 0]));
+    const root = path.join(fixture.options.homeDir, '.claude/projects');
+    const summary = internals.summarizeTranscriptFile('claude', { file: journal, root, stats: fs.lstatSync(journal) },
+      counters, +SNAPSHOT_TIME - 14 * 86400000, config);
+    assert.ok(summary, 'non-journal content is not removed by the journal shortcut');
+    assert.equal(counters.files_scanned, 1);
+    assert.equal(counters.files_skipped, 0);
+    assert.equal(counters.files_failed, 0);
+    const groups = new Map();
+    internals.groupTranscriptFiles(groups, 'claude', summary);
+    assert.equal(groups.size, 1);
+    assert.equal([...groups.values()][0].files.has(journal), true);
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(snapshot.coverage.claude.files_failed, 0);
+    assert.equal(snapshot.coverage.claude.multi_file_withheld, variant === 'session-id' ? 1 : 0);
+    assert.equal(snapshot.sessions.length, variant === 'session-id' ? 0 : 1);
+    // A sessionless unsupported transcript can still be skipped by the later generic rule.
+    assert.equal(snapshot.coverage.claude.files_skipped, variant === 'session-id' ? 0 : 1);
+  });
+}
+
+test('PR1d R5 changed discarded-details reread remains a blocked competitor for the same cwd and pane', t => {
+  const fixture = createFixture(t);
+  const cap = snapshotPolicy.SNAPSHOT_LIMITS.sessions;
+  const prompt = 'live uniquely matching instruction';
+  let firstFile, originalFirst;
+  for (let index = 0; index <= cap; index++) {
+    const row = claudeUserRecord(index === 1 ? prompt : `different instruction ${index}`, {
+      sessionId: `s${index}`, timestamp: new Date(Date.parse(RECORD_TIMESTAMP) - (cap - index) * 1000).toISOString(),
+      cwd: index <= 1 ? '/sensitive/repo' : '/unrelated/repo'
+    });
+    const file = fixture.file('claude', `a-${String(index).padStart(3, '0')}`, [row]);
+    if (index === 0) { firstFile = file; originalFirst = row; }
+  }
+  // Evict s0, then invalidate the newest group so final selection must restore s0.
+  fixture.file('claude', 'z-duplicate', [claudeUserRecord('duplicate newest', {
+    sessionId: `s${cap}`, cwd: '/unrelated/repo'
+  })]);
+  fixture.options.runOrca = orcaRunner([orcaWorktree(prompt)], []);
+  const baseline = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(baseline.sessions.length, cap);
+  assert.equal(baseline.coverage.claude.files_failed, 0);
+  assert.equal(baseline.sessions.find(session => session.session_id === 's1').orca_link.confirmed, true);
+  const inode = fs.statSync(firstFile).ino;
+  const originalOpen = fs.openSync;
+  let firstOpens = 0;
+  t.mock.method(fs, 'openSync', function(file, ...args) {
+    if (file === firstFile && ++firstOpens === 2) {
+      fs.writeFileSync(firstFile, JSON.stringify({ ...originalFirst,
+        timestamp: new Date(Date.parse(originalFirst.timestamp) + 1000).toISOString() }));
+    }
+    return originalOpen(file, ...args);
+  });
+  const changed = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(firstOpens, 2, 'the discarded file is reopened exactly once after the initial pass');
+  assert.equal(fs.statSync(firstFile).ino, inode, 'only content changes between passes');
+  assert.equal(changed.coverage.claude.files_scanned, cap + 2);
+  assert.equal(changed.coverage.claude.multi_file_withheld, 1);
+  assert.equal(changed.coverage.claude.files_failed, 1);
+  assert.equal(changed.sessions.length, cap - 1);
+  assert.equal(changed.sessions.some(session => session.session_id === 's0'), false);
+  assert.equal(changed.instructions.some(instruction => instruction.id.startsWith('claude:s0:')), false);
+  assert.deepEqual(changed.sessions.find(session => session.session_id === 's1').orca_link,
+    { evidence: 'ambiguous', confirmed: false, pane_key: null, terminal_handle: null });
+});
