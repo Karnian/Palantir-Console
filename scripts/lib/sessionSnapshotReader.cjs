@@ -519,7 +519,8 @@ function compareRecordTimes(left, right) {
   return (left.ts || '').localeCompare(right.ts || '') || left.position - right.position;
 }
 
-function parseFile(provider, records, providerCoverage, config = {}, retainAllInstructions = false) {
+function parseFile(provider, records, providerCoverage, config = {}, retainAllInstructions = false,
+  displayOptions = {}) {
   // Spec §1.2/§1.4: parse a nonwithheld file in original order before timestamp display sorting.
   const ordered = records.map((record, position) => ({
     record,
@@ -569,6 +570,12 @@ function parseFile(provider, records, providerCoverage, config = {}, retainAllIn
     providerCoverage.records_unverified++;
     return null;
   }
+  const readerOptions = displayOptions.readerOptions;
+  const lastAt = Date.parse(times[times.length - 1]);
+  const displayExcluded = displayOptions.withheld || (!retainAllInstructions && readerOptions
+    && (lastAt < +readerOptions.now - 14 * 86400000 || lastAt > +readerOptions.now
+      || snapshotSessionExclusion(readerOptions, config, { provider, sid: sessionId,
+        cwd: cwd.length > 4096 ? null : cwd, run_mode }, false) !== null));
   const byUuid = new Map(records.filter(record => record.uuid).map(record => [record.uuid, record]));
   for (const {
     record,
@@ -683,6 +690,8 @@ function parseFile(provider, records, providerCoverage, config = {}, retainAllIn
   items.sort(compareRecordTimes);
   providerCoverage.records_unknown += unknown;
   const detail = boundSessionInstructions(items, config, providerCoverage, retainAllInstructions);
+  // Spec §1.4/§4: sanitize only retained output candidates; deletion rescans retain every instruction.
+  detail.items = displayExcluded ? [] : detail.items.map(finalizeRetainedInstruction);
   if (cwd.length > 4096) {
     cwd = null;
     providerCoverage.records_unverified++;
@@ -691,11 +700,12 @@ function parseFile(provider, records, providerCoverage, config = {}, retainAllIn
     provider: retainString(provider, 32),
     sid: retainString(sessionId, 64),
     cwd: retainString(cwd, 4096),
-    branch: typeof branch === 'string' ? retainString(snapshotPolicy.finalizeLabel(branch).value, 64) : null,
+    branch: !displayExcluded && typeof branch === 'string'
+      ? retainString(snapshotPolicy.finalizeLabel(branch).value, 64) : null,
     run_mode: retainString(run_mode, 32),
-    title: title === null ? null : retainString(snapshotPolicy.finalizeText(title, 200).value, 200),
+    title: displayExcluded || title === null ? null : retainString(snapshotPolicy.finalizeText(title, 200).value, 200),
     ...detail,
-    link_text: linkState.last ? summarizeLinkText(linkState.rawText) : null,
+    link_text: !displayExcluded && linkState.last ? summarizeLinkText(linkState.rawText) : null,
     unknown,
     first: retainString(first || 'unknown', 32),
     compact: compact && !items.length,
@@ -742,6 +752,10 @@ function finalizeInstructionText(rawText) {
     redacted: finalized.redacted };
 }
 
+function finalizeRetainedInstruction(instruction) {
+  return { ...instruction, ...finalizeInstructionText(instruction.text) };
+}
+
 // Spec §2.2: retain only a digest, length and bounded local prefix of normalized raw text.
 function summarizeLinkText(rawText) {
   const normalized = normalizeLinkText(rawText);
@@ -760,13 +774,12 @@ function compactInstruction(config, instruction, linkState) {
   }
   instruction.fp = computeInstructionFingerprint(config, instruction);
   const ref = computeInstructionRef(config, instruction);
-  const display = finalizeInstructionText(instruction.text);
   return {
     id: retainString(instruction.id, 160),
     ts: retainString(instruction.ts, 24),
     position: instruction.position,
     kind: retainString(instruction.kind, 32),
-    ...display,
+    text: instruction.text,
     attachments: instruction.attachments,
     unknown_blocks: instruction.unknown_blocks || 0,
     fp: retainString(instruction.fp, 64),
@@ -853,7 +866,8 @@ function countInvalidTimeRecords(records) {
     && !snapshotPolicy.isSafeTimestamp(record.timestamp)).length;
 }
 
-function parseIndependentTranscript(provider, records, providerCoverage, config, retainAllInstructions) {
+function parseIndependentTranscript(provider, records, providerCoverage, config, retainAllInstructions,
+  displayOptions = {}) {
   // Host R5: a single file cannot assign instructions from multiple explicit session identities.
   const mixedSession = hasMixedSessionIdentities(provider, records);
   if (mixedSession) {
@@ -870,7 +884,8 @@ function parseIndependentTranscript(provider, records, providerCoverage, config,
   }
   let session;
   try {
-    session = parseFile(provider, records, providerCoverage, config, retainAllInstructions);
+    session = parseFile(provider, records, providerCoverage, config, retainAllInstructions,
+      { ...displayOptions, withheld: displayOptions.withheld || mixedSession || duplicates > 0 });
   } catch {
     // Spec §1: malformed candidates cannot abort unrelated sessions.
     providerCoverage.files_failed++;
@@ -1000,7 +1015,8 @@ function claudeSubagentSessionId(provider, file, root) {
 }
 
 // Spec §2: verify the enumerated inode before reading; only one file's records remain in scope.
-function summarizeTranscriptFile(provider, file, providerCoverage, windowSince, config = {}, requestedTarget = null) {
+function summarizeTranscriptFile(provider, file, providerCoverage, windowSince, config = {}, requestedTarget = null,
+  scanContext = {}) {
   const retainedFile = retainString(file.file, 4096);
   const subagentSid = claudeSubagentSessionId(provider, file.file, file.root);
   let fileDescriptor;
@@ -1041,7 +1057,9 @@ function summarizeTranscriptFile(provider, file, providerCoverage, windowSince, 
       providerCoverage.files_skipped++;
       return null;
     }
-    const parsed = parseIndependentTranscript(provider, records, providerCoverage, config, requestedTarget !== null);
+    const parsed = parseIndependentTranscript(provider, records, providerCoverage, config, requestedTarget !== null,
+      { readerOptions: scanContext.readerOptions,
+        withheld: scanContext.groups?.get(`${provider}:${sessionId}`)?.files.size > 0 });
     return { file: retainedFile, sessionId: sessionId?.length <= 64 ? retainString(sessionId, 64) : null, ...parsed };
   } catch {
     providerCoverage.files_failed++;
@@ -1068,7 +1086,7 @@ function discardSessionDetails(file, details) {
 }
 
 // Spec §1.2/§1.4/§2: only output-eligible sessions consume detail slots.
-function snapshotSessionExclusion(readerOptions, config, session) {
+function snapshotSessionExclusion(readerOptions, config, session, checkSchema = true) {
   if (session.provider === 'codex' && config.invalidContentRuleSessions?.has(session.sid)) {
     return 'withheld_sessions';
   }
@@ -1090,7 +1108,8 @@ function snapshotSessionExclusion(readerOptions, config, session) {
     return session.provider === 'codex' ? 'withheld_sessions' : 'excluded_sessions';
   }
   const key = `${config.machine_id}:${session.provider}:${session.sid}`;
-  if (!safeId(key) || !snapshotPolicy.validateSession(buildSnapshotSession(config, session, key, [])).ok) {
+  if (!safeId(key) || (checkSchema
+    && !snapshotPolicy.validateSession(buildSnapshotSession(config, session, key, [])).ok)) {
     return 'records_unverified';
   }
   return null;
@@ -1143,7 +1162,8 @@ function restoreSelectedDetails(files, details, config, coverage, windowSince, r
     if (file.detailsDiscarded) {
       const provider = file.session.provider;
       const counters = Object.fromEntries(snapshotPolicy.COVERAGE_KEYS[provider].map(key => [key, 0]));
-      const restored = summarizeTranscriptFile(provider, file.source, counters, windowSince, config, requestedTarget);
+      const restored = summarizeTranscriptFile(provider, file.source, counters, windowSince, config, requestedTarget,
+        { readerOptions });
       if (!restored?.session || restored.session.sid !== file.session.sid
         || restored.session.lastAt !== file.session.lastAt || restored.session.firstAt !== file.session.firstAt
         || (!requestedTarget && snapshotSessionExclusion(readerOptions, config, restored.session) !== null)) {
@@ -1166,6 +1186,7 @@ function scanSessions(readerOptions, config, requestedTarget = null) {
     orca: { state: 'unavailable', code: 'orca_unavailable' }
   };
   const groups = new Map();
+  const scanContext = { readerOptions, groups };
   const details = new Map();
   const windowSince = +readerOptions.now - 14 * 86400000;
   let scanIndex = 0;
@@ -1177,7 +1198,7 @@ function scanSessions(readerOptions, config, requestedTarget = null) {
   for (const [provider, root] of roots) {
     for (const file of listFiles(root, coverage[provider], budget)) {
       const summary = summarizeTranscriptFile(provider, file, coverage[provider],
-        windowSince, config, requestedTarget);
+        windowSince, config, requestedTarget, scanContext);
       if (summary) {
         if (summary.session) {
           summary.snapshotExclusion = requestedTarget ? null
@@ -1633,9 +1654,10 @@ function buildOrcaLinkCandidates(all, agents) {
         continue;
       }
       let evidence = 'cwd_only';
-      if (text && text.hash === agent.prompt.hash && text.length >= 8) {
+      const complete = text && text.length <= 4096 && agent.prompt.length <= 4096;
+      if (complete && text.hash === agent.prompt.hash && text.length >= 8) {
         evidence = 'prompt_exact';
-      } else if (text && Math.min(text.length, agent.prompt.length) >= 24
+      } else if (complete && Math.min(text.length, agent.prompt.length) >= 24
         && text.prefix.slice(0, Math.min(text.length, agent.prompt.length, 4096))
           === agent.prompt.prefix.slice(0, Math.min(text.length, agent.prompt.length, 4096))) {
         evidence = 'prompt_prefix';

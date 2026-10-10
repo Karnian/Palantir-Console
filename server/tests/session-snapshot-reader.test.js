@@ -3542,11 +3542,11 @@ test('PR1c R3 raw link summaries retain only the last chronological instruction 
     assert.ok(countStoredStringCharacters(scanned) < 8000);
     fixture.options.runOrca = orcaRunner([orcaWorktree(normalized)], [orcaTerminal()]);
     const exact = snapshotReader.runSnapshot(fixture.options);
-    assert.equal(exact.sessions[0].orca_link.evidence, 'prompt_exact');
-    assert.equal(exact.sessions[0].orca_link.confirmed, true);
+    assert.equal(exact.sessions[0].orca_link.evidence, 'cwd_only');
+    assert.equal(exact.sessions[0].orca_link.confirmed, false);
     fixture.options.runOrca = orcaRunner([orcaWorktree(normalized + ' different suffix')], [orcaTerminal()]);
     const prefix = snapshotReader.runSnapshot(fixture.options);
-    assert.equal(prefix.sessions[0].orca_link.evidence, 'prompt_prefix');
+    assert.equal(prefix.sessions[0].orca_link.evidence, 'cwd_only');
     assert.equal(prefix.sessions[0].orca_link.confirmed, false);
     assert.equal(JSON.stringify(exact).includes('last raw suffix'), false);
     assert.equal(JSON.stringify(exact).includes('link_text'), false);
@@ -4011,4 +4011,85 @@ test('candidate cap keeps excluded sessions as text-free Orca ambiguity blockers
   assert.match(linkCandidates[0].cwdHash, /^[a-f0-9]{64}$/);
   assert.equal(Object.hasOwn(linkCandidates[0], 'items'), false);
   assert.equal(linkCandidates[0].link_text, null);
+});
+
+test('PR1c R6 excluded exec bodies never reach finalizeText while included bodies do', testContext => {
+  const fixture = createFixture(testContext);
+  const body = 'ordinary safe instruction '.repeat(10000);
+  fixture.file('codex', 'exec', [codexSessionMeta({ source: 'exec' }), codexMessage(body)]);
+  const calls = [];
+  const finalize = snapshotPolicy.finalizeText;
+  testContext.mock.method(snapshotPolicy, 'finalizeText', function countFinalization(text, ...args) {
+    calls.push(text);
+    return finalize(text, ...args);
+  });
+  const included = snapshotReader.runSnapshot({ ...fixture.options, includeExec: true });
+  assert.equal(included.instructions.length, 1);
+  assert.equal(calls.filter(text => text === body).length, 1);
+  calls.length = 0;
+  const excluded = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(excluded.sessions.length, 0);
+  assert.equal(excluded.coverage.codex.exec_sessions_excluded, 1);
+  assert.equal(calls.length, 0);
+  fixture.file('codex', 'exec', [codexSessionMeta(), codexMessage(body)]);
+  const interactive = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(interactive.instructions.length, 1);
+  assert.equal(calls.filter(text => text === body).length, 1);
+  assert.equal(interactive.instructions[0].text.length, 2000);
+});
+
+test('PR1c R6 instruction retention is decided before sanitization without changing refs', testContext => {
+  const fixture = createFixture(testContext);
+  const config = snapshotReader.loadConfig(fixture.options);
+  const { parseFile } = loadReaderWithInternals();
+  const body = 'discarded ordinary instruction '.repeat(10000);
+  const records = Array.from({ length: 220 }, function retainedRow(_, index) {
+    return claudeUserRecord(index === 1 ? body : `instruction ${index}`, { uuid: `u${index}` });
+  });
+  const calls = [];
+  const finalize = snapshotPolicy.finalizeText;
+  testContext.mock.method(snapshotPolicy, 'finalizeText', function countFinalization(text, ...args) {
+    calls.push(text);
+    return finalize(text, ...args);
+  });
+  function counters() {
+    return Object.fromEntries(snapshotPolicy.COVERAGE_KEYS.claude.map(key => [key, 0]));
+  }
+  const complete = parseFile('claude', records, counters(), config, true);
+  assert.equal(complete.items.length, 220);
+  assert.equal(calls.filter(text => text === body).length, 1);
+  calls.length = 0;
+  const coverage = counters();
+  const bounded = parseFile('claude', records, coverage, config);
+  assert.equal(bounded.items.length, 201);
+  assert.equal(calls.filter(text => text === body).length, 0);
+  assert.equal(calls.length, 201);
+  assert.equal(coverage.records_unverified, 19);
+  assert.equal(bounded.sessionFingerprint, complete.sessionFingerprint);
+  for (const item of bounded.items) {
+    const original = complete.items.find(candidate => candidate.id === item.id);
+    assert.equal(item.ref, original.ref);
+    assert.equal(item.fp, original.fp);
+    assert.equal(item.text, original.text);
+  }
+});
+
+test('PR1c R6 Orca exact and prefix evidence require two complete local text summaries', testContext => {
+  const fixture = createFixture(testContext);
+  function link(text, prompt) {
+    fixture.file('claude', 'link', [claudeUserRecord(text)]);
+    fixture.options.runOrca = orcaRunner([orcaWorktree(prompt)], [orcaTerminal()]);
+    return snapshotReader.runSnapshot(fixture.options).sessions[0].orca_link;
+  }
+  const short = 'ordinary safe instruction with a real prefix';
+  assert.equal(link(short, short + ' suffix').evidence, 'prompt_prefix');
+  assert.equal(link(short, short).confirmed, true);
+  const long = 'x'.repeat(4096);
+  for (const [text, prompt] of [[long + 'A', long + 'B'], [long + 'A', long + 'A'],
+    [long, long + 'A'], [long + 'A', long]]) {
+    const result = link(text, prompt);
+    assert.equal(result.evidence, 'cwd_only');
+    assert.equal(result.confirmed, false);
+  }
+  assert.equal(link(long, long).evidence, 'prompt_exact');
 });
