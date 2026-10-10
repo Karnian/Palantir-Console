@@ -3352,6 +3352,58 @@ for (const scenario of ['text', 'metadata']) {
   });
 }
 
+function writeHeapRunner(fixture) {
+  const runnerPath = path.join(fixture.root, 'heap-runner.cjs');
+  const source = [
+    "const assert = require('node:assert/strict');",
+    'const reader = require(process.argv[2]);',
+    'const options = JSON.parse(process.argv[3]);',
+    'options.now = new Date(options.now);',
+    'options.runOrca = function unavailableOrca() { return null; };',
+    'const snapshot = reader.runSnapshot(options);',
+    'assert.equal(snapshot.sessions.length, 9);',
+    'assert.equal(snapshot.instructions.length, 9);',
+    'assert.equal(snapshot.coverage.claude.files_scanned, 33);',
+    'assert.equal(snapshot.coverage.claude.files_failed, 0);',
+    'assert.equal(snapshot.coverage.claude.files_skipped, 0);',
+    'assert.equal(snapshot.coverage.claude.records_unverified, 24);',
+    'assert.equal(snapshot.instructions.filter(item => item.text.length === 2000 && item.truncated).length, 8);',
+    'assert.ok(snapshot.instructions.some(item => item.text === "control survives"));',
+    'process.stdout.write(JSON.stringify({sessions: snapshot.sessions.length}) + "\\n");'
+  ].join('\n');
+  fs.writeFileSync(runnerPath, source);
+  return runnerPath;
+}
+
+test('PR1c R2 temporary runner retains bounded strings under a 64MB heap', { timeout: 30000 }, testContext => {
+  const { spawnSync } = require('node:child_process');
+  const fixture = createFixture(testContext);
+  const body = 'ordinary instruction '.repeat(100000);
+  const metadata = 'directory/'.repeat(220000);
+  assert.ok(body.length >= 2 * 1024 * 1024);
+  assert.ok(metadata.length >= 2 * 1024 * 1024);
+  for (let index = 0; index < 32; index++) {
+    fixture.file('claude', `large-${index}`, [claudeUserRecord(body, {
+      sessionId: `large-${index}`,
+      cwd: index < 24 ? '/' + metadata : '/sensitive/repo',
+      gitBranch: metadata
+    })]);
+  }
+  fixture.file('claude', 'control', [claudeUserRecord('control survives', { sessionId: 'control' })]);
+  const runnerPath = writeHeapRunner(fixture);
+  const child = spawnSync(process.execPath, ['--max-old-space-size=64', runnerPath,
+    require.resolve('../../scripts/lib/sessionSnapshotReader.cjs'), JSON.stringify(fixture.options)], {
+    encoding: 'utf8', timeout: 12000, maxBuffer: 64 * 1024, cwd: fixture.root,
+    env: { ...process.env, HOME: fixture.options.homeDir }
+  });
+  testContext.diagnostic(`file runner: status=${child.status}, signal=${child.signal}, `
+    + `sessions=${child.stdout.trim()}`);
+  assert.equal(child.error, undefined);
+  assert.equal(child.status, 0, child.stderr.slice(-1000));
+  assert.equal(child.signal, null);
+  assert.deepEqual(JSON.parse(child.stdout), { sessions: 9 });
+});
+
 test('PR1c R2 partial Orca inventories cannot confirm links or assign terminal handles', testContext => {
   const fixture = createFixture(testContext);
   fixture.file('claude', 'main', [claudeUserRecord('abcdefgh')]);
