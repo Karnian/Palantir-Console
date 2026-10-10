@@ -2411,7 +2411,7 @@ function loadReaderWithInternals(maxFiles, summaries) {
     `const LINK_LIMITS = { summaries: ${summaries} };`);
   loaded._compile(source + '\nmodule.exports.testInternals = '
     + '{ listFiles, summarizeTranscriptFile, groupTranscriptFiles, parseFile, '
-    + 'computeInstructionFingerprint, computeInstructionRef, buildSnapshotInstruction, scanSessions, buildOrcaLinkCandidates, applyOrcaLinks };', filename);
+    + 'computeInstructionFingerprint, computeInstructionRef, buildSnapshotInstruction, scanSessions, buildOrcaLinkCandidates, applyOrcaLinks, summarizeLinkText };', filename);
   return { ...loaded.exports.testInternals, runSnapshot: loaded.exports.runSnapshot };
 }
 
@@ -5323,4 +5323,125 @@ test('PR1d R3 full hidden summary and agent dimensions fit a 64MB heap without o
     { encoding: 'utf8', timeout: 25000, env: { ...process.env, PALANTIR_BLOCK_REAL_SPAWN: '1' } });
   assert.equal(child.status, 0, child.stderr);
   assert.equal(child.stdout, 'bounded');
+});
+
+test('PR1d R4-A a 7MiB transcript growing to 17MiB activates default 8MiB line limit', t => {
+  const fixture = createFixture(t);
+  const file = fixture.file('claude', 'growing', [claudeUserRecord('recent'),
+    ...Array.from({ length: 7 }, () => ({ type: 'assistant', padding: 'x'.repeat(1024 * 1024) }))]);
+  assert.ok(fs.statSync(file).size < snapshotReader.MAX_FILE_BYTES);
+  assert.equal(snapshotReader.STREAM_LIMITS.fileBytes, 256 * 1024 * 1024);
+  assert.equal(snapshotReader.STREAM_LIMITS.lineBytes, 8 * 1024 * 1024);
+  const originalOpen = fs.openSync, originalFstat = fs.fstatSync, originalRead = fs.readSync;
+  let descriptor, statsRead = 0, grew = false;
+  t.mock.method(fs, 'openSync', function(filename, ...args) {
+    const fd = originalOpen(filename, ...args); if (filename === file) descriptor = fd; return fd;
+  });
+  t.mock.method(fs, 'fstatSync', function(fd, ...args) {
+    const stats = originalFstat(fd, ...args); if (fd === descriptor) statsRead++; return stats;
+  });
+  t.mock.method(fs, 'readSync', function(fd, ...args) {
+    if (fd === descriptor && !grew && statsRead >= 2) {
+      grew = true;
+      fs.appendFileSync(file, '\n' + JSON.stringify({ type: 'assistant', padding: 'x'.repeat(10 * 1024 * 1024) }) + '\n');
+    }
+    return originalRead(fd, ...args);
+  });
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(grew, true);
+  assert.ok(fs.statSync(file).size > snapshotReader.MAX_FILE_BYTES);
+  assert.equal(snapshot.coverage.claude.large_file_withheld, 1);
+  assert.equal(snapshot.coverage.claude.files_failed, 1);
+  assert.equal(snapshot.coverage.claude.link_blocked, 1);
+  assert.equal(snapshot.sessions.length, 0);
+  assert.equal(snapshot.instructions.length, 0);
+});
+
+test('PR1d R4-C1 distinct lone-surrogate cwd values never match in the comparison index', t => {
+  const fixture = createFixture(t), prompt = 'abcdefgh';
+  fixture.file('claude', 'a', [claudeUserRecord(prompt, { cwd: '/repo/\uD800' })]);
+  fixture.options.runOrca = orcaRunner([{ ...orcaWorktree(prompt), path: '/repo/\uD801' }], []);
+  let snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.coverage.claude.link_blocked, 0);
+  assert.equal(snapshot.sessions[0].orca_link.confirmed, false);
+  assert.equal(snapshot.sessions[0].orca_link.evidence, 'none');
+  fixture.options.runOrca = orcaRunner([{ ...orcaWorktree(prompt), path: '/repo/\uD800' }], []);
+  snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.sessions[0].orca_link.confirmed, true);
+});
+
+test('PR1d R4-C2 special Orca agent summaries cannot confirm a human line-folded lookalike', t => {
+  const fixture = createFixture(t);
+  const special = 'You are working inside Orca, a multi-agent IDE.';
+  fixture.file('claude', 'a', [claudeUserRecord('You are working inside Orca,\na multi-agent IDE.', { sessionId: 'visible' })]);
+  fixture.file('claude', 'b', [claudeUserRecord(special + '\nbootstrap', { sessionId: 'system' })]);
+  for (const excluded of [false, true]) {
+    snapshotReader.loadConfig(fixture.options);
+    const config = fixture.config(); config.exclude.sessions = excluded ? ['claude:system'] : []; fixture.save(config);
+    fixture.options.runOrca = orcaRunner([orcaWorktree(special)], []);
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(snapshot.coverage.claude.link_blocked, 0);
+    assert.equal(snapshot.sessions.find(session => session.session_id === 'visible').orca_link.confirmed, false);
+    assert.equal(snapshot.sessions.find(session => session.session_id === 'visible').orca_link.evidence, 'cwd_only');
+  }
+});
+
+
+for (const provider of ['claude', 'codex']) {
+  test(`PR1d R4 growth updates ${provider === 'claude' ? 'identity metadata' : 'instruction'} limit state`, t => {
+    const fixture = createFixture(t);
+    const previous = { ...snapshotReader.STREAM_LIMITS };
+    Object.assign(snapshotReader.STREAM_LIMITS, { smallFileBytes: 4096, identities: 5 });
+    t.after(() => Object.assign(snapshotReader.STREAM_LIMITS, previous));
+    const rows = provider === 'claude' ? Array.from({ length: 4 }, (_, index) => claudeUserRecord('item-' + index, { uuid: 'u' + index }))
+      : [codexSessionMeta(), ...Array.from({ length: 8 }, (_, index) => codexMessage('item-' + index))];
+    const file = fixture.file(provider, 'growing', rows);
+    assert.ok(fs.statSync(file).size < snapshotReader.STREAM_LIMITS.smallFileBytes);
+    const originalOpen = fs.openSync, originalRead = fs.readSync;
+    let descriptor, grew = false;
+    t.mock.method(fs, 'openSync', function(filename, ...args) {
+      const fd = originalOpen(filename, ...args); if (filename === file) descriptor = fd; return fd;
+    });
+    t.mock.method(fs, 'readSync', function(fd, ...args) {
+      if (fd === descriptor && !grew) {
+        grew = true;
+        fs.appendFileSync(file, '\n' + JSON.stringify({ type: 'assistant', padding: 'x'.repeat(5000) }));
+      }
+      return originalRead(fd, ...args);
+    });
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(grew, true);
+    assert.equal(snapshot.coverage[provider].large_file_withheld, 1);
+    assert.equal(snapshot.coverage[provider].files_failed, 1);
+    assert.equal(snapshot.sessions.length, 0);
+  });
+}
+
+test('PR1d R4 cwd fallback and terminal partial scopes preserve lone surrogate distinctions', t => {
+  const fixture = createFixture(t), prompt = 'abcdefgh', cwd = '/repo/\uD800';
+  fixture.file('claude', 'a', [claudeUserRecord(prompt, { cwd })]);
+  for (const scope of ['/repo/\uD801', cwd]) {
+    fixture.options.runOrca = orcaRunner([{ ...orcaWorktree(prompt), path: cwd }], [orcaTerminal({
+      worktreeId: 'missing::' + scope, worktreePath: scope, tabId: 'orphan', leafId: 'leaf' })]);
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(snapshot.coverage.orca.state, 'partial');
+    assert.equal(snapshot.sessions[0].orca_link.confirmed, scope !== cwd);
+    if (scope === cwd) assert.equal(snapshot.sessions[0].orca_link.evidence, 'ambiguous');
+  }
+  const { buildOrcaLinkCandidates, applyOrcaLinks, summarizeLinkText } = loadReaderWithInternals();
+  const session = { provider: 'claude', cwd, firstAt: RECORD_TIMESTAMP, lastAt: RECORD_TIMESTAMP,
+    link_text: summarizeLinkText(prompt), output: {} };
+  const agent = { provider: 'claude', pane: 'p:leaf', cwd: '/repo/\uD801',
+    prompt: summarizeLinkText(prompt, true), times: [Date.parse(RECORD_TIMESTAMP)] };
+  applyOrcaLinks([session], buildOrcaLinkCandidates([session], [agent]));
+  assert.equal(session.output.orca_link, undefined);
+});
+
+test('PR1d R4 agent special summary detection shares the producer whitespace predicate', () => {
+  const { summarizeLinkText } = loadReaderWithInternals();
+  const special = 'You are working inside Orca, a multi-agent IDE.';
+  for (const prefix of ['', ' \t\r\n', '\u00a0\u1680\u2000\u2028\u2029\u202f\u205f\u3000\ufeff']) {
+    assert.equal(summarizeLinkText(prefix + special + '\nbootstrap', true), null);
+  }
+  assert.notEqual(summarizeLinkText('ordinary human instructions', true), null);
 });

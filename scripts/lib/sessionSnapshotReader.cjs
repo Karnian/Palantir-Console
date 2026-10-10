@@ -24,7 +24,7 @@ function selectFirstTranscriptIdentity(provider, record, identity) {
   }
 }
 function* transcriptRecords(fd, observation) {
-  const limited = observation?.limited !== false;
+  let limited = observation?.limited !== false;
   function consume(line, terminated = true) {
     const record = parseTranscriptRecord(line, terminated);
     if (observation) selectFirstTranscriptIdentity(observation.provider, record, observation);
@@ -36,6 +36,10 @@ function* transcriptRecords(fd, observation) {
     const count = fs.readSync(fd, chunk, 0, Math.min(chunk.length, STREAM_LIMITS.fileBytes + 1 - offset), offset);
     if (!count) break;
     offset += count;
+    if (offset > STREAM_LIMITS.smallFileBytes) {
+      limited = true;
+      if (observation) observation.limited = true;
+    }
     if (offset > STREAM_LIMITS.fileBytes) streamLimit();
     let start = 0, end;
     while ((end = chunk.indexOf(10, start)) >= 0 && end < count) {
@@ -57,7 +61,7 @@ function* transcriptRecords(fd, observation) {
 }
 function transcriptSource(fd, provider, validateOnly = false, observation) {
   const headers = [];
-  const source = { streaming: true, limited: observation?.limited !== false, find(predicate) { return headers.find(predicate); } };
+  const source = { streaming: true, get limited() { return observation?.limited !== false; }, find(predicate) { return headers.find(predicate); } };
   const analysis = { byUuid: new Map(), firstTime: null, lastTime: null, duplicates: 0, invalidTime: 0,
     mixed: false, queuedDuplicate: false, sidechainOnly: true, singleSession: true, count: 0,
     brokenJson: false, hasSessionIdentity: false, instructionCandidates: 0, summaryCandidates: 0 };
@@ -125,6 +129,7 @@ function transcriptSource(fd, provider, validateOnly = false, observation) {
     analysis.mixed = sessions.size > 1;
     analysis.singleSession &&= sessions.size === 1;
     analysis.sidechainOnly &&= analysis.count > 0;
+    if (source.limited) checkMetadata(analysis.byUuid.size + seen.size + users.size + queued.size + sessions.size);
     for (const id of queued) if (users.has(id)) { analysis.queuedDuplicate = true; break; }
   }
   source.analysis = analysis;
@@ -898,6 +903,7 @@ function parseFile(provider, records, providerCoverage, config = {}, retainAllIn
       }
     }
   }
+  if (records.limited !== false) checkMetadata(items.length);
   if (records.lazy) {
     firstTime = records.analysis.firstTime; lastTime = records.analysis.lastTime;
     if (firstClaudeRecord) first = recoverClaudeFirstInstruction(firstClaudeRecord, byUuid);
@@ -997,15 +1003,21 @@ function finalizeRetainedInstruction(instruction) {
   return { ...instruction, ...finalizeInstructionText(instruction.text) };
 }
 
-// Spec §2.2: compare producer forms using UTF-16 digests, lengths and bounded local prefixes.
+// Spec §2.2: all connection comparisons preserve the original UTF-16 code units.
+function hashComparisonText(value) {
+  return crypto.createHash('sha256').update(Buffer.from(value, 'utf16le')).digest('hex');
+}
 function orcaWhitespace(c) {
   return c === 32 || c >= 9 && c <= 13 || c === 160 || c === 5760 || c >= 8192 && c <= 8202
     || [8232, 8233, 8239, 8287, 12288, 65279].includes(c);
 }
-function orcaPromptForm(raw) {
+function isOrcaSpecialSummary(raw) {
   let leading = 0;
   while (leading < Math.min(raw.length, 24576) && orcaWhitespace(raw.charCodeAt(leading))) leading++;
-  if (raw.startsWith('You are working inside Orca, a multi-agent IDE.', leading)) return null;
+  return raw.startsWith('You are working inside Orca, a multi-agent IDE.', leading);
+}
+function orcaPromptForm(raw) {
+  if (isOrcaSpecialSummary(raw)) return null;
   const n = Math.min(raw.length, 1664);
   let r = 0, value = '', line = false;
   while (r < n && orcaWhitespace(raw.charCodeAt(r))) r++;
@@ -1033,12 +1045,13 @@ function orcaPromptForm(raw) {
   return { value, truncated };
 }
 function summarizeLinkText(rawText, agent = false) {
+  if (agent && isOrcaSpecialSummary(rawText)) return null;
   const form = agent ? { value: rawText, truncated: false } : orcaPromptForm(rawText);
   if (!form) return null;
-  return { hash: crypto.createHash('sha256').update(Buffer.from(form.value, 'utf16le')).digest('hex'),
+  return { hash: hashComparisonText(form.value),
     length: form.value.length, truncated: form.truncated,
     ...(agent ? { prefix_hashes: Array.from({ length: Math.min(form.value.length, 200) - Math.min(form.value.length, 23) },
-      (_, index) => crypto.createHash('sha256').update(Buffer.from(form.value.slice(0, index + 24), 'utf16le')).digest('hex')) } : {}) };
+      (_, index) => hashComparisonText(form.value.slice(0, index + 24))) } : {}) };
 }
 
 // Spec §1.4/§2/§3: compute identity before discarding unbounded text and block structure.
@@ -1233,7 +1246,7 @@ function inspectTranscriptIdentity(provider, data, observation) {
   const sessionId = chosen.sessionId;
   const cwd = records.find(record => typeof record.cwd === 'string' || typeof record.payload?.cwd === 'string');
   const rawCwd = cwd?.cwd || cwd?.payload?.cwd;
-  return { selected: chosen.selected, sessionId, cwdHash: typeof rawCwd === 'string' ? crypto.createHash('sha256').update(rawCwd).digest('hex') : null, singleSession: records.every(record => record.sessionId === sessionId),
+  return { selected: chosen.selected, sessionId, cwdHash: typeof rawCwd === 'string' ? hashComparisonText(rawCwd) : null, singleSession: records.every(record => record.sessionId === sessionId),
     sidechainOnly: records.length > 0 && records.every(record => record.isSidechain === true) };
 }
 
@@ -1287,7 +1300,7 @@ function readTranscriptIdentity(provider, fileDescriptor, fileSize, verifySidech
     for (const record of transcriptRecords(fileDescriptor, observation)) {
       count++;
       const cwd = provider === 'claude' ? record.cwd : record.payload?.cwd;
-      if (!cwdHash && typeof cwd === 'string') cwdHash = crypto.createHash('sha256').update(cwd).digest('hex');
+      if (!cwdHash && typeof cwd === 'string') cwdHash = hashComparisonText(cwd);
       selectFirstTranscriptIdentity(provider, record, chosen);
       if (record.sessionId !== chosen.sessionId) singleSession = false;
       if (record.isSidechain !== true) sidechainOnly = false;
@@ -1411,7 +1424,7 @@ function summarizeTranscriptFile(provider, file, providerCoverage, windowSince, 
     const rawCwd = provider === 'claude' ? records.find(record => typeof record.cwd === 'string')?.cwd
       : records.find(record => record.type === 'session_meta')?.payload?.cwd;
     return { file: retainedFile, firstAt: records.analysis.firstTime, lastAt: records.analysis.lastTime,
-      cwdHash: typeof rawCwd === 'string' ? crypto.createHash('sha256').update(rawCwd).digest('hex') : null,
+      cwdHash: typeof rawCwd === 'string' ? hashComparisonText(rawCwd) : null,
       sessionId: sessionId?.length <= 64 ? retainString(sessionId, 64) : null, ...parsed, comparisonFailed };
   } catch (error) {
     providerCoverage.files_failed++;
@@ -1989,7 +2002,7 @@ function parseOrcaWorktrees(worktrees, config, out, orcaCoverage, outputBudget) 
         prompt: typeof agent.prompt === 'string' ? summarizeLinkText(agent.prompt, true) : null,
         provider: agent.agentType,
         cwd: rawPath,
-        cwdHash: crypto.createHash('sha256').update(rawPath).digest('hex'),
+        cwdHash: hashComparisonText(rawPath),
         times: [stateStartedAt, updatedAt].filter(Boolean).map(Date.parse)
       });
     }
@@ -2023,7 +2036,7 @@ function parseOrcaWorktrees(worktrees, config, out, orcaCoverage, outputBudget) 
 // Spec §2.2: hash indexes bound competing matches; cwd membership needs no cross-product edges.
 function orcaCwdKey(value) {
   return value.cwdHash || (typeof value.cwd === 'string'
-    ? crypto.createHash('sha256').update(value.cwd).digest('hex') : null);
+    ? hashComparisonText(value.cwd) : null);
 }
 function orcaComparisonKey(cwd, provider, text) {
   return text && text.length >= 8 ? JSON.stringify([cwd, provider, text.hash, text.length]) : null;
@@ -2150,7 +2163,7 @@ function parseOrcaTerminals(terminals, edges, agents, ids, out, orcaCoverage, ou
     }
     // The derived path restricts cancellation only; it is never link evidence or output.
     partial.cwds.add(scopedPath);
-    partial.cwdHashes.add(crypto.createHash('sha256').update(scopedPath).digest('hex'));
+    partial.cwdHashes.add(hashComparisonText(scopedPath));
   }
   for (const terminal of terminals.slice(0, snapshotPolicy.SNAPSHOT_LIMITS.terminals)) {
     if (!isRecordObject(terminal)) {
