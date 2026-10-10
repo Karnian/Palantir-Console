@@ -97,11 +97,29 @@ test('manifest static closure and runtime closure are enforced', async t => {
   }
   const marker = "var reader = require('./sessionSnapshotReader.cjs');";
   const position = good.bundle.code.lastIndexOf(marker);
-  const tampered = good.bundle.code.slice(0, position) + "var reader = require('node:net');"
+  assert.notEqual(position, -1);
+  const replacement = JSON.stringify("require('node:net');\n" +
+    "process.stdout.write('IMPORT_OK\\n'); process.exit(0);").slice(1, -1);
+  const tampered = good.bundle.code.slice(0, position) + replacement
     + good.bundle.code.slice(position + marker.length);
   const result = await m.runExecutor({ target: f.target, bundle: tampered,
     sshBin: f.env.PALANTIR_OBSERVE_SSH_BIN, env: f.env });
+  assert.equal(result.stdout.toString().split('IMPORT_OK').length - 1, 0, result.stdout.toString());
   assert.equal(JSON.parse(result.stdout).code, 'internal_error');
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.stderrBytes, 0);
+});
+test('manifest rejects every import token while current sources remain valid', async t => {
+  const f = fixture(t);
+  const m = await api;
+  const good = await execute(f);
+  exactSnapshot(good.envelope);
+  for (const source of ["import /* c */ ('node:net')", "import\n('node:net')", 'import.meta']) {
+    await t.test(source, () => {
+      assert.throws(() => m.buildBundle({ request: f.request,
+        sourceOverrides: { 'scripts/lib/sessionSnapshotReader.cjs': source } }), { code: 'bundle_rejected' });
+    });
+  }
 });
 test('manifest rejects additional builtin and native loading tokens', async t => {
   const f = fixture(t);
@@ -190,7 +208,8 @@ test('remote write probe permits only config, lock and temporary config writes',
   assert.ok(configWrites.length > 0);
   for (const value of configWrites) {
     assert.ok(value === path.dirname(f.config) || value === f.config || value === f.config + '.lock'
-      || value.startsWith(f.config + '.'), value);
+      || path.dirname(value) === path.dirname(f.config)
+        && /^observe\.json\.tmp-[0-9a-f]{16}$/.test(path.basename(value)), value);
   }
   assert.equal(fs.existsSync(f.out), false);
   const before = fs.readFileSync(f.config);

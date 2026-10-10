@@ -26,7 +26,7 @@ function rejectBundle() {
   throw error;
 }
 function checkSource(name, source) {
-  if (/module\s*\.\s*require|import\s*\(|process\s*\.\s*binding/.test(source)) rejectBundle();
+  if (/module\s*\.\s*require|\bimport\b|process\s*\.\s*binding/.test(source)) rejectBundle();
   if (/\b(?:getBuiltinModule|createRequire)\b|process\s*\.\s*dlopen\b/.test(source)) rejectBundle();
   for (const match of source.matchAll(/\brequire\s*\(\s*([^)]*)\)/g)) {
     const literal = /^(['"])([^'"\n]*)\1\s*$/.exec(match[1]);
