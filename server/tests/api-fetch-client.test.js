@@ -42,6 +42,32 @@ function jsonResponse({ status, ok, body }) {
   return { status, ok, json: async () => body };
 }
 
+for (const namedAbort of [true, false]) {
+  test(`apiFetch propagates aborted 403 body reads without login bounce (named=${namedAbort})`, async () => {
+    const controller = new AbortController();
+    const error = namedAbort ? new DOMException('Body read aborted', 'AbortError') : new Error('Body read stopped');
+    let reading, rejectBody;
+    const started = new Promise(resolve => { reading = resolve; });
+    const body = new Promise((resolve, reject) => { rejectBody = reject; });
+    const restore = stubGlobals({ status: 403, ok: false, json: () => { reading(); return body; } });
+    try {
+      const { apiFetch } = await import(API_URL);
+      const rejected = assert.rejects(apiFetch('/api/observe/snapshots', {
+        allowAppForbidden: true, signal: controller.signal,
+      }), actual => { assert.equal(actual, error); return true; });
+      await started;
+      assert.equal(restore.seen.fetchOpts.length, 1);
+      assert.equal(restore.seen.fetchOpts[0].signal, controller.signal);
+      if (!namedAbort) controller.abort();
+      rejectBody(error);
+      await rejected;
+      assert.deepEqual(restore.seen.redirects, []);
+    } finally {
+      restore();
+    }
+  });
+}
+
 test('apiFetch preserves status, body, and reason on a non-ok JSON response', async () => {
   const restore = stubGlobals(jsonResponse({
     status: 409,

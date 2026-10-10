@@ -13,6 +13,13 @@ const { defineConfig, devices } = require('@playwright/test');
 // already-running :4177 makes `test:visual` abort trying to rebind the port,
 // even though visual tests never touch it (Codex round-4 P2 catch).
 const visualOnly = process.env.PALANTIR_VISUAL_ONLY === '1';
+const observeEnabled = process.env.PALANTIR_OBSERVE_UI === '1';
+const selectedProjects = process.argv.flatMap((arg, index, args) => arg.startsWith('--project=')
+  ? [arg.slice('--project='.length)] : arg === '--project' ? [args[index + 1]] : []);
+const observeOnly = observeEnabled && selectedProjects.length > 0
+  && selectedProjects.every(project => /^observe(?:-setup)?$/.test(project));
+const needsObserve = selectedProjects.length === 0
+  || selectedProjects.some(project => /^observe(?:-setup)?$/.test(project));
 
 module.exports = defineConfig({
   testDir: './server/tests/e2e',
@@ -30,17 +37,32 @@ module.exports = defineConfig({
   projects: [
     {
       name: 'chromium',
-      testIgnore: '**/visual.spec.js',
+      testIgnore: ['**/visual.spec.js', '**/observe/**'],
       use: { ...devices['Desktop Chrome'] },
     },
     {
       name: 'visual-chromium',
       testMatch: '**/visual.spec.js',
+      testIgnore: '**/observe/**',
       use: { ...devices['Desktop Chrome'], baseURL: 'http://localhost:4189' },
     },
+    ...(observeEnabled ? [{
+      name: 'observe-setup',
+      testMatch: '**/observe/setup.js',
+      use: { baseURL: 'http://localhost:4191' },
+    },
+    {
+      name: 'observe',
+      testMatch: '**/observe/**',
+      testIgnore: '**/observe/setup.js',
+      dependencies: ['observe-setup'],
+      use: { ...devices['Desktop Chrome'], baseURL: 'http://localhost:4191',
+        timezoneId: 'Asia/Seoul',
+        storageState: 'test-results/observe-auth.json' },
+    }] : []),
   ],
   webServer: [
-    ...(visualOnly ? [] : [{
+    ...(visualOnly || observeOnly ? [] : [{
       command: 'npm start',
       port: 4177,
       // Was `!process.env.CI` (reuse locally for a faster loop). Changed to
@@ -55,9 +77,9 @@ module.exports = defineConfig({
       timeout: 30000,
       // A developer's local .env (PALANTIR_TOKEN, non-default PORT, …) must
       // not leak into this server — tests assume no-auth on :4177.
-      env: { PALANTIR_SKIP_DOTENV: '1' },
+      env: { PALANTIR_SKIP_DOTENV: '1', PALANTIR_TOKEN: '', PALANTIR_OBSERVE_SNAPSHOT_DIR: '' },
     }]),
-    {
+    ...(observeOnly ? [] : [{
       // K-5 isolated webServer: every input that affects rendered HTML
       // is reset to a deterministic empty state before boot —
       //   * PALANTIR_DB → fresh /tmp DB (no projects/tasks/runs)
@@ -83,7 +105,8 @@ module.exports = defineConfig({
         // fresh checkout (or one that flipped Node major) fails to
         // boot the visual server with a NODE_MODULE_VERSION mismatch.
         'npm rebuild better-sqlite3 --silent 2>/dev/null || true',
-        'rm -rf /tmp/palantir-visual-db /tmp/palantir-visual-home /tmp/palantir-visual-opencode /tmp/palantir-visual-codex',
+        'rm -rf /tmp/palantir-visual-db /tmp/palantir-visual-home '
+          + '/tmp/palantir-visual-opencode /tmp/palantir-visual-codex',
         'mkdir -p /tmp/palantir-visual-home /tmp/palantir-visual-opencode /tmp/palantir-visual-codex',
         // PALANTIR_SKIP_DOTENV — same leak this isolation block already
         // guards against, just for .env instead of ~/.claude etc.
@@ -112,6 +135,7 @@ module.exports = defineConfig({
           'PALANTIR_SKIP_HOST_CREDENTIALS=1',
           // Auth mode: a set token would bounce every route to /login.html.
           'PALANTIR_TOKEN=',
+          'PALANTIR_OBSERVE_SNAPSHOT_DIR=',
           // Feature flags whose state is surfaced in the UI.
           'PALANTIR_MEMORY_DISTILL=',
           'PALANTIR_OPERATOR_SPECIALIST=',
@@ -124,6 +148,12 @@ module.exports = defineConfig({
       port: 4189,
       reuseExistingServer: false,
       timeout: 30000,
-    },
+    }]),
+    ...(observeEnabled && needsObserve ? [{
+      command: 'node server/tests/helpers/observe-ui-server.cjs',
+      port: 4191,
+      reuseExistingServer: false,
+      timeout: 30000,
+    }] : []),
   ],
 });

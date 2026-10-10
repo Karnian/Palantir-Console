@@ -19,7 +19,7 @@ const FOCUSABLE_SEL = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(',');
 
-export function CommandPalette({ open, onClose }) {
+export function CommandPalette({ open, onClose, navItems = NAV_ITEMS }) {
   const [query, setQuery] = useState('');
   const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef(null);
@@ -82,10 +82,10 @@ export function CommandPalette({ open, onClose }) {
   // When the query is empty, show only NAV_ITEMS (top-level groups) so
   // the number-key shortcuts map 1:1 to the displayed rows.
   const allItems = query
-    ? [...NAV_ITEMS, ...NAV_SUB_ITEMS].filter(item =>
+    ? [...navItems, ...NAV_SUB_ITEMS].filter(item =>
         item.label.toLowerCase().includes(query.toLowerCase())
       )
-    : NAV_ITEMS;
+    : navItems;
 
   // For keyboard navigation we always use `allItems`.
   const items = allItems;
@@ -98,14 +98,18 @@ export function CommandPalette({ open, onClose }) {
   const handleKeyDown = (e) => {
     if (e.key === 'ArrowDown') { e.preventDefault(); setSelectedIndex(i => Math.min(i + 1, items.length - 1)); return; }
     if (e.key === 'ArrowUp') { e.preventDefault(); setSelectedIndex(i => Math.max(i - 1, 0)); return; }
-    if (e.key === 'Enter') { e.preventDefault(); if (items[selectedIndex]) handleSelect(items[selectedIndex].hash); return; }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (items[selectedIndex]) handleSelect(items[selectedIndex].hash);
+      return;
+    }
     // Number keys 1–N only when query is empty (avoid conflict with typing)
     // and only over NAV_ITEMS (the top-level group list).
     if (!query) {
       const num = parseInt(e.key, 10);
-      if (num >= 1 && num <= NAV_ITEMS.length) {
+      if (num >= 1 && num <= navItems.length) {
         e.preventDefault();
-        handleSelect(NAV_ITEMS[num - 1].hash);
+        handleSelect(navItems[num - 1].hash);
       }
     }
   };
@@ -124,7 +128,7 @@ export function CommandPalette({ open, onClose }) {
         <input
           ref=${inputRef}
           class="command-palette-input"
-          placeholder=${COMMAND_PALETTE_LABELS.placeholder(NAV_ITEMS.length)}
+          placeholder=${COMMAND_PALETTE_LABELS.placeholder(navItems.length)}
           aria-label=${COMMAND_PALETTE_LABELS.filterAriaLabel}
           value=${query}
           onInput=${e => setQuery(e.target.value)}

@@ -11,12 +11,14 @@ import { formatDuration, formatTime, timeAgo } from './app/lib/format.js';
 import { renderMarkdown } from './app/lib/markdown.js';
 import { apiFetch } from './app/lib/api.js';
 import { addToast, useToasts, ToastContainer, apiFetchWithToast } from './app/lib/toast.js';
-import { useRoute, navigate, useEscape, useSSE, useTasks, useRuns, useProjects, useClaudeSessions, useAgents, useManagerLifecycle, useConversation, useDispatchAudit } from './app/lib/hooks.js';
+import { useRoute, navigate, useEscape, useSSE, useTasks, useRuns, useProjects, useClaudeSessions,
+  useAgents, useManagerLifecycle, useConversation, useDispatchAudit } from './app/lib/hooks.js';
 import { dueState, formatDueDate, useNowTick, dueDateMeta } from './app/lib/dueDate.js';
 import { requestNotificationPermission, showBrowserNotification, pulseTabTitle } from './app/lib/notifications.js';
-import { NAV_ITEMS } from './app/lib/nav.js';
+import { getNavItems } from './app/lib/nav.js';
+import { useObserveEntry } from './app/lib/hooks/observe.js';
 import { operatorConversationId } from './app/lib/conversationId.js';
-import { THEME_TOGGLE_LABELS, NAV_LABELS } from './app/lib/copy.js';
+import { THEME_TOGGLE_LABELS, NAV_LABELS, WORK_BOARD_LABELS } from './app/lib/copy.js';
 import { clickableProps } from './app/lib/a11y.js';
 
 // Components
@@ -27,6 +29,7 @@ import { EmptyState } from './app/components/EmptyState.js';
 import { MentionInput } from './app/components/MentionInput.js';
 import { CommandPalette } from './app/components/CommandPalette.js';
 import { DashboardView } from './app/components/DashboardView.js';
+import { WorkBoardView } from './app/components/WorkBoardView.js';
 import { BoardView, CalendarView, DirectoryPicker } from './app/components/BoardView.js';
 import { ProjectsView } from './app/components/ProjectsView.js';
 import { AgentsView } from './app/components/AgentsView.js';
@@ -45,9 +48,9 @@ import { OperatorProfilesView } from './app/components/OperatorProfilesView.js';
 import { OperatorsView } from './app/components/OperatorsView.js';
 import { TabGroupView } from './app/components/TabGroupView.js';
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ------------------------------------------------------------------------
 // Sidebar Navigation
-// ─────────────────────────────────────────────────────────────────────────────
+// ------------------------------------------------------------------------
 
 // R2-A.1: AttentionBadge — needs_input + failed count on worker runs.
 // Clamped to "9+" at 10+. Renders nothing when count is 0 (spec §14.1).
@@ -153,7 +156,7 @@ function ThemeToggle() {
   `;
 }
 
-function NavSidebar({ route, connected, attentionCount, onAttentionClick }) {
+function NavSidebar({ route, connected, attentionCount, onAttentionClick, navItems }) {
   return html`
     <nav class="nav-sidebar">
       <div
@@ -163,15 +166,17 @@ function NavSidebar({ route, connected, attentionCount, onAttentionClick }) {
         aria-current=${route.split('/')[0] === 'dashboard' ? 'page' : undefined}
         ...${clickableProps(() => navigate('dashboard'))}
       >\u2726</div>
-      ${NAV_ITEMS.map(item => html`
+      ${navItems.map(item => html`
         <button
           key=${item.hash}
-          class="nav-item ${route.split('/')[0] === item.hash ? 'active' : ''}"
+          class="nav-item ${item.hash === 'work' ? 'nav-work' : ''}
+            ${(item.hash === 'work' ? route === 'work' : route.split('/')[0] === item.hash) ? 'active' : ''}"
           aria-label=${item.label}
-          aria-current=${route.split('/')[0] === item.hash ? 'page' : undefined}
+          aria-current=${(item.hash === 'work' ? route === 'work'
+            : route.split('/')[0] === item.hash) ? 'page' : undefined}
           onClick=${() => navigate(item.hash)}
         >
-          ${item.icon}
+          ${item.hash === 'work' ? html`<span class="nav-work-label">${item.label}</span>` : item.icon}
           <span class="nav-tooltip" aria-hidden="true">${item.label}</span>
         </button>
       `)}
@@ -187,9 +192,9 @@ function NavSidebar({ route, connected, attentionCount, onAttentionClick }) {
   `;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ------------------------------------------------------------------------
 // Loading component (inline — too small to extract)
-// ─────────────────────────────────────────────────────────────────────────────
+// ------------------------------------------------------------------------
 
 function Loading() {
   return html`
@@ -201,12 +206,14 @@ function Loading() {
   `;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ------------------------------------------------------------------------
 // App Root
-// ─────────────────────────────────────────────────────────────────────────────
+// ------------------------------------------------------------------------
 
 function App() {
   const route = useRoute();
+  const observe = useObserveEntry();
+  const navItems = getNavItems(observe.activation);
   const { tasks, setTasks, loading: tasksLoading, reload: reloadTasks } = useTasks();
   const { runs, setRuns, loading: runsLoading, reload: reloadRuns } = useRuns();
   const { projects, loading: projectsLoading, reload: reloadProjects } = useProjects();
@@ -399,6 +406,10 @@ function App() {
   ), [runs]);
 
   const renderView = () => {
+    if (observe.loading && !location.hash) {
+      return html`<div class="work-entry-loading" role="status">${WORK_BOARD_LABELS.pending}</div>`;
+    }
+    if (route === 'work') return html`<${WorkBoardView} activation=${observe.activation} />`;
     if (routeBase === 'manager') {
       const routeParts = route.split('/');
       const rawProjectId = routeParts[1] === 'operator' ? (routeParts.slice(2).join('/') || null) : null;
@@ -408,7 +419,10 @@ function App() {
         try { projectId = decodeURIComponent(rawProjectId); } catch { projectId = rawProjectId; }
         managerInitialTarget = operatorConversationId(projectId);
       }
-      return html`<${ManagerView} manager=${manager} runs=${runs} tasks=${tasks} projects=${projects} agents=${agents} agentsError=${agentsError} agentsLoading=${agentsLoading} reloadAgents=${reloadAgents} driftAudit=${driftAudit} onOpenDrift=${() => setShowDriftDrawer(true)} initialTarget=${managerInitialTarget} />`;
+      return html`<${ManagerView} manager=${manager} runs=${runs} tasks=${tasks} projects=${projects}
+        agents=${agents} agentsError=${agentsError} agentsLoading=${agentsLoading} reloadAgents=${reloadAgents}
+        driftAudit=${driftAudit} onOpenDrift=${() => setShowDriftDrawer(true)}
+        initialTarget=${managerInitialTarget} />`;
     }
     if (routeBase === 'board') {
       if (tasksLoading) return html`<${Loading} />`;
@@ -462,11 +476,14 @@ function App() {
         groupHash="resources"
         subRoute=${sub}
         tabs=${[
-          { key: 'nodes',       label: NAV_LABELS.nodes,           render: () => html`<${NodesView} detailId=${nodeDetailId} />` },
-          { key: 'skills',      label: NAV_LABELS.skills,          render: () => html`<${SkillPacksView} projects=${projects} />` },
+          { key: 'nodes', label: NAV_LABELS.nodes,
+            render: () => html`<${NodesView} detailId=${nodeDetailId} />` },
+          { key: 'skills', label: NAV_LABELS.skills,
+            render: () => html`<${SkillPacksView} projects=${projects} />` },
           { key: 'presets',     label: NAV_LABELS.presets,         render: () => html`<${PresetsView} />` },
           { key: 'mcp-servers', label: NAV_LABELS['mcp-servers'],  render: () => html`<${McpTemplatesView} />` },
-          { key: 'models',      label: NAV_LABELS.models,          render: () => html`<${ModelPoliciesView} projects=${projects} />` },
+          { key: 'models', label: NAV_LABELS.models,
+            render: () => html`<${ModelPoliciesView} projects=${projects} />` },
         ]}
       />`;
     }
@@ -487,16 +504,24 @@ function App() {
       }
       let initialSpecialistProfileId = rawSpecialistProfileId;
       if (rawSpecialistProfileId) {
-        try { initialSpecialistProfileId = decodeURIComponent(rawSpecialistProfileId); } catch { initialSpecialistProfileId = rawSpecialistProfileId; }
+        try { initialSpecialistProfileId = decodeURIComponent(rawSpecialistProfileId); }
+        catch { initialSpecialistProfileId = rawSpecialistProfileId; }
       }
       return html`<${TabGroupView}
         groupHash="operator"
         subRoute=${sub}
         tabs=${[
-          { key: 'roster',     label: NAV_LABELS['operator-roster'],     render: () => html`<${OperatorsView} runs=${runs} projects=${projects} tasks=${tasks} />` },
-          { key: 'codebases',  label: NAV_LABELS['operator-codebases'],  render: () => projectsLoading ? html`<${Loading} />` : html`<${ProjectsView} projects=${projects} tasks=${tasks} runs=${runs} reloadProjects=${reloadProjects} onOpenRun=${(run) => setInspectRun(run)} onOpenTask=${(task) => setInspectTask(task)} highlightProjectId=${highlightProjectId} />` },
-          { key: 'profiles',   label: NAV_LABELS['operator-profiles'],   render: () => html`<${OperatorProfilesView} />` },
-          { key: 'specialist', label: NAV_LABELS.specialist,             render: () => html`<${SpecialistView} runs=${runs} initialProfileId=${initialSpecialistProfileId} />` },
+          { key: 'roster', label: NAV_LABELS['operator-roster'],
+            render: () => html`<${OperatorsView} runs=${runs} projects=${projects} tasks=${tasks} />` },
+          { key: 'codebases', label: NAV_LABELS['operator-codebases'],
+            render: () => projectsLoading ? html`<${Loading} />` : html`<${ProjectsView}
+              projects=${projects} tasks=${tasks} runs=${runs} reloadProjects=${reloadProjects}
+              onOpenRun=${(run) => setInspectRun(run)} onOpenTask=${(task) => setInspectTask(task)}
+              highlightProjectId=${highlightProjectId} />` },
+          { key: 'profiles', label: NAV_LABELS['operator-profiles'],
+            render: () => html`<${OperatorProfilesView} />` },
+          { key: 'specialist', label: NAV_LABELS.specialist,
+            render: () => html`<${SpecialistView} runs=${runs} initialProfileId=${initialSpecialistProfileId} />` },
         ]}
       />`;
     }
@@ -548,6 +573,7 @@ function App() {
       }}>본문으로 건너뛰기</a>
       <${NavSidebar}
         route=${route}
+        navItems=${navItems}
         connected=${sseConnected}
         attentionCount=${attentionCount}
         onAttentionClick=${() => navigate('manager')}
@@ -573,7 +599,7 @@ function App() {
           reloadTasks=${reloadTasks}
         />
       `}
-      <${CommandPalette} open=${showPalette} onClose=${() => setShowPalette(false)} />
+      <${CommandPalette} open=${showPalette} onClose=${() => setShowPalette(false)} navItems=${navItems} />
       <${DriftDrawer}
         open=${showDriftDrawer}
         onClose=${() => setShowDriftDrawer(false)}
@@ -585,9 +611,9 @@ function App() {
   `;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ------------------------------------------------------------------------
 // Mount
-// ─────────────────────────────────────────────────────────────────────────────
+// ------------------------------------------------------------------------
 
 function mount() {
   const target = document.getElementById('app');
