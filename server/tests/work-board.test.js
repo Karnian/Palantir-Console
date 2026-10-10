@@ -26,6 +26,79 @@ function deferred() {
 
 const drain = async () => { await Promise.resolve(); await Promise.resolve(); };
 
+test('card line priority compares normalized display strings in normal and search cards', async t => {
+  const { snapshotCards } = await logic;
+  const { alpha } = fixtures(t);
+  const env = boardEnv(t), root = env.document.getElementById('root');
+  const cases = [
+    { ai: '로그인 수정', first: '설계 검토', recent: '로그인 수정', omit: true, show: true },
+    { ai: '설계 검토', first: '설계 검토', recent: '로그인 수정', omit: false, show: false },
+    { ai: '세션 검토', first: '로그인 수정', recent: '로그인 수정', omit: false, show: false },
+    { ai: '로그인 수정', first: '로그인 수정', recent: '로그인 수정', omit: true, show: false },
+    { ai: null, first: '로그인 수정', recent: '로그인 수정', omit: true, show: false,
+      state: 'unrecoverable' },
+    { ai: null, first: '로그인 수정', recent: '로그인 수정', omit: true, show: false, state: 'unknown' },
+    { ai: '  CAFÉ\t로그인  수정  ', first: '설계 검토', recent: 'CAFE\u0301 로그인   수정',
+      omit: true, show: true },
+    { ai: '세션 검토', first: '  로그인\t수정  ', recent: '로그인   수정', omit: false, show: false },
+    { ai: 'LOGIN 수정', first: '설계 검토', recent: 'login 수정', omit: false, show: true },
+    { ai: '텍스트 없는 지시', first: '설계 검토', recent: '', missing: true, omit: true, show: true },
+    { ai: '세션 검토', first: '텍스트 없는 지시', recent: '', missing: true, omit: false, show: false },
+  ];
+  for (const variant of cases) {
+    const snapshot = structuredClone(alpha);
+    snapshot.sessions = snapshot.sessions.slice(0, 1);
+    Object.assign(snapshot.sessions[0], { ai_title: variant.ai,
+      first_instruction: variant.state || 'recoverable' });
+    snapshot.instructions = snapshot.instructions.slice(0, 2);
+    snapshot.instructions[0].text = variant.first;
+    Object.assign(snapshot.instructions[1], { text: variant.recent, text_missing: !!variant.missing });
+    const card = snapshotCards(snapshot)[0];
+    if (!variant.missing) {
+      assert.equal(card.title, variant.ai || variant.first);
+      assert.equal(card.omitRecent, variant.omit);
+      assert.equal(card.showFirst, variant.show);
+    }
+    env.context.apiFetch = async url => url.endsWith('/snapshots')
+      ? { snapshots: [{ machine_id: 'alpha' }] } : snapshot;
+    env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
+    const check = () => {
+      assert.equal(root.querySelectorAll('.work-card').length, 1);
+      assert.equal(root.querySelector('.work-title').textContent, variant.ai || variant.first);
+      assert.equal(root.querySelectorAll('.work-recent-block').length, variant.omit ? 0 : 1);
+      assert.equal(root.querySelectorAll('.work-first-block').length, variant.show ? 1 : 0);
+      const status = variant.state === 'unknown' ? '최초 지시 확인 불가' : '최초 지시 복구 불가';
+      assert.deepEqual(Array.from(root.querySelectorAll('.work-first-status'), node => node.textContent),
+        variant.state ? [status] : []);
+    };
+    check();
+    const query = root.querySelector('#work-query');
+    query.value = variant.state ? '로그인' : '검토 수정 지시'.split(' ').find(word =>
+      [variant.ai, variant.first, variant.recent].some(text => text?.includes(word)));
+    query.dispatchEvent(new env.window.Event('input', { bubbles: true })); await flushEffects();
+    check();
+    env.render(null, root);
+  }
+});
+
+test('whitespace-only AI titles fall back to the first text instruction', async t => {
+  const { snapshotCards } = await logic;
+  const { alpha } = fixtures(t);
+  alpha.sessions = alpha.sessions.slice(0, 1);
+  alpha.sessions[0].ai_title = ' \t\n\u00a0 ';
+  const card = snapshotCards(alpha)[0];
+  assert.equal(card.title, '인증 흐름을 검토해 주세요.');
+  assert.equal(card.titleSource, 'first');
+  assert.equal(card.showFirst, false);
+  const env = boardEnv(t), root = env.document.getElementById('root');
+  env.context.apiFetch = async url => url.endsWith('/snapshots') ? { snapshots: [{ machine_id: 'alpha' }] } : alpha;
+  env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
+  assert.equal(root.querySelectorAll('.work-card').length, 1);
+  assert.equal(root.querySelector('.work-title').textContent, '인증 흐름을 검토해 주세요.');
+  assert.equal(root.querySelector('.work-title').previousElementSibling.textContent, '처음');
+  assert.equal(root.querySelectorAll('.work-first-block').length, 0);
+});
+
 test('normalization preserves spaces, uses NFC/lowercase and matches partial words', async () => {
   const { normalizeSearch, matchText, highlightParts, matchedLines } = await logic;
   assert.deepEqual(normalizeSearch('CAFE\u0301 로그인 리다이렉트'),
@@ -54,7 +127,8 @@ test('card conversion preserves exact instructions, recent/first, omission and a
   assert.equal(cards[0].agent.state, 'waiting');
   const one = structuredClone(alpha);
   one.instructions = one.instructions.slice(0, 1);
-  assert.equal(snapshotCards(one)[0].omitRecent, true);
+  assert.equal(snapshotCards(one)[0].omitRecent, false);
+  assert.equal(snapshotCards(one)[0].showFirst, false);
   one.sessions[0].ai_title = null;
   const fallback = snapshotCards(one)[0];
   assert.equal(fallback.title, '인증 흐름을 검토해 주세요.');
@@ -242,9 +316,9 @@ test('DOM preserves XSS instruction/title/repo as text, timeline flags and selec
   await flushEffects(); await flushEffects();
   const cards = env.document.querySelectorAll('.work-card');
   assert.equal(cards.length, 2);
-  assert.equal(cards[0].querySelector('.work-recent').textContent, attack);
   assert.equal(cards[0].querySelector('.work-repo').textContent, attack);
   assert.equal(cards[0].querySelector('.work-title').textContent, attack);
+  assert.equal(cards[0].querySelectorAll('.work-recent-block').length, 0);
   assert.equal(cards[0].querySelector('.work-title').previousElementSibling.textContent, 'AI 제목');
   assert.ok(env.document.querySelector('.work-coverage').textContent.includes('읽지 못한 스냅샷'));
   assert.equal(env.document.querySelectorAll('img, script').length, 0);
@@ -542,10 +616,11 @@ test('normal and search cards share title rules, omit duplicate rows and limit w
     { ai: null, state: 'recoverable', title: '인증 흐름을 검토해 주세요.', first: false },
     { ai: null, state: 'unrecoverable', title: '인증 흐름을 검토해 주세요.', first: false },
     { ai: null, state: 'unknown', title: '인증 흐름을 검토해 주세요.', first: false },
-    { ai: '인증 설계 검토', state: 'recoverable', title: '인증 설계 검토', first: true, same: true },
+    { ai: '인증 설계 검토', state: 'recoverable', title: '인증 설계 검토', first: false, same: true },
     { ai: null, state: 'recoverable', title: '인증 흐름을 검토해 주세요.', first: false, same: true },
   ];
   for (const variant of cases) {
+    const omitRecent = variant.same && !variant.ai;
     const snapshot = structuredClone(alpha);
     snapshot.sessions = snapshot.sessions.slice(0, 1);
     snapshot.instructions = snapshot.instructions.slice(0, 2);
@@ -563,10 +638,12 @@ test('normal and search cards share title rules, omit duplicate rows and limit w
     assert.equal(root.querySelectorAll('.work-card').length, 1);
     assert.equal(card.querySelector('.work-title').textContent, variant.title);
     assert.equal(card.querySelectorAll('.work-first-block').length, variant.first ? 1 : 0);
-    assert.equal(card.querySelectorAll('.work-recent-block').length, variant.same ? 0 : 1);
-    if (!variant.same) {
+    assert.equal(card.querySelectorAll('.work-recent-block').length, omitRecent ? 0 : 1);
+    if (!omitRecent) {
+      const expectedRecent = variant.same ? '인증 흐름을 검토해 주세요.'
+        : '로그인 리다이렉트 테스트를 추가해 주세요.';
       assert.equal(card.querySelector('.work-recent').textContent,
-        '로그인 리다이렉트 테스트를 추가해 주세요.');
+        expectedRecent);
       assert.equal(card.querySelector('.work-recent-block .work-label').textContent.trim(),
         '최근 지시 · 59분 전');
     }
@@ -588,7 +665,7 @@ test('normal and search cards share title rules, omit duplicate rows and limit w
       assert.equal(root.querySelectorAll('.work-card').length, 1);
       assert.equal(root.querySelector('.work-title').textContent, variant.title);
       assert.equal(root.querySelectorAll('.work-first-block').length, variant.first ? 1 : 0);
-      assert.equal(root.querySelectorAll('.work-recent-block').length, variant.same ? 0 : 1);
+      assert.equal(root.querySelectorAll('.work-recent-block').length, omitRecent ? 0 : 1);
       assert.equal(root.querySelector('.work-match mark').textContent,
         variant.same ? '인증 흐름' : '로그인 리다');
       if (variant.ai) {
@@ -598,7 +675,7 @@ test('normal and search cards share title rules, omit duplicate rows and limit w
         assert.equal(root.querySelector('.work-title').textContent, variant.title);
         assert.equal(root.querySelector('.work-title mark').textContent, '설계');
         assert.equal(root.querySelector('.work-match .work-label').textContent, 'AI 제목 일치');
-        assert.equal(root.querySelectorAll('.work-first-block').length, 1);
+        assert.equal(root.querySelectorAll('.work-first-block').length, variant.first ? 1 : 0);
       }
     }
     env.render(null, root);

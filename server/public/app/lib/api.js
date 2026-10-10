@@ -60,7 +60,11 @@ export async function apiFetch(url, opts = {}) {
   let parsed = false;
   if (res.status === 401 || res.status === 403) {
     if (allowAppForbidden) {
-      try { data = await res.json(); parsed = true; } catch { /* unparseable ⇒ treat as auth */ }
+      try { data = await res.json(); parsed = true; }
+      catch (error) {
+        if (error.name === 'AbortError' || fetchOpts.signal?.aborted) throw error;
+        // Unparseable bodies still follow the auth failure path.
+      }
     }
     const appDenial = res.status === 403
       && parsed

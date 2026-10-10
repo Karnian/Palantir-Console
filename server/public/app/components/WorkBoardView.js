@@ -4,7 +4,7 @@ import htm from '../../vendor/htm.module.js';
 import { apiFetch } from '../lib/api.js';
 import { WORK_BOARD_LABELS as W } from '../lib/copy.js';
 import { snapshotCards, rankCards, highlightParts, matchedLines,
-  coverageCounts, loadWorkSnapshots, formatLocalSnapshotTime } from '../lib/workBoard.js';
+  coverageCounts, loadWorkSnapshots, formatLocalSnapshotTime, cardLineVisibility } from '../lib/workBoard.js';
 
 const html = htm.bind(h);
 const emptyLoad = () => ({ entries: [], snapshots: [], failures: [], done: 0, total: 0 });
@@ -67,6 +67,9 @@ function SessionCard({ card, query, rank, now }) {
     : card.first_instruction === 'unknown' ? W.unknownFirst : card.first || W.missing;
   const titleFallback = card.first_instruction === 'unrecoverable' ? W.unrecoverable
     : card.first_instruction === 'unknown' ? W.unknownFirst : W.noTextInstruction;
+  const title = card.title || titleFallback;
+  const recent = card.recent || (card.recentMissing ? W.missing : W.noInstruction);
+  const { omitRecent, showFirst } = cardLineVisibility(title, recent, card.showFirst ? first : null);
   const timelineId = `work-timeline-${encodeURIComponent(card.key)}`;
   return html`<article class="work-card">
     <div class="work-meta">
@@ -77,15 +80,14 @@ function SessionCard({ card, query, rank, now }) {
       <span>${card.git_branch || W.branchUnknown}</span>
     </div>
     <div><span class="work-label">${card.titleSource === 'ai' ? W.aiTitle : W.first}</span>
-      <h2 class="work-title"><${Highlight} text=${card.title || titleFallback} query=${query} /></h2></div>
+      <h2 class="work-title"><${Highlight} text=${title} query=${query} /></h2></div>
     ${card.first_instruction !== 'recoverable' && html`<p class="work-first-status work-label">
       ${card.first_instruction === 'unrecoverable' ? W.unrecoverable : W.unknownFirst}</p>`}
-    ${!card.omitRecent && html`<div class="work-recent-block">
+    ${!omitRecent && html`<div class="work-recent-block">
       <span class="work-label"><${SnapshotTime} value=${card.recentAt} now=${now}
         label=${W.recent} relativeOnly=${true} /></span>
-      <p class="work-recent"><${Highlight}
-        text=${card.recent || (card.recentMissing ? W.missing : W.noInstruction)} query=${query} /></p></div>`}
-    ${card.showFirst && html`<div class="work-first-block"><span class="work-label">${W.first}</span>
+      <p class="work-recent"><${Highlight} text=${recent} query=${query} /></p></div>`}
+    ${showFirst && html`<div class="work-first-block"><span class="work-label">${W.first}</span>
       <p class="work-first"><${Highlight} text=${first} query=${query} /></p></div>`}
     ${card.match && html`<div class="work-match">
       <span class="work-label">${card.match.target === 0 ? W.instructionMatch : W.titleMatch}</span>

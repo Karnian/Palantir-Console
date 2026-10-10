@@ -8,6 +8,16 @@ const lexical = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 const epoch = value => Date.parse(value) || 0;
 const firstLine = instruction => instruction?.text_missing
   ? null : instruction?.text.split(/\r?\n/u).find(line => line.trim() !== '') || null;
+const displayKey = text => String(text || '').normalize('NFC').trim().replace(/\s+/gu, ' ');
+
+// Spec §6: compare display lines without changing their rendered text.
+export function cardLineVisibility(title, recent, first) {
+  const [titleKey, recentKey, firstKey] = [title, recent, first].map(displayKey);
+  return {
+    omitRecent: !!recentKey && recentKey === titleKey,
+    showFirst: !!firstKey && firstKey !== titleKey && firstKey !== recentKey,
+  };
+}
 
 export function formatLocalSnapshotTime(value, now = Date.now()) {
   const date = new Date(value);
@@ -29,17 +39,14 @@ export function snapshotCards(snapshot) {
     const recent = firstLine(instructions.at(-1));
     const first = session.first_instruction === 'recoverable' ? firstLine(instructions[0]) : null;
     const titleInstruction = instructions.find(instruction => firstLine(instruction) !== null);
-    const firstHasText = firstLine(instructions[0]) !== null;
-    const titleIsRecent = !session.ai_title && titleInstruction
-      && titleInstruction.seq === instructions.at(-1)?.seq;
+    const aiTitle = displayKey(session.ai_title) ? session.ai_title : null;
+    const title = aiTitle || firstLine(titleInstruction);
     return {
       ...session, machine: snapshot.machine, instructions, recent, first,
-      title: session.ai_title || firstLine(titleInstruction), titleSource: session.ai_title ? 'ai' : 'first',
-      showFirst: !!session.ai_title && firstHasText && session.first_instruction === 'recoverable',
+      ai_title: aiTitle, title, titleSource: aiTitle ? 'ai' : 'first',
+      ...cardLineVisibility(title, recent, first),
       recentAt: instructions.at(-1)?.ts || null,
       recentMissing: !!instructions.at(-1)?.text_missing,
-      omitRecent: !!titleIsRecent
-        || (session.first_instruction === 'recoverable' && first !== null && first === recent),
       agent: session.orca_link.confirmed
         ? agents.find(agent => agent.pane_key === session.orca_link.pane_key) || null : null,
     };
