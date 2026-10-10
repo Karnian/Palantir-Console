@@ -26,6 +26,45 @@ function deferred() {
 
 const drain = async () => { await Promise.resolve(); await Promise.resolve(); };
 
+test('recent instruction placeholders distinguish blank text from zero instructions', async t => {
+  const { snapshotCards } = await logic;
+  const { alpha } = fixtures(t);
+  const env = boardEnv(t), root = env.document.getElementById('root');
+  const cases = [
+    { text: ' \t\n\u00a0 ', expected: '텍스트 없는 지시' },
+    { text: '', expected: '텍스트 없는 지시' },
+    { text: '', missing: true, expected: '텍스트 없는 지시' },
+    { empty: true, expected: '관측된 지시 없음' },
+    { text: '진행해 주세요.', expected: '진행해 주세요.' },
+  ];
+  for (const variant of cases) {
+    const snapshot = structuredClone(alpha);
+    snapshot.sessions = snapshot.sessions.slice(0, 1);
+    snapshot.instructions = variant.empty ? [] : snapshot.instructions.slice(1, 2);
+    snapshot.sessions[0].instruction_count = snapshot.instructions.length;
+    if (!variant.empty) Object.assign(snapshot.instructions[0], {
+      text: variant.text, text_missing: !!variant.missing,
+    });
+    const card = snapshotCards(snapshot)[0];
+    assert.equal(card.title, '합성 세션 검토');
+    assert.equal(card.instructions.length, variant.empty ? 0 : 1);
+    assert.equal(card.recent, variant.text?.trim() ? variant.text : null);
+    assert.equal(card.recentMissing, !!variant.missing);
+    env.context.apiFetch = async url => url.endsWith('/snapshots')
+      ? { snapshots: [{ machine_id: 'alpha' }] } : snapshot;
+    env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
+    assert.equal(root.querySelectorAll('.work-card').length, 1);
+    assert.equal(root.querySelector('.work-title').textContent, '합성 세션 검토');
+    assert.equal(root.querySelector('.work-recent').textContent, variant.expected);
+    const query = root.querySelector('#work-query');
+    query.value = '합성'; query.dispatchEvent(new env.window.Event('input', { bubbles: true }));
+    await flushEffects();
+    assert.equal(root.querySelectorAll('.work-card').length, 1);
+    assert.equal(root.querySelector('.work-recent').textContent, variant.expected);
+    env.render(null, root);
+  }
+});
+
 test('card line priority compares normalized display strings in normal and search cards', async t => {
   const { snapshotCards } = await logic;
   const { alpha } = fixtures(t);

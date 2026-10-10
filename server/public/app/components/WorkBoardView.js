@@ -68,7 +68,7 @@ function SessionCard({ card, query, rank, now }) {
   const titleFallback = card.first_instruction === 'unrecoverable' ? W.unrecoverable
     : card.first_instruction === 'unknown' ? W.unknownFirst : W.noTextInstruction;
   const title = card.title || titleFallback;
-  const recent = card.recent || (card.recentMissing ? W.missing : W.noInstruction);
+  const recent = card.recent || (card.instructions.length ? W.missing : W.noInstruction);
   const { omitRecent, showFirst } = cardLineVisibility(title, recent, card.showFirst ? first : null);
   const timelineId = `work-timeline-${encodeURIComponent(card.key)}`;
   return html`<article class="work-card">
