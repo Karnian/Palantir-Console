@@ -50,6 +50,7 @@ function createObserveRouter({ state, store = snapshotStore }) {
   }));
   router.use(function observeFallback(req, res, next) {
     if (req.auth?.method !== 'cookie') return next(new ForbiddenError('cookie auth required'));
+    // Spec §5.3: unmatched path structure is 404; matched invalid IDs are 400.
     return next(new AppError('route_not_found', 404));
   });
   return router;

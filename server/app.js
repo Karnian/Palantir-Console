@@ -1805,7 +1805,12 @@ function createApp(options = {}) {
     res.setHeader('Referrer-Policy', 'no-referrer');
     next();
   });
-  app.use(express.static(path.join(__dirname, 'public')));
+  const serveStatic = express.static(path.join(__dirname, 'public'));
+  app.use(function servePublic(req, res, next) {
+    // Spec §5.3: rejected observe IDs must not trigger static-file probes either.
+    if (/^\/api\/observe(?:\/|$)/i.test(req.path)) return next();
+    return serveStatic(req, res, next);
+  });
 
   // Health check (before auth — must be accessible without token)
   app.get('/api/health', (req, res) => {

@@ -310,9 +310,32 @@ test('endpoint: reader output is identical, never writes files or DB, and uses n
 test('endpoint: malformed IDs, missing files, JSON and policy violations have fixed statuses', async (t) => {
   const fx = fixture(t);
   const app = makeApp(fx);
-  assert.equal((await cookieGet(app)).status, 200);
-  for (const id of ['bad.dot', 'a'.repeat(129), '%2Fetc%2Fpasswd', '%2E%2E', '%00', '%20', '%GG']) {
-    assertError(await cookieGet(app, `${LIST}/${id}`), 400, 'invalid_machine_id');
+  const spy = spyFs(['realpathSync', 'readdirSync', 'lstatSync', 'openSync', 'fstatSync', 'readSync',
+    'statSync', 'readFileSync', 'stat', 'open', 'readdir', 'readFile']);
+  try {
+    assert.equal((await cookieGet(app)).status, 200);
+    assert.equal((await cookieGet(app, LIST)).body.snapshots.length, 1);
+    for (const name of ['realpathSync', 'readdirSync', 'lstatSync', 'openSync', 'fstatSync', 'readSync']) {
+      assert.ok(spy.calls[name] > 0, name);
+    }
+    const invalidIds = ['bad.dot', 'a'.repeat(129), '%2Fetc%2Fpasswd', '%00', '%20', '%GG'];
+    const cases = invalidIds.map(function invalidId(id) {
+      return [`${LIST}/${id}`, 400, 'invalid_machine_id'];
+    });
+    // HTTP clients normalize the encoded dot segment before Express sees the URL.
+    cases.push([`${LIST}/%2E%2E`, 404, 'route_not_found']);
+    cases.push([`${LIST}/extra/child`, 404, 'route_not_found']);
+    cases.push([`${LIST}//etc/passwd`, 404, 'route_not_found']);
+    for (const [url, status, reason] of cases) {
+      spy.reset();
+      const response = await cookieGet(app, url);
+      assertError(response, status, reason);
+      for (const [name, count] of Object.entries(spy.calls)) assert.equal(count, 0, `${url}: ${name}`);
+      assert.ok(!JSON.stringify(response.body).includes(url));
+      assert.ok(!JSON.stringify(response.body).includes(url.slice(LIST.length + 1)));
+    }
+  } finally {
+    spy.restore();
   }
   assertError(await cookieGet(app, `${LIST}/missing`), 404, 'not_found');
   fs.writeFileSync(fx.filename, '{');
