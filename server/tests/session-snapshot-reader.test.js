@@ -281,7 +281,7 @@ test('Claude ordered decision table explicitly protects rows 4,6,7, queue and ti
   assert.deepEqual(snapshot.instructions.map(instruction => instruction.text), [
     'normal', '<command-name>/good</command-name><command-args>arg</command-args>',
     '<command-name>/not-absent</command-name>',
-    'echo safe', 'pasted safe', 'queued safe', ''
+    '<bash-input>echo safe</bash-input>', '<pasted>pasted safe</pasted>', 'queued safe', ''
   ]);
   assert.equal(snapshot.instructions[2].kind, 'human');
   assert.equal(snapshot.instructions[6].attachments, 1);
@@ -2293,6 +2293,10 @@ function trackTranscriptReads(testContext, file) {
     const count = originalRead(descriptor, ...args);
     if (descriptors.has(descriptor)) {
       totals.bytes += count;
+      if (args[1] === 0 && args[3] === 0
+        && (args[0].length > 64 * 1024 || args[0].length === fs.fstatSync(descriptor).size + 1)) {
+        totals.fullReads++;
+      }
     }
     return count;
   });
@@ -3105,7 +3109,7 @@ test('PR1c R1 old subagent prefix cannot prove all records are sidechain', testC
     return { type: 'assistant', sessionId: 's', isSidechain: true, timestamp: OLD_RECORD_TIMESTAMP,
       padding: 'x'.repeat(80) };
   });
-  const old = fixture.file('claude', 's/subagents/agent-mixed', [
+  const old = fixture.file('claude', 'project/s/subagents/agent-mixed', [
     ...prefix, claudeUserRecord('old main', { timestamp: OLD_RECORD_TIMESTAMP })
   ]);
   assert.ok(Buffer.byteLength(prefix.map(record => JSON.stringify(record)).join('\n')) > 64 * 1024);
@@ -3545,4 +3549,239 @@ test('PR1c R3 raw link summaries retain only the last chronological instruction 
     assert.equal(JSON.stringify(exact).includes('link_text'), false);
     fs.unlinkSync(file);
   }
+});
+
+test('PR1c R4 every Claude wrapper preserves raw sanitization and content identity', testContext => {
+  const fixture = createFixture(testContext);
+  const { parseFile } = loadReaderWithInternals();
+  const config = snapshotReader.loadConfig(fixture.options);
+  const ignored = ['task-notification', 'local-command-stdout', 'local-command-caveat', 'bash-stdout', 'bash-stderr'];
+  for (const tag of ['bash-input', 'pasted', 'command-name', 'command-message', 'command-args', ...ignored]) {
+    const text = `<${tag}>password="LEAK_ME</${tag}>"`;
+    fixture.file('claude', 'wrapper', [claudeUserRecord(text)]);
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(JSON.stringify(snapshot).includes('LEAK_ME'), false, tag);
+    if (ignored.includes(tag)) {
+      assert.equal(snapshot.instructions.length, 0, tag);
+      continue;
+    }
+    assert.equal(snapshot.instructions.length, 1, tag);
+    assert.equal(snapshot.instructions[0].text, snapshotPolicy.finalizeText(text).value, tag);
+    const coverage = Object.fromEntries(snapshotPolicy.COVERAGE_KEYS.claude.map(key => [key, 0]));
+    const first = parseFile('claude', [claudeUserRecord(text)], coverage, config).items[0];
+    const changed = parseFile('claude', [claudeUserRecord(text + ' outside sentence')], coverage, config).items[0];
+    assert.notEqual(first.ref, changed.ref, tag);
+    assert.notEqual(first.fp, changed.fp, tag);
+  }
+  const text = '<bash-input>password="LEAK_ME</bash-input>"';
+  fixture.file('claude', 'wrapper', [claudeUserRecord('', { message: {
+    content: [{ type: 'text', text }, { type: 'text', text: 'outside block' }]
+  } })]);
+  const joined = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(joined.instructions[0].text, snapshotPolicy.finalizeText(text + '\n\noutside block').value);
+  assert.equal(JSON.stringify(joined).includes('LEAK_ME'), false);
+});
+
+test('PR1c R4 subagent omission requires the exact projects-relative path and matching sid', testContext => {
+  const fixture = createFixture(testContext);
+  fixture.file('claude', 'p/s', [claudeUserRecord('main')]);
+  const sidechain = [claudeUserRecord('sidechain', { isSidechain: true })];
+  const valid = fixture.file('claude', 'p/s/subagents/agent-x', sidechain);
+  const initial = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(initial.instructions.length, 1);
+  assert.equal(initial.coverage.claude.files_skipped, 1);
+  assert.equal(initial.coverage.claude.multi_file_withheld, 0);
+  fs.unlinkSync(valid);
+  for (const name of ['p/subagents/archive', 'p/different/subagents/agent-x', 'p/s/subagents/archive',
+    'p/s/subagents/nested/agent-x']) {
+    const file = fixture.file('claude', name, sidechain);
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(snapshot.coverage.claude.files_skipped, 0, name);
+    assert.equal(snapshot.coverage.claude.multi_file_withheld, 1, name);
+    assert.equal(snapshot.sessions.length, 0, name);
+    fs.unlinkSync(file);
+  }
+  fixture.options.homeDir = path.join(fixture.options.homeDir, 'subagents');
+  const projects = path.join(fixture.options.homeDir, '.claude/projects');
+  fs.mkdirSync(projects, { recursive: true });
+  fs.writeFileSync(path.join(projects, 'main.jsonl'), JSON.stringify(claudeUserRecord('main')));
+  fs.writeFileSync(path.join(projects, 'side.jsonl'), JSON.stringify(sidechain[0]));
+  const homeSegment = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(homeSegment.coverage.claude.files_skipped, 0);
+  assert.equal(homeSegment.coverage.claude.multi_file_withheld, 1);
+  assert.equal(homeSegment.sessions.length, 0);
+});
+
+for (const old of [false, true]) {
+  test(`PR1c R4 inode growth after fstat uses a bounded fd read with old=${old}`, testContext => {
+    const fixture = createFixture(testContext);
+    const file = fixture.file('claude', 'growing', old ? [
+      { type: 'assistant', timestamp: OLD_RECORD_TIMESTAMP, padding: 'x'.repeat(70 * 1024) },
+      claudeUserRecord('old', { timestamp: OLD_RECORD_TIMESTAMP })
+    ] : [claudeUserRecord('recent')]);
+    if (old) setTranscriptMtime(file, OLD_RECORD_TIMESTAMP);
+    const originalOpen = fs.openSync;
+    const originalFstat = fs.fstatSync;
+    const originalReadFile = fs.readFileSync;
+    const originalRead = fs.readSync;
+    const originalClose = fs.closeSync;
+    const descriptors = new Set();
+    let grew = false;
+    let unboundedReads = 0;
+    let bytes = 0;
+    testContext.mock.method(fs, 'openSync', function trackGrowingFile(filePath, ...args) {
+      const descriptor = originalOpen(filePath, ...args);
+      if (filePath === file) descriptors.add(descriptor);
+      return descriptor;
+    });
+    testContext.mock.method(fs, 'fstatSync', function growAfterStat(descriptor, ...args) {
+      const stats = originalFstat(descriptor, ...args);
+      if (descriptors.has(descriptor) && !grew) {
+        grew = true;
+        fs.appendFileSync(file, Buffer.alloc(snapshotReader.MAX_FILE_BYTES + 1024, 32));
+      }
+      return stats;
+    });
+    testContext.mock.method(fs, 'readFileSync', function countUnboundedRead(descriptor, ...args) {
+      if (descriptors.has(descriptor)) unboundedReads++;
+      return originalReadFile(descriptor, ...args);
+    });
+    testContext.mock.method(fs, 'readSync', function countBoundedRead(descriptor, ...args) {
+      const count = originalRead(descriptor, ...args);
+      if (descriptors.has(descriptor)) bytes += count;
+      return count;
+    });
+    testContext.mock.method(fs, 'closeSync', function trackClosingFile(descriptor) {
+      descriptors.delete(descriptor);
+      return originalClose(descriptor);
+    });
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(grew, true);
+    assert.equal(unboundedReads, 0);
+    assert.ok(bytes <= snapshotReader.MAX_FILE_BYTES + 1 + 128 * 1024);
+    assert.equal(snapshot.coverage.claude.files_failed, 1);
+    assert.equal(snapshot.sessions.length, 0);
+    assert.equal(descriptors.size, 0);
+  });
+}
+
+test('PR1c R4 detail bounds keep first and recent instructions with original seq refs and session tokens',
+  testContext => {
+  const fixture = createFixture(testContext);
+  const rows = Array.from({ length: 220 }, function instructionRow(_, index) {
+    return claudeUserRecord(`instruction ${index}`, { uuid: `u${index}` });
+  });
+  fixture.file('claude', 'bounded', rows);
+  const before = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(before.instructions.length, 201);
+  assert.deepEqual(before.instructions.map(item => item.seq),
+    [1, ...Array.from({ length: 200 }, (_, i) => i + 21)]);
+  assert.equal(before.instructions[0].id, 'claude:s:uu0');
+  assert.equal(before.instructions[1].id, 'claude:s:uu20');
+  assert.equal(before.instructions.at(-1).id, 'claude:s:uu219');
+  assert.equal(before.coverage.claude.records_unverified, 19);
+  const target = { kind: 'session', provider: 'claude', sessionId: 's' };
+  const preview = snapshotReader.excludeQuery({ ...fixture.options, target });
+  assert.equal(preview.equiv_count, 220);
+  rows[10].message.content = 'changed discarded instruction';
+  fixture.file('claude', 'bounded', rows);
+  const after = snapshotReader.runSnapshot(fixture.options);
+  assert.deepEqual(after.instructions, before.instructions);
+  assert.equal(snapshotReader.excludeCommit({ ...fixture.options, target, token: preview.token }).code,
+    'confirm_mismatch');
+});
+
+function writeManyInstructionRunner(fixture) {
+  const runner = path.join(fixture.root, 'many-instructions.cjs');
+  fs.writeFileSync(runner, [
+    "const assert = require('node:assert/strict');",
+    'const reader = require(process.argv[2]);',
+    'const options = JSON.parse(process.argv[3]);',
+    'options.now = new Date(options.now);',
+    'options.runOrca = function unavailableOrca() { return null; };',
+    'const snapshot = reader.runSnapshot(options);',
+    'assert.equal(snapshot.sessions.length, 300);',
+    'assert.equal(snapshot.sessions[0].session_id, "stress-319");',
+    'assert.equal(snapshot.sessions.at(-1).session_id, "stress-20");',
+    'assert.ok(snapshot.sessions.every(session => session.instruction_count <= 201));',
+    'const latest = snapshot.instructions.filter(item => item.session_key === snapshot.sessions[0].key);',
+    'assert.equal(latest.length, 201);',
+    'assert.equal(latest[0].seq, 1);',
+    'assert.equal(latest[1].seq, 1801);',
+    'assert.equal(latest.at(-1).seq, 2000);',
+    'assert.equal(snapshot.coverage.claude.files_scanned, 320);',
+    'assert.equal(snapshot.coverage.claude.files_failed, 0);',
+    'process.stdout.write(JSON.stringify({sessions: snapshot.sessions.length,',
+    '  latest: snapshot.sessions[0].session_id}));'
+  ].join('\n'));
+  return runner;
+}
+
+test('PR1c R4 hundreds of sessions with thousands of instructions survive a 64MB child heap',
+  { timeout: 30000 }, testContext => {
+  const { spawnSync } = require('node:child_process');
+  const fixture = createFixture(testContext);
+  const body = 'ordinary safe message '.repeat(10);
+  assert.ok(body.length >= 200);
+  for (let index = 0; index < 320; index++) {
+    const timestamp = new Date(+SNAPSHOT_TIME - (320 - index) * 1000).toISOString();
+    fixture.file('claude', `stress-${String(index).padStart(3, '0')}`, Array.from({ length: 2000 },
+      function stressInstruction(_, item) {
+        return claudeUserRecord(body + item, { sessionId: `stress-${index}`, uuid: `u${item}`, timestamp });
+      }));
+  }
+  const child = spawnSync(process.execPath, ['--max-old-space-size=64', writeManyInstructionRunner(fixture),
+    require.resolve('../../scripts/lib/sessionSnapshotReader.cjs'), JSON.stringify(fixture.options)], {
+    encoding: 'utf8', timeout: 25000, maxBuffer: 64 * 1024, cwd: fixture.root,
+    env: { ...process.env, HOME: fixture.options.homeDir }
+  });
+  testContext.diagnostic(`many instructions: status=${child.status}, signal=${child.signal}, `
+    + `oom=${/heap out of memory|Reached heap limit|Allocation failed/.test(child.stderr || '')}`);
+  assert.equal(child.error, undefined);
+  assert.equal(child.status, 0, child.stderr.slice(-1000));
+  assert.equal(child.signal, null);
+  assert.deepEqual(JSON.parse(child.stdout), { sessions: 300, latest: 'stress-319' });
+});
+
+test('PR1c R4 late duplicate files restore displaced sessions without duplicate coverage', testContext => {
+  const fixture = createFixture(testContext);
+  let first;
+  for (let index = 0; index < 301; index++) {
+    const timestamp = new Date(+SNAPSHOT_TIME - (301 - index) * 1000).toISOString();
+    const file = fixture.file('claude', `a-${String(index).padStart(3, '0')}`, [
+      claudeUserRecord(`instruction ${index}`, { sessionId: `s${index}`, timestamp })
+    ]);
+    if (index === 0) first = file;
+  }
+  fixture.file('claude', 'z-duplicate', [claudeUserRecord('duplicate', { sessionId: 's300' })]);
+  const reads = trackTranscriptReads(testContext, first);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.sessions.length, 300);
+  assert.equal(snapshot.instructions.length, 300);
+  assert.deepEqual(snapshot.sessions.map(session => session.session_id),
+    Array.from({ length: 300 }, (_, index) => `s${index}`));
+  assert.equal(snapshot.coverage.claude.files_scanned, 302);
+  assert.equal(snapshot.coverage.claude.files_failed, 0);
+  assert.equal(snapshot.coverage.claude.multi_file_withheld, 1);
+  assert.equal(snapshot.coverage.claude.records_unverified, 0);
+  assert.equal(reads.fullReads, 2);
+});
+
+test('PR1c R4 capped Codex content exclusions count every identical original instruction', testContext => {
+  const fixture = createFixture(testContext);
+  fixture.file('codex', 'bounded', [codexSessionMeta(), ...Array.from({ length: 220 },
+    function repeatedInstruction() { return codexMessage('same original instruction'); })]);
+  const before = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(before.instructions.length, 201);
+  assert.equal(before.instructions[0].id, 'codex:s:n1');
+  assert.equal(before.instructions[1].id, 'codex:s:n21');
+  const target = instructionTarget(before.instructions[0]);
+  const preview = snapshotReader.excludeQuery({ ...fixture.options, target });
+  assert.equal(preview.equiv_count, 220);
+  assert.equal(snapshotReader.excludeCommit({ ...fixture.options, target, token: preview.token }).code, 'ok');
+  const excluded = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(excluded.instructions.length, 0);
+  assert.equal(excluded.coverage.codex.deleted_instructions, 220);
+  assert.equal(excluded.coverage.codex.content_rule_excluded, 220);
+  assert.equal(excluded.coverage.codex.records_unverified, 19);
 });
