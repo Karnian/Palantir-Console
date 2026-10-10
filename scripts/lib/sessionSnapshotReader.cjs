@@ -23,8 +23,9 @@ function selectFirstTranscriptIdentity(provider, record, identity) {
 }
 function* transcriptRecords(fd, observation) {
   const limited = observation?.limited !== false;
-  function consume(line) {
+  function consume(line, terminated = true) {
     const record = parseTranscriptRecord(line);
+    if (!terminated && record.__parseFailed) record.__pending = true;
     if (observation) selectFirstTranscriptIdentity(observation.provider, record, observation);
     return record;
   }
@@ -50,19 +51,21 @@ function* transcriptRecords(fd, observation) {
   }
   if (pendingBytes) {
     const line = Buffer.concat(pending, pendingBytes).toString('utf8');
-    if (line.trim()) yield consume(line);
+    if (line.trim()) yield consume(line, false);
   }
 }
 function transcriptSource(fd, provider, validateOnly = false, observation) {
   const headers = [];
   const source = { streaming: true, limited: observation?.limited !== false, find(predicate) { return headers.find(predicate); } };
   const analysis = { byUuid: new Map(), firstTime: null, lastTime: null, duplicates: 0, invalidTime: 0,
-    mixed: false, queuedDuplicate: false, sidechainOnly: true, singleSession: true, count: 0 };
+    mixed: false, queuedDuplicate: false, sidechainOnly: true, singleSession: true, count: 0,
+    brokenJson: false, hasSessionIdentity: false, instructionCandidates: 0, skippedCandidates: false };
   const seen = new Set(), users = new Set(), queued = new Set(), sessions = new Set();
   let hasMeta = false, hasSid = false, hasCwd = false, hasBranch = false, firstSid;
-  let timestampInput, timestampOutput;
+  let timestampInput, timestampOutput, userOrdinal = 0;
   function observe(record) {
     analysis.count++;
+    if (record.__invalid && !record.__pending) analysis.brokenJson = true;
     if (provider === 'codex' && record.type === 'session_meta' && !hasMeta) {
       hasMeta = true;
       const payload = record.payload;
@@ -87,13 +90,27 @@ function transcriptSource(fd, provider, validateOnly = false, observation) {
       && !snapshotPolicy.isSafeTimestamp(record.timestamp)) analysis.invalidTime++;
     const sid = provider === 'claude' ? record.sessionId : record.type === 'session_meta' ? record.payload?.id : undefined;
     if (typeof sid === 'string') sessions.add(sid);
+    if (provider === 'claude' ? Object.hasOwn(record, 'sessionId') : record.type === 'session_meta')
+      analysis.hasSessionIdentity = true;
     if (record.isSidechain !== true) analysis.sidechainOnly = false;
     if (record.sessionId !== firstSid || !hasSid) analysis.singleSession = false;
     if (typeof record.uuid === 'string' && record.uuid) analysis.byUuid.set(record.uuid, Object.hasOwn(record, 'parentUuid')
       ? { parentUuid: typeof record.parentUuid === 'string' || record.parentUuid === null ? record.parentUuid : false } : {});
     const user = provider === 'claude' ? record.type === 'user'
       : record.type === 'response_item' && record.payload?.type === 'message' && record.payload.role === 'user';
-    const attachment = provider === 'claude' && isQueuedInstruction(record);
+    if (provider === 'codex' && user) userOrdinal++;
+    const classification = provider === 'claude' ? classifyClaudeRecord(record)
+      : user ? classifyCodexMessage(record.payload) : null;
+    analysis.currentClassification = classification;
+    const attachment = provider === 'claude' && isQueuedInstruction(record, classification);
+    if (classification?.kind && !classification.empty) {
+      analysis.instructionCandidates++;
+      const suffix = provider === 'claude' ? isIdentityComponent(record.uuid)
+        : codexIdentitySuffix(record.payload.id, userOrdinal);
+      const contentValid = provider !== 'claude' || record.type !== 'user'
+        || typeof record.message?.content === 'string' || Array.isArray(record.message?.content);
+      if (!ts || !suffix || !contentValid) analysis.skippedCandidates = true;
+    }
     const identity = provider === 'claude' ? record.uuid : record.payload?.id;
     if ((user || attachment) && isIdentityComponent(identity)) {
       if (seen.has(identity)) analysis.duplicates++;
@@ -107,6 +124,7 @@ function transcriptSource(fd, provider, validateOnly = false, observation) {
     if (source.limited) checkMetadata(analysis.byUuid.size + seen.size + users.size + queued.size + sessions.size);
   }
   function finish() {
+    delete analysis.currentClassification;
     analysis.mixed = sessions.size > 1;
     analysis.singleSession &&= sessions.size === 1;
     analysis.sidechainOnly &&= analysis.count > 0;
@@ -123,9 +141,10 @@ function transcriptSource(fd, provider, validateOnly = false, observation) {
   }
   const seedTime = analysis.firstTime;
   const ready = !validateOnly && analysis.firstTime && isIdentityComponent(transcriptSessionId(provider, source));
-  analysis.byUuid.clear(); seen.clear(); users.clear(); queued.clear(); sessions.clear();
+  analysis.byUuid.clear(); seen.clear(); users.clear(); queued.clear(); sessions.clear(); userOrdinal = 0;
   Object.assign(analysis, { firstTime: null, lastTime: null, count: 0, duplicates: 0,
-    invalidTime: 0, singleSession: true, sidechainOnly: true, mixed: false, queuedDuplicate: false });
+    invalidTime: 0, singleSession: true, sidechainOnly: true, mixed: false, queuedDuplicate: false,
+    brokenJson: false, hasSessionIdentity: false, instructionCandidates: 0, skippedCandidates: false });
   if (ready) {
     source.lazy = true;
     // parseFile checks timestamp availability before it consumes the iterator.
@@ -387,7 +406,7 @@ function parseTranscriptRecord(line) {
     }
     return record;
   } catch {
-    return { __invalid: true };
+    return { __invalid: true, __parseFailed: true };
   }
 }
 
@@ -476,10 +495,10 @@ function retainString(value, max) {
 }
 
 // Spec §1.1: first matching row wins; output and origin conflicts precede slash/shell wrappers.
-function isQueuedInstruction(record) {
+function isQueuedInstruction(record, classification) {
   if (record.type !== 'attachment' || record.attachment?.type !== 'queued_command'
     || !isIdentityComponent(record.uuid) || !toIsoTimestamp(record.timestamp)) return false;
-  const classification = classifyClaudeRecord(record);
+  if (classification === undefined) classification = classifyClaudeRecord(record);
   return Boolean(classification?.kind);
 }
 
@@ -768,7 +787,7 @@ function parseFile(provider, records, providerCoverage, config = {}, retainAllIn
       if (record.isCompactSummary) {
         compactBefore = true;
       }
-      const classification = classifyClaudeRecord(record);
+      const classification = records.lazy ? records.analysis.currentClassification : classifyClaudeRecord(record);
       if (!classification) {
         continue;
       }
@@ -831,7 +850,7 @@ function parseFile(provider, records, providerCoverage, config = {}, retainAllIn
       if (!first) {
         first = compactBefore ? 'unrecoverable' : metaBefore ? 'recoverable' : 'unknown';
       }
-      const classification = classifyCodexMessage(record.payload);
+      const classification = records.lazy ? records.analysis.currentClassification : classifyCodexMessage(record.payload);
       if (classification.unverified) {
         providerCoverage.records_unverified++;
         continue;
@@ -1157,6 +1176,7 @@ function parseIndependentTranscript(provider, records, providerCoverage, config,
     return null;
   }
   let session;
+  let comparisonFailed = false;
   try {
     if (records.lazy) {
       session = streamedSession;
@@ -1167,10 +1187,14 @@ function parseIndependentTranscript(provider, records, providerCoverage, config,
     if (error.streamLimit) throw error;
     // Spec §1: malformed candidates cannot abort unrelated sessions.
     providerCoverage.files_failed++;
+    comparisonFailed = true;
   }
   // Spec §1.3 / v11: defer group-dependent coverage until all file identities are known.
   return {
     session: mixedSession || queuedDuplicate || duplicates > 0 ? null : session,
+    comparison: session ? { provider: session.provider, sid: session.sid, firstAt: session.firstAt,
+      lastAt: session.lastAt, link_text: session.link_text } : null,
+    comparisonFailed,
     skipIfSingle: !session && duplicates === 0
   };
 }
@@ -1365,11 +1389,15 @@ function summarizeTranscriptFile(provider, file, providerCoverage, windowSince, 
       providerCoverage.files_skipped++;
       return null;
     }
+    const ignored = !records.analysis.hasSessionIdentity && !records.analysis.instructionCandidates;
+    const comparisonFailed = Boolean(parsed?.comparisonFailed || records.analysis.brokenJson
+      || records.analysis.invalidTime || records.analysis.mixed || records.analysis.skippedCandidates
+      || (!ignored && !parsed?.comparison));
     const rawCwd = provider === 'claude' ? records.find(record => typeof record.cwd === 'string')?.cwd
       : records.find(record => record.type === 'session_meta')?.payload?.cwd;
     return { file: retainedFile, firstAt: records.analysis.firstTime, lastAt: records.analysis.lastTime,
       cwdHash: typeof rawCwd === 'string' ? crypto.createHash('sha256').update(rawCwd).digest('hex') : null,
-      sessionId: sessionId?.length <= 64 ? retainString(sessionId, 64) : null, ...parsed };
+      sessionId: sessionId?.length <= 64 ? retainString(sessionId, 64) : null, ...parsed, comparisonFailed };
   } catch (error) {
     providerCoverage.files_failed++;
     if (error.streamLimit) providerCoverage.large_file_withheld++;
@@ -1477,6 +1505,7 @@ function restoreSelectedDetails(files, details, config, coverage, windowSince, r
       const counters = Object.fromEntries(snapshotPolicy.COVERAGE_KEYS[provider].map(key => [key, 0]));
       const restored = summarizeTranscriptFile(provider, file.source, counters, windowSince, config, requestedTarget,
         { readerOptions });
+      if (restored?.comparisonFailed) coverage[provider].link_blocked = 1;
       if (!restored?.session || restored.session.sid !== file.session.sid
         || restored.session.lastAt !== file.session.lastAt || restored.session.firstAt !== file.session.firstAt
         || (!requestedTarget && snapshotSessionExclusion(readerOptions, config, restored.session) !== null)) {
@@ -1520,17 +1549,17 @@ function scanSessions(readerOptions, config, requestedTarget = null) {
         windowSince, config, requestedTarget, scanContext);
       if (!requestedTarget && !summary?.outsideWindow
         && !(summary === null && (coverage[provider].files_skipped || 0) > skippedBefore)
-        && !summary?.session) coverage[provider].link_blocked = 1;
+        && (!summary || summary.comparisonFailed !== false)) coverage[provider].link_blocked = 1;
       if (summary) {
         if (summary.session) {
           summary.snapshotExclusion = requestedTarget ? null
             : snapshotSessionExclusion(readerOptions, config, summary.session);
-          if (!requestedTarget) {
-            const { provider: kind, sid, firstAt, lastAt, link_text } = summary.session;
-            linkCandidates.push({ file: summary, session: { provider: kind, sid, firstAt, lastAt, link_text,
-              cwd: null, cwdHash: summary.cwdHash } });
-          }
         }
+        if (!requestedTarget && !summary.comparisonFailed && summary.comparison) {
+          linkCandidates.push({ file: summary, session: { ...summary.comparison,
+            cwd: null, cwdHash: summary.cwdHash } });
+        }
+        delete summary.comparison;
         summary.scanIndex = scanIndex++;
         summary.source = { file: retainString(file.file, 4096), root: retainString(root, 4096),
           stats: { dev: file.stats.dev, ino: file.stats.ino } };

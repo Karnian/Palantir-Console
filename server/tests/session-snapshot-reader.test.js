@@ -2257,7 +2257,7 @@ test('PR1c fixed pre-change bytes preserve window, whole sessions, exclusions an
       files_scanned: 5, files_skipped: 1, files_failed: 0, records_unknown: 1, records_unverified: 1,
       excluded_sessions: 1, deleted_instructions: 1, queued_enqueued: 1, queued_dequeued: 1, queued_removed: 1,
       multi_file_withheld: 1, mixed_session_withheld: 0, invalid_time_withheld: 0,
-      large_file_withheld: 0, link_blocked: 0, queued_delivered_attachment: 0, queued_duplicate_withheld: 0
+      large_file_withheld: 0, link_blocked: 1, queued_delivered_attachment: 0, queued_duplicate_withheld: 0
     },
     codex: {
       files_scanned: 6, files_failed: 0, exec_sessions_excluded: 1, subagent_excluded: 0,
@@ -2269,7 +2269,14 @@ test('PR1c fixed pre-change bytes preserve window, whole sessions, exclusions an
   });
   // Spec §1.4 / §3: freeze the complete serialized pre-change output, including order and refs.
   const legacy = JSON.parse(JSON.stringify(snapshot));
-  for (const session of legacy.sessions) delete session.instruction_total;
+  for (const session of legacy.sessions) {
+    delete session.instruction_total;
+    // The fixture's complete unsupported JSON value now intentionally blocks Claude links.
+    if (session.provider === 'claude') {
+      assert.equal(session.orca_link.evidence, 'ambiguous');
+      session.orca_link = { evidence: 'none', confirmed: false, pane_key: null, terminal_handle: null };
+    }
+  }
   for (const provider of ['claude', 'codex']) {
     delete legacy.coverage[provider].large_file_withheld;
     delete legacy.coverage[provider].link_blocked;
@@ -4431,7 +4438,7 @@ test('PR1d R2 a failed body read retains identity as a blocker and prevents sibl
   assert.equal(snapshot.sessions.length, 0);
 });
 
-test('PR1d R2 a failed file summary blocks the provider even with disjoint known times', t => {
+test('PR1d S1 correction duplicate withheld files retain their disjoint comparison time range', t => {
   const fixture = createFixture(t);
   fixture.file('claude', 'active', [claudeUserRecord('the live exact instruction')]);
   const old = new Date(Date.parse(RECORD_TIMESTAMP) - 86400000).toISOString();
@@ -4440,10 +4447,10 @@ test('PR1d R2 a failed file summary blocks the provider even with disjoint known
   fixture.options.runOrca = orcaRunner([orcaWorktree('the live exact instruction')], []);
   const snapshot = snapshotReader.runSnapshot(fixture.options);
   assert.equal(snapshot.sessions.length, 1);
-  assert.equal(snapshot.sessions[0].orca_link.confirmed, false);
+  assert.equal(snapshot.sessions[0].orca_link.confirmed, true);
   const scanned = loadReaderWithInternals().scanSessions(fixture.options, fixture.config());
-  assert.equal(scanned.coverage.claude.link_blocked, 1);
-  assert.equal(scanned.linkCandidates.length, 0);
+  assert.equal(scanned.coverage.claude.link_blocked, 0);
+  assert.equal(scanned.linkCandidates.length, 1);
 });
 
 function orcaTerminalPartialFixture(t, terminalExtra = {}) {
@@ -5074,3 +5081,132 @@ for (const id of [undefined, 'invalid/id']) {
       target: { kind: 'session', provider: 'codex', sessionId: 's' } }).equiv_count, 1);
   });
 }
+
+test('PR1d S1 correction ignores complete state jsonl with no session identity or instruction candidates', t => {
+  const fixture = createFixture(t), prompt = 'shared human prompt';
+  fixture.file('claude', 'project/main', [claudeUserRecord(prompt)]);
+  fixture.file('claude', '.ao/state/ao-model-usage', [{ type: 'usage', model: 'claude', tokens: 17 }]);
+  fixture.options.runOrca = orcaRunner([orcaWorktree(prompt)], []);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.coverage.claude.link_blocked, 0);
+  assert.equal(snapshot.coverage.claude.files_skipped, 1);
+  assert.equal(snapshot.sessions[0].orca_link.confirmed, true);
+});
+
+test('PR1d S1 correction duplicate Codex identities withhold output but compete by last sorted prompt', t => {
+  const fixture = createFixture(t), prompt = 'shared human prompt';
+  fixture.file('codex', 'visible', [codexSessionMeta({ id: 'visible' }), codexMessage(prompt)]);
+  fixture.options.runOrca = orcaRunner([orcaWorktree(prompt, 'p:leaf', { agentType: 'codex' })], []);
+  const hidden = text => fixture.file('codex', 'hidden', [codexSessionMeta({ id: 'hidden' }),
+    codexMessage(text, { id: 'duplicate' }), { ...codexMessage('older different prompt', { id: 'duplicate' }),
+      timestamp: '2026-10-08T01:59:00.000Z' }]);
+  hidden(prompt);
+  let snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.deepEqual(snapshot.sessions.map(session => session.session_id), ['visible']);
+  assert.equal(snapshot.coverage.codex.link_blocked, 0);
+  assert.equal(snapshot.sessions[0].orca_link.evidence, 'ambiguous');
+  hidden('a different human prompt');
+  snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.coverage.codex.link_blocked, 0);
+  assert.equal(snapshot.sessions[0].orca_link.confirmed, true);
+});
+
+for (const newline of [true, false]) {
+  test(`PR1d S1 correction invalid final JSON line ${newline ? 'with newline blocks' : 'without newline stays pending'}`, t => {
+    const fixture = createFixture(t), prompt = 'shared human prompt';
+    const file = fixture.file('claude', 'main', [claudeUserRecord(prompt)]);
+    fs.appendFileSync(file, '\n{"type":"user","message":' + (newline ? '\n' : ''));
+    fixture.options.runOrca = orcaRunner([orcaWorktree(prompt)], []);
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(snapshot.coverage.claude.link_blocked, newline ? 1 : 0);
+    assert.equal(snapshot.coverage.claude.records_unverified, 1);
+    assert.equal(snapshot.sessions[0].orca_link.confirmed, !newline);
+    if (newline) assert.equal(snapshot.sessions[0].orca_link.evidence, 'ambiguous');
+  });
+}
+
+test('PR1d S1 correction skipped last instruction candidates with missing time or identity block older prompt', t => {
+  for (const provider of ['claude', 'codex']) for (const invalid of ['timestamp', 'identity']) {
+    const fixture = createFixture(t), prompt = 'shared human prompt';
+    const latest = provider === 'claude' ? claudeUserRecord('new human instruction', { uuid: 'later' })
+      : codexMessage('new human instruction', { id: 'later' });
+    if (invalid === 'timestamp') delete latest.timestamp;
+    else if (provider === 'claude') latest.uuid = 'bad/id';
+    else latest.payload.id = 'bad/id';
+    fixture.file(provider, 'main', provider === 'claude' ? [claudeUserRecord(prompt), latest]
+      : [codexSessionMeta(), codexMessage(prompt), latest]);
+    fixture.options.runOrca = orcaRunner([orcaWorktree(prompt, 'p:leaf', { agentType: provider })], []);
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(snapshot.coverage[provider].link_blocked, 1, `${provider}/${invalid}`);
+    assert.equal(snapshot.sessions[0].orca_link.evidence, 'ambiguous');
+    assert.equal(snapshot.sessions[0].orca_link.confirmed, false);
+  }
+});
+
+test('PR1d S1 correction exec-excluded Codex files keep their prompt competition', t => {
+  const fixture = createFixture(t), prompt = 'shared human prompt';
+  fixture.file('codex', 'visible', [codexSessionMeta({ id: 'visible' }), codexMessage(prompt)]);
+  const hidden = text => fixture.file('codex', 'exec', [codexSessionMeta({ id: 'exec', source: 'exec' }), codexMessage(text)]);
+  fixture.options.runOrca = orcaRunner([orcaWorktree(prompt, 'p:leaf', { agentType: 'codex' })], []);
+  hidden(prompt);
+  let snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.coverage.codex.exec_sessions_excluded, 1);
+  assert.equal(snapshot.coverage.codex.link_blocked, 0);
+  assert.equal(snapshot.sessions[0].orca_link.evidence, 'ambiguous');
+  hidden('different exec prompt');
+  snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.coverage.codex.link_blocked, 0);
+  assert.equal(snapshot.sessions[0].orca_link.confirmed, true);
+});
+
+
+test('PR1d S1 correction queued candidates missing timestamp or uuid also invalidate the last prompt', t => {
+  for (const field of ['timestamp', 'uuid']) {
+    const fixture = createFixture(t), prompt = 'shared human prompt';
+    const queued = { type: 'attachment', sessionId: 's', uuid: 'later', timestamp: RECORD_TIMESTAMP,
+      attachment: { type: 'queued_command', origin: { kind: 'human' }, commandMode: 'prompt', prompt: 'new instruction' } };
+    delete queued[field];
+    fixture.file('claude', 'main', [claudeUserRecord(prompt), queued]);
+    fixture.options.runOrca = orcaRunner([orcaWorktree(prompt)], []);
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(snapshot.coverage.claude.link_blocked, 1, field);
+    assert.equal(snapshot.sessions[0].orca_link.confirmed, false);
+  }
+});
+
+test('PR1d S1 correction a broken nonfinal line still blocks when the last valid record has no newline', t => {
+  const fixture = createFixture(t), prompt = 'shared human prompt';
+  const file = fixture.file('claude', 'main', []);
+  fs.writeFileSync(file, '{broken JSON\n' + JSON.stringify(claudeUserRecord(prompt)));
+  fixture.options.runOrca = orcaRunner([orcaWorktree(prompt)], []);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.coverage.claude.link_blocked, 1);
+  assert.equal(snapshot.coverage.claude.records_unverified, 1);
+  assert.equal(snapshot.sessions[0].orca_link.confirmed, false);
+});
+
+test('PR1d S1 correction reread notices newly completed broken JSON without changing session times', t => {
+  const fixture = createFixture(t), cap = snapshotPolicy.SNAPSHOT_LIMITS.sessions;
+  const prompt = 'shared human prompt';
+  let firstFile;
+  for (let index = 0; index <= cap; index++) {
+    const file = fixture.file('claude', `a-${String(index).padStart(3, '0')}`, [claudeUserRecord(index === 1 ? prompt : 'older task', {
+      sessionId: `s${index}`, cwd: index === 1 ? '/sensitive/repo' : '/else',
+      timestamp: new Date(Date.parse(RECORD_TIMESTAMP) - (cap - index) * 1000).toISOString()
+    })]);
+    if (index === 0) firstFile = file;
+  }
+  fixture.file('claude', 'z-duplicate', [claudeUserRecord('duplicate', { sessionId: `s${cap}`, cwd: '/else' })]);
+  fixture.options.runOrca = orcaRunner([orcaWorktree(prompt)], []);
+  const originalOpen = fs.openSync;
+  let opens = 0;
+  t.mock.method(fs, 'openSync', function(file, ...args) {
+    if (file === firstFile && ++opens === 2) fs.appendFileSync(firstFile, '\n{broken JSON\n');
+    return originalOpen(file, ...args);
+  });
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(opens, 2);
+  assert.equal(snapshot.coverage.claude.link_blocked, 1);
+  assert.equal(snapshot.sessions.some(session => session.session_id === 's0'), true);
+  assert.equal(snapshot.sessions.find(session => session.session_id === 's1').orca_link.evidence, 'ambiguous');
+});
