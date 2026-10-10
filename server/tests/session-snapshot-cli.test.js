@@ -41,6 +41,29 @@ async function initialize(f) {
   assert.equal(snapshot.instructions[0].text, 'Synthetic instruction A');
   return { file, bytes, snapshot };
 }
+test('CLI rejects public output paths before spawn or directory creation', async t => {
+  const f = fixture(t);
+  await initialize(f);
+  const publicDir = fs.realpathSync(path.resolve(__dirname, '../public'));
+  const target = path.join(publicDir, 'observe-snapshots-test-' + path.basename(f.root));
+  assert.equal(fs.existsSync(target), false);
+  t.after(() => fs.rmSync(target, { recursive: true, force: true }));
+  const alias = path.join(f.root, 'public-link');
+  fs.symlinkSync(publicDir, alias);
+  for (const outDir of [target, publicDir, path.join(alias, 'new', 'nested')]) {
+    const argv = args(f);
+    argv[argv.indexOf('--out-dir') + 1] = outDir;
+    const denied = recordingSpawn(t);
+    const result = await invoke(f, argv, '', f.env, denied.spawnImpl);
+    assert.equal(result.code, 2);
+    assert.equal(result.errors(), 'out_dir_public\n');
+    assert.equal(result.output(), '');
+    assert.equal(result.spawns(), 0);
+    assert.equal(denied.calls.length, 0);
+    assert.equal(fs.existsSync(target), false);
+    assert.equal(fs.existsSync(path.join(alias, 'new')), false);
+  }
+});
 async function operation(f, request, overrides) {
   const m = await api;
   const bundle = m.buildBundle({ request, sourceOverrides: overrides });

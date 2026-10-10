@@ -1,10 +1,31 @@
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import { buildBundle, runExecutor, receiveEnvelope, writeSnapshotAtomic } from './lib/sessionSnapshotBundle.mjs';
 const require = createRequire(import.meta.url);
 const { assertSpawnAllowed, isSpawnGuardActive } = require('../server/utils/spawnGuard.js');
 function invalidInput() { throw new Error('request_invalid'); }
+function assertPrivateOutput(outDir) {
+  const publicRoot = fs.realpathSync(fileURLToPath(new URL('../server/public', import.meta.url)));
+  let ancestor = path.resolve(outDir);
+  const suffix = [];
+  let resolved;
+  while (resolved === undefined) {
+    try {
+      resolved = path.join(fs.realpathSync(ancestor), ...suffix);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      suffix.unshift(path.basename(ancestor));
+      ancestor = path.dirname(ancestor);
+    }
+  }
+  const relative = path.relative(publicRoot, resolved);
+  if (relative === '' || (!path.isAbsolute(relative) && relative !== '..'
+    && !relative.startsWith('..' + path.sep))) {
+    throw Object.assign(new Error('out_dir_public'), { code: 'out_dir_public' });
+  }
+}
 function parseArguments(argv, env) {
   const args = [...argv];
   const remote = args[0] === 'remote';
@@ -82,6 +103,7 @@ export async function main(argv, { stdin = process.stdin, stdout = process.stdou
   let options;
   try {
     options = parseArguments(argv, env);
+    if (options.request.op === 'snapshot') assertPrivateOutput(options.outDir);
     if (isSpawnGuardActive()) {
       assertSpawnAllowed({ command: options.request.orca_bin, source: 'session-snapshot:orca_bin' });
     }

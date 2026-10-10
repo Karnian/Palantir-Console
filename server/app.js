@@ -70,6 +70,8 @@ const { createDispatchAuditRouter } = require('./routes/dispatchAudit');
 const { createRouterService } = require('./services/routerService');
 const { createRouterRouter } = require('./routes/router');
 const { createAuthRouter } = require('./routes/auth');
+const { sealObserveState } = require('./services/observeSnapshotStore');
+const { createObserveOffGate, createObserveRouter, observeErrorHandler } = require('./routes/observe');
 const { createSkillPackService } = require('./services/skillPackService');
 const { createRegistryService } = require('./services/registryService');
 const { createSkillPacksRouter } = require('./routes/skillPacks');
@@ -1106,6 +1108,12 @@ function createApp(options = {}) {
   const pmToken = pmTokenFromOptions
     ? optionPmToken
     : actorTokenEnv.PALANTIR_PM_TOKEN;
+  const observeDir = options.observeSnapshotDir === undefined
+    ? process.env.PALANTIR_OBSERVE_SNAPSHOT_DIR
+    : options.observeSnapshotDir;
+  const publicDir = path.join(__dirname, 'public');
+  const observeState = sealObserveState({ dir: observeDir, authToken, publicDir });
+  if (observeDir && !observeState.on) console.warn(observeState.code);
   const actorTokenOptions = {
     actorTokenSource: options.actorTokenSource,
     agentProcessIsolation: options.agentProcessIsolation,
@@ -1780,7 +1788,14 @@ function createApp(options = {}) {
   });
 
   // Middleware
-  app.use(express.json({ limit: '2mb' }));
+  // Spec §5.2: gate before auth and body parsing, even for malformed POST bodies.
+  app.use('/api/observe', createObserveOffGate(observeState));
+  const parseJson = express.json({ limit: '2mb' });
+  app.use(function parseNonObserveJson(req, res, next) {
+    // Spec §5.3: observe authenticates before parsing bodies.
+    if (/^\/api\/observe(?:\/|$)/i.test(req.path)) return next();
+    return parseJson(req, res, next);
+  });
   app.use((req, res, next) => {
     // All assets self-hosted: vendor/ has Preact/HTM/marked/DOMPurify,
     // vendor/fonts/ has Inter woff2. No external CDN dependencies.
@@ -1796,7 +1811,18 @@ function createApp(options = {}) {
     res.setHeader('Referrer-Policy', 'no-referrer');
     next();
   });
-  app.use(express.static(path.join(__dirname, 'public')));
+  const serveStatic = express.static(publicDir);
+  app.use(function servePublic(req, res, next) {
+    // Spec §5.2/§5.3: static serving must not probe any decoded API path.
+    let decoded;
+    try {
+      decoded = path.posix.normalize(decodeURIComponent(req.path));
+    } catch {
+      return next();
+    }
+    if (/^\/api(?:\/|$)/i.test(decoded)) return next();
+    return serveStatic(req, res, next);
+  });
 
   // Health check (before auth — must be accessible without token)
   app.get('/api/health', (req, res) => {
@@ -1857,6 +1883,9 @@ function createApp(options = {}) {
     },
   });
   app.use('/api', auth);
+  app.use('/api/observe', parseJson);
+  app.use('/api/observe', createObserveRouter({ state: observeState, store: options.observeSnapshotStore }));
+  app.use('/api/observe', observeErrorHandler);
   app.use('/api/agent-context', createAgentContextRouter({
     goalFeatureActive,
     isSpecialistAvailable,

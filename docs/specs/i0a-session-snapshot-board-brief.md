@@ -318,8 +318,8 @@
 - 활성 판정은 **부팅 시 한 번만** 한다. 아래 조건을 모두 만족해야 `on` 이다.
   - `PALANTIR_OBSERVE_SNAPSHOT_DIR` 설정됨
   - human 인증(`PALANTIR_TOKEN`) 켜짐
-  - 루트 디렉터리 검사 통과: realpath 가 설정값과 같고, 서버 사용자 소유이며, group/other 쓰기 권한이 없음
-- 하나라도 실패하면 `off` 이고, 부팅 로그에 고정 코드로 경고를 남긴다.
+  - 루트 디렉터리 검사 통과: 설정값이 절대경로이고 realpath 가 설정값과 **글자 그대로** 같으며(정규화 비교 금지), 서버 사용자 소유이고, group/other 쓰기 권한이 없으며, 공개 정적 폴더(`server/public`) 안이 아님
+- 하나라도 실패하면 `off` 이고, 경로를 설정했는데 실패한 경우에만 부팅 로그에 고정 코드로 경고를 남긴다(미설정은 무음).
 - 상태를 바꾸려면 재시작해야 한다.
 - 토큰 없이 auth 가 꺼진 상태(`method=none`)는 cookie 로 간주하지 않는다.
 
@@ -333,18 +333,19 @@
 ### 5.3 on 상태 — 인증 뒤
 
 - 라우트 안에서 `req.auth.method === 'cookie'` 만 허용한다(`routes/questions.js` 선례).
-- bearer 는 human·PM·worker 모두 403 이다.
+- bearer 는 human·PM·worker 모두 403 이다. **cookie 가 아닌 요청은 오류 종류와 무관하게 403** 이다(잘못된 인코딩·본문 파싱 오류 포함, 인증 미들웨어의 401 만 예외). observe 는 본문을 auth 뒤에서 파싱한다.
 - `GET /api/observe/snapshots` 는 검증을 통과한 파일의 메타데이터(machine id·label, generated_at, 크기, coverage 요약)를 돌려준다. 실패한 파일은 `{name_id, error_code}` 만 돌려준다.
-- `GET /api/observe/snapshots/:machineId` 는 `machineId` 를 `ID` 정규식으로 검사하고, 파일명은 서버가 조합한다.
+- `GET /api/observe/snapshots/:machineId` 는 `machineId` 를 정책 ID 슬롯(정규식 + 비밀값 탐지)으로 검사하고, 파일명은 서버가 조합한다. 디렉터리 항목에 **정확히** `<machineId>.json` 이 있을 때만 연다(대소문자 무시 파일시스템 대비). 목록도 같은 이름 필터를 쓰고, 통과 못 한 이름은 항목째 제외한다. 목록 대상 파일이 256개를 넘으면 413 이다.
 
 ### 5.4 파일 읽기
 
 - 매 요청마다 루트 realpath 를 다시 확인한다. 값이 다르면 503 과 `observe_root_changed` 를 돌려준다. 이때 상태는 바꾸지 않는다.
 - 파일은 아래 순서로 연다.
   1. `lstat` 으로 regular file 이고 symlink 가 아닌지 확인한다.
-  2. `open(O_RDONLY | O_NOFOLLOW)` 로 연다.
+  2. `open(O_RDONLY | O_NOFOLLOW | O_NONBLOCK)` 로 연다(FIFO 로 바뀌어도 대기하지 않음).
   3. 연 fd 를 `fstat` 해서 **dev/ino 가 1 의 lstat 결과와 같은지** 대조한다.
   4. 바이트 상한까지만 읽는다. 파일당 16MB, 응답 합계 64MB 다.
+- 정적 서빙은 디코딩·정규화한 경로가 `/api` 아래면 건너뛴다. CLI 는 출력 폴더가 `server/public` 안이면 기록 전에 `out_dir_public` 으로 거부한다(공개 폴더의 파일은 인증 없이 서빙되기 때문).
 - **신뢰 전제**: 루트는 서버 사용자 소유이고 다른 사용자가 쓸 수 없다. 따라서 디렉터리 교체 공격에는 서버 사용자 권한이 필요하다. 이 범위 밖은 위협 모델에 넣지 않는다.
 
 ### 5.5 재검증
@@ -411,7 +412,7 @@
 ## 8. 작업 단위 (codex-goal 위임)
 
 1. **PR1 — 읽기 모듈 + 정책 모듈 + 실행 경로**: `scripts/session-snapshot.mjs`, `scripts/lib/sessionSnapshotReader.cjs`, `server/services/observeSnapshotPolicy.js`, parser, 연결, 번들·launcher·실행기(§2.3), envelope 검증, `observe.json` 갱신 규칙, exclude 조회·기록, 가짜 ssh·orca fixture, 단위 테스트.
-2. **PR2 — endpoint + 보드 + runbook**: `routes/observe.js`(auth 앞 offGate), `WorkBoardView`, 진입 분기, UI·통합 테스트, a11y/visual, 반출 runbook 단락.
+2. **PR2 — endpoint + 보드 + runbook** (PR2a = endpoint + runbook, PR2b = 보드·진입·UI 테스트로 나눔): `routes/observe.js`(auth 앞 offGate), `WorkBoardView`, 진입 분기, UI·통합 테스트, a11y/visual, 반출 runbook 단락.
 
 단위마다: codex-goal 위임 → 호스트 외부검증(RED→GREEN, 역회귀) → codex 적대리뷰 PASS → merge.
 
@@ -529,3 +530,4 @@
   - R3: 주석을 끼운 동적 import 가 정적 검사를 피했다 → 형태를 쫓지 않고 `import` 토큰 자체를 금지했다(manifest 에 이 단어가 없다). 테스트가 import 성공과 차단을 구분하도록, 쓰기 허용 목록이 잠금·정확한 tmp 형식만 받도록 좁혔다.
   - R4: 같은 계열(주석을 끼운 `process.binding`·`dlopen`·`require`)이 다시 나왔다 → 정적 검사를 **형태 추적에서 단어 규칙으로** 바꿔 계열 전체를 닫았다(§2.3). 그 밖에 CLI timeout 뒤 기존 파일 보존, 큰 정상 envelope 의 flush 를 테스트로 고정했다.
   - R5: 정적 검사 계열은 닫힘. timeout 때 ssh 자손이 파이프를 쥐면 끝나지 않던 문제 → 프로세스 그룹 kill + 파이프 닫기 + 2초 backstop. 로컬 실행기의 가드 호출을 호출 기록으로 검증.
+- **PR2a (2026-10-10)**: endpoint + runbook. codex 코드 적대리뷰 R1~R3 NO-GO → R4 GO. 반영: 파일명도 정책 ID 슬롯(비밀값 탐지)으로 거르기, `O_NONBLOCK`(FIFO 교체 대기), 목록 파일 수 상한 256, 상세의 정확한 파일명 대조(대소문자 무시 FS), 루트 설정값 글자 그대로 비교·공개 폴더 안 거부, 정적 서빙의 디코딩 기준 `/api` 제외, CLI 의 공개 폴더 출력 거부, cookie 아닌 요청은 오류 종류와 무관하게 403(단일 규칙). 범위 밖으로 확정: 죽은 manager capability 요청 때 전역 auth 의 `probeActive` 정리(전역 auth 기존 동작, "전역 auth 무변경").
