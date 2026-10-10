@@ -4,7 +4,8 @@ import htm from '../../vendor/htm.module.js';
 import { apiFetch } from '../lib/api.js';
 import { WORK_BOARD_LABELS as W } from '../lib/copy.js';
 import { snapshotCards, rankCards, highlightParts, matchedLines,
-  coverageCounts, loadWorkSnapshots, formatLocalSnapshotTime, cardLineVisibility } from '../lib/workBoard.js';
+  coverageCounts, loadWorkSnapshots, formatLocalSnapshotTime, cardLineVisibility,
+  displayInstructionText } from '../lib/workBoard.js';
 
 const html = htm.bind(h);
 const emptyLoad = () => ({ entries: [], snapshots: [], failures: [], done: 0, total: 0 });
@@ -22,12 +23,15 @@ function SnapshotTime({ value, now, relativeOnly = false, snapshot = false, labe
   return html`<time dateTime=${value}>${label ? `${label} · ${text}` : text}</time>`;
 }
 
-function Highlight({ text, query }) {
+function Highlight({ text, query, transformed = false }) {
+  if (transformed) return text;
   return highlightParts(text, query).map((part, index) => part.highlighted
     ? html`<mark key=${index}>${part.text}</mark>` : part.text);
 }
 
 function Instruction({ instruction, query, now }) {
+  const text = displayInstructionText(instruction.text);
+  const transformed = !instruction.text_missing && text !== instruction.text;
   const [copyState, setCopyState] = useState('');
   const alive = useRef(true);
   const selectorRef = useRef(null);
@@ -53,7 +57,7 @@ function Instruction({ instruction, query, now }) {
       ${instruction.unknown_blocks > 0 && html`<span>${W.unknownBlocks(instruction.unknown_blocks)}</span>`}
     </div>
     <p class="work-instruction"><${Highlight}
-      text=${instruction.text_missing ? W.missing : instruction.text} query=${query} /></p>
+      text=${instruction.text_missing ? W.missing : text} query=${query} transformed=${transformed} /></p>
     <button class="work-button" type="button" onClick=${copy}>${W.copy}</button>
     <span role="status">${copyState === 'copied' ? W.copied : copyState === 'fallback' ? W.copyFallback : ''}</span>
     ${copyState === 'fallback' && html`<input ref=${selectorRef} class="work-selector"
@@ -80,15 +84,18 @@ function SessionCard({ card, query, rank, now }) {
       <span>${card.git_branch || W.branchUnknown}</span>
     </div>
     <div><span class="work-label">${card.titleSource === 'ai' ? W.aiTitle : W.first}</span>
-      <h2 class="work-title"><${Highlight} text=${title} query=${query} /></h2></div>
+      <h2 class="work-title"><${Highlight} text=${title} query=${query}
+        transformed=${card.titleTransformed} /></h2></div>
     ${card.first_instruction !== 'recoverable' && html`<p class="work-first-status work-label">
       ${card.first_instruction === 'unrecoverable' ? W.unrecoverable : W.unknownFirst}</p>`}
     ${!omitRecent && html`<div class="work-recent-block">
       <span class="work-label"><${SnapshotTime} value=${card.recentAt} now=${now}
         label=${W.recent} relativeOnly=${true} /></span>
-      <p class="work-recent"><${Highlight} text=${recent} query=${query} /></p></div>`}
+      <p class="work-recent"><${Highlight} text=${recent} query=${query}
+        transformed=${card.recentTransformed} /></p></div>`}
     ${showFirst && html`<div class="work-first-block"><span class="work-label">${W.first}</span>
-      <p class="work-first"><${Highlight} text=${first} query=${query} /></p></div>`}
+      <p class="work-first"><${Highlight} text=${first} query=${query}
+        transformed=${card.firstTransformed} /></p></div>`}
     ${card.match && html`<div class="work-match">
       <span class="work-label">${card.match.target === 0 ? W.instructionMatch : W.titleMatch}</span>
       <p><${Highlight} text=${matchedLines(card.match.text, query)} query=${query} /></p>
