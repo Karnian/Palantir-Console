@@ -123,12 +123,24 @@ test('executor timeout terminates inherited-pipe descendants', { timeout: 15000 
 test('large remote snapshot flushes its complete envelope before launcher exit', async t => {
   const f = fixture(t);
   const m = await api;
-  const count = 400;
+  const sessionCount = 2;
+  const instructionsPerSession = 200;
+  const count = sessionCount * instructionsPerSession;
   const filename = path.join(f.home, '.claude/projects/s.jsonl');
   const template = JSON.parse(fs.readFileSync(filename, 'utf8'));
-  const rows = Array.from({ length: count }, (_, index) => ({ ...template, uuid: 'u' + index,
-    message: { content: 'Synthetic instruction ' + index + ': ' + 'a '.repeat(850) } }));
-  fs.writeFileSync(filename, rows.map(JSON.stringify).join('\n') + '\n');
+  fs.unlinkSync(filename);
+  const rows = [];
+  for (let session = 0; session < sessionCount; session++) {
+    const sessionId = 'flush-' + session;
+    const sessionRows = Array.from({ length: instructionsPerSession }, (_, offset) => {
+      const index = session * instructionsPerSession + offset;
+      return { ...template, sessionId, uuid: 'u' + index,
+        message: { content: 'Synthetic instruction ' + index + ': ' + 'a '.repeat(850) } };
+    });
+    rows.push(...sessionRows);
+    fs.writeFileSync(path.join(path.dirname(filename), sessionId + '.jsonl'),
+      sessionRows.map(JSON.stringify).join('\n') + '\n');
+  }
   const bundle = m.buildBundle({ request: f.request });
   const result = await m.runExecutor({ target: f.target, bundle,
     sshBin: f.env.PALANTIR_OBSERVE_SSH_BIN, env: f.env });
@@ -137,7 +149,9 @@ test('large remote snapshot flushes its complete envelope before launcher exit',
   const received = m.receiveEnvelope(result, { expectedKinds: ['snapshot'],
     expectedReaderBuild: bundle.readerBuild });
   assert.equal(received.ok, true, received.reason);
-  assert.equal(received.envelope.sessions.length, 1);
+  assert.equal(received.envelope.sessions.length, sessionCount);
+  assert.ok(received.envelope.sessions.every(session => session.instruction_count === instructionsPerSession));
+  assert.equal(received.envelope.coverage.claude.records_unverified, 0);
   assert.equal(received.envelope.instructions.length, count);
   assert.deepEqual(received.envelope.instructions.map(item => item.text), rows.map(row => row.message.content));
 });
