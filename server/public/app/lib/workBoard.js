@@ -1,4 +1,22 @@
 // Session snapshot board: spec §6. No persistent client state.
+// Display only: input is already sanitized. Keep payloads literal and search the original text.
+export function displayInstructionText(text) {
+  if (typeof text !== 'string') return text;
+  const trimmed = text.trim();
+  const tags = /<command-(name|message|args)>([\s\S]*?)<\/command-\1>/gu;
+  const values = {};
+  let end = 0;
+  for (const match of trimmed.matchAll(tags)) {
+    if (trimmed.slice(end, match.index).trim()) return text;
+    values[match[1]] ??= match[2];
+    end = match.index + match[0].length;
+  }
+  const name = values.name || values.message;
+  if (!name || trimmed.slice(end).trim()) return text;
+  const args = values.args || '';
+  return `/${name.replace(/^\/+/u, '')}${args ? ` ${args}` : ''}`;
+}
+
 export function normalizeSearch(text) {
   const spaced = String(text || '').normalize('NFC').toLowerCase();
   return { spaced, compact: spaced.replace(/\s/gu, '') };
@@ -7,7 +25,7 @@ export function normalizeSearch(text) {
 const lexical = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 const epoch = value => Date.parse(value) || 0;
 const firstLine = instruction => instruction?.text_missing
-  ? null : instruction?.text.split(/\r?\n/u).find(line => line.trim() !== '') || null;
+  ? null : displayInstructionText(instruction?.text)?.split(/\r?\n/u).find(line => line.trim() !== '') || null;
 const displayKey = text => String(text || '').normalize('NFC').trim().replace(/\s+/gu, ' ');
 
 // Spec §6: compare display lines without changing their rendered text.
@@ -40,7 +58,7 @@ export function snapshotCards(snapshot) {
     const first = session.first_instruction === 'recoverable' ? firstLine(instructions[0]) : null;
     const titleInstruction = instructions.find(instruction => firstLine(instruction) !== null);
     const aiTitle = displayKey(session.ai_title) ? session.ai_title : null;
-    const title = aiTitle || firstLine(titleInstruction);
+    const title = aiTitle ? displayInstructionText(aiTitle) : firstLine(titleInstruction);
     return {
       ...session, machine: snapshot.machine, instructions, recent, first,
       ai_title: aiTitle, title, titleSource: aiTitle ? 'ai' : 'first',
