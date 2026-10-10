@@ -3274,10 +3274,13 @@ for (const provider of ['claude', 'codex']) {
       { type: 'ai-title', aiTitle: 'title '.repeat(100), sessionId: 's' }
     ] : [codexSessionMeta({ cwd, git: { branch } }), codexMessage(body)]);
     const config = snapshotReader.loadConfig(fixture.options);
-    const { scanSessions } = loadReaderWithInternals();
+    const { scanSessions, parseFile } = loadReaderWithInternals();
     const scanned = scanSessions(fixture.options, config);
-    assert.equal(scanned.all.length, 1);
-    const session = scanned.all[0];
+    assert.equal(scanned.all.length, 0);
+    assert.equal(scanned.coverage[provider].records_unverified, 1);
+    const counters = Object.fromEntries(snapshotPolicy.COVERAGE_KEYS[provider].map(key => [key, 0]));
+    const records = fs.readFileSync(file, 'utf8').split('\n').map(line => JSON.parse(line));
+    const session = parseFile(provider, records, counters, config);
     assert.equal(session.cwd, null);
     assert.equal(session.branch, snapshotPolicy.finalizeLabel(branch).value);
     assert.equal(session.branch.length, 64);
@@ -3784,4 +3787,148 @@ test('PR1c R4 capped Codex content exclusions count every identical original ins
   assert.equal(excluded.coverage.codex.deleted_instructions, 220);
   assert.equal(excluded.coverage.codex.content_rule_excluded, 220);
   assert.equal(excluded.coverage.codex.records_unverified, 19);
+});
+
+function writeInteractiveCandidates(fixture, count) {
+  for (let index = 0; index < count; index++) {
+    const sid = `interactive-${index}`;
+    const timestamp = new Date(+SNAPSHOT_TIME - (1000 - index) * 1000).toISOString();
+    fixture.file('claude', `interactive-${String(index).padStart(3, '0')}`, [
+      claudeUserRecord(`instruction ${index}`, { sessionId: sid, timestamp })
+    ]);
+  }
+}
+
+test('candidate cap excludes 350 exec sessions before retaining five interactive sessions', testContext => {
+  const fixture = createFixture(testContext);
+  writeInteractiveCandidates(fixture, 5);
+  for (let index = 0; index < 350; index++) {
+    const timestamp = new Date(+SNAPSHOT_TIME - 1000).toISOString();
+    fixture.file('codex', `exec-${String(index).padStart(3, '0')}`, [
+      { ...codexSessionMeta({ id: `exec-${index}`, source: 'exec' }), timestamp },
+      { ...codexMessage('exec instruction'), timestamp }
+    ]);
+  }
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.deepEqual(snapshot.sessions.map(session => session.session_id),
+    Array.from({ length: 5 }, (_, index) => `interactive-${index}`));
+  assert.deepEqual(snapshot.instructions.map(instruction => instruction.text),
+    Array.from({ length: 5 }, (_, index) => `instruction ${index}`));
+  assert.equal(snapshot.coverage.codex.exec_sessions_excluded, 350);
+  assert.equal(snapshot.coverage.codex.records_unverified, 0);
+  assert.equal(snapshot.coverage.claude.records_unverified, 0);
+  const included = snapshotReader.runSnapshot({ ...fixture.options, includeExec: true });
+  assert.equal(included.sessions.length, 300);
+  assert.ok(included.sessions.every(session => session.run_mode === 'exec'));
+  assert.equal(included.coverage.codex.exec_sessions_excluded, 0);
+  assert.equal(included.coverage.codex.records_unverified, 50);
+  assert.equal(included.coverage.claude.records_unverified, 5);
+});
+
+test('candidate cap selects exactly the newest 300 of 310 interactive sessions', testContext => {
+  const fixture = createFixture(testContext);
+  writeInteractiveCandidates(fixture, 310);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.deepEqual(snapshot.sessions.map(session => session.session_id),
+    Array.from({ length: 300 }, (_, index) => `interactive-${309 - index}`));
+  assert.equal(snapshot.instructions.length, 300);
+  assert.equal(snapshot.coverage.claude.records_unverified, 10);
+  assert.equal(snapshot.coverage.claude.files_scanned, 310);
+});
+
+test('candidate cap counts multi-file sessions as withheld without consuming candidate slots', testContext => {
+  const fixture = createFixture(testContext);
+  writeInteractiveCandidates(fixture, 5);
+  for (let index = 0; index < 350; index++) {
+    const timestamp = new Date(+SNAPSHOT_TIME - 1000).toISOString();
+    for (const suffix of ['a', 'b']) {
+      fixture.file('claude', `multi-${String(index).padStart(3, '0')}-${suffix}`, [
+        claudeUserRecord('withheld instruction', { sessionId: `multi-${index}`, uuid: suffix, timestamp })
+      ]);
+    }
+  }
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.deepEqual(snapshot.sessions.map(session => session.session_id),
+    Array.from({ length: 5 }, (_, index) => `interactive-${index}`));
+  assert.equal(snapshot.coverage.claude.multi_file_withheld, 350);
+  assert.equal(snapshot.coverage.claude.records_unverified, 0);
+});
+
+test('candidate cap applies session rules, unsupported modes and key withholding before ranking', testContext => {
+  const fixture = createFixture(testContext);
+  writeInteractiveCandidates(fixture, 5);
+  snapshotReader.loadConfig(fixture.options);
+  const config = fixture.config();
+  for (let index = 0; index < 70; index++) {
+    const sid = `excluded-${index}`;
+    const timestamp = new Date(+SNAPSHOT_TIME - 1000).toISOString();
+    fixture.file('claude', sid, [claudeUserRecord('excluded instruction', { sessionId: sid, timestamp })]);
+    config.exclude.sessions.push(`claude:${sid}`);
+    for (const mode of ['exec', 'subagent', 'unsupported', 'withheld']) {
+      const id = `${mode}-${index}`;
+      const source = { exec: 'exec', subagent: { subagent: 'review' }, unsupported: 'voice', withheld: 'cli' };
+      fixture.file('codex', id, [{ ...codexSessionMeta({ id, source: source[mode] }), timestamp },
+        { ...codexMessage('excluded'), timestamp }]);
+      if (mode === 'withheld') {
+        config.exclude.instructions.push({ id: `codex:${id}:n1`, fingerprint: '1'.repeat(64),
+          key_fingerprint: '0'.repeat(64) });
+      }
+    }
+  }
+  fixture.save(config);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.deepEqual(snapshot.sessions.map(session => session.session_id),
+    Array.from({ length: 5 }, (_, index) => `interactive-${index}`));
+  assert.equal(snapshot.coverage.claude.excluded_sessions, 70);
+  assert.equal(snapshot.coverage.codex.exec_sessions_excluded, 70);
+  assert.equal(snapshot.coverage.codex.subagent_excluded, 70);
+  assert.equal(snapshot.coverage.codex.unsupported_sessions, 70);
+  assert.equal(snapshot.coverage.codex.withheld_sessions, 70);
+  assert.equal(snapshot.coverage.claude.records_unverified, 0);
+  assert.equal(snapshot.coverage.codex.records_unverified, 0);
+});
+
+test('candidate cap preserves querying and repeat commits for already excluded sessions', testContext => {
+  const fixture = createFixture(testContext);
+  writeInteractiveCandidates(fixture, 1);
+  for (let index = 0; index < 350; index++) {
+    const timestamp = new Date(+SNAPSHOT_TIME - 1000).toISOString();
+    fixture.file('codex', `exec-${index}`, [{ ...codexSessionMeta({ id: `exec-${index}`, source: 'exec' }),
+      timestamp }, { ...codexMessage('exec instruction'), timestamp }]);
+  }
+  const target = { kind: 'session', provider: 'claude', sessionId: 'interactive-0' };
+  snapshotReader.loadConfig(fixture.options);
+  const preview = snapshotReader.excludeQuery({ ...fixture.options, target });
+  assert.equal(preview.equiv_count, 1);
+  assert.equal(snapshotReader.excludeCommit({ ...fixture.options, target, token: preview.token }).counts.registered, 1);
+  assert.equal(snapshotReader.runSnapshot(fixture.options).sessions.length, 0);
+  assert.equal(snapshotReader.excludeQuery({ ...fixture.options, target }).token, preview.token);
+  assert.equal(snapshotReader.excludeCommit({ ...fixture.options, target, token: preview.token }).counts.registered, 0);
+});
+
+test('candidate cap keeps excluded sessions as text-free Orca ambiguity blockers', testContext => {
+  const fixture = createFixture(testContext);
+  const text = 'same safe interactive instruction';
+  fixture.file('claude', 'a', [claudeUserRecord(text)]);
+  fixture.file('claude', 'b', [claudeUserRecord(text, { sessionId: 'excluded' })]);
+  fixture.options.runOrca = orcaRunner([orcaWorktree(text)], [orcaTerminal()]);
+  assert.ok(snapshotReader.runSnapshot(fixture.options).sessions.every(session =>
+    session.orca_link.evidence === 'ambiguous'));
+  const config = fixture.config();
+  config.exclude.sessions.push('claude:excluded');
+  fixture.save(config);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.sessions.length, 1);
+  assert.equal(snapshot.sessions[0].session_id, 's');
+  assert.equal(snapshot.sessions[0].orca_link.evidence, 'ambiguous');
+  assert.equal(snapshot.sessions[0].orca_link.confirmed, false);
+  assert.equal(snapshot.coverage.claude.excluded_sessions, 1);
+  const { all, linkCandidates } = loadReaderWithInternals().scanSessions(fixture.options, config);
+  assert.equal(all.length, 1);
+  assert.equal(linkCandidates.length, 1);
+  assert.equal(linkCandidates[0].sid, 'excluded');
+  assert.equal(linkCandidates[0].cwd, null);
+  assert.match(linkCandidates[0].cwdHash, /^[a-f0-9]{64}$/);
+  assert.equal(Object.hasOwn(linkCandidates[0], 'items'), false);
+  assert.equal(linkCandidates[0].link_text, null);
 });

@@ -1052,15 +1052,53 @@ function compareSessionFiles(left, right) {
 }
 
 function discardSessionDetails(file, details) {
-  details.delete(file);
   if (file.session) {
     const { provider, sid, firstAt, lastAt } = file.session;
+    details.delete(`${provider}:${sid}`);
     file.session = { provider, sid, firstAt, lastAt };
     file.detailsDiscarded = true;
   }
 }
 
-function retainScannedDetails(groups, details, provider, file, windowSince, now) {
+// Spec §1.2/§1.4/§2: only output-eligible sessions consume detail slots.
+function snapshotSessionExclusion(readerOptions, config, session) {
+  if (session.provider === 'codex' && config.invalidContentRuleSessions?.has(session.sid)) {
+    return 'withheld_sessions';
+  }
+  if (session.cwd === null) {
+    return 'cwd_unavailable';
+  }
+  if (session.run_mode === 'exec' && !readerOptions.includeExec) {
+    return 'exec_sessions_excluded';
+  }
+  if (session.run_mode === 'subagent' || session.run_mode === 'unsupported') {
+    return session.run_mode === 'subagent' ? 'subagent_excluded' : 'unsupported_sessions';
+  }
+  if (isSessionExcluded(config, session)) {
+    return 'excluded_sessions';
+  }
+  const rules = session.provider === 'codex' ? config.exclude.instructions.filter(record =>
+    record.id.startsWith(`codex:${session.sid}:n`)) : [];
+  if (!hasValidLocalKey(config) || rules.some(record => record.key_fingerprint !== config.key_fingerprint)) {
+    return session.provider === 'codex' ? 'withheld_sessions' : 'excluded_sessions';
+  }
+  const key = `${config.machine_id}:${session.provider}:${session.sid}`;
+  if (!safeId(key) || !snapshotPolicy.validateSession(buildSnapshotSession(config, session, key, [])).ok) {
+    return 'records_unverified';
+  }
+  return null;
+}
+
+function matchesRequestedSession(target, session) {
+  if (!target) {
+    return true;
+  }
+  const [provider, sid] = target.kind === 'session'
+    ? [target.provider, target.sessionId] : target.instrId.split(':');
+  return session.provider === provider && session.sid === sid;
+}
+
+function retainScannedDetails(groups, details, provider, file, windowSince, readerOptions, requestedTarget) {
   const key = isIdentityComponent(file.sessionId) ? `${provider}:${file.sessionId}` : `${provider}:file:${file.file}`;
   const group = groups.get(key);
   if (group.files.size > 1 && isIdentityComponent(group.sessionId)) {
@@ -1073,21 +1111,22 @@ function retainScannedDetails(groups, details, provider, file, windowSince, now)
     return;
   }
   const last = Date.parse(file.session.lastAt);
-  if (last < windowSince || last > now) {
+  if (last < windowSince || last > +readerOptions.now || file.snapshotExclusion !== null
+    || !matchesRequestedSession(requestedTarget, file.session)) {
     discardSessionDetails(file, details);
     return;
   }
-  details.add(file);
+  details.set(`${provider}:${file.session.sid}`, file);
   if (details.size > snapshotPolicy.SNAPSHOT_LIMITS.sessions) {
-    const ranked = [...details].sort(compareSessionFiles);
+    const ranked = [...details.values()].sort(compareSessionFiles);
     discardSessionDetails(ranked[ranked.length - 1], details);
   }
 }
 
 // Spec §1.4: grouping can invalidate an earlier candidate; refill only final selected identities.
-function restoreSelectedDetails(files, details, config, coverage, windowSince) {
+function restoreSelectedDetails(files, details, config, coverage, windowSince, readerOptions, requestedTarget) {
   const selected = new Set(files);
-  for (const file of details) {
+  for (const file of details.values()) {
     if (!selected.has(file)) {
       discardSessionDetails(file, details);
     }
@@ -1099,27 +1138,28 @@ function restoreSelectedDetails(files, details, config, coverage, windowSince) {
       const counters = Object.fromEntries(snapshotPolicy.COVERAGE_KEYS[provider].map(key => [key, 0]));
       const restored = summarizeTranscriptFile(provider, file.source, counters, windowSince, config);
       if (!restored?.session || restored.session.sid !== file.session.sid
-        || restored.session.lastAt !== file.session.lastAt || restored.session.firstAt !== file.session.firstAt) {
+        || restored.session.lastAt !== file.session.lastAt || restored.session.firstAt !== file.session.firstAt
+        || (!requestedTarget && snapshotSessionExclusion(readerOptions, config, restored.session) !== null)) {
         coverage[provider].files_failed++;
         continue;
       }
       file.session = restored.session;
       file.detailsDiscarded = false;
-      details.add(file);
+      details.set(`${provider}:${file.session.sid}`, file);
     }
     sessions.push(file.session);
   }
   return sessions;
 }
 
-function scanSessions(readerOptions, config) {
+function scanSessions(readerOptions, config, requestedTarget = null) {
   const coverage = {
     claude: Object.fromEntries(snapshotPolicy.COVERAGE_KEYS.claude.map(coverageKey => [coverageKey, 0])),
     codex: Object.fromEntries(snapshotPolicy.COVERAGE_KEYS.codex.map(coverageKey => [coverageKey, 0])),
     orca: { state: 'unavailable', code: 'orca_unavailable' }
   };
   const groups = new Map();
-  const details = new Set();
+  const details = new Map();
   const windowSince = +readerOptions.now - 14 * 86400000;
   let scanIndex = 0;
   const budget = { entries: 0, files: 0 };
@@ -1132,11 +1172,17 @@ function scanSessions(readerOptions, config) {
       const summary = summarizeTranscriptFile(provider, file, coverage[provider],
         windowSince, config);
       if (summary) {
+        if (summary.session) {
+          summary.snapshotExclusion = requestedTarget ? null
+            : snapshotSessionExclusion(readerOptions, config, summary.session);
+          summary.cwdHash = typeof summary.session.cwd === 'string'
+            ? crypto.createHash('sha256').update(summary.session.cwd).digest('hex') : null;
+        }
         summary.scanIndex = scanIndex++;
         summary.source = { file: retainString(file.file, 4096), root: retainString(root, 4096),
           stats: { dev: file.stats.dev, ino: file.stats.ino } };
         groupTranscriptFiles(groups, provider, summary);
-        retainScannedDetails(groups, details, provider, summary, windowSince, +readerOptions.now);
+        retainScannedDetails(groups, details, provider, summary, windowSince, readerOptions, requestedTarget);
       }
     }
   }
@@ -1166,6 +1212,7 @@ function scanSessions(readerOptions, config) {
       }
     }
   }
+  const linkCandidates = [];
   const selectedFiles = parsedFiles.filter(file => {
     const session = file.session;
     if (session.provider === 'codex' && config.invalidContentRuleSessions?.has(session.sid)) {
@@ -1177,7 +1224,22 @@ function scanSessions(readerOptions, config) {
     if (!inWindow && session.provider === 'claude') {
       coverage.claude.files_skipped++;
     }
-    return inWindow;
+    if (!inWindow) {
+      return false;
+    }
+    // Spec §2.2: excluded sessions still prevent a false unique pane match, without retaining text or paths.
+    if (!requestedTarget && file.cwdHash) {
+      const { provider, sid, firstAt, lastAt } = session;
+      linkCandidates.push({ file, session: { provider, sid, firstAt, lastAt,
+        cwd: null, link_text: null, cwdHash: file.cwdHash } });
+    }
+    if (file.snapshotExclusion !== null) {
+      if (file.snapshotExclusion !== 'cwd_unavailable') {
+        coverage[session.provider][file.snapshotExclusion]++;
+      }
+      return false;
+    }
+    return matchesRequestedSession(requestedTarget, session);
   });
   if (selectedFiles.length > snapshotPolicy.SNAPSHOT_LIMITS.sessions) {
     selectedFiles.sort(compareSessionFiles);
@@ -1186,7 +1248,11 @@ function scanSessions(readerOptions, config) {
     }
     selectedFiles.length = snapshotPolicy.SNAPSHOT_LIMITS.sessions;
   }
-  return { all: restoreSelectedDetails(selectedFiles, details, config, coverage, windowSince), coverage };
+  const all = restoreSelectedDetails(selectedFiles, details, config, coverage, windowSince, readerOptions,
+    requestedTarget);
+  const selected = new Set(selectedFiles);
+  return { all, coverage, linkCandidates: linkCandidates.filter(entry => !selected.has(entry.file))
+    .map(entry => entry.session) };
 }
 
 function isSessionExcluded(config, parsedSession) {
@@ -1306,7 +1372,8 @@ function runSnapshot(inputOptions) {
     ? readConfig(readerOptions) || loadConfig(readerOptions) : loadConfig(readerOptions);
   const {
     all,
-    coverage
+    coverage,
+    linkCandidates
   } = scanSessions(readerOptions, config);
   const sessions = [];
   const instructions = [];
@@ -1315,33 +1382,6 @@ function runSnapshot(inputOptions) {
     const providerCoverage = coverage[parsedSession.provider];
     if (sessions.length >= snapshotPolicy.SNAPSHOT_LIMITS.sessions) {
       providerCoverage.records_unverified++;
-      continue;
-    }
-    // Spec §2.1/§3: the closed session schema cannot project an unavailable cwd identity.
-    if (parsedSession.cwd === null) {
-      continue;
-    }
-    if (parsedSession.run_mode === 'exec' && !readerOptions.includeExec) {
-      providerCoverage.exec_sessions_excluded++;
-      continue;
-    }
-    if (parsedSession.run_mode === 'subagent' || parsedSession.run_mode === 'unsupported') {
-      providerCoverage[parsedSession.run_mode === 'subagent' ? 'subagent_excluded' : 'unsupported_sessions']++;
-      continue;
-    }
-    if (isSessionExcluded(config, parsedSession)) {
-      providerCoverage.excluded_sessions++;
-      continue;
-    }
-    // Spec §2/§4 and host R6: content deletion and key withholding are scoped by provider and session.
-    const rules = parsedSession.provider === 'codex' ? config.exclude.instructions.filter(record =>
-      record.id.startsWith(`codex:${parsedSession.sid}:n`)) : [];
-    if (!hasValidLocalKey(config) || rules.some(record => record.key_fingerprint !== config.key_fingerprint)) {
-      if (parsedSession.provider === 'codex') {
-        providerCoverage.withheld_sessions++;
-      } else {
-        providerCoverage.excluded_sessions++;
-      }
       continue;
     }
     providerCoverage.deleted_instructions += parsedSession.discardedDeleted;
@@ -1374,7 +1414,7 @@ function runSnapshot(inputOptions) {
     parsedSession.output = session;
     instructions.push(...projectedInstructions);
   }
-  const orca = readOrca(readerOptions, config, all, coverage, outputBudget);
+  const orca = readOrca(readerOptions, config, [...all, ...linkCandidates], coverage, outputBudget);
   const result = buildSnapshotEnvelope(readerOptions, config, coverage, sessions, instructions, orca);
   if (!snapshotPolicy.validateSnapshot(result).ok) {
     fail('internal_error');
@@ -1543,6 +1583,7 @@ function parseOrcaWorktrees(worktrees, config, out, orcaCoverage, outputBudget) 
         pane: agent.paneKey,
         prompt: summarizeLinkText(typeof agent.prompt === 'string' ? agent.prompt : ''),
         cwd: rawPath,
+        cwdHash: crypto.createHash('sha256').update(rawPath).digest('hex'),
         time: Date.parse(stateStartedAt || updatedAt)
       });
     }
@@ -1579,7 +1620,9 @@ function buildOrcaLinkCandidates(all, agents) {
   for (const parsedSession of all) {
     const text = parsedSession.link_text;
     for (const agent of agents) {
-      if (parsedSession.cwd === null || parsedSession.cwd !== agent.cwd) {
+      const sameCwd = parsedSession.cwdHash ? parsedSession.cwdHash === agent.cwdHash
+        : parsedSession.cwd !== null && parsedSession.cwd === agent.cwd;
+      if (!sameCwd) {
         continue;
       }
       let evidence = 'cwd_only';
@@ -1711,7 +1754,7 @@ function resolveTarget(readerOptions, config, checkRef) {
   }
   const {
     all
-  } = scanSessions(readerOptions, config);
+  } = scanSessions(readerOptions, config, readerOptions.target);
   const entry = readerOptions.target;
   let target;
   let timestamp = null;
