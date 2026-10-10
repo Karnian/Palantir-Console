@@ -162,7 +162,7 @@ export function coverageCounts(coverage) {
     unknown: sum(['records_unknown']), unverified: sum(['records_unverified']),
     exec: sum(['exec_sessions_excluded']),
     withheld: sum(['withheld_sessions', 'multi_file_withheld', 'mixed_session_withheld',
-      'invalid_time_withheld']),
+      'invalid_time_withheld', 'large_file_withheld', 'queued_duplicate_withheld']),
   };
 }
 
