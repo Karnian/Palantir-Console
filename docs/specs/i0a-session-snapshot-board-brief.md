@@ -192,7 +192,8 @@
 - **절단**: 출력 루프가 200 단위에 도달했거나, 스캔 상한 뒤 WS 아닌 원문이 남았거나, p 가 high surrogate 를 제거하면 true 다. 길이만으로 판단하지 않는다(`a`×199+이모지도 true).
 - **증거 등급**: 같은 cwd + producer 값 일치에서 절단 아님·길이 ≥8 은 `prompt_exact`, 절단됨은 `prompt_trunc` 다. 기존 `prompt_prefix`·`cwd_only` 는 후보 표시만 하며 유일성 판정에서 제외한다.
 - **시간·provider**: stateStartedAt 또는 updatedAt 중 하나라도 `[first_record_at, last_record_at + 10분]` 안이고 agent.agentType 이 세션 provider 와 같아야 확정 후보가 된다.
-- **유일성**: 확정 후보끼리 pane→session, session→pane 양방향 1:1 일 때만 confirmed 다. 제외·보유 상한 밖·출력 예산 밖 세션도 머신 내부의 상한 있는 해시·길이·절단·시간·provider·cwdHash 요약으로 경쟁에 참여한다. 요약 계산 불가인 보류·읽기 상한 세션은 명시적 blocked 다. 확정 후보 agent 의 pane 에 대해서만 같은 cwd·provider 일치(미상 포함)의 blocked 경쟁을 검사한다. 알려진 `[first, last + 10분]` 과 agent 시각이 겹쳐야 경쟁하며, 범위를 모르면 겹친다고 본다. 사람 지시 0개·text_missing·Orca 특수 요약 등 비교 불가가 확정된 세션은 blocked 가 아니다. 경쟁이 있으면 `ambiguous`, confirmed=false 다. 이 요약은 반출하지 않는다. Orca inventory partial/truncated 면 확정을 취소한다.
+- **유일성**: 확정 후보끼리 pane→session, session→pane 양방향 1:1 일 때만 confirmed 다. 제외·보유 상한 밖·출력 예산 밖 세션도 머신 내부의 상한 있는 해시·길이·절단·시간·provider·cwdHash 요약으로 경쟁에 참여한다. 요약 계산 불가인 보류·읽기 상한 세션은 명시적 blocked 다. 확정 후보 agent 의 pane 에 대해서만 같은 cwd·provider 일치(미상 포함)의 blocked 경쟁을 검사한다. 알려진 `[first, last + 10분]` 과 agent 시각이 겹쳐야 경쟁하며, 범위를 모르면 겹친다고 본다. 사람 지시 0개·text_missing·Orca 특수 요약 등 비교 불가가 확정된 세션은 blocked 가 아니다. 경쟁이 있으면 `ambiguous`, confirmed=false 다. 이 요약은 반출하지 않는다. Orca ps/list 응답 실패·truncated, worktree/agent 파싱 실패, agents 상한·출력 예산 초과는 전역 확정 취소다. `worktree.agents` 키가 있되 배열이 아니어도 전역 partial 이며, 키가 없으면 0개다.
+- **terminal partial 범위**: 미등록 worktreeId·불량 필드의 terminal 은 반출하지 않는다. `worktreePath` 가 비어 있지 않은 절대경로이고 worktreeId 의 `::` 뒤 경로와 정확히 같으며(경로 부분이 있을 때), terminal pane 이 ps agent pane 과 겹치지 않으면 같은 cwd 세션만 `ambiguous`, confirmed=false 다. 하나라도 충족하지 못하면 전역 확정을 취소한다. 비교는 기존 raw cwd/cwdHash 규칙을 쓰며 worktreePath·범위 요약은 머신 내부에만 둔다. terminal 응답 실패·truncated·출력 예산 초과는 전역 취소다.
 - **화면 표시**: confirmed 만 "Orca 터미널 연결됨 (스냅샷 시점 관측)"으로 표시한다.
 
 ### 2.3 실행 경로 — 번들 하나, 로컬·원격 공통
@@ -286,6 +287,8 @@
                              "last_output_at": "TIME", "connected": false } ] }
 }
 ```
+
+`coverage.orca` 의 `partial` / `orca_unavailable` 은 inventory 일부가 누락됨을 뜻한다. ps/list·worktree/agent·상한·출력 예산 실패는 전역 확정 취소, 신뢰 가능한 경로·독립 pane 의 terminal 항목 실패는 해당 cwd 만 확정 취소다(§2.2). 범위별 새 enum·키는 없으며 원본 worktreePath 는 반출하지 않는다.
 
 `machine.id` 가 identity 다. `label` 은 화면 표시용일 뿐이다. `reader_build` 는 `^[0-9a-f]{16}$` 다(§2.3). `ref` 는 `HMAC(local_key, 정규 인코딩 ["palantir.instr-ref/1", machine.id, INSTR_ID, 지시의 지문, ts])` 의 앞 16 hex 이고, 서버는 문법만 검증한다.
 
@@ -556,3 +559,5 @@
 - **PR1d (2026-10-10, 측정 전 실데이터 점검)**: 수집·연결 원인 3건(16MB 초과 활발한 transcript 통째 누락, 작업 중 전달된 human queued_command attachment 누락, cwd-only 경쟁·200자 producer 절단으로 Orca 확정 0건)과 footer 지시 수 표시를 고친다. Claude 호스트·codex 2라운드 교차검토 **AMEND→AMEND** 합의: 상한 있는 전체 스트리밍·신원 보존 보류, attachment 기존 신원 경로 편입·이중 기록 세션 보류(병합 금지), producer 변환·실제 절단·시간 OR·provider·확정 후보 양방향 1:1·숨은 경쟁, instruction_total 추가·unknown 비율 유지.
 
 - **PR1d 호스트 검증 1차 수정 (2026-10-11)**: 0f9b77d 의 호스트 DoD 307 pass·npm 3988 pass 뒤 실데이터에서 숨은 경쟁 과잉(Mac ambiguous 100/110), workflow 하위 에이전트 다중 파일 보류, 스트리밍 성능 퇴행을 확인했다. blocked 를 계산 불가 경로에 한정하고 확정 후보 pane·cwd·provider·시간으로 경쟁을 좁혔다. 정확 workflow 경로와 sessionless journal 예외를 추가했다. 전체 이중 JSON 파싱·바이트별 줄 탐색·반복 Set/신원 검증·매 지시 재정렬을 줄여 한 패스 검증과 상한 내 정렬 삽입으로 바꿨다. 72.9MB/20파일/100000레코드(파일당 3.65MB, 서로 다른 시각) 로컬 중앙값은 PR1c 251ms → 1차 PR1d 952ms → 수정본 269ms 다. codev2 의 제시된 숫자 agent 시각·Claude provider·출력/숨은 후보 시간 보존은 fixture 에서 confirmed=true 를 확인했다. 같은 fixture 에 partial inventory 를 주면 prompt_exact/false 가 재현된다. 이는 기존 확정 취소 계약이며, 실제 3건의 coverage·truncated 값은 호스트에서 대조한다.
+
+- **PR1d 호스트 검증 2차 (2026-10-11)**: 87ffe4f 의 npm 4002 pass·0 fail, Mac 확정 6건과 큰 파일·workflow 세션 반출, 생성 11.9초(Mac)·6.9초(codev2)를 확인했다. codev2 ps/list 7개·terminal 11개는 truncated=false 였으나 미등록 worktree 를 가리킨 terminal 1개가 전역 partial 을 일으켜 exact 1:1 3건의 확정을 취소했다. codex 교차검토 AMEND 합의대로 절대 worktreePath·id 경로 일치·ps pane 비중복이 증명된 terminal 실패만 cwd 로 국한했다. 나머지 inventory 실패·상한·출력 예산 실패와 비배열 agents 는 전역 취소를 유지한다. 숫자 시각·Claude agentType·worktreePath/tabId/leafId 실제 형태, 경로 누락·상대·모순, pane 충돌, 비배열/누락 agents 를 회귀로 고정했다.

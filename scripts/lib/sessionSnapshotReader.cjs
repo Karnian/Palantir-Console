@@ -1814,15 +1814,21 @@ function readOrca(readerOptions, config, all, coverage, outputBudget) {
     agents,
     ids
   } = parseOrcaWorktrees(worktrees, config, out, coverage.orca, outputBudget);
+  const globalPartial = coverage.orca.state !== 'ok';
   const edges = buildOrcaLinkCandidates(all, agents);
   applyOrcaLinks(all, edges);
-  parseOrcaTerminals(terminals, edges, ids, out, coverage.orca, outputBudget);
-  // Spec §2.2: partial inventories cannot prove uniqueness, including failures during projection.
-  if (coverage.orca.state !== 'ok') {
-    for (const session of all) {
-      if (session.output) {
-        session.output.orca_link.confirmed = false;
-        session.output.orca_link.terminal_handle = null;
+  const terminalPartial = parseOrcaTerminals(terminals, edges, agents, ids, out, coverage.orca, outputBudget);
+  // Spec §2.2: trusted terminal paths restrict cancellation; inventory failures remain global.
+  for (const session of all) {
+    if (!session.output) continue;
+    const scopedPartial = session.cwdHash ? terminalPartial.cwdHashes.has(session.cwdHash)
+      : terminalPartial.cwds.has(session.cwd);
+    if (globalPartial || terminalPartial.global || scopedPartial) {
+      session.output.orca_link.confirmed = false;
+      session.output.orca_link.terminal_handle = null;
+      if (!globalPartial && !terminalPartial.global && scopedPartial) {
+        session.output.orca_link.evidence = 'ambiguous';
+        session.output.orca_link.pane_key = null;
       }
     }
   }
@@ -1878,6 +1884,9 @@ function parseOrcaWorktrees(worktrees, config, out, orcaCoverage, outputBudget) 
     }
     const exportedAgents = [];
     const localAgents = [];
+    if (Object.hasOwn(worktree, 'agents') && !Array.isArray(worktree.agents)) {
+      markOrcaPartial(orcaCoverage);
+    }
     const sourceAgents = Array.isArray(worktree.agents) ? worktree.agents : [];
     if (sourceAgents.length > snapshotPolicy.SNAPSHOT_LIMITS.agents) {
       markOrcaPartial(orcaCoverage);
@@ -2007,14 +2016,29 @@ function applyOrcaLinks(all, edges) {
 
 
 // Host R4/R6: project terminal fields without titles; only valid mapped worktrees are exported.
-function parseOrcaTerminals(terminals, edges, ids, out, orcaCoverage, outputBudget) {
+function parseOrcaTerminals(terminals, edges, agents, ids, out, orcaCoverage, outputBudget) {
+  const partial = { global: false, cwds: new Set(), cwdHashes: new Set() };
+  function rejectTerminal(terminal) {
+    markOrcaPartial(orcaCoverage);
+    const rawPath = terminal?.worktreePath;
+    const rawId = terminal?.worktreeId;
+    const separator = typeof rawId === 'string' ? rawId.indexOf('::') : -1;
+    if (typeof rawPath !== 'string' || !rawPath || !path.isAbsolute(rawPath)
+      || (separator >= 0 && rawId.slice(separator + 2) !== rawPath)
+      || agents.some(agent => agent.pane === orcaTerminalPaneKey(terminal || {}))) {
+      partial.global = true;
+      return;
+    }
+    partial.cwds.add(rawPath);
+    partial.cwdHashes.add(crypto.createHash('sha256').update(rawPath).digest('hex'));
+  }
   for (const terminal of terminals.slice(0, snapshotPolicy.SNAPSHOT_LIMITS.terminals)) {
     if (!isRecordObject(terminal)) {
-      markOrcaPartial(orcaCoverage);
+      rejectTerminal(terminal);
       continue;
     }
     if (!safeId(terminal.handle) || !ids.has(terminal.worktreeId) || !toOrcaIsoTimestamp(terminal.lastOutputAt)) {
-      markOrcaPartial(orcaCoverage);
+      rejectTerminal(terminal);
       continue;
     }
     const paneKey = orcaTerminalPaneKey(terminal);
@@ -2026,9 +2050,13 @@ function parseOrcaTerminals(terminals, edges, ids, out, orcaCoverage, outputBudg
       last_output_at: toOrcaIsoTimestamp(terminal.lastOutputAt),
       connected: terminal.connected === true
     };
-    if (!snapshotPolicy.validateOrcaTerminal(projectedTerminal).ok
-      || !reserveOutputBytes(projectedTerminal, outputBudget)) {
+    if (!snapshotPolicy.validateOrcaTerminal(projectedTerminal).ok) {
+      rejectTerminal(terminal);
+      continue;
+    }
+    if (!reserveOutputBytes(projectedTerminal, outputBudget)) {
       markOrcaPartial(orcaCoverage);
+      partial.global = true;
       continue;
     }
     out.terminals.push(projectedTerminal);
@@ -2038,6 +2066,7 @@ function parseOrcaTerminals(terminals, edges, ids, out, orcaCoverage, outputBudg
       }
     }
   }
+  return partial;
 }
 
 function isValidExcludeTarget(target) {

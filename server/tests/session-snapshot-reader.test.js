@@ -4441,3 +4441,105 @@ test('PR1d R2 a withheld transcript preserves known times and cannot block a dis
   assert.equal(scanned.linkCandidates[0].firstAt, old);
   assert.equal(scanned.linkCandidates[0].lastAt, old);
 });
+
+function orcaTerminalPartialFixture(t, terminalExtra = {}) {
+  const fixture = createFixture(t);
+  const cwd = '/private/orphan-repo';
+  const prompt = 'numeric-time Claude exact instruction';
+  fixture.file('claude', 'live', [claudeUserRecord(prompt)]);
+  fixture.file('claude', 'orphan-cwd', [claudeUserRecord('orphan cwd exact instruction',
+    { sessionId: 'orphan', cwd })]);
+  const worktrees = [orcaWorktree(prompt),
+    { ...orcaWorktree('orphan cwd exact instruction', 'orphan:agent'), worktreeId: 'known-orphan', path: cwd }];
+  const good = orcaTerminal({ worktreePath: '/sensitive/repo' });
+  const bad = orcaTerminal({ handle: 'orphan-terminal', worktreeId: `repoId::${cwd}`,
+    worktreePath: cwd, tabId: 'orphan', leafId: 'terminal', agentIdentity: undefined,
+    orphaned: false, ...terminalExtra });
+  fixture.options.runOrca = orcaRunner(worktrees, [good, bad]);
+  return { fixture, worktrees, good, bad, cwd };
+}
+
+test('PR1d R3 unknown-worktree terminal scopes partial to its cwd with actual Orca fields', t => {
+  const { fixture, cwd } = orcaTerminalPartialFixture(t);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.deepEqual(snapshot.coverage.orca, { state: 'partial', code: 'orca_unavailable' });
+  assert.equal(snapshot.orca.terminals.length, 1);
+  const live = snapshot.sessions.find(session => session.session_id === 's');
+  assert.deepEqual(live.orca_link, { evidence: 'prompt_exact', confirmed: true,
+    pane_key: 'p:leaf', terminal_handle: 'h' });
+  const affected = snapshot.sessions.find(session => session.session_id === 'orphan');
+  assert.deepEqual(affected.orca_link, { evidence: 'ambiguous', confirmed: false,
+    pane_key: null, terminal_handle: null });
+  assert.equal(snapshot.orca.worktrees[0].agents[0].agent_type, 'claude');
+  assert.equal(snapshot.orca.worktrees[0].agents[0].state_started_at, RECORD_TIMESTAMP);
+  assert.equal(JSON.stringify(snapshot).includes(cwd), false);
+  assert.equal(JSON.stringify(snapshot).includes('worktreePath'), false);
+});
+
+for (const [variant, extra] of [
+  ['missing path', { worktreePath: undefined }],
+  ['empty path', { worktreePath: '' }],
+  ['relative path', { worktreePath: 'private/orphan-repo' }],
+  ['contradictory id path', { worktreeId: 'repoId::/different/repo' }],
+  ['overlapping tab/leaf pane', { tabId: 'p', leafId: 'leaf' }],
+  ['overlapping legacy pane', { tabId: undefined, leafId: undefined, paneKey: 'p:leaf' }]
+]) {
+  test(`PR1d R3 rejected terminal ${variant} cancels confirmations globally`, t => {
+    const { fixture } = orcaTerminalPartialFixture(t, extra);
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.deepEqual(snapshot.coverage.orca, { state: 'partial', code: 'orca_unavailable' });
+    assert.equal(snapshot.orca.terminals.length, 1);
+    for (const session of snapshot.sessions) {
+      assert.equal(session.orca_link.evidence, 'prompt_exact');
+      assert.equal(session.orca_link.confirmed, false);
+      assert.equal(session.orca_link.terminal_handle, null);
+    }
+  });
+}
+
+for (const [variant, extra] of [
+  ['invalid handle', { handle: '' }],
+  ['invalid timestamp', { lastOutputAt: 'bad-time' }]
+]) {
+  test(`PR1d R3 known-worktree terminal ${variant} also scopes to its trusted cwd`, t => {
+    const { fixture } = orcaTerminalPartialFixture(t, { worktreeId: 'known-orphan', ...extra });
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(snapshot.coverage.orca.state, 'partial');
+    assert.equal(snapshot.orca.terminals.length, 1);
+    assert.equal(snapshot.sessions.find(session => session.session_id === 's').orca_link.confirmed, true);
+    assert.equal(snapshot.sessions.find(session => session.session_id === 'orphan').orca_link.evidence, 'ambiguous');
+  });
+}
+
+test('PR1d R3 rejected terminal checks all ps panes including agents without session edges', t => {
+  const { fixture, worktrees, good, bad } = orcaTerminalPartialFixture(t);
+  worktrees.push({ ...orcaWorktree('no matching session', 'orphan:terminal'),
+    worktreeId: 'unrelated', path: '/unrelated/repo' });
+  fixture.options.runOrca = orcaRunner(worktrees, [good, bad]);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.coverage.orca.state, 'partial');
+  assert.equal(snapshot.sessions.every(session => !session.orca_link.confirmed), true);
+});
+
+for (const sourceAgents of [null, {}, 'invalid', 42]) {
+  test(`PR1d R3 present nonarray worktree agents (${JSON.stringify(sourceAgents)}) is globally partial`, t => {
+    const { fixture, worktrees, good } = orcaTerminalPartialFixture(t);
+    worktrees[1].agents = sourceAgents;
+    fixture.options.runOrca = orcaRunner(worktrees, [good]);
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.deepEqual(snapshot.coverage.orca, { state: 'partial', code: 'orca_unavailable' });
+    const live = snapshot.sessions.find(session => session.session_id === 's');
+    assert.equal(live.orca_link.evidence, 'prompt_exact');
+    assert.equal(live.orca_link.confirmed, false);
+    assert.equal(live.orca_link.terminal_handle, null);
+  });
+}
+
+test('PR1d R3 absent worktree agents means zero agents without partial', t => {
+  const { fixture, worktrees, good } = orcaTerminalPartialFixture(t);
+  delete worktrees[1].agents;
+  fixture.options.runOrca = orcaRunner(worktrees, [good]);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.deepEqual(snapshot.coverage.orca, { state: 'ok', code: null });
+  assert.equal(snapshot.sessions.find(session => session.session_id === 's').orca_link.confirmed, true);
+});
