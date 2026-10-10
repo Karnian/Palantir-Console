@@ -14,7 +14,8 @@ async function openBoard(page, theme, viewport) {
   await page.goto('/#work');
   await expect(page.locator('.work-card')).toHaveCount(3);
   await expect(page.getByRole('status').filter({ hasText: '세션 3개' })).toBeVisible();
-  await expect(page.locator('.nav-work')).toHaveText('작업');
+  await expect(page.locator('.nav-work-label')).toHaveText('작업');
+  await expect(page.locator('.nav-work')).toHaveAccessibleName('작업');
   await page.evaluate(() => document.fonts.ready);
 }
 
@@ -69,7 +70,8 @@ test('entry default, exact work route, nav and command palette preserve explicit
   await expect(page.locator('[data-view="dashboard"]')).toBeVisible();
   await expect(page.locator('.nav-work')).toBeVisible();
   await page.keyboard.press('Control+k');
-  await expect(page.getByRole('button', { name: /작업/ })).toBeVisible();
+  await expect(page.getByRole('dialog').locator('.command-palette-label')
+    .filter({ hasText: /^작업$/ })).toBeVisible();
   await page.keyboard.press('Escape');
   await page.goto('/#work/child');
   await expect(page.locator('[data-view="dashboard"]')).toBeVisible();

@@ -348,3 +348,40 @@ test('strict activation HTTP status keeps apiFetch cookie transport and 401 logi
     assert.deepEqual(redirects, status === 401 ? ['/login.html?next=%2F%23work'] : []);
   }
 });
+
+test('coverage aggregates every board counter and renders machine totals with Korean Orca status', async t => {
+  const { coverageCounts } = await logic;
+  const { alpha } = fixtures(t);
+  Object.assign(alpha.coverage.claude, {
+    files_scanned: 3, files_skipped: 2, files_failed: 1, excluded_sessions: 4,
+    deleted_instructions: 5, records_unknown: 6, records_unverified: 7,
+    multi_file_withheld: 1, mixed_session_withheld: 2, invalid_time_withheld: 3,
+  });
+  Object.assign(alpha.coverage.codex, {
+    files_scanned: 8, files_failed: 9, excluded_sessions: 10, deleted_instructions: 11,
+    records_unknown: 12, records_unverified: 13, exec_sessions_excluded: 14, withheld_sessions: 15,
+    multi_file_withheld: 4, mixed_session_withheld: 5, invalid_time_withheld: 6,
+  });
+  const expected = { scanned: 11, skipped: 2, failed: 10, excluded: 14, deleted: 16,
+    unknown: 18, unverified: 20, exec: 14, withheld: 36 };
+  assert.deepEqual(coverageCounts(alpha.coverage), expected);
+  const env = boardEnv(t);
+  env.context.apiFetch = async url => url.endsWith('/snapshots') ? { snapshots: [{
+    machine_id: 'alpha', machine_label: 'Mac', generated_at: '2026-10-10T01:00:00.000Z',
+  }] } : alpha;
+  const root = env.document.getElementById('root');
+  env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
+  assert.equal(root.querySelectorAll('.work-card').length, 2);
+  const machines = root.querySelectorAll('.work-coverage-machine');
+  assert.equal(machines.length, 1);
+  assert.equal(machines[0].querySelector('h3').textContent, 'Mac');
+  const rows = Array.from(machines[0].querySelectorAll('dl > div'), row => [
+    row.querySelector('dt').textContent, row.querySelector('dd').textContent,
+  ]);
+  assert.deepEqual(rows, [
+    ['스캔', '11'], ['건너뜀', '2'], ['읽기 실패', '10'], ['세션 제외', '14'], ['지시 삭제', '16'],
+    ['판별 불명', '18'], ['미검증', '20'], ['exec 제외', '14'], ['보류', '36'], ['Orca', '수집됨'],
+  ]);
+  assert.ok(root.querySelector('.work-snapshot-times').textContent.includes('2026-10-10 03:00:00 UTC'));
+  assert.equal(root.querySelector('.work-snapshot-times').textContent.includes('01:00:00'), false);
+});
