@@ -34,9 +34,14 @@ const isIdentityComponent = value => typeof value === 'string' && /^[A-Za-z0-9_-
 const normalizeDeletionText = value => value.normalize('NFC').trim();
 const normalizeLinkText = value => value.normalize('NFC').replace(/\s+/g, ' ').trim();
 
+function isValidMachineLabel(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9._-]{1,32}$/.test(value) && !value.startsWith('-')
+    && snapshotPolicy.finalizeLabel(value).value === value;
+}
+
 function validateReaderOptions(readerOptions) {
   const allowedKeys = [
-    'homeDir', 'configDir', 'now', 'includeExec', 'readerBuild', 'runOrca', 'target', 'token'
+    'homeDir', 'configDir', 'now', 'includeExec', 'readerBuild', 'runOrca', 'target', 'token', 'machineLabel'
   ];
   if (
     !readerOptions
@@ -47,6 +52,7 @@ function validateReaderOptions(readerOptions) {
     || !path.isAbsolute(readerOptions.configDir)
     || (readerOptions.includeExec !== undefined && typeof readerOptions.includeExec !== 'boolean')
     || (readerOptions.runOrca !== undefined && typeof readerOptions.runOrca !== 'function')
+    || (readerOptions.machineLabel !== undefined && !isValidMachineLabel(readerOptions.machineLabel))
     || !(readerOptions.now instanceof Date)
     || !Number.isFinite(+readerOptions.now)
     || !toIsoTimestamp(readerOptions.now.toISOString())
@@ -169,11 +175,14 @@ function writeConfig(readerOptions, config) {
 function loadConfig(readerOptions) {
   validateReaderOptions(readerOptions);
   let config = readConfig(readerOptions);
+  const existingConfig = config !== null;
   if (config) {
     if (!hasValidLocalKey(config)) {
       fail('key_unavailable');
     }
-    return config;
+    if (readerOptions.machineLabel === undefined || readerOptions.machineLabel === config.machine_label) {
+      return config;
+    }
   }
   return withConfigLock(readerOptions, () => {
     config = readConfig(readerOptions);
@@ -181,12 +190,20 @@ function loadConfig(readerOptions) {
       if (!hasValidLocalKey(config)) {
         fail('key_unavailable');
       }
+      // Spec §2: a label update rereads under the same lock and preserves every other stored field.
+      if (readerOptions.machineLabel !== undefined && readerOptions.machineLabel !== config.machine_label) {
+        config.machine_label = readerOptions.machineLabel;
+        writeConfig(readerOptions, config);
+      }
       return config;
+    }
+    if (existingConfig) {
+      fail('key_unavailable');
     }
     const key = crypto.randomBytes(32).toString('hex');
     config = {
       machine_id: crypto.randomBytes(8).toString('hex'),
-      machine_label: 'machine',
+      machine_label: readerOptions.machineLabel ?? 'machine',
       path_salt: crypto.randomBytes(32).toString('hex'),
       path_gen: 0,
       local_key: key,
@@ -789,7 +806,25 @@ function parseIndependentTranscript(provider, records, providerCoverage) {
   };
 }
 
-// Spec §1.4: old files contribute identity only, using complete records within a bounded prefix.
+// Spec §1.4: identity reads retain only grouping fields, never message content.
+function parseTranscriptIdentityRecord(line) {
+  try {
+    const record = JSON.parse(line);
+    if (isRecordObject(record)) {
+      return { type: record.type, sessionId: record.sessionId, payload: { id: record.payload?.id },
+        isSidechain: record.isSidechain };
+    }
+  } catch {}
+  return { __invalid: true };
+}
+
+function inspectTranscriptIdentity(provider, data) {
+  const records = data.split('\n').filter(value => value.trim()).map(parseTranscriptIdentityRecord);
+  return { sessionId: transcriptSessionId(provider, records),
+    sidechainOnly: records.length > 0 && records.every(record => record.isSidechain === true) };
+}
+
+// Spec §1.4: use complete prefix records; unresolved identities fall back to one bounded full read.
 function readTranscriptIdentity(provider, fileDescriptor, fileSize) {
   const prefix = Buffer.alloc(Math.min(fileSize, IDENTITY_PREFIX_BYTES));
   let bytesRead = 0;
@@ -801,23 +836,26 @@ function readTranscriptIdentity(provider, fileDescriptor, fileSize) {
     bytesRead += count;
   }
   const data = prefix.subarray(0, bytesRead);
-  const completeEnd = bytesRead < prefix.length || fileSize <= bytesRead ? bytesRead : data.lastIndexOf(10) + 1;
-  for (const line of data.subarray(0, completeEnd).toString('utf8').split('\n')) {
-    let record;
-    try {
-      record = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (!isRecordObject(record)) {
-      continue;
-    }
-    const sessionId = transcriptSessionId(provider, [record]);
-    if (provider === 'codex' ? record.type === 'session_meta' : isIdentityComponent(sessionId)) {
-      return sessionId;
-    }
+  const completeFile = bytesRead < prefix.length || fileSize <= bytesRead;
+  const completeEnd = completeFile ? bytesRead : data.lastIndexOf(10) + 1;
+  const identity = inspectTranscriptIdentity(provider, data.subarray(0, completeEnd).toString('utf8'));
+  if (!isIdentityComponent(identity.sessionId) && !completeFile) {
+    return inspectTranscriptIdentity(provider, readTranscriptData(fileDescriptor));
   }
-  return undefined;
+  return identity;
+}
+
+function readTranscriptData(fileDescriptor) {
+  const data = fs.readFileSync(fileDescriptor, 'utf8');
+  if (Buffer.byteLength(data) > MAX_FILE_BYTES) {
+    throw Error();
+  }
+  return data;
+}
+
+// Spec §1.1 / §1.3: only a directory segment plus exclusively sidechain records proves a subagent file.
+function isClaudeSubagentFile(provider, file, sidechainOnly) {
+  return provider === 'claude' && path.dirname(file).split(path.sep).includes('subagents') && sidechainOnly;
 }
 
 // Spec §2: verify the enumerated inode before reading; only one file's records remain in scope.
@@ -831,16 +869,22 @@ function summarizeTranscriptFile(provider, file, providerCoverage, windowSince) 
       throw Error();
     }
     if (file.stats.mtimeMs < windowSince) {
-      const sessionId = readTranscriptIdentity(provider, fileDescriptor, openedStats.size);
+      const identity = readTranscriptIdentity(provider, fileDescriptor, openedStats.size);
       providerCoverage.files_scanned++;
-      return { file: file.file, sessionId, outsideWindow: true };
+      if (isClaudeSubagentFile(provider, file.file, identity.sidechainOnly)) {
+        providerCoverage.files_skipped++;
+        return null;
+      }
+      return { file: file.file, sessionId: identity.sessionId, outsideWindow: true };
     }
-    const data = fs.readFileSync(fileDescriptor, 'utf8');
-    if (Buffer.byteLength(data) > MAX_FILE_BYTES) {
-      throw Error();
-    }
+    const data = readTranscriptData(fileDescriptor);
     const records = data.split('\n').filter(value => value.trim()).map(parseTranscriptRecord);
     providerCoverage.files_scanned++;
+    const sidechainOnly = records.length > 0 && records.every(record => record.isSidechain === true);
+    if (isClaudeSubagentFile(provider, file.file, sidechainOnly)) {
+      providerCoverage.files_skipped++;
+      return null;
+    }
     const sessionId = transcriptSessionId(provider, records);
     const parsed = parseIndependentTranscript(provider, records, providerCoverage);
     return { file: file.file, sessionId, ...parsed };
@@ -1034,7 +1078,8 @@ function projectSnapshotInstructions(kept, key, remainingCount, providerCoverage
 
 function runSnapshot(inputOptions) {
   const readerOptions = validateReaderOptions(inputOptions);
-  const config = readConfig(readerOptions) || loadConfig(readerOptions);
+  const config = readerOptions.machineLabel === undefined
+    ? readConfig(readerOptions) || loadConfig(readerOptions) : loadConfig(readerOptions);
   const {
     all,
     coverage

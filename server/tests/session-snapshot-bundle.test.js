@@ -578,3 +578,53 @@ test('simulated old major without globalThis rejects before compiling modern rea
   assert.deepEqual(JSON.parse(result.stdout), { schema: 'palantir.snapshot-status/1', machine_id: 'unknown',
     reader_build: bundle.readerBuild, code: 'node_unsupported', counts: {} });
 });
+
+test('PR1c B labels initialize and update config once; repeated and absent labels write nothing', async t => {
+  const f = fixture(t);
+  const log = path.join(f.root, 'label-writes.log');
+  f.env.FAKE_SSH_PRELOAD = path.resolve(__dirname, 'fixtures/session-snapshot/write-probe.cjs');
+  f.env.WRITE_PROBE_LOG = log;
+  delete f.env.FAKE_ORCA_SPAWN_LOG;
+  const initial = await execute(f, { ...f.request, machine_label: 'Mac' });
+  exactSnapshot(initial.envelope);
+  assert.equal(initial.envelope.machine.label, 'Mac');
+  const before = JSON.parse(fs.readFileSync(f.config, 'utf8'));
+  fs.writeFileSync(log, '');
+  const updated = await execute(f, { ...f.request, machine_label: 'codev2' });
+  assert.equal(updated.envelope.machine.label, 'codev2');
+  const after = JSON.parse(fs.readFileSync(f.config, 'utf8'));
+  assert.equal(after.machine_label, 'codev2');
+  after.machine_label = before.machine_label;
+  assert.equal(JSON.stringify(after), JSON.stringify(before));
+  const writes = fs.readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(writes.filter(value => value === f.config).length, 1);
+  assert.ok(writes.includes(f.config + '.lock'));
+  const bytes = fs.readFileSync(f.config);
+  for (const request of [{ ...f.request, machine_label: 'codev2' }, f.request]) {
+    fs.writeFileSync(log, '');
+    const same = await execute(f, request);
+    assert.equal(same.envelope.machine.label, 'codev2');
+    assert.equal(fs.readFileSync(log, 'utf8'), '');
+    assert.deepEqual(fs.readFileSync(f.config), bytes);
+  }
+});
+
+test('PR1c B direct invalid labels and labels on exclusion requests are rejected before reader execution', async t => {
+  const f = fixture(t);
+  const valid = await execute(f, { ...f.request, machine_label: 'codev2' });
+  assert.equal(valid.envelope.machine.label, 'codev2');
+  const before = fs.readFileSync(f.config);
+  const probe = { 'scripts/lib/sessionSnapshotReader.cjs': "throw new Error('READER_SHOULD_NOT_RUN');" };
+  for (const label of ['a b', '-x', 'x'.repeat(33), '', null, 42]) {
+    const result = await execute(f, { ...f.request, machine_label: label }, {}, probe);
+    assert.equal(result.envelope.code, 'request_invalid');
+    assert.deepEqual(fs.readFileSync(f.config), before);
+  }
+  for (const op of ['exclude_query', 'exclude_commit']) {
+    const request = { ...f.request, op, machine_label: 'codev2',
+      target: { kind: 'session', provider: 'claude', sessionId: 's' } };
+    if (op === 'exclude_commit') request.token = '0'.repeat(64);
+    const result = await execute(f, request, {}, probe);
+    assert.equal(result.envelope.code, 'request_invalid');
+  }
+});

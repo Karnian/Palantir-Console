@@ -2453,11 +2453,11 @@ for (const provider of ['claude', 'codex']) {
     assert.equal(short.sessionId, 's');
     assert.equal(short.outsideWindow, true);
     assert.equal(Object.hasOwn(short, 'session'), false);
-    // Spec §1.4: the unfinished final record cannot supply an identity.
+    // Spec §1.4: an unfinished prefix record needs the bounded full-file identity fallback.
     fs.writeFileSync(file, JSON.stringify({ type: 'assistant', padding: 'x'.repeat(64 * 1024) })
       + '\n' + JSON.stringify(identity));
     setTranscriptMtime(file, OLD_RECORD_TIMESTAMP);
-    assert.equal(summarizeOldFile().sessionId, undefined);
+    assert.equal(summarizeOldFile().sessionId, 's');
     if (provider === 'codex') {
       fs.writeFileSync(file, [
         JSON.stringify(codexSessionMeta({ id: 'invalid/id' })), JSON.stringify(identity)
@@ -2491,3 +2491,185 @@ test('PR1c deferred reads still reject changed inodes and symlink replacements b
   assert.equal(coverage.files_scanned, 0);
   assert.equal(totals.bytes, 0);
 });
+
+for (const provider of ['claude', 'codex']) {
+  test(`PR1c C ${provider} old files recover late identities without parsing content coverage`, testContext => {
+    const fixture = createFixture(testContext);
+    const anonymous = Array.from({ length: 1100 }, function anonymousRecord() {
+      return { type: 'assistant', timestamp: OLD_RECORD_TIMESTAMP, padding: 'x'.repeat(80) };
+    });
+    const identity = provider === 'claude'
+      ? claudeUserRecord('unknown old', { timestamp: OLD_RECORD_TIMESTAMP, origin: undefined })
+      : { ...codexSessionMeta(), timestamp: OLD_RECORD_TIMESTAMP };
+    const old = fixture.file(provider, 'a-old', [...anonymous, identity]);
+    setTranscriptMtime(old, OLD_RECORD_TIMESTAMP);
+    assert.ok(fs.statSync(old).size > 64 * 1024);
+    fixture.file(provider, 'b-new', provider === 'claude'
+      ? [claudeUserRecord('main')] : [codexSessionMeta(), codexMessage('main')]);
+    const totals = trackTranscriptReads(testContext, old);
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(snapshot.coverage[provider].multi_file_withheld, 1);
+    assert.equal(snapshot.sessions.length, 0);
+    assert.equal(snapshot.instructions.length, 0);
+    assert.equal(totals.fullReads, 1);
+    assert.equal(totals.bytes, 64 * 1024 + fs.statSync(old).size);
+    assert.equal(snapshot.coverage[provider].records_unknown, 0);
+    assert.equal(snapshot.coverage[provider].records_unverified, 0);
+  });
+}
+
+test('PR1c C old unknown records do not contribute observed content coverage', testContext => {
+  const fixture = createFixture(testContext);
+  const old = fixture.file('claude', 'old', [
+    claudeUserRecord('unknown', { timestamp: OLD_RECORD_TIMESTAMP, origin: undefined })
+  ]);
+  setTranscriptMtime(old, SNAPSHOT_TIME);
+  assert.equal(snapshotReader.runSnapshot(fixture.options).coverage.claude.records_unknown, 1);
+  setTranscriptMtime(old, OLD_RECORD_TIMESTAMP);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.coverage.claude.files_scanned, 1);
+  assert.equal(snapshot.coverage.claude.files_skipped, 1);
+  assert.equal(snapshot.coverage.claude.records_unknown, 0);
+});
+
+for (const old of [false, true]) {
+  test(`PR1c A pure Claude subagent files are skipped with old=${old}`, testContext => {
+    const fixture = createFixture(testContext);
+    fixture.file('claude', 'project/s', [claudeUserRecord('main one'), claudeUserRecord('main two', { uuid: 'v' })]);
+    const timestamp = old ? OLD_RECORD_TIMESTAMP : RECORD_TIMESTAMP;
+    const sidechain = fixture.file('claude', 'project/s/subagents/agent-x', [
+      claudeUserRecord('subagent', { isSidechain: true, agentId: 'x', timestamp }),
+      { type: 'assistant', isSidechain: true, sessionId: 's', timestamp }
+    ]);
+    if (old) setTranscriptMtime(sidechain, OLD_RECORD_TIMESTAMP);
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(snapshot.coverage.claude.files_scanned, 2);
+    assert.equal(snapshot.coverage.claude.files_skipped, 1);
+    assert.equal(snapshot.coverage.claude.multi_file_withheld, 0);
+    assert.equal(snapshot.sessions.length, 1);
+    assert.equal(snapshot.sessions[0].instruction_count, 2);
+    assert.deepEqual(snapshot.instructions.map(instruction => instruction.text), ['main one', 'main two']);
+  });
+}
+
+for (const scenario of ['mixed', 'outside-directory', 'similar-directory', 'non-boolean']) {
+  test(`PR1c A ${scenario} Claude files still participate in grouping`, testContext => {
+    const fixture = createFixture(testContext);
+    fixture.file('claude', 'project/s', [claudeUserRecord('main')]);
+    const folder = scenario === 'outside-directory' ? 'other'
+      : scenario === 'similar-directory' ? 'subagents-extra' : 'subagents';
+    const rows = [claudeUserRecord('sidechain', { isSidechain: scenario === 'non-boolean' ? 'true' : true })];
+    if (scenario === 'mixed') rows.push({ type: 'assistant', sessionId: 's', timestamp: RECORD_TIMESTAMP });
+    fixture.file('claude', `project/s/${folder}/agent-x`, rows);
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(snapshot.coverage.claude.multi_file_withheld, 1);
+    assert.equal(snapshot.coverage.claude.files_skipped, 0);
+    assert.equal(snapshot.sessions.length, 0);
+  });
+}
+
+function trackConfigMutations(testContext, configDir) {
+  const totals = { operations: 0 };
+  for (const name of ['writeFileSync', 'renameSync', 'mkdirSync', 'unlinkSync', 'openSync']) {
+    const original = fs[name];
+    testContext.mock.method(fs, name, function countConfigMutation(target, ...args) {
+      const writing = name !== 'openSync'
+        || (args[0] & (fs.constants.O_WRONLY | fs.constants.O_RDWR)) !== 0;
+      if (writing && typeof target === 'string' && target.startsWith(configDir)) totals.operations++;
+      return original(target, ...args);
+    });
+  }
+  return totals;
+}
+
+test('PR1c B reader labels initialize once and update only the label; no-op snapshots write zero', testContext => {
+  const fixture = createFixture(testContext);
+  fixture.file('claude', 'main', [claudeUserRecord('main')]);
+  const options = { ...fixture.options, machineLabel: 'Mac' };
+  const totals = trackConfigMutations(testContext, fixture.options.configDir);
+  assert.equal(snapshotReader.runSnapshot(options).machine.label, 'Mac');
+  assert.ok(totals.operations > 0);
+  const before = fixture.config();
+  totals.operations = 0;
+  assert.equal(snapshotReader.runSnapshot({ ...options, machineLabel: 'codev2' }).machine.label, 'codev2');
+  assert.ok(totals.operations > 0);
+  const updated = fixture.config();
+  updated.machine_label = before.machine_label;
+  assert.equal(JSON.stringify(updated), JSON.stringify(before));
+  for (const labelOptions of [{ ...options, machineLabel: 'codev2' }, fixture.options]) {
+    totals.operations = 0;
+    const bytes = fs.readFileSync(path.join(fixture.options.configDir, 'observe.json'));
+    assert.equal(snapshotReader.runSnapshot(labelOptions).machine.label, 'codev2');
+    assert.equal(totals.operations, 0);
+    assert.deepEqual(fs.readFileSync(path.join(fixture.options.configDir, 'observe.json')), bytes);
+  }
+});
+
+test('PR1c B label updates reread latest config under lock and preserve concurrent exclusion changes', testContext => {
+  const fixture = createFixture(testContext);
+  snapshotReader.loadConfig(fixture.options);
+  const latest = fixture.config();
+  latest.path_gen = 3;
+  latest.exclude.sessions.push('claude:other');
+  const originalOpen = fs.openSync;
+  let locks = 0;
+  testContext.mock.method(fs, 'openSync', function updateBeforeLock(file, ...args) {
+    if (file === path.join(fixture.options.configDir, 'observe.json.lock')) {
+      locks++;
+      fixture.save(latest);
+    }
+    return originalOpen(file, ...args);
+  });
+  const snapshot = snapshotReader.runSnapshot({ ...fixture.options, machineLabel: 'codev2' });
+  assert.equal(locks, 1);
+  assert.equal(snapshot.machine.label, 'codev2');
+  const updated = fixture.config();
+  updated.machine_label = latest.machine_label;
+  assert.equal(JSON.stringify(updated), JSON.stringify(latest));
+});
+
+test('PR1c B label updates respect busy locks and never repair unavailable keys', testContext => {
+  const fixture = createFixture(testContext);
+  snapshotReader.loadConfig(fixture.options);
+  const options = { ...fixture.options, machineLabel: 'codev2' };
+  const file = path.join(fixture.options.configDir, 'observe.json');
+  fs.writeFileSync(file + '.lock', '');
+  const before = fs.readFileSync(file);
+  assertReaderError(() => snapshotReader.runSnapshot(options), 'config_busy');
+  assert.deepEqual(fs.readFileSync(file), before);
+  fs.unlinkSync(file + '.lock');
+  const config = fixture.config();
+  delete config.local_key;
+  fixture.save(config);
+  const broken = fs.readFileSync(file);
+  const totals = trackConfigMutations(testContext, fixture.options.configDir);
+  assertReaderError(() => snapshotReader.runSnapshot(options), 'key_unavailable');
+  assert.equal(totals.operations, 0);
+  assert.deepEqual(fs.readFileSync(file), broken);
+});
+
+for (const missing of ['file', 'key']) {
+  test(`PR1c B label update refuses a missing ${missing} discovered after acquiring the lock`, testContext => {
+    const fixture = createFixture(testContext);
+    snapshotReader.loadConfig(fixture.options);
+    const file = path.join(fixture.options.configDir, 'observe.json');
+    const changed = fixture.config();
+    delete changed.local_key;
+    const originalOpen = fs.openSync;
+    let locks = 0;
+    testContext.mock.method(fs, 'openSync', function removeConfigBeforeLock(target, ...args) {
+      if (target === file + '.lock') {
+        locks++;
+        if (missing === 'file') fs.unlinkSync(file);
+        else fixture.save(changed);
+      }
+      return originalOpen(target, ...args);
+    });
+    assertReaderError(() => snapshotReader.runSnapshot({ ...fixture.options, machineLabel: 'codev2' }),
+      'key_unavailable');
+    assert.equal(locks, 1);
+    assert.equal(fs.existsSync(file + '.lock'), false);
+    if (missing === 'file') assert.equal(fs.existsSync(file), false);
+    else assert.equal(JSON.stringify(fixture.config()), JSON.stringify(changed));
+  });
+}

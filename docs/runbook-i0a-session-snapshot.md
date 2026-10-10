@@ -29,15 +29,19 @@ npm start
 
 ```sh
 # Mac 로컬
-node scripts/session-snapshot.mjs snapshot
+node scripts/session-snapshot.mjs snapshot --label Mac
 
 # Mac에서 codev2 실행 후 같은 Mac 디렉터리에 기록
-node scripts/session-snapshot.mjs remote --host codev@codev2 snapshot
+node scripts/session-snapshot.mjs remote --host codev@codev2 snapshot --label codev2
 
 # 비대화형 SSH PATH에 node가 없으면 실제 절대경로 지정
 node scripts/session-snapshot.mjs remote --host codev@codev2 \
   --remote-node /home/codev/.local/bin/node snapshot
 ```
+
+`--label <name>`은 해당 머신의 표시 이름을 설정에 저장한다. 허용 문자는 영문·숫자·`.`·`_`·`-`이며,
+길이는 1~32자이고 `-`로 시작할 수 없다. 생략하면 기존 이름을 유지한다.
+원격 Orca가 비대화형 PATH에 없으면 `--orca-bin /home/<user>/.local/bin/orca`를 지정한다.
 
 `--out-dir <실제 절대경로>`로 출력 디렉터리를 명시할 수도 있다. 실행 실패나 수신 검증 실패 시
 기존 파일은 보존된다. 목록과 상세 응답에는 `Cache-Control: no-store`가 붙는다.

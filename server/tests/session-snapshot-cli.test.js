@@ -308,3 +308,44 @@ test('terminal confirmation displays escaped preview and never displays ssh stde
   assert.equal(preview.output().includes('\u0001'), false);
   assert.equal((preview.output() + preview.errors()).includes('RAW_SSH_SENTINEL'), false);
 });
+
+test('PR1c B CLI snapshot label persists locally and remotely and preserves other config bytes', async t => {
+  const f = fixture(t);
+  await initialize(f);
+  const before = JSON.parse(fs.readFileSync(f.config, 'utf8'));
+  for (const remote of [true, false]) {
+    const argv = remote ? args(f, ['--label', 'codev2'])
+      : ['snapshot', '--now', NOW, '--out-dir', f.out, '--orca-bin', f.request.orca_bin, '--label', 'Mac'];
+    const result = await invoke(f, argv);
+    assert.equal(result.code, 0, result.errors());
+    assert.equal(result.spawns(), 1);
+    const config = JSON.parse(fs.readFileSync(f.config, 'utf8'));
+    const snapshot = JSON.parse(fs.readFileSync(path.join(f.out, fs.readdirSync(f.out)[0]), 'utf8'));
+    assert.equal(snapshot.machine.label, remote ? 'codev2' : 'Mac');
+    assert.equal(config.machine_label, snapshot.machine.label);
+    config.machine_label = before.machine_label;
+    assert.equal(JSON.stringify(config), JSON.stringify(before));
+  }
+});
+
+test('PR1c B invalid labels and labels on exclude are rejected by Mac with zero spawn', async t => {
+  const f = fixture(t);
+  const good = await initialize(f);
+  const allowed = await invoke(f, args(f, ['--label', 'codev2']));
+  assert.equal(allowed.code, 0, allowed.errors());
+  assert.equal(allowed.spawns(), 1);
+  const before = fs.readFileSync(f.config);
+  const denied = recordingSpawn(t);
+  for (const argv of ['a b', '-x', 'x'.repeat(33), ''].map(function invalidLabel(label) {
+    return args(f, ['--label', label]);
+  }).concat([args(f, ['--label']), args(f, ['--label', 'Mac', '--label', 'codev2']),
+    [...exclusionArgs(f), '--label', 'codev2']])) {
+    const result = await invoke(f, argv, '', f.env, denied.spawnImpl);
+    assert.equal(result.code, 2);
+    assert.equal(result.errors(), 'request_invalid\n');
+    assert.equal(result.spawns(), 0);
+    assert.deepEqual(fs.readFileSync(f.config), before);
+  }
+  assert.equal(denied.calls.length, 0);
+  assert.equal(fs.existsSync(good.file), true);
+});
