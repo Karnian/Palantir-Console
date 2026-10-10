@@ -189,3 +189,24 @@ test('PR1d session total is a required closed integer slot and prompt_trunc is a
   snapshot.instructions.push({ ...snapshot.instructions[0] });
   assert.equal(snapshotPolicy.validateSnapshot(snapshot).ok, false);
 });
+
+test('PR1d S1 provider link_blocked coverage accepts only integer zero or one', t => {
+  const os = require('node:os'), path = require('node:path');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'snapshot-link-policy-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const snapshot = require('../../scripts/lib/sessionSnapshotReader.cjs').runSnapshot({
+    homeDir: root, configDir: path.join(root, 'config'), now: new Date('2026-10-08T03:00:00.000Z'),
+    readerBuild: 'a'.repeat(16), runOrca: () => null
+  });
+  for (const provider of ['claude', 'codex']) {
+    for (const value of [0, 1]) {
+      snapshot.coverage[provider].link_blocked = value;
+      assert.equal(snapshotPolicy.validateSnapshot(snapshot).ok, true);
+    }
+    for (const value of [2, -1, true, null, '1']) {
+      snapshot.coverage[provider].link_blocked = value;
+      assert.equal(snapshotPolicy.validateSnapshot(snapshot).ok, false);
+    }
+    snapshot.coverage[provider].link_blocked = 0;
+  }
+});

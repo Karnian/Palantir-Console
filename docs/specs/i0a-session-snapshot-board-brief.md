@@ -41,7 +41,7 @@
 | 9 | `origin.kind=human` 또는 `turnOrigin=human` 또는 `promptSource ∈ {typed, queued, suggestion_accepted}` | `human`. `<pasted>` 래퍼는 벗기고, `image` 블록은 `attachments` 로 센다. 텍스트 없이 이미지만 있으면 `text_missing=true` 인 지시 1건으로 남긴다 |
 | 10 | 그 밖 | `unknown` (coverage) |
 
-- **작업 중 전달**: `type=attachment`, `attachment.type=queued_command`, `origin.kind=human`, `commandMode=prompt`, `isSidechain!==true`, `humanTurn!==false`, 문자열 `prompt`, 유효 uuid·timestamp 이면 `human` 지시 1건이다. id 는 `claude:<sid>:u<record.uuid>`, ts 는 record.timestamp, 본문은 prompt 원문이며 기존 제외 우선순위·지문·ref·살균·삭제를 그대로 따른다. humanTurn=false 또는 human origin 의 mode/prompt 모순은 `records_unverified`. task-notification·peer 등은 무시한다. attachment uuid 또는 source_uuid/delivery_id 가 user 신원과 연결되면 병합하지 않고 세션 전체를 `queued_duplicate_withheld` 로 보류한다.
+- **작업 중 전달**: `type=attachment`, `attachment.type=queued_command`, `origin.kind=human`, `commandMode=prompt`, `isSidechain!==true`, `humanTurn!==false`, 문자열 `prompt`, 유효 uuid·timestamp 이면 `human` 지시 1건이다. id 는 `claude:<sid>:u<record.uuid>`, ts 는 record.timestamp, 본문은 prompt 원문이며 기존 제외 우선순위·지문·ref·살균·삭제를 그대로 따른다. humanTurn=false 또는 human origin 의 mode/prompt 모순은 `records_unverified`. task-notification·peer 등은 무시한다. 분류 결과가 지시인 queued attachment 는 kind(human·shell·slash 등)와 무관하게 중복 검사한다. attachment uuid 또는 source_uuid/delivery_id 가 user 신원과 연결되거나 같은 지시 ID 가 두 번 생기면 병합하지 않고 세션 전체를 `queued_duplicate_withheld` 로 보류한다.
 - **큐**: `queue-operation` 의 `queued_enqueued / dequeued / removed` 는 원시 개수다. remove 는 취소 또는 작업 중 전달일 수 있다. 전달이 확인된 것은 `queued_delivered_attachment`, 나머지는 "전달 미확인 제거"다.
 - **`ai-title`**: 세션의 `ai_title` 로 쓴다. §2.1 의 TEXT 정책을 적용하고 파일 안 마지막 값을 쓴다. 실제 레코드에는 `timestamp` 가 없다(`type, aiTitle, sessionId` 만) — 시각을 요구하지 않는다.
 - **명령 래퍼 표시**: reader 는 표시를 정리하지 않는다 — 지시 텍스트는 **원문 전체를 살균**한 결과다(래퍼 태그가 남는다). 보기 좋은 `/name args` 표시는 화면이 이미 살균된 텍스트에서 태그를 걷어 만든다. 지문·ref 는 slash 지시도 원문 전체를 포함한다(표시가 바뀌는 모든 변경이 ref 변경이 되게). reader 단계 정리는 PR1c 리뷰 R1~R3 에서 같은 계열(살균 문맥 파괴, 지문 밖 문장, 긴 인자 소실)이 반복돼 범위를 줄여 닫았다.
@@ -131,7 +131,7 @@
 
 ---
 
-- **PR1d 스트리밍**: 창 판정은 그대로다. 창 안 파일은 16MB 초과도 fs.readSync 청크·줄 단위로 전체 검증한다. 원문·레코드는 처리 직후 폐기하고 처음 + 최근 200 지시(기존 timestamp→position 정렬 기준), 검증 메타데이터만 보유한다. 줄 8MB, 파일 읽기 256MB, 신원 메타데이터 100000 항목 상한은 테스트에서 바꿀 수 있는 상수다. 초과는 `large_file_withheld`; 신원은 그룹에 남겨 작은 형제도 단독 반출하지 않는다. 처음 지시 증거를 못 읽으면 unknown 이며 compact/부모 체인 증거 없이 unrecoverable 로 승격하지 않는다. exclude 대상 재탐색도 같은 스트리밍을 쓰며 지문·순번·확인 토큰을 유지한다. 정상적인 앞부분 메타데이터가 있는 파일은 신원·시간·중복 검증과 지시 추출을 한 순차 패스에 수행한다. 메타데이터가 늦거나 불충분한 경우만 전체 검증 후 다시 읽는다. 256KB 청크의 줄바꿈 검색·청크 내부 문자열 변환, 상한 있는 최근 지시 정렬 삽입을 사용한다. 16MB 이하 파일에는 새 줄·신원 메타데이터 상한을 적용하지 않아 기존 출력과 같다. 테스트에서만 작은 파일 경계 상수를 내려 큰 파일 상한을 재현한다. 스트리밍 중 관측한 모든 sessionId·cwd 해시는 예외 뒤에도 보존하며, 여러 신원은 각각 그룹 판정에 참여한다. 보류 파일의 모든 관측 cwd 는 머신 내부 blocked 경쟁자로 남는다.
+- **PR1d 스트리밍**: 창 판정은 그대로다. 창 안 파일은 16MB 초과도 fs.readSync 청크·줄 단위로 전체 검증한다. 원문·레코드는 처리 직후 폐기하고 처음 + 최근 200 지시(기존 timestamp→position 정렬 기준), 검증 메타데이터만 보유한다. 줄 8MB, 파일 읽기 256MB, 신원 메타데이터 100000 항목 상한은 테스트에서 바꿀 수 있는 상수다. 초과는 `large_file_withheld`; 신원은 그룹에 남겨 작은 형제도 단독 반출하지 않는다. 처음 지시 증거를 못 읽으면 unknown 이며 compact/부모 체인 증거 없이 unrecoverable 로 승격하지 않는다. exclude 대상 재탐색도 같은 스트리밍을 쓰며 지문·순번·확인 토큰을 유지한다. 정상적인 앞부분 메타데이터가 있는 파일은 신원·시간·중복 검증과 지시 추출을 한 순차 패스에 수행한다. 메타데이터가 늦거나 불충분한 경우만 전체 검증 후 다시 읽는다. 256KB 청크의 줄바꿈 검색·청크 내부 문자열 변환, 상한 있는 최근 지시 정렬 삽입을 사용한다. 16MB 이하 파일에는 새 줄·신원 메타데이터 상한을 적용하지 않아 기존 출력과 같다. 테스트에서만 작은 파일 경계 상수를 내려 큰 파일 상한을 재현한다. 그룹 신원은 main 과 같은 첫 신원 하나다(Claude: 첫 유효 sessionId, Codex: 첫 session_meta 의 id; 부적합한 첫 id 를 뒤 id 로 바꾸지 않는다). 64KB 미완성 줄을 임시로 닫은 신원은 창 밖 판정에만 쓰며, 창 안은 완전한 레코드의 공통 신원 선택 결과가 권위다. 큰 파일 상한 예외에도 이미 읽은 첫 신원 하나만 보존한다. 후속 sid 의 작은 형제는 반출될 수 있다(main 의 16MB 초과 처리와 같은 범위 축소); 연결 확정은 해당 provider 요약 실패 규칙(§2.2)이 차단한다. snapshot·exclude 재탐색은 같은 신원 함수를 쓴다. 연결 요약의 cwd 는 파일에서 처음 발견한 문자열 하나만 쓰며 신원·cwd 를 누적하지 않는다.
 
 ## 2. 읽기 모듈 (snapshot CLI)
 
@@ -183,17 +183,19 @@
 - **Orca 에서 버리는 필드**: `prompt`, `lastAssistantMessage`, `toolInput`, `toolName`, `preview`, `comment`, 그리고 `displayName` 같은 모든 비명시 필드.
 - **Orca 텍스트를 쓰는 곳**: 연결 계산(§2.2)에서 머신 안에서만 쓴다.
 - **Orca 터미널 제목은 내보내지 않는다** (v11). 제목은 transcript 의 `ai_title` 과 겹치고, 제외·보류 세션과의 연결을 증명해 차단하는 로직이 라운드마다 새 우회를 냈다.
-- **보류 규칙** (v11): 같은 `provider:session_id` 가 여러 파일에 있으면(`multi_file_withheld`), 한 파일에 서로 다른 sessionId 가 섞이면(`mixed_session_withheld`), 레코드에 시각이 있는데 TIME 문법·범위를 벗어나면(`invalid_time_withheld`) 그 세션(파일)을 통째로 보류한다. 같은 파일 안 같은 신원이 두 위치에 나오면 그 세션만 보류하고 `records_unverified` 에 더한다. 보류 세션은 exclude 조회에서 `target_not_found`, Orca 확정 후보에서는 빠지지만 같은 cwd 의 유일성 미확인 차단자로 남는다. 어떤 입력에서도 수집 전체가 실패하지 않는다(슬롯 부적합 값은 항목 단위 제외 + coverage).
+- **보류 규칙** (v11): 같은 `provider:session_id` 가 여러 파일에 있으면(`multi_file_withheld`), 한 파일에 서로 다른 sessionId 가 섞이면(`mixed_session_withheld`), 레코드에 시각이 있는데 TIME 문법·범위를 벗어나면(`invalid_time_withheld`) 그 세션(파일)을 통째로 보류한다. 같은 파일 안 같은 신원이 두 위치에 나오면 그 세션만 보류하고 `records_unverified` 에 더한다. 보류 세션은 exclude 조회에서 `target_not_found`, 반출은 하지 않되 정상 파싱한 파일별 요약은 Orca 경쟁에 남긴다. 요약 실패는 해당 provider 의 확정을 취소한다(§2.2). 어떤 입력에서도 수집 전체가 실패하지 않는다(슬롯 부적합 값은 항목 단위 제외 + coverage).
 - **coverage 오류**: 고정 코드만 쓴다. 예외 메시지 문자열은 반출하지 않는다.
 
 ### 2.2 Orca ↔ 세션 연결 관측 (머신 측 계산)
 
 - **비교 대상**: 같은 cwd 의 마지막 사람 지시 원문(queued attachment 포함)에 Orca 1.4.207 producer 의 `h/g/p` 를 그대로 적용한 값과 agent.prompt 문자열 그대로다. NFC·일반 공백 축약은 하지 않는다. 앞 WS 제거, CRLF·연속 줄바꿈만 공백 1개, 200 UTF-16 단위 상한·1664 단위 스캔 상한·끝 WS 제거·마지막 high surrogate 제거를 재현한다. WS 는 producer 의 명시 집합(ASCII 9–13/32, 160, 5760, 8192–8202, 8232/8233/8239/8287/12288/65279), LB 는 13/10/8232/8233 이다. 앞 WS 를 최대 24576 단위 건너뛴 위치의 Orca 시스템 접두어는 특수 요약이므로 연결에 쓰지 않는다.
 - **절단**: 출력 루프가 200 단위에 도달했거나, 스캔 상한 뒤 WS 아닌 원문이 남았거나, p 가 high surrogate 를 제거하면 true 다. 길이만으로 판단하지 않는다(`a`×199+이모지도 true).
-- **증거 등급**: 같은 cwd + producer 값 일치에서 절단 아님·길이 ≥8 은 `prompt_exact`, 절단됨은 `prompt_trunc` 다. 기존 `prompt_prefix`·`cwd_only` 는 후보 표시만 하며 유일성 판정에서 제외한다. 세션·agent 비교 해시는 UTF-16 코드 단위를 보존하는 utf16le 바이트로 계산한다(단독 surrogate 충돌 방지).
+- **증거 등급**: 같은 cwd + producer 값 일치에서 절단 아님·길이 ≥8 은 `prompt_exact`, 절단됨·길이 ≥8 은 `prompt_trunc` 다. agent.prompt 가 문자열이 아니면 prompt 증거가 없다. 기존 `prompt_prefix`·`cwd_only` 는 후보 표시만 하며 유일성 판정에서 제외한다. 세션·agent 비교 해시는 UTF-16 코드 단위를 보존하는 utf16le 바이트로 계산한다(단독 surrogate 충돌 방지).
 - **시간·provider**: stateStartedAt 또는 updatedAt 중 하나라도 `[first_record_at, last_record_at + 10분]` 안이고 agent.agentType 이 세션 provider 와 같아야 확정 후보가 된다.
-- **유일성**: 확정 후보끼리 pane→session, session→pane 양방향 1:1 일 때만 confirmed 다. 제외·보유 상한 밖·출력 예산 밖 세션도 머신 내부의 상한 있는 해시·길이·절단·시간·provider·cwdHash 요약으로 경쟁에 참여한다. 요약 계산 불가인 보류·읽기 상한 세션은 명시적 blocked 다. 확정 후보 agent 의 pane 에 대해서만 같은 cwd·provider 일치(미상 포함)의 blocked 경쟁을 검사한다. 알려진 `[first, last + 10분]` 과 agent 시각이 겹쳐야 경쟁하며, 범위를 모르면 겹친다고 본다. 사람 지시 0개·text_missing·Orca 특수 요약 등 비교 불가가 확정된 세션은 blocked 가 아니다. 경쟁이 있으면 `ambiguous`, confirmed=false 다. 이 요약은 반출하지 않는다. Orca ps/list 응답 실패·truncated, worktree/agent 파싱 실패, agents 상한·출력 예산 초과는 전역 확정 취소다. `worktree.agents` 키가 있되 배열이 아니어도 전역 partial 이며, 키가 없으면 0개다. 내용 삭제 규칙 부적합 등 조기 보류·제외 전에 경쟁 요약을 등록하며, 계산 불가면 blocked 다.
-- **terminal partial 범위**: 미등록 worktreeId·불량 필드의 terminal 은 반출하지 않는다. `worktreePath` 가 비어 있지 않은 문자열이면 절대경로여야 하고, worktreeId 에 `::` 가 있으면 그 뒤 경로와 정확히 같아야 한다. `worktreePath` 가 정확히 `""` 이거나 필드 부재(undefined)면 worktreeId 가 문자열이고 `::` 가 정확히 1개이며 뒤 부분이 비어 있지 않은 절대경로일 때만 그 경로를 쓴다. null·비문자열 worktreePath 는 전역 취소다. 유효한 국한 경로가 있고 terminal pane 이 ps agent pane 과 겹치지 않으면 같은 cwd 세션만 `ambiguous`, confirmed=false 다. 하나라도 충족하지 못하면 전역 확정을 취소한다. 비교는 기존 raw cwd/cwdHash 규칙을 쓰며 worktreePath·파생 경로·범위 요약은 머신 내부에만 둔다. 파생 경로는 취소 범위 계산에만 쓰고 링크 확정 근거로 쓰지 않는다. terminal 응답 실패·truncated·출력 예산 초과는 전역 취소다.
+- **유일성**: 확정 후보끼리 pane→session, session→pane 양방향 1:1 일 때만 confirmed 다. 정상 파싱한 파일별 요약(해시·길이·절단·시간·provider·대표 cwdHash)은 다중 파일 보류·제외·보유 상한 밖·출력 예산 밖·내용 삭제 규칙 보류도 경쟁에 남긴다. 사람 지시 0개인 정상 파일은 요약 성공(일치 불가 확정)이다. 요약은 머신 내부에만 둔다.
+- **provider 요약 실패**: 창 밖임이 검증된 파일과 검증된 하위 에이전트·workflow journal skip 을 빼고, 파일별 완전한 비교 요약 성공 경로가 아닌 파일이 하나라도 있으면 해당 provider 의 `link_blocked=1` 이다. 스캔 자체 불완전과 상세 재읽기 실패도 포함한다. 재읽기까지 반영한 뒤 연결 확정 직전에 해당 provider 의 모든 세션을 `ambiguous`, confirmed=false, pane_key=null 로 만든다. 다른 provider 는 유지한다. 세션별 blocked·관측 신원/cwd 누적은 쓰지 않는다.
+- **Orca 전역 partial**: ps/list 응답 실패·truncated, worktree/agent 파싱 실패, agents 상한·출력 예산 초과는 전역 확정 취소다. `worktree.agents` 키가 있되 배열이 아니어도 전역 partial 이며, 키가 없으면 0개다.
+- **terminal partial 범위**: 미등록 worktreeId·불량 필드의 terminal 은 반출하지 않는다. `worktreePath` 가 비어 있지 않은 문자열이면 절대경로여야 하고, worktreeId 에 `::` 가 있으면 그 뒤 경로와 정확히 같아야 한다. `worktreePath` 가 정확히 `""` 이거나 필드 부재(undefined)면 worktreeId 가 문자열이고 `::` 가 정확히 1개이며 뒤 부분이 비어 있지 않은 절대경로일 때만 그 경로를 쓴다. null·비문자열 worktreePath 는 전역 취소다. 유효한 국한 경로가 있고 terminal pane 을 해석할 수 있으며 ps agent pane 과 겹치지 않으면 같은 cwd 세션만 `ambiguous`, confirmed=false 다. 하나라도 충족하지 못하면 전역 확정을 취소한다. 비교는 기존 raw cwd/cwdHash 규칙을 쓰며 worktreePath·파생 경로·범위 요약은 머신 내부에만 둔다. 파생 경로는 취소 범위 계산에만 쓰고 링크 확정 근거로 쓰지 않는다. terminal 응답 실패·truncated·출력 예산 초과는 전역 취소다.
 - **화면 표시**: confirmed 만 "Orca 터미널 연결됨 (스냅샷 시점 관측)"으로 표시한다.
 
 ### 2.3 실행 경로 — 번들 하나, 로컬·원격 공통
@@ -257,12 +259,12 @@
                 "records_unverified": 0, "excluded_sessions": 0, "deleted_instructions": 0,
                 "queued_enqueued": 0, "queued_dequeued": 0, "queued_removed": 0,
                 "queued_delivered_attachment": 0, "queued_duplicate_withheld": 0,
-                "multi_file_withheld": 0, "mixed_session_withheld": 0, "invalid_time_withheld": 0, "large_file_withheld": 0 },
+                "multi_file_withheld": 0, "mixed_session_withheld": 0, "invalid_time_withheld": 0, "large_file_withheld": 0, "link_blocked": 0 },
     "codex":  { "files_scanned": 0, "files_failed": 0, "exec_sessions_excluded": 0,
                 "subagent_excluded": 0, "unsupported_sessions": 0, "records_unknown": 0, "records_unverified": 0,
                 "withheld_sessions": 0, "content_rule_excluded": 0,
                 "excluded_sessions": 0, "deleted_instructions": 0,
-                "multi_file_withheld": 0, "mixed_session_withheld": 0, "invalid_time_withheld": 0, "large_file_withheld": 0 },
+                "multi_file_withheld": 0, "mixed_session_withheld": 0, "invalid_time_withheld": 0, "large_file_withheld": 0, "link_blocked": 0 },
     "orca":   { "state": "ok|unavailable|partial", "code": "ENUM|null" }
   },
   "sessions": [ { "key": "ID",                       // machine.id + ':' + provider + ':' + session_id
@@ -287,6 +289,8 @@
                              "last_output_at": "TIME", "connected": false } ] }
 }
 ```
+
+`coverage.claude/codex.link_blocked` 는 0/1 정수다. 1이면 해당 provider 의 파일 비교 요약 또는 스캔이 불완전하여 연결 확정을 취소했다(§2.2). 원문·추가 신원·cwd 목록은 반출하지 않는다.
 
 `coverage.orca` 의 `partial` / `orca_unavailable` 은 inventory 일부가 누락됨을 뜻한다. ps/list·worktree/agent·상한·출력 예산 실패는 전역 확정 취소, 신뢰 가능한 경로·독립 pane 의 terminal 항목 실패는 해당 cwd 만 확정 취소다(§2.2). 범위별 새 enum·키는 없으며 원본 worktreePath 는 반출하지 않는다.
 
@@ -565,3 +569,5 @@
 - **PR1d 호스트 검증 3차 보완 (2026-10-11)**: 7aab9b8 의 npm 4017 pass·0 fail 뒤 codev2 확정 0건이 남았다. 문제 terminal 의 worktreePath 는 빈 문자열이고 절대경로는 worktreeId 의 `::` 뒤에만 있었다. codex 교차검토 **AGREE** 합의대로 빈 문자열·필드 부재일 때만 단일 `::` 뒤의 비어 있지 않은 절대경로를 취소 범위로 쓴다. null·비문자열·다중 구분자·상대/빈 접미 경로·pane 충돌은 전역 취소를 유지한다. 파생 경로는 확정 근거로 쓰거나 반출하지 않는다. 빈/누락 경로의 cwd 국한과 부적합 값의 전역 취소를 회귀로 고정했다.
 
 - **PR1d 적대리뷰 R1 수정 (2026-10-11)**: 6df56f2 기준 NO-GO 2건의 R1a-1~5·R1b-1~3을 재현 회귀로 먼저 RED 확인했다. 상한 예외의 늦은 신원·cwd 유실과 journal 사전 검사 유실을 고쳐 모든 관측 신원·cwd 를 그룹·blocked 경쟁에 남겼다. 16MB 이하 줄·신원 상한 회귀를 해제하고, attachment 중복은 분류기와 같은 human 지시 술어로 제한했다. 큐 원시 집계는 enqueue/dequeue/remove 만 허용한다. 부적합 Codex 내용 규칙의 조기 보류도 경쟁 요약을 보존하고, 연결 해시는 utf16le 로 단독 surrogate 를 구별한다.
+
+- **PR1d 적대리뷰 R2 범위 축소 (2026-10-11)**: codex **AMEND** 합의대로 R1 의 세션별 blocked·모든 신원/cwd 누적을 철회했다. 완전한 파일 요약 성공 외 경로와 스캔·재읽기 실패는 provider 단위 `link_blocked` 로 확정을 취소한다. 정상 다중 파일·비출력 파일은 파일별 요약으로 경쟁하고, 첫 신원·대표 cwd 하나만 보유한다. 64KB 임시 신원은 창 밖에만 쓰며 snapshot·exclude 는 공통 첫 신원 선택을 따른다. queued 중복은 분류 결과의 모든 지시 kind, prompt exact/trunc 는 문자열·8단위 이상, terminal 범위 축소는 해석 가능한 독립 pane 을 요구한다. R2-A1~3·C1~5 는 9개 재현 테스트로 먼저 RED 확인하고 새 규칙 회귀로 고정했다.

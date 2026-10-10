@@ -25,11 +25,11 @@ const ENUMS = Object.freeze({
 const COVERAGE_KEYS = Object.freeze({
   claude: ['files_scanned', 'files_skipped', 'files_failed', 'records_unknown', 'records_unverified',
     'excluded_sessions', 'deleted_instructions', 'queued_enqueued', 'queued_dequeued', 'queued_removed', 'queued_delivered_attachment', 'queued_duplicate_withheld',
-    'multi_file_withheld', 'mixed_session_withheld', 'invalid_time_withheld', 'large_file_withheld'],
+    'multi_file_withheld', 'mixed_session_withheld', 'invalid_time_withheld', 'large_file_withheld', 'link_blocked'],
   codex: ['files_scanned', 'files_failed', 'exec_sessions_excluded', 'subagent_excluded',
     'unsupported_sessions', 'records_unknown', 'records_unverified', 'withheld_sessions',
     'content_rule_excluded', 'excluded_sessions', 'deleted_instructions',
-    'multi_file_withheld', 'mixed_session_withheld', 'invalid_time_withheld', 'large_file_withheld']
+    'multi_file_withheld', 'mixed_session_withheld', 'invalid_time_withheld', 'large_file_withheld', 'link_blocked']
 });
 const COUNT_KEYS = [...new Set([...COVERAGE_KEYS.claude, ...COVERAGE_KEYS.codex, 'registered', 'equiv_count'])];
 
@@ -185,8 +185,8 @@ const snapshotSchema = {
   redaction_version: value => integerSlot(value) && value >= REDACTION_VERSION,
   policy_version: value => integerSlot(value) && value >= POLICY_VERSION,
   coverage: {
-    claude: countSlots(COVERAGE_KEYS.claude),
-    codex: countSlots(COVERAGE_KEYS.codex),
+    claude: { ...countSlots(COVERAGE_KEYS.claude), link_blocked: value => value === 0 || value === 1 },
+    codex: { ...countSlots(COVERAGE_KEYS.codex), link_blocked: value => value === 0 || value === 1 },
     orca: {
       state: enumSlot('state'),
       code: nullable(value => STATUS_CODES.includes(value))

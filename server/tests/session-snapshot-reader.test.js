@@ -2257,13 +2257,13 @@ test('PR1c fixed pre-change bytes preserve window, whole sessions, exclusions an
       files_scanned: 5, files_skipped: 1, files_failed: 0, records_unknown: 1, records_unverified: 1,
       excluded_sessions: 1, deleted_instructions: 1, queued_enqueued: 1, queued_dequeued: 1, queued_removed: 1,
       multi_file_withheld: 1, mixed_session_withheld: 0, invalid_time_withheld: 0,
-      large_file_withheld: 0, queued_delivered_attachment: 0, queued_duplicate_withheld: 0
+      large_file_withheld: 0, link_blocked: 0, queued_delivered_attachment: 0, queued_duplicate_withheld: 0
     },
     codex: {
       files_scanned: 6, files_failed: 0, exec_sessions_excluded: 1, subagent_excluded: 0,
       unsupported_sessions: 0, records_unknown: 1, records_unverified: 0, withheld_sessions: 0,
       content_rule_excluded: 1, excluded_sessions: 1, deleted_instructions: 1,
-      multi_file_withheld: 1, mixed_session_withheld: 0, invalid_time_withheld: 0, large_file_withheld: 0
+      multi_file_withheld: 1, mixed_session_withheld: 0, invalid_time_withheld: 0, large_file_withheld: 0, link_blocked: 0
     },
     orca: { state: 'unavailable', code: 'orca_unavailable' }
   });
@@ -2272,6 +2272,7 @@ test('PR1c fixed pre-change bytes preserve window, whole sessions, exclusions an
   for (const session of legacy.sessions) delete session.instruction_total;
   for (const provider of ['claude', 'codex']) {
     delete legacy.coverage[provider].large_file_withheld;
+    delete legacy.coverage[provider].link_blocked;
     delete legacy.coverage[provider].queued_delivered_attachment;
     delete legacy.coverage[provider].queued_duplicate_withheld;
   }
@@ -2392,16 +2393,17 @@ for (const provider of ['claude', 'codex']) {
   });
 }
 
-function loadReaderWithInternals() {
+function loadReaderWithInternals(maxFiles) {
   const Module = require('node:module');
   const filename = require.resolve('../../scripts/lib/sessionSnapshotReader.cjs');
   const loaded = new Module(filename, module);
   loaded.filename = filename;
-  const source = fs.readFileSync(filename, 'utf8');
+  let source = fs.readFileSync(filename, 'utf8');
+  if (maxFiles !== undefined) source = source.replace('const MAX_FILES = 10000;', `const MAX_FILES = ${maxFiles};`);
   loaded._compile(source + '\nmodule.exports.testInternals = '
     + '{ listFiles, summarizeTranscriptFile, groupTranscriptFiles, parseFile, '
     + 'computeInstructionFingerprint, computeInstructionRef, buildSnapshotInstruction, scanSessions, buildOrcaLinkCandidates, applyOrcaLinks };', filename);
-  return loaded.exports.testInternals;
+  return { ...loaded.exports.testInternals, runSnapshot: loaded.exports.runSnapshot };
 }
 
 function assertNoOriginalRecords(value) {
@@ -4284,7 +4286,7 @@ test('PR1d unavailable summaries block uniqueness while known nonmatching system
   assert.equal(snapshot.coverage.claude.large_file_withheld, 1);
 });
 
-test('PR1d first overlong line retains its complete header identity and blocks a small sibling', t => {
+test('PR1d first overlong record has no complete identity and blocks provider links instead of its sibling', t => {
   forceLargeFileLimits(t);
   const fixture = createFixture(t);
   const previous = snapshotReader.STREAM_LIMITS.lineBytes;
@@ -4294,8 +4296,10 @@ test('PR1d first overlong line retains its complete header identity and blocks a
   snapshotReader.STREAM_LIMITS.lineBytes = 1000;
   const snapshot = snapshotReader.runSnapshot(fixture.options);
   assert.equal(snapshot.coverage.claude.large_file_withheld, 1);
-  assert.equal(snapshot.coverage.claude.multi_file_withheld, 1);
-  assert.equal(snapshot.sessions.length, 0);
+  assert.equal(snapshot.coverage.claude.multi_file_withheld, 0);
+  assert.equal(snapshot.coverage.claude.link_blocked, 1);
+  assert.equal(snapshot.sessions.length, 1);
+  assert.equal(snapshot.sessions[0].orca_link.evidence, 'ambiguous');
 });
 
 test('PR1d R2 missing human instructions and text-missing sessions never become blocked competitors', t => {
@@ -4311,29 +4315,21 @@ test('PR1d R2 missing human instructions and text-missing sessions never become 
   assert.equal(snapshot.sessions.find(session => session.session_id === 'empty').orca_link.confirmed, false);
 });
 
-test('PR1d R2 blockers are scoped to the eligible agent, provider and known time range', () => {
+test('PR1d S1 provider summary failure overrides pane, cwd and known time matches', () => {
   const { buildOrcaLinkCandidates, applyOrcaLinks } = loadReaderWithInternals();
-  const cwdHash = 'a'.repeat(64), textHash = 'b'.repeat(64);
-  const time = Date.parse(RECORD_TIMESTAMP);
-  const agent = { pane: 'active', provider: 'claude', cwdHash, times: [time],
-    prompt: { hash: textHash, length: 10, prefix_hashes: [] } };
-  const otherAgent = { ...agent, pane: 'past', times: [time - 86400000], prompt: { ...agent.prompt, hash: 'c'.repeat(64) } };
-  function link(blocker, agents = [agent]) {
+  const cwdHash = 'a'.repeat(64), hash = 'b'.repeat(64);
+  const agent = { pane: 'active', provider: 'claude', cwdHash, times: [Date.parse(RECORD_TIMESTAMP)],
+    prompt: { hash, length: 10, prefix_hashes: [] } };
+  function link(coverage, agents = [agent]) {
     const session = { provider: 'claude', cwdHash, firstAt: RECORD_TIMESTAMP, lastAt: RECORD_TIMESTAMP,
-      link_text: { hash: textHash, length: 10, truncated: false }, output: {} };
-    const all = [session, blocker];
-    applyOrcaLinks(all, buildOrcaLinkCandidates(all, agents));
+      link_text: { hash, length: 10, truncated: false }, output: {} };
+    applyOrcaLinks([session], buildOrcaLinkCandidates([session], agents), coverage);
     return session.output.orca_link;
   }
-  const blocked = { provider: 'claude', cwdHash, blocked: true, link_text: null };
-  assert.equal(link(blocked).evidence, 'ambiguous');
-  assert.equal(link({ ...blocked, provider: undefined }).confirmed, false);
-  assert.equal(link({ ...blocked, provider: 'codex' }).confirmed, true);
-  assert.equal(link({ ...blocked, cwdHash: 'd'.repeat(64) }).confirmed, true);
-  const oldTime = new Date(time - 86400000).toISOString();
-  assert.equal(link({ ...blocked, firstAt: oldTime, lastAt: oldTime }, [agent, otherAgent]).confirmed, true);
-  assert.equal(link({ ...blocked, firstAt: RECORD_TIMESTAMP, lastAt: RECORD_TIMESTAMP }).confirmed, false);
-  assert.equal(link({ ...blocked, blocked: false }).confirmed, true);
+  assert.equal(link({ claude: { link_blocked: 0 }, codex: { link_blocked: 1 } }).confirmed, true);
+  assert.deepEqual(link({ claude: { link_blocked: 1 } }),
+    { evidence: 'ambiguous', confirmed: false, pane_key: null, terminal_handle: null });
+  assert.equal(link({ claude: { link_blocked: 1 } }, []).evidence, 'ambiguous');
 });
 
 test('PR1d R2 codev2 epoch-ms agent matches the actual session range, including hidden candidates', t => {
@@ -4435,7 +4431,7 @@ test('PR1d R2 a failed body read retains identity as a blocker and prevents sibl
   assert.equal(snapshot.sessions.length, 0);
 });
 
-test('PR1d R2 a withheld transcript preserves known times and cannot block a disjoint live agent', t => {
+test('PR1d R2 a failed file summary blocks the provider even with disjoint known times', t => {
   const fixture = createFixture(t);
   fixture.file('claude', 'active', [claudeUserRecord('the live exact instruction')]);
   const old = new Date(Date.parse(RECORD_TIMESTAMP) - 86400000).toISOString();
@@ -4444,12 +4440,10 @@ test('PR1d R2 a withheld transcript preserves known times and cannot block a dis
   fixture.options.runOrca = orcaRunner([orcaWorktree('the live exact instruction')], []);
   const snapshot = snapshotReader.runSnapshot(fixture.options);
   assert.equal(snapshot.sessions.length, 1);
-  assert.equal(snapshot.sessions[0].orca_link.confirmed, true);
+  assert.equal(snapshot.sessions[0].orca_link.confirmed, false);
   const scanned = loadReaderWithInternals().scanSessions(fixture.options, fixture.config());
-  assert.equal(scanned.linkCandidates.length, 1);
-  assert.equal(scanned.linkCandidates[0].blocked, true);
-  assert.equal(scanned.linkCandidates[0].firstAt, old);
-  assert.equal(scanned.linkCandidates[0].lastAt, old);
+  assert.equal(scanned.coverage.claude.link_blocked, 1);
+  assert.equal(scanned.linkCandidates.length, 0);
 });
 
 function orcaTerminalPartialFixture(t, terminalExtra = {}) {
@@ -4597,7 +4591,8 @@ test('PR1d R5 complete overlong newline within one chunk withholds the session a
   const previous = snapshotReader.STREAM_LIMITS.lineBytes;
   t.after(() => { snapshotReader.STREAM_LIMITS.lineBytes = previous; });
   snapshotReader.STREAM_LIMITS.lineBytes = 1000;
-  const file = fixture.file('claude', 'a-long', [claudeUserRecord('x'.repeat(2000))]);
+  const file = fixture.file('claude', 'a-long', [claudeUserRecord('identity'),
+    { type: 'assistant', padding: 'x'.repeat(2000) }]);
   fs.appendFileSync(file, '\n');
   const bytes = fs.readFileSync(file);
   assert.ok(bytes.length < 256 * 1024);
@@ -4767,7 +4762,7 @@ for (const large of [false, true]) {
   });
 }
 
-test('PR1d R1a-1 all identities observed before a large-file limit block their respective siblings', t => {
+test('PR1d R1a-1 large failed files retain just the first identity; later siblings export with provider links blocked', t => {
   const fixture = createFixture(t);
   const file = fixture.file('codex', 'a-mixed', [{ type: 'assistant', padding: 'x'.repeat(70000) },
     codexSessionMeta({ id: 'first' }), codexSessionMeta({ id: 'second' }),
@@ -4776,9 +4771,11 @@ test('PR1d R1a-1 all identities observed before a large-file limit block their r
   for (const sid of ['first', 'second']) fixture.file('codex', `b-${sid}`, [codexSessionMeta({ id: sid }), codexMessage(sid)]);
   const snapshot = snapshotReader.runSnapshot(fixture.options);
   assert.equal(snapshot.coverage.codex.large_file_withheld, 1);
-  assert.equal(snapshot.coverage.codex.mixed_session_withheld, 1);
-  assert.equal(snapshot.coverage.codex.multi_file_withheld, 2);
-  assert.equal(snapshot.sessions.length, 0);
+  assert.equal(snapshot.coverage.codex.mixed_session_withheld, 0);
+  assert.equal(snapshot.coverage.codex.multi_file_withheld, 1);
+  assert.equal(snapshot.coverage.codex.link_blocked, 1);
+  assert.deepEqual(snapshot.sessions.map(session => session.session_id), ['second']);
+  assert.equal(snapshot.sessions[0].orca_link.evidence, 'ambiguous');
 });
 
 test('PR1d R1a-3 a 9MB line inside a legacy small file preserves byte-identical output', t => {
@@ -4871,3 +4868,209 @@ test('PR1d R1b-3 distinct lone UTF-16 surrogates cannot collide in producer comp
   assert.equal(equal.sessions[0].orca_link.confirmed, true);
   assert.equal(equal.sessions[0].orca_link.evidence, 'prompt_trunc');
 });
+
+test('PR1d R2-A1 shell queued attachments participate in delivery duplicates and cannot bypass deletion', t => {
+  const fixture = createFixture(t);
+  fixture.file('claude', 's', [claudeUserRecord('<bash-input>echo hi</bash-input>'),
+    queuedHuman('<bash-input>echo hi</bash-input>', { uuid: 'q' }, { source_uuid: 'u' })]);
+  snapshotReader.loadConfig(fixture.options);
+  const config = fixture.config(); config.exclude.instructions.push({ id: 'claude:s:uu' }); fixture.save(config);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.coverage.claude.queued_duplicate_withheld, 1);
+  assert.equal(snapshot.sessions.length, 0);
+  assert.equal(snapshot.instructions.length, 0);
+});
+
+test('PR1d R2-A1 duplicate shell instruction IDs withhold just their session instead of failing collection', t => {
+  const fixture = createFixture(t);
+  fixture.file('claude', 's', [claudeUserRecord('<bash-input>echo hi</bash-input>'),
+    queuedHuman('<bash-input>echo hi</bash-input>', { uuid: 'u' })]);
+  fixture.file('claude', 'other', [claudeUserRecord('other survives', { sessionId: 'other' })]);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.deepEqual(snapshot.sessions.map(session => session.session_id), ['other']);
+  assert.equal(snapshot.coverage.claude.records_unverified, 1);
+});
+
+test('PR1d R2-A2 snapshot and exclusion use the same first identity for a mixed sibling file', t => {
+  const fixture = createFixture(t);
+  fixture.file('claude', 'project/a-mixed', [claudeUserRecord('first', { sessionId: 'x', uuid: 'x1' }),
+    claudeUserRecord('mixed history', { uuid: 's1' })]);
+  fixture.file('claude', 'project/b-small', [claudeUserRecord('must remain visible')]);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.deepEqual(snapshot.sessions.map(session => session.session_id), ['s']);
+  assert.equal(snapshot.coverage.claude.multi_file_withheld, 0);
+  assert.equal(snapshot.coverage.claude.mixed_session_withheld, 1);
+  const target = { kind: 'session', provider: 'claude', sessionId: 's' };
+  const query = snapshotReader.excludeQuery({ ...fixture.options, target });
+  assert.equal(query.equiv_count, 1);
+  assert.equal(snapshotReader.excludeCommit({ ...fixture.options, target, token: query.token }).counts.registered, 1);
+});
+
+test('PR1d R2-A3 provisional duplicate-key headers cannot invent an in-window group identity', t => {
+  const fixture = createFixture(t);
+  const file = fixture.file('claude', 'project/a-mixed', []);
+  fs.writeFileSync(file, '{"type":"assistant","sessionId":"victim","timestamp":"' + RECORD_TIMESTAMP
+    + '","padding":"' + 'x'.repeat(70000) + '","sessionId":"actual"}\n'
+    + JSON.stringify({ type: 'assistant', sessionId: 'other', timestamp: RECORD_TIMESTAMP }));
+  fixture.file('claude', 'project/b-victim', [claudeUserRecord('must remain visible', { sessionId: 'victim' })]);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.deepEqual(snapshot.sessions.map(session => session.session_id), ['victim']);
+  assert.equal(snapshot.coverage.claude.multi_file_withheld, 0);
+});
+
+test('PR1d R2-C1 missing time blocks the whole Claude provider while Codex still confirms', t => {
+  const fixture = createFixture(t);
+  fixture.file('claude', 'project/visible', [claudeUserRecord('shared human prompt', { sessionId: 'visible' })]);
+  fixture.file('claude', 'different-project/hidden', [claudeUserRecord('shared human prompt',
+    { sessionId: 'hidden', timestamp: undefined })]);
+  fixture.file('claude', 'other-project/else', [claudeUserRecord('different live task',
+    { sessionId: 'else', cwd: '/different/repo' })]);
+  fixture.file('codex', 'codex', [codexSessionMeta({ id: 'codex' }), codexMessage('shared human prompt')]);
+  fixture.options.runOrca = orcaRunner([orcaWorktree('shared human prompt'),
+    { ...orcaWorktree('shared human prompt', 'cx:leaf', { agentType: 'codex' }), worktreeId: 'cx' },
+    { ...orcaWorktree('different live task', 'else:leaf'), worktreeId: 'else', path: '/different/repo' }], []);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  const claude = snapshot.sessions.find(session => session.provider === 'claude');
+  assert.deepEqual(claude.orca_link, { evidence: 'ambiguous', confirmed: false, pane_key: null, terminal_handle: null });
+  assert.equal(snapshot.sessions.find(session => session.provider === 'codex').orca_link.confirmed, true);
+  assert.equal(snapshot.sessions.filter(session => session.provider === 'claude').length, 2);
+  assert.equal(snapshot.sessions.filter(session => session.provider === 'claude').every(session =>
+    session.orca_link.evidence === 'ambiguous' && !session.orca_link.confirmed && session.orca_link.pane_key === null), true);
+  assert.equal(snapshot.coverage.claude.link_blocked, 1);
+  assert.equal(snapshot.coverage.codex.link_blocked, 0);
+});
+
+test('PR1d R2-C2 nonstring prompts and producer forms shorter than eight cannot confirm truncation', t => {
+  const fixture = createFixture(t);
+  fixture.file('claude', 's', [claudeUserRecord(' '.repeat(1664) + 'different task')]);
+  for (const prompt of [null, undefined, {}, '']) {
+    fixture.options.runOrca = orcaRunner([orcaWorktree(prompt)], []);
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(snapshot.sessions[0].orca_link.confirmed, false);
+    assert.equal(snapshot.sessions[0].orca_link.evidence, 'cwd_only');
+  }
+});
+
+test('PR1d R2-C3 reread cwd drift blocks provider confirmation without retaining new cwd competitors', t => {
+  const fixture = createFixture(t);
+  const cap = snapshotPolicy.SNAPSHOT_LIMITS.sessions, prompt = 'shared human prompt';
+  let firstFile;
+  for (let index = 0; index <= cap; index++) {
+    const file = fixture.file('claude', `a-${String(index).padStart(3, '0')}`, [claudeUserRecord(index === 1 ? prompt : 'old instruction', {
+      sessionId: `s${index}`, cwd: index === 0 ? '/old' : index === 1 ? '/sensitive/repo' : '/else',
+      timestamp: new Date(Date.parse(RECORD_TIMESTAMP) - (cap - index) * 1000).toISOString()
+    })]);
+    if (index === 0) firstFile = file;
+  }
+  fixture.file('claude', 'z-duplicate', [claudeUserRecord('duplicate', { sessionId: `s${cap}`, cwd: '/else' })]);
+  fixture.options.runOrca = orcaRunner([orcaWorktree(prompt)], []);
+  const originalOpen = fs.openSync;
+  let opens = 0;
+  t.mock.method(fs, 'openSync', function(file, ...args) {
+    if (file === firstFile && ++opens === 2) fs.writeFileSync(firstFile, JSON.stringify(claudeUserRecord(prompt, {
+      sessionId: 's0', cwd: '/sensitive/repo',
+      timestamp: new Date(Date.parse(RECORD_TIMESTAMP) - (cap - 1) * 1000).toISOString()
+    })));
+    return originalOpen(file, ...args);
+  });
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(opens, 2);
+  assert.equal(snapshot.sessions.find(session => session.session_id === 's1').orca_link.confirmed, false);
+  assert.equal(snapshot.coverage.claude.link_blocked, 1);
+});
+
+test('PR1d R2-C4 an uninterpretable rejected terminal pane forces global cancellation', t => {
+  const fixture = createFixture(t);
+  fixture.file('claude', 's', [claudeUserRecord('shared human prompt')]);
+  fixture.options.runOrca = orcaRunner([orcaWorktree('shared human prompt')], [orcaTerminal({ handle: 'orphan',
+    worktreeId: 'missing::/else', worktreePath: '/else', tabId: 'p', leafId: null })]);
+  assert.equal(snapshotReader.runSnapshot(fixture.options).sessions[0].orca_link.confirmed, false);
+});
+
+test('PR1d R2-C5 varying cwd rows retain only one representative cwd and bounded per-file summary', t => {
+  const fixture = createFixture(t);
+  const rows = Array.from({ length: 5000 }, (_, index) => ({ type: 'assistant', sessionId: 's',
+    timestamp: RECORD_TIMESTAMP, cwd: `/r/0/${index}` }));
+  const file = fixture.file('claude', 's', rows);
+  const config = snapshotReader.loadConfig(fixture.options);
+  const summary = loadReaderWithInternals().summarizeTranscriptFile('claude', { file,
+    root: path.join(fixture.options.homeDir, '.claude/projects'), stats: fs.lstatSync(file) },
+    Object.fromEntries(snapshotPolicy.COVERAGE_KEYS.claude.map(key => [key, 0])), +SNAPSHOT_TIME - 14 * 86400000, config);
+  assert.equal(Object.hasOwn(summary, 'cwdHashes'), false);
+  assert.equal(Object.hasOwn(summary, 'sessionIds'), false);
+  assert.equal(summary.session.cwd, '/r/0/0');
+  assert.ok(countStoredStringCharacters(summary) < 4000);
+});
+
+test('PR1d S1 normally parsed multi-file groups compete through each file summary', t => {
+  const fixture = createFixture(t), prompt = 'shared human prompt';
+  fixture.file('claude', 'visible', [claudeUserRecord(prompt, { sessionId: 'visible' })]);
+  for (const name of ['a-duplicate', 'b-duplicate']) fixture.file('claude', name, [claudeUserRecord(prompt)]);
+  fixture.options.runOrca = orcaRunner([orcaWorktree(prompt)], []);
+  let snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.coverage.claude.multi_file_withheld, 1);
+  assert.equal(snapshot.coverage.claude.link_blocked, 0);
+  assert.deepEqual(snapshot.sessions.map(session => session.session_id), ['visible']);
+  assert.equal(snapshot.sessions[0].orca_link.evidence, 'ambiguous');
+  for (const name of ['a-duplicate', 'b-duplicate']) fixture.file('claude', name, [claudeUserRecord('different task')]);
+  snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.coverage.claude.link_blocked, 0);
+  assert.equal(snapshot.coverage.claude.multi_file_withheld, 1);
+  assert.equal(snapshot.sessions[0].orca_link.confirmed, true);
+});
+
+test('PR1d S1 no-human files and verified sidechain/journal skips preserve confirmation', t => {
+  const fixture = createFixture(t), prompt = 'shared human prompt';
+  fixture.file('claude', 'project/main', [claudeUserRecord(prompt)]);
+  fixture.file('claude', 'else/empty', [{ type: 'assistant', sessionId: 'empty',
+    cwd: '/sensitive/repo', timestamp: RECORD_TIMESTAMP }]);
+  fixture.file('claude', 'project/s/subagents/agent-side', [claudeUserRecord('side', { isSidechain: true })]);
+  fixture.file('claude', 'project/s/subagents/workflows/wf/journal', [{ type: 'launched' }, { type: 'result' }]);
+  fixture.options.runOrca = orcaRunner([orcaWorktree(prompt)], []);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.coverage.claude.link_blocked, 0);
+  assert.equal(snapshot.coverage.claude.files_skipped, 2);
+  assert.equal(snapshot.sessions.find(session => session.session_id === 's').orca_link.confirmed, true);
+});
+
+test('PR1d S1 directory scan failure blocks links even when visible files parse normally', t => {
+  const fixture = createFixture(t), prompt = 'shared human prompt';
+  fixture.file('claude', 'good/main', [claudeUserRecord(prompt)]);
+  fixture.file('claude', 'bad/missing', [claudeUserRecord('unread', { sessionId: 'missing' })]);
+  const bad = path.join(fixture.options.homeDir, '.claude/projects/bad'), original = fs.readdirSync;
+  t.mock.method(fs, 'readdirSync', function(dir, ...args) {
+    if (dir === bad) throw Object.assign(new Error(), { code: 'EACCES' });
+    return original(dir, ...args);
+  });
+  fixture.options.runOrca = orcaRunner([orcaWorktree(prompt)], []);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.coverage.claude.files_failed, 1);
+  assert.equal(snapshot.coverage.claude.link_blocked, 1);
+  assert.equal(snapshot.sessions[0].orca_link.confirmed, false);
+});
+
+test('PR1d S1 exploration cap marks provider comparison incomplete', t => {
+  const fixture = createFixture(t), prompt = 'shared human prompt';
+  fixture.file('claude', 'a-visible', [claudeUserRecord(prompt)]);
+  fixture.file('claude', 'z-hidden', [claudeUserRecord(prompt, { sessionId: 'hidden' })]);
+  fixture.options.runOrca = orcaRunner([orcaWorktree(prompt)], []);
+  const snapshot = loadReaderWithInternals(1).runSnapshot(fixture.options);
+  assert.equal(snapshot.sessions.length, 1);
+  assert.equal(snapshot.coverage.claude.files_failed, 1);
+  assert.equal(snapshot.coverage.claude.link_blocked, 1);
+  assert.equal(snapshot.sessions[0].orca_link.evidence, 'ambiguous');
+});
+
+for (const id of [undefined, 'invalid/id']) {
+  test(`PR1d S2 first invalid Codex metadata (${id}) is never replaced by a later identity`, t => {
+    const fixture = createFixture(t);
+    fixture.file('codex', 'a-invalid', [codexSessionMeta({ id }), codexSessionMeta(), codexMessage('bad mixed history')]);
+    fixture.file('codex', 'b-valid', [codexSessionMeta(), codexMessage('valid session survives')]);
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.deepEqual(snapshot.sessions.map(session => session.session_id), ['s']);
+    assert.equal(snapshot.coverage.codex.multi_file_withheld, 0);
+    assert.equal(snapshot.coverage.codex.link_blocked, 1);
+    assert.equal(snapshotReader.excludeQuery({ ...fixture.options,
+      target: { kind: 'session', provider: 'codex', sessionId: 's' } }).equiv_count, 1);
+  });
+}
