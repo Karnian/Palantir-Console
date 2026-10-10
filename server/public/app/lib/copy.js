@@ -1348,7 +1348,7 @@ export const WORK_BOARD_LABELS = {
   noTextInstruction: '텍스트가 있는 지시 없음',
   missing: '텍스트 없는 지시',
   noInstruction: '관측된 지시 없음',
-  unrecoverable: '최초 지시 복구 불가', unknownFirst: '최초 지시 복구 여부 불명',
+  unrecoverable: '최초 지시 복구 불가', unknownFirst: '최초 지시 확인 불가',
   aiTitle: 'AI 제목', instructionMatch: '지시 일치', titleMatch: 'AI 제목 일치',
   timeline: '타임라인', closeTimeline: '타임라인 접기', timelineEmpty: '관측된 지시가 없습니다.',
   instructions: n => `지시 ${n}개`, results: n => `세션 ${n}개`,

@@ -71,7 +71,7 @@ test('card conversion preserves exact instructions, recent/first, omission and a
     assert.equal(card.title, '인증 흐름을 검토해 주세요.');
     assert.equal(card.titleSource, 'first');
     assert.equal(card.showFirst, false);
-    assert.equal(card.omitRecent, false);
+    assert.equal(card.omitRecent, true);
   }
 });
 
@@ -288,7 +288,115 @@ test('DOM cleanup aborts detail requests and removes data; recovery messages rem
   assert.deepEqual(Array.from(root.querySelectorAll('.work-title'), node => node.textContent),
     ['합성 세션 검토', '이미지 크기별 결과를 정리해 주세요.',
       '주간 보고 초안을 작성해 주세요.']);
+  assert.deepEqual(Array.from(root.querySelectorAll('.work-first-status'), node => node.textContent),
+    ['최초 지시 복구 불가', '최초 지시 확인 불가']);
 });
+
+test('attachment-first title instruction hides the same recent seq in normal and search cards', async t => {
+  const { snapshotCards } = await logic;
+  const { alpha } = fixtures(t);
+  alpha.sessions = alpha.sessions.slice(0, 1);
+  alpha.sessions[0].ai_title = null;
+  alpha.instructions = alpha.instructions.slice(0, 2);
+  Object.assign(alpha.instructions[0], { text: '', text_missing: true, attachments: 1 });
+  alpha.instructions[1].text = '검색 가능한 첫 텍스트';
+  assert.equal(snapshotCards(alpha)[0].title, '검색 가능한 첫 텍스트');
+  assert.equal(snapshotCards(alpha)[0].omitRecent, true);
+  alpha.sessions[0].ai_title = 'AI 제목';
+  assert.equal(snapshotCards(alpha)[0].omitRecent, false);
+  alpha.sessions[0].ai_title = null;
+  const env = boardEnv(t), root = env.document.getElementById('root');
+  env.context.apiFetch = async url => url.endsWith('/snapshots') ? { snapshots: [{ machine_id: 'alpha' }] } : alpha;
+  env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
+  assert.equal(root.querySelector('.work-title').textContent, '검색 가능한 첫 텍스트');
+  assert.equal(root.querySelectorAll('.work-recent-block').length, 0);
+  const query = root.querySelector('#work-query');
+  query.value = '검색가능'; query.dispatchEvent(new env.window.Event('input', { bubbles: true }));
+  await flushEffects();
+  assert.equal(root.querySelectorAll('.work-card').length, 1);
+  assert.equal(root.querySelector('.work-title').textContent, '검색 가능한 첫 텍스트');
+  assert.equal(root.querySelectorAll('.work-recent-block').length, 0);
+});
+
+test('display lines skip leading empty lines and whitespace-only title candidates', async t => {
+  const { snapshotCards } = await logic;
+  const { alpha } = fixtures(t);
+  alpha.sessions[0].ai_title = null;
+  alpha.instructions[0].text = '\n \t\n로그인 고쳐 주세요.\n둘째 줄';
+  alpha.instructions[1].text = '\r\n\r\n최근 지시';
+  const card = snapshotCards(alpha)[0];
+  assert.equal(card.title, '로그인 고쳐 주세요.');
+  assert.equal(card.first, '로그인 고쳐 주세요.');
+  assert.equal(card.recent, '최근 지시');
+  alpha.instructions[0].text = '\n \t\n';
+  assert.equal(snapshotCards(alpha)[0].title, '최근 지시');
+});
+
+test('recovery status remains visible with AI titles and text titles, including search results', async t => {
+  const { alpha } = fixtures(t);
+  const env = boardEnv(t), root = env.document.getElementById('root');
+  const states = [['unrecoverable', '최초 지시 복구 불가'], ['unknown', '최초 지시 확인 불가']];
+  for (const [state, message] of states) {
+    for (const title of ['AI 세션 제목', null]) {
+      const snapshot = structuredClone(alpha);
+      snapshot.sessions = snapshot.sessions.slice(0, 1);
+      Object.assign(snapshot.sessions[0], { first_instruction: state, ai_title: title });
+      env.context.apiFetch = async url => url.endsWith('/snapshots')
+        ? { snapshots: [{ machine_id: 'alpha' }] } : snapshot;
+      env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
+      assert.equal(root.querySelectorAll('.work-card').length, 1);
+      assert.equal(root.querySelector('.work-title').textContent, title || '인증 흐름을 검토해 주세요.');
+      assert.deepEqual(Array.from(root.querySelectorAll('.work-first-status'), node => node.textContent), [message]);
+      const query = root.querySelector('#work-query');
+      query.value = '로그인'; query.dispatchEvent(new env.window.Event('input', { bubbles: true }));
+      await flushEffects();
+      assert.equal(root.querySelectorAll('.work-card').length, 1);
+      assert.equal(root.querySelector('.work-first-status').textContent, message);
+      env.render(null, root);
+    }
+  }
+});
+
+for (const [status, reason, bounces] of [[403, 'cookie auth required', false], [403, null, true], [401, null, true]]) {
+  test(`observe API ${status} reason=${reason}: activation, list and detail preserve auth contract`, async t => {
+    const { startObserveEntry, loadWorkSnapshots } = await logic;
+    const apiSource = fs.readFileSync(path.join(__dirname, '../public/app/lib/api.js'), 'utf8');
+    const redirects = [], requests = [];
+    let goodList = false;
+    const context = vm.createContext({ Headers, location: { hash: '', pathname: '/', search: '',
+      replace: url => redirects.push(url) }, fetch: async (url, options) => {
+      requests.push([url, options]);
+      const isList = goodList && url.endsWith('/snapshots');
+      return new Response(JSON.stringify(isList ? { snapshots: [{ machine_id: 'alpha' }] }
+        : reason ? { reason } : {}), { status: isList ? 200 : status });
+    } });
+    vm.runInContext(apiSource.replace(/\bexport /g, ''), context);
+    const states = [], writes = [];
+    const cleanup = startObserveEntry({ request: context.apiFetch, getHash: () => '',
+      navigate: hash => writes.push(hash), subscribe: () => () => {}, publish: state => states.push(state),
+      setTimer: () => 1, clearTimer: () => {} });
+    t.after(cleanup);
+    // The API response body introduces additional promise turns.
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(states.at(-1).activation, 'error');
+    assert.deepEqual(writes, []);
+    assert.equal(redirects.length, bounces ? 1 : 0);
+    const controller = new AbortController();
+    await assert.rejects(loadWorkSnapshots(context.apiFetch, controller.signal, () => {}));
+    assert.equal(redirects.length, bounces ? 2 : 0);
+    goodList = true;
+    const updates = [];
+    const detailLoad = loadWorkSnapshots(context.apiFetch, controller.signal, state => updates.push(state));
+    if (bounces) await assert.rejects(detailLoad, /Not authenticated/);
+    else await detailLoad;
+    assert.equal(updates.at(-1).failures.length, 1);
+    assert.equal(redirects.length, bounces ? 3 : 0);
+    assert.equal(requests.length, 4);
+    assert.equal(requests.at(-1)[0], '/api/observe/snapshots/alpha');
+    assert.equal(requests.every(([, options]) => options.credentials === 'same-origin'), true);
+    assert.equal(redirects.every(url => url === '/login.html?next=%2F'), true);
+  });
+}
 
 test('observe nav is labeled and gated in both sidebar items and palette', async t => {
   const env = createPreactEnv();
@@ -533,7 +641,7 @@ test('attachment-first cards hide empty first rows and fall back only when no te
     { ai: 'AI 세션 제목', state: 'recoverable', text: '검색 가능한 첫 텍스트', title: 'AI 세션 제목' },
     { ai: null, state: 'recoverable', text: '', title: '텍스트가 있는 지시 없음' },
     { ai: null, state: 'unrecoverable', text: '', title: '최초 지시 복구 불가' },
-    { ai: null, state: 'unknown', text: '', title: '최초 지시 복구 여부 불명' },
+    { ai: null, state: 'unknown', text: '', title: '최초 지시 확인 불가' },
   ];
   for (const variant of variants) {
     const snapshot = structuredClone(alpha);

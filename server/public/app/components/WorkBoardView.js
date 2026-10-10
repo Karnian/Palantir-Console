@@ -78,6 +78,8 @@ function SessionCard({ card, query, rank, now }) {
     </div>
     <div><span class="work-label">${card.titleSource === 'ai' ? W.aiTitle : W.first}</span>
       <h2 class="work-title"><${Highlight} text=${card.title || titleFallback} query=${query} /></h2></div>
+    ${card.first_instruction !== 'recoverable' && html`<p class="work-first-status work-label">
+      ${card.first_instruction === 'unrecoverable' ? W.unrecoverable : W.unknownFirst}</p>`}
     ${!card.omitRecent && html`<div class="work-recent-block">
       <span class="work-label"><${SnapshotTime} value=${card.recentAt} now=${now}
         label=${W.recent} relativeOnly=${true} /></span>

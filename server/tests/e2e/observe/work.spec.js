@@ -101,3 +101,71 @@ test('partial detail failure keeps healthy cards and Korean coverage message', a
     .toContainText('codev2 · 이 머신의 스냅샷을 읽지 못했습니다.');
   await expect(page.locator('[data-view="work"]')).not.toContainText('internal_error');
 });
+
+async function holdEntryProbe(page) {
+  await page.clock.install({ time: new Date(NOW) });
+  await page.clock.pauseAt(new Date(Date.parse(NOW) + 1000));
+  let release, started, delivered;
+  const gate = new Promise(resolve => { release = resolve; });
+  const intercepted = new Promise(resolve => { started = resolve; });
+  const responseSent = new Promise(resolve => { delivered = resolve; });
+  let held = false;
+  await page.route('**/api/observe/snapshots', async route => {
+    if (held) return route.continue();
+    held = true;
+    started();
+    await gate;
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '{"snapshots":[]}' });
+    delivered();
+  });
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await expect(page.locator('.work-entry-loading')).toBeVisible();
+  // Flush the first Preact effects while keeping the verdict pending.
+  await page.clock.runFor(100);
+  await intercepted;
+  return async () => { release(); await responseSent; await page.clock.runFor(100); };
+}
+
+test('one-second verdict keeps the pending shell until work becomes the default', async ({ page }) => {
+  const release = await holdEntryProbe(page);
+  const shell = page.locator('.work-entry-loading');
+  await expect(shell).toBeVisible();
+  await expect(page.locator('[data-view="dashboard"]')).toHaveCount(0);
+  await expect(page.locator('.nav-work')).toHaveCount(0);
+  expect(await page.evaluate(() => location.hash)).toBe('');
+  await page.clock.runFor(900);
+  await expect(shell).toBeVisible();
+  await expect(page.locator('[data-view="dashboard"]')).toHaveCount(0);
+  await release();
+  await expect(page).toHaveURL(/#work$/);
+  await page.clock.runFor(100);
+  await expect(page.locator('.work-card')).toHaveCount(3);
+  await expect(page.locator('.nav-work')).toBeVisible();
+  await expect(shell).toHaveCount(0);
+});
+
+test('two-second verdict falls back without a hash write and late on only adds nav', async ({ page }) => {
+  const release = await holdEntryProbe(page);
+  const shell = page.locator('.work-entry-loading');
+  await expect(shell).toBeVisible();
+  await expect(page.locator('[data-view="dashboard"]')).toHaveCount(0);
+  await page.clock.runFor(1300);
+  await expect(shell).toBeVisible();
+  await expect(page.locator('[data-view="dashboard"]')).toHaveCount(0);
+  await page.clock.runFor(200);
+  const dashboard = page.locator('[data-view="dashboard"]');
+  await expect(dashboard).toBeVisible();
+  await expect(shell).toHaveCount(0);
+  await expect(page.locator('.nav-work')).toHaveCount(0);
+  expect(await page.evaluate(() => location.hash)).toBe('');
+  const originalDashboard = await dashboard.elementHandle();
+  await page.clock.runFor(400);
+  await release();
+  await expect(page.locator('.nav-work')).toBeVisible();
+  await expect(dashboard).toBeVisible();
+  expect(await originalDashboard.evaluate(element => element === document.querySelector('[data-view="dashboard"]')))
+    .toBe(true);
+  expect(await page.evaluate(() => location.hash)).toBe('');
+  await expect(page.locator('[data-view="work"]')).toHaveCount(0);
+  await expect(shell).toHaveCount(0);
+});

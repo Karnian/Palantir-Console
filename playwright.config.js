@@ -13,9 +13,10 @@ const { defineConfig, devices } = require('@playwright/test');
 // already-running :4177 makes `test:visual` abort trying to rebind the port,
 // even though visual tests never touch it (Codex round-4 P2 catch).
 const visualOnly = process.env.PALANTIR_VISUAL_ONLY === '1';
+const observeEnabled = process.env.PALANTIR_OBSERVE_UI === '1';
 const selectedProjects = process.argv.flatMap((arg, index, args) => arg.startsWith('--project=')
   ? [arg.slice('--project='.length)] : arg === '--project' ? [args[index + 1]] : []);
-const observeOnly = selectedProjects.length > 0
+const observeOnly = observeEnabled && selectedProjects.length > 0
   && selectedProjects.every(project => /^observe(?:-setup)?$/.test(project));
 const needsObserve = selectedProjects.length === 0
   || selectedProjects.some(project => /^observe(?:-setup)?$/.test(project));
@@ -45,7 +46,7 @@ module.exports = defineConfig({
       testIgnore: '**/observe/**',
       use: { ...devices['Desktop Chrome'], baseURL: 'http://localhost:4189' },
     },
-    {
+    ...(observeEnabled ? [{
       name: 'observe-setup',
       testMatch: '**/observe/setup.js',
       use: { baseURL: 'http://localhost:4191' },
@@ -58,7 +59,7 @@ module.exports = defineConfig({
       use: { ...devices['Desktop Chrome'], baseURL: 'http://localhost:4191',
         timezoneId: 'Asia/Seoul',
         storageState: 'test-results/observe-auth.json' },
-    },
+    }] : []),
   ],
   webServer: [
     ...(visualOnly || observeOnly ? [] : [{
@@ -148,7 +149,7 @@ module.exports = defineConfig({
       reuseExistingServer: false,
       timeout: 30000,
     }]),
-    ...(needsObserve ? [{
+    ...(observeEnabled && needsObserve ? [{
       command: 'node server/tests/helpers/observe-ui-server.cjs',
       port: 4191,
       reuseExistingServer: false,

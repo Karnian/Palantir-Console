@@ -7,7 +7,7 @@ export function normalizeSearch(text) {
 const lexical = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 const epoch = value => Date.parse(value) || 0;
 const firstLine = instruction => instruction?.text_missing
-  ? null : instruction?.text.split(/\r?\n/u)[0] || null;
+  ? null : instruction?.text.split(/\r?\n/u).find(line => line.trim() !== '') || null;
 
 export function formatLocalSnapshotTime(value, now = Date.now()) {
   const date = new Date(value);
@@ -28,14 +28,18 @@ export function snapshotCards(snapshot) {
     const instructions = (bySession.get(session.key) || []).sort((a, b) => a.seq - b.seq);
     const recent = firstLine(instructions.at(-1));
     const first = session.first_instruction === 'recoverable' ? firstLine(instructions[0]) : null;
-    const titleInstruction = instructions.find(instruction => !instruction.text_missing && instruction.text !== '');
-    const firstHasText = !!instructions[0] && !instructions[0].text_missing && instructions[0].text !== '';
+    const titleInstruction = instructions.find(instruction => firstLine(instruction) !== null);
+    const firstHasText = firstLine(instructions[0]) !== null;
+    const titleIsRecent = !session.ai_title && titleInstruction
+      && titleInstruction.seq === instructions.at(-1)?.seq;
     return {
       ...session, machine: snapshot.machine, instructions, recent, first,
       title: session.ai_title || firstLine(titleInstruction), titleSource: session.ai_title ? 'ai' : 'first',
-      showFirst: !!session.ai_title && firstHasText, recentAt: instructions.at(-1)?.ts || null,
+      showFirst: !!session.ai_title && firstHasText && session.first_instruction === 'recoverable',
+      recentAt: instructions.at(-1)?.ts || null,
       recentMissing: !!instructions.at(-1)?.text_missing,
-      omitRecent: session.first_instruction === 'recoverable' && first !== null && first === recent,
+      omitRecent: !!titleIsRecent
+        || (session.first_instruction === 'recoverable' && first !== null && first === recent),
       agent: session.orca_link.confirmed
         ? agents.find(agent => agent.pane_key === session.orca_link.pane_key) || null : null,
     };
@@ -129,7 +133,7 @@ export function coverageCounts(coverage) {
 }
 
 export async function loadWorkSnapshots(request, signal, publish) {
-  const { snapshots: entries } = await request('/api/observe/snapshots', { signal });
+  const { snapshots: entries } = await request('/api/observe/snapshots', { signal, allowAppForbidden: true });
   if (signal.aborted) return;
   const result = { entries, snapshots: [], failures: [], done: 0, total: entries.length };
   const emit = () => { if (!signal.aborted) publish({ ...result,
@@ -138,7 +142,8 @@ export async function loadWorkSnapshots(request, signal, publish) {
   await Promise.all(entries.map(async entry => {
     try {
       if (!entry.machine_id) throw new Error('unavailable');
-      const snapshot = await request(`/api/observe/snapshots/${encodeURIComponent(entry.machine_id)}`, { signal });
+      const snapshot = await request(`/api/observe/snapshots/${encodeURIComponent(entry.machine_id)}`,
+        { signal, allowAppForbidden: true });
       if (!signal.aborted) result.snapshots.push(snapshot);
     } catch (error) {
       if (!signal.aborted) result.failures.push(entry);
@@ -169,7 +174,7 @@ export function startObserveEntry({ request, getHash, navigate, subscribe, publi
     if (value === 'on' && !fallback && !moved && !getHash()) navigate('work');
     emit();
   };
-  request('/api/observe/snapshots', { signal: controller.signal, expectedStatus: 200 })
+  request('/api/observe/snapshots', { signal: controller.signal, expectedStatus: 200, allowAppForbidden: true })
     .then(() => settle('on'), error => settle(error.status === 404 ? 'off' : 'error'));
   emit();
   return () => { controller.abort(); clearTimer(timer); unsubscribe(); };
