@@ -2785,7 +2785,9 @@ test('PR1c D truncation of either collection preserves projected items and marks
     assert.deepEqual(snapshot.coverage.orca, { state: 'partial', code: 'orca_unavailable' });
     assert.equal(snapshot.orca.worktrees.length, 2);
     assert.equal(snapshot.orca.terminals.length, 2);
-    assert.equal(snapshot.sessions[0].orca_link.terminal_handle, 'term_synthetic');
+    assert.equal(snapshot.sessions[0].orca_link.terminal_handle, null);
+    assert.equal(snapshot.sessions[0].orca_link.confirmed, false);
+    assert.equal(snapshot.sessions[0].orca_link.evidence, 'prompt_exact');
     assert.equal(JSON.stringify(snapshot).includes(ORCA_TEXT_SENTINEL), false);
     responses[command].result.truncated = false;
   }
@@ -2897,7 +2899,7 @@ test('PR1c E absent or nonstring AI titles remain null', testContext => {
   assert.deepEqual(snapshot.sessions.map(session => session.ai_title), [null, null]);
 });
 
-test('PR1c E slash display formats clean wrappers and preserves sanitized originals', testContext => {
+test('PR1c E slash display formats commands after original-context sanitization', testContext => {
   const fixture = createFixture(testContext);
   const cases = [
     ['<command-message>deep-research</command-message>', '/deep-research'],
@@ -2909,7 +2911,7 @@ test('PR1c E slash display formats clean wrappers and preserves sanitized origin
       + '<command-message>ignored</command-message>', '/review scripts/lib'],
     ['<command-message>review</command-message><command-args>scripts/lib</command-args>', '/review scripts/lib'],
     [`<command-message>review</command-message><command-args>${SECRET_SENTINEL}</command-args>`,
-      '<command-message>review</command-message><command-args>[REDACTED]</command-args>']
+      '/review [REDACTED]']
   ];
   fixture.file('claude', 'slash', cases.map(([text], index) => claudeUserRecord(text, {
     uuid: `slash-${index}`, origin: undefined
@@ -2979,7 +2981,7 @@ test('PR1c E slash display changes preserve legacy fingerprints refs and registe
   assert.equal(snapshot.instructions.length, 3);
   assert.deepEqual(snapshot.instructions.map(item => item.ref), refs);
   assert.deepEqual(snapshot.instructions.map(item => item.text), [
-    '/deep-research', '/review scripts/lib', snapshotPolicy.finalizeText(texts[2]).value
+    '/deep-research', '/review scripts/lib', '/review [REDACTED]'
   ]);
   const target = { kind: 'instruction', instrId: 'claude:s:uslash-1', ref: refs[1] };
   const preview = snapshotReader.excludeQuery({ ...fixture.options, target });
@@ -3051,7 +3053,7 @@ test('PR1c correction 1 human wrapper-only text accepts every order and sanitize
   }
 });
 
-test('PR1c correction 1 wrappers with outside text preserve the original display for human and slash', testContext => {
+test('PR1c correction 1 outside text remains human display while slash projects only commands', testContext => {
   const fixture = createFixture(testContext);
   const wrapper = '<command-message>review</command-message><command-name>/review</command-name>'
     + '<command-args>scripts/lib</command-args>';
@@ -3072,7 +3074,8 @@ test('PR1c correction 1 wrappers with outside text preserve the original display
   const snapshot = snapshotReader.runSnapshot(fixture.options);
   assert.equal(snapshot.instructions.length, cases.length);
   assert.deepEqual(snapshot.instructions.map(item => item.kind), cases.map(([, kind]) => kind));
-  assert.deepEqual(snapshot.instructions.map(item => item.text), cases.map(([text]) => text));
+  assert.deepEqual(snapshot.instructions.map(item => item.text),
+    cases.map(([text, kind]) => kind === 'slash' ? '/review scripts/lib' : text));
 });
 
 for (const kind of ['slash', 'human']) {
@@ -3092,7 +3095,8 @@ for (const kind of ['slash', 'human']) {
     assert.equal(snapshot.instructions[0].kind, kind);
     assert.equal(snapshotPolicy.finalizeText(attack).redacted, true);
     assert.equal(JSON.stringify(snapshot).includes('LEAK_ME'), false);
-    assert.equal(snapshot.instructions[1].text, snapshotPolicy.finalizeText(attack).value);
+    assert.equal(snapshot.instructions[1].text, kind === 'slash' ? '/review'
+      : snapshotPolicy.finalizeText(attack).value);
     assert.equal(snapshot.instructions[1].kind, kind);
     assert.equal(snapshot.instructions[1].redacted, true);
   });
@@ -3236,4 +3240,155 @@ test('PR1c R1 Orca evidence uses bounded sanitized instruction text', testContex
     assert.equal(snapshot.sessions[0].orca_link.confirmed, evidence === 'prompt_exact');
     assert.equal(JSON.stringify(snapshot).includes('ORCA_PRIVATE_VALUE'), false);
   }
+});
+
+test('PR1c R2 slash display ignores outside sentences without changing refs or confirmation tokens', testContext => {
+  const fixture = createFixture(testContext);
+  const wrapper = '<command-name>/review</command-name><command-args>scripts/lib</command-args>';
+  fixture.file('claude', 'slash', [claudeUserRecord(wrapper + ' Outside sentence A.', { origin: undefined })]);
+  const before = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(before.instructions.length, 1);
+  assert.equal(before.instructions[0].kind, 'slash');
+  assert.equal(before.instructions[0].text, '/review scripts/lib');
+  const target = instructionTarget(before.instructions[0]);
+  const preview = snapshotReader.excludeQuery({ ...fixture.options, target });
+  fixture.file('claude', 'slash', [claudeUserRecord(wrapper + ' Outside sentence B.', { origin: undefined })]);
+  const after = snapshotReader.runSnapshot(fixture.options);
+  assert.deepEqual(after.instructions, before.instructions);
+  assert.deepEqual(snapshotReader.excludeQuery({ ...fixture.options, target }), preview);
+  assert.equal(snapshotReader.excludeCommit({ ...fixture.options, target, token: preview.token }).counts.registered, 1);
+});
+
+for (const provider of ['claude', 'codex']) {
+  test(`PR1c R2 ${provider} summary bounds metadata and drops oversized cwd before projection`, testContext => {
+    const fixture = createFixture(testContext);
+    const branch = 'feature/' + 'branch'.repeat(1000);
+    const cwd = '/' + 'directory/'.repeat(1000);
+    const body = 'ordinary instruction '.repeat(200);
+    const file = fixture.file(provider, 'bounds', provider === 'claude' ? [
+      claudeUserRecord(body, { cwd, gitBranch: branch }),
+      { type: 'ai-title', aiTitle: 'title '.repeat(100), sessionId: 's' }
+    ] : [codexSessionMeta({ cwd, git: { branch } }), codexMessage(body)]);
+    const config = snapshotReader.loadConfig(fixture.options);
+    const { scanSessions } = loadReaderWithInternals();
+    const scanned = scanSessions(fixture.options, config);
+    assert.equal(scanned.all.length, 1);
+    const session = scanned.all[0];
+    assert.equal(session.cwd, null);
+    assert.equal(session.branch, snapshotPolicy.finalizeLabel(branch).value);
+    assert.equal(session.branch.length, 64);
+    assert.equal(session.items[0].text.length, 2000);
+    if (provider === 'claude') {
+      assert.equal(session.title.length, 200);
+    }
+    const originalOpaquePath = snapshotPolicy.opaquePath;
+    testContext.mock.method(snapshotPolicy, 'opaquePath', function rejectOversizedPath(salt, generation, rawPath) {
+      assert.notEqual(rawPath, cwd);
+      assert.notEqual(rawPath, null);
+      return originalOpaquePath(salt, generation, rawPath);
+    });
+    fixture.options.runOrca = orcaRunner([orcaWorktree(body)], [orcaTerminal()]);
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(snapshot.sessions.length, 0);
+    assert.equal(snapshot.instructions.length, 0);
+    assert.equal(snapshot.coverage[provider].records_unverified, 1);
+    fs.unlinkSync(file);
+    fixture.file(provider, 'boundary', provider === 'claude' ? [
+      claudeUserRecord('valid cwd', { cwd: '/' + 'x'.repeat(4095) })
+    ] : [codexSessionMeta({ cwd: '/' + 'x'.repeat(4095) }), codexMessage('valid cwd')]);
+    assert.equal(snapshotReader.runSnapshot(fixture.options).instructions.length, 1);
+  });
+}
+
+function runSmallHeapSnapshot(fixture, scenario) {
+  const { spawnSync } = require('node:child_process');
+  const source = [
+    "const assert = require('node:assert/strict');",
+    'const reader = require(process.argv[1]);',
+    'const options = JSON.parse(process.argv[2]);',
+    'options.now = new Date(options.now);',
+    'options.runOrca = function unavailableOrca() { return null; };',
+    'const snapshot = reader.runSnapshot(options);',
+    'const expected = process.argv[3] === "text" ? 33 : 1;',
+    'assert.equal(snapshot.sessions.length, expected);',
+    'assert.equal(snapshot.instructions.length, expected);',
+    'assert.equal(snapshot.coverage.claude.files_scanned, 33);',
+    'assert.equal(snapshot.coverage.claude.files_failed, 0);',
+    'assert.equal(snapshot.coverage.claude.files_skipped, 0);',
+    'assert.equal(snapshot.coverage.claude.records_unverified, expected === 1 ? 32 : 0);',
+    'assert.ok(snapshot.instructions.some(item => item.text === "control survives"));',
+    'process.stdout.write(JSON.stringify({sessions: expected, heap: process.memoryUsage().heapUsed}));'
+  ].join('\n');
+  return spawnSync(process.execPath, ['--max-old-space-size=64', '-e', source,
+    require.resolve('../../scripts/lib/sessionSnapshotReader.cjs'), JSON.stringify(fixture.options), scenario], {
+    encoding: 'utf8', timeout: 12000, maxBuffer: 64 * 1024, cwd: fixture.root,
+    env: { ...process.env, HOME: fixture.options.homeDir }
+  });
+}
+
+for (const scenario of ['text', 'metadata']) {
+  test(`PR1c R2 detached ${scenario} strings survive a 64MB child heap`, { timeout: 30000 }, testContext => {
+    const fixture = createFixture(testContext);
+    const body = 'ordinary instruction '.repeat(100000);
+    const metadata = 'directory/'.repeat(220000);
+    assert.ok(body.length >= 2 * 1024 * 1024);
+    assert.ok(metadata.length >= 2 * 1024 * 1024);
+    for (let index = 0; index < 32; index++) {
+      fixture.file('claude', `large-${index}`, [claudeUserRecord(body, {
+        sessionId: `large-${index}`,
+        cwd: scenario === 'metadata' ? '/' + metadata : '/sensitive/repo',
+        gitBranch: scenario === 'metadata' ? metadata : 'main'
+      })]);
+    }
+    fixture.file('claude', 'control', [claudeUserRecord('control survives', { sessionId: 'control' })]);
+    const child = runSmallHeapSnapshot(fixture, scenario);
+    const oom = /heap out of memory|Reached heap limit|Allocation failed/.test(child.stderr || '');
+    testContext.diagnostic(`${scenario} child: status=${child.status}, signal=${child.signal}, oom=${oom}`);
+    assert.equal(child.error, undefined);
+    assert.equal(child.status, 0, child.stderr.slice(-1000));
+    assert.equal(child.signal, null);
+    const result = JSON.parse(child.stdout);
+    assert.equal(result.sessions, scenario === 'text' ? 33 : 1);
+  });
+}
+
+test('PR1c R2 partial Orca inventories cannot confirm links or assign terminal handles', testContext => {
+  const fixture = createFixture(testContext);
+  fixture.file('claude', 'main', [claudeUserRecord('abcdefgh')]);
+  const worktree = orcaWorktree('abcdefgh');
+  const terminal = orcaTerminal();
+  const responses = { worktree: orcaResponse('worktrees', [worktree]),
+    terminal: orcaResponse('terminals', [terminal]) };
+  fixture.options.runOrca = args => JSON.stringify(responses[args[0]]);
+  const complete = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(complete.coverage.orca.state, 'ok');
+  assert.equal(complete.sessions[0].orca_link.confirmed, true);
+  assert.equal(complete.sessions[0].orca_link.terminal_handle, 'h');
+  const competing = { ...worktree.agents[0], paneKey: 'other:leaf' };
+  worktree.agents.push(competing);
+  assert.equal(snapshotReader.runSnapshot(fixture.options).sessions[0].orca_link.evidence, 'ambiguous');
+  worktree.agents.pop();
+  for (const command of ['worktree', 'terminal']) {
+    responses[command].result.truncated = true;
+    const partial = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(partial.coverage.orca.state, 'partial');
+    assert.equal(partial.sessions[0].orca_link.evidence, 'prompt_exact');
+    assert.equal(partial.sessions[0].orca_link.confirmed, false);
+    assert.equal(partial.sessions[0].orca_link.terminal_handle, null);
+    responses[command].result.truncated = false;
+  }
+  responses.terminal.result.terminals.push({ handle: 'invalid' });
+  const latePartial = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(latePartial.coverage.orca.state, 'partial');
+  assert.equal(latePartial.sessions[0].orca_link.confirmed, false);
+  assert.equal(latePartial.sessions[0].orca_link.terminal_handle, null);
+  responses.terminal.result.terminals.pop();
+  responses.worktree.result.worktrees.push(...Array.from({ length: snapshotPolicy.SNAPSHOT_LIMITS.worktrees },
+    function unrelatedWorktree(_, index) {
+      return { ...worktree, worktreeId: `other-${index}`, path: '/other/repo', agents: [] };
+    }));
+  const capped = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(capped.coverage.orca.state, 'partial');
+  assert.equal(capped.sessions[0].orca_link.confirmed, false);
+  assert.equal(capped.sessions[0].orca_link.terminal_handle, null);
 });

@@ -336,15 +336,20 @@ function listFiles(root, providerCoverage, budget) {
   return result;
 }
 
-// Spec §1.1/§2: wrapper-only display preserves classification and content identity.
-function formatCommandWrapperText(text) {
-  if (text.replace(/<command-(name|message|args)>[\s\S]*?<\/command-\1>/g, '').trim()) {
+// Spec §1.4: copy bounded UTF-16 code units without retaining the source string.
+function retainString(value, max) {
+  return typeof value === 'string' ? Buffer.from(value.slice(0, max), 'utf16le').toString('utf16le') : null;
+}
+
+// Spec §1.1/§2: human wrappers must cover the text; slash display projects command fields only.
+function formatCommandWrapperText(text, wrapperOnly = true) {
+  if (wrapperOnly && text.replace(/<command-(name|message|args)>[\s\S]*?<\/command-\1>/g, '').trim()) {
     return text;
   }
   const name = text.match(/<command-name>([\s\S]*?)<\/command-name>/)?.[1]
     ?? text.match(/<command-message>([\s\S]*?)<\/command-message>/)?.[1];
   if (name === undefined) {
-    return text;
+    return wrapperOnly ? text : '';
   }
   const args = text.match(/<command-args>([\s\S]*?)<\/command-args>/)?.[1] || '';
   return '/' + name.trim().replace(/^\/+/, '') + (args ? ' ' + args : '');
@@ -697,38 +702,48 @@ function parseFile(provider, records, providerCoverage, config = {}) {
   // Spec §1.2/§1.4: timestamp display ordering cannot alter n identities or recovery evidence.
   items.sort(compareRecordTimes);
   providerCoverage.records_unknown += unknown;
+  if (cwd.length > 4096) {
+    cwd = null;
+    providerCoverage.records_unverified++;
+  }
   return {
-    provider,
-    sid: sessionId,
-    cwd,
-    branch,
-    run_mode,
-    title: title === null ? null : snapshotPolicy.finalizeText(title, 200).value,
+    provider: retainString(provider, 32),
+    sid: retainString(sessionId, 64),
+    cwd: retainString(cwd, 4096),
+    branch: typeof branch === 'string' ? retainString(snapshotPolicy.finalizeLabel(branch).value, 64) : null,
+    run_mode: retainString(run_mode, 32),
+    title: title === null ? null : retainString(snapshotPolicy.finalizeText(title, 200).value, 200),
     items,
     unknown,
-    first: first || 'unknown',
+    first: retainString(first || 'unknown', 32),
     compact: compact && !items.length,
-    firstAt: times[0],
-    lastAt: times[times.length - 1]
+    firstAt: retainString(times[0], 24),
+    lastAt: retainString(times[times.length - 1], 24)
   };
 }
 
 // Spec §2.1: sanitize the original context before removing command wrappers.
-function finalizeInstructionText(rawText) {
+function finalizeInstructionText(rawText, kind) {
   const original = snapshotPolicy.finalizeText(rawText);
-  const text = original.redacted ? rawText : formatCommandWrapperText(rawText);
-  const finalized = original.redacted ? original : snapshotPolicy.finalizeText(text);
-  return { text: finalized.value, text_missing: !text, truncated: text.length > 2000,
-    redacted: finalized.redacted };
+  const text = kind === 'slash' ? formatCommandWrapperText(original.redacted ? original.value : rawText, false)
+    : original.redacted ? rawText : formatCommandWrapperText(rawText);
+  const finalized = original.redacted && kind !== 'slash' ? original : snapshotPolicy.finalizeText(text);
+  return { text: retainString(finalized.value, 2000), text_missing: !text, truncated: text.length > 2000,
+    redacted: original.redacted || finalized.redacted };
 }
 
 // Spec §1.4/§2/§3: compute identity before discarding unbounded text and block structure.
 function compactInstruction(config, instruction) {
   instruction.fp = computeInstructionFingerprint(config, instruction);
   instruction.ref = computeInstructionRef(config, instruction);
-  const display = finalizeInstructionText(instruction.displayText ?? instruction.text);
+  const display = finalizeInstructionText(instruction.displayText ?? instruction.text, instruction.kind);
   delete instruction.structure;
   delete instruction.displayText;
+  instruction.id = retainString(instruction.id, 160);
+  instruction.ts = retainString(instruction.ts, 24);
+  instruction.kind = retainString(instruction.kind, 32);
+  instruction.fp = retainString(instruction.fp, 64);
+  instruction.ref = retainString(instruction.ref, 16);
   return Object.assign(instruction, display);
 }
 
@@ -929,6 +944,7 @@ function isClaudeSubagentFile(provider, file, sidechainOnly) {
 
 // Spec §2: verify the enumerated inode before reading; only one file's records remain in scope.
 function summarizeTranscriptFile(provider, file, providerCoverage, windowSince, config = {}) {
+  const retainedFile = retainString(file.file, 4096);
   let fileDescriptor;
   try {
     fileDescriptor = fs.openSync(file.file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
@@ -945,7 +961,9 @@ function summarizeTranscriptFile(provider, file, providerCoverage, windowSince, 
         providerCoverage.files_skipped++;
         return null;
       }
-      return { file: file.file, sessionId: identity.sessionId, outsideWindow: true };
+      return { file: retainedFile,
+        sessionId: identity.sessionId?.length <= 64 ? retainString(identity.sessionId, 64) : null,
+        outsideWindow: true };
     }
     const data = readTranscriptData(fileDescriptor);
     const records = data.split('\n').filter(value => value.trim()).map(parseTranscriptRecord);
@@ -957,7 +975,7 @@ function summarizeTranscriptFile(provider, file, providerCoverage, windowSince, 
     }
     const sessionId = transcriptSessionId(provider, records);
     const parsed = parseIndependentTranscript(provider, records, providerCoverage, config);
-    return { file: file.file, sessionId, ...parsed };
+    return { file: retainedFile, sessionId: sessionId?.length <= 64 ? retainString(sessionId, 64) : null, ...parsed };
   } catch {
     providerCoverage.files_failed++;
     return null;
@@ -1060,7 +1078,7 @@ function buildSnapshotSession(config, parsedSession, key, kept) {
     repo_label: parsedSession.cwd ? snapshotPolicy.finalizeLabel(path.basename(parsedSession.cwd)).value : null,
     git_branch: typeof parsedSession.branch === 'string' ? snapshotPolicy.finalizeLabel(parsedSession.branch)
       .value : null,
-    cli_version: 'unverified',
+    cli_version: retainString('unverified', 32),
     format_unverified: true,
     first_record_at: parsedSession.firstAt,
     last_record_at: parsedSession.lastAt,
@@ -1156,6 +1174,10 @@ function runSnapshot(inputOptions) {
     const providerCoverage = coverage[parsedSession.provider];
     if (sessions.length >= snapshotPolicy.SNAPSHOT_LIMITS.sessions) {
       providerCoverage.records_unverified++;
+      continue;
+    }
+    // Spec §2.1/§3: the closed session schema cannot project an unavailable cwd identity.
+    if (parsedSession.cwd === null) {
       continue;
     }
     if (parsedSession.run_mode === 'exec' && !readerOptions.includeExec) {
@@ -1283,6 +1305,15 @@ function readOrca(readerOptions, config, all, coverage, outputBudget) {
   const edges = buildOrcaLinkCandidates(all, agents);
   applyOrcaLinks(all, edges);
   parseOrcaTerminals(terminals, edges, ids, out, coverage.orca, outputBudget);
+  // Spec §2.2: partial inventories cannot prove uniqueness, including failures during projection.
+  if (coverage.orca.state !== 'ok') {
+    for (const session of all) {
+      if (session.output) {
+        session.output.orca_link.confirmed = false;
+        session.output.orca_link.terminal_handle = null;
+      }
+    }
+  }
   return out;
 }
 
@@ -1403,7 +1434,7 @@ function buildOrcaLinkCandidates(all, agents) {
   for (const parsedSession of all) {
     const last = parsedSession.items[parsedSession.items.length - 1];
     for (const agent of agents) {
-      if (parsedSession.cwd !== agent.cwd) {
+      if (parsedSession.cwd === null || parsedSession.cwd !== agent.cwd) {
         continue;
       }
       const text = last ? normalizeLinkText(last.text) : '';
