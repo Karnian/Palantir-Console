@@ -2400,7 +2400,7 @@ function loadReaderWithInternals() {
   const source = fs.readFileSync(filename, 'utf8');
   loaded._compile(source + '\nmodule.exports.testInternals = '
     + '{ listFiles, summarizeTranscriptFile, groupTranscriptFiles, parseFile, '
-    + 'computeInstructionFingerprint, computeInstructionRef, buildSnapshotInstruction, scanSessions };', filename);
+    + 'computeInstructionFingerprint, computeInstructionRef, buildSnapshotInstruction, scanSessions, buildOrcaLinkCandidates, applyOrcaLinks };', filename);
   return loaded.exports.testInternals;
 }
 
@@ -4255,15 +4255,15 @@ test('PR1d Orca exact candidates ignore cwd-only history, use time OR and provid
   assert.equal(snapshot.sessions.find(item => item.session_id === 's').orca_link.evidence, 'prompt_trunc');
 });
 
-test('PR1d unreadable summaries and Orca system prompts prevent false cwd uniqueness', t => {
+test('PR1d unavailable summaries block uniqueness while known nonmatching system prompts do not', t => {
   const fixture = createFixture(t);
   fixture.file('claude', 'a-active', [claudeUserRecord('active unique prompt')]);
   fixture.file('claude', 'b-system', [claudeUserRecord('You are working inside Orca, a multi-agent IDE.',
     { sessionId: 'system' })]);
   fixture.options.runOrca = orcaRunner([orcaWorktree('active unique prompt')], []);
   let snapshot = snapshotReader.runSnapshot(fixture.options);
-  assert.equal(snapshot.sessions[0].orca_link.confirmed, false);
-  assert.equal(snapshot.sessions[0].orca_link.evidence, 'ambiguous');
+  assert.equal(snapshot.sessions[0].orca_link.confirmed, true);
+  assert.equal(snapshot.sessions[0].orca_link.evidence, 'prompt_exact');
   fixture.file('claude', 'b-system', [claudeUserRecord('first identity', { sessionId: 'system' }),
     { type: 'assistant', padding: 'x'.repeat(2000) }]);
   const previous = snapshotReader.STREAM_LIMITS.lineBytes;
@@ -4286,4 +4286,158 @@ test('PR1d first overlong line retains its complete header identity and blocks a
   assert.equal(snapshot.coverage.claude.large_file_withheld, 1);
   assert.equal(snapshot.coverage.claude.multi_file_withheld, 1);
   assert.equal(snapshot.sessions.length, 0);
+});
+
+test('PR1d R2 missing human instructions and text-missing sessions never become blocked competitors', t => {
+  const fixture = createFixture(t);
+  fixture.file('claude', 'active', [claudeUserRecord('an exact live instruction')]);
+  fixture.file('claude', 'empty', [{ type: 'assistant', sessionId: 'empty', cwd: '/sensitive/repo',
+    timestamp: RECORD_TIMESTAMP, uuid: 'empty' }]);
+  fixture.file('claude', 'image', [claudeUserRecord([{ type: 'image' }], { sessionId: 'image', uuid: 'image' })]);
+  fixture.options.runOrca = orcaRunner([orcaWorktree('an exact live instruction')], []);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.sessions.length, 3);
+  assert.equal(snapshot.sessions.find(session => session.session_id === 's').orca_link.confirmed, true);
+  assert.equal(snapshot.sessions.find(session => session.session_id === 'empty').orca_link.confirmed, false);
+});
+
+test('PR1d R2 blockers are scoped to the eligible agent, provider and known time range', () => {
+  const { buildOrcaLinkCandidates, applyOrcaLinks } = loadReaderWithInternals();
+  const cwdHash = 'a'.repeat(64), textHash = 'b'.repeat(64);
+  const time = Date.parse(RECORD_TIMESTAMP);
+  const agent = { pane: 'active', provider: 'claude', cwdHash, times: [time],
+    prompt: { hash: textHash, length: 10, prefix_hashes: [] } };
+  const otherAgent = { ...agent, pane: 'past', times: [time - 86400000], prompt: { ...agent.prompt, hash: 'c'.repeat(64) } };
+  function link(blocker, agents = [agent]) {
+    const session = { provider: 'claude', cwdHash, firstAt: RECORD_TIMESTAMP, lastAt: RECORD_TIMESTAMP,
+      link_text: { hash: textHash, length: 10, truncated: false }, output: {} };
+    const all = [session, blocker];
+    applyOrcaLinks(all, buildOrcaLinkCandidates(all, agents));
+    return session.output.orca_link;
+  }
+  const blocked = { provider: 'claude', cwdHash, blocked: true, link_text: null };
+  assert.equal(link(blocked).evidence, 'ambiguous');
+  assert.equal(link({ ...blocked, provider: undefined }).confirmed, false);
+  assert.equal(link({ ...blocked, provider: 'codex' }).confirmed, true);
+  assert.equal(link({ ...blocked, cwdHash: 'd'.repeat(64) }).confirmed, true);
+  const oldTime = new Date(time - 86400000).toISOString();
+  assert.equal(link({ ...blocked, firstAt: oldTime, lastAt: oldTime }, [agent, otherAgent]).confirmed, true);
+  assert.equal(link({ ...blocked, firstAt: RECORD_TIMESTAMP, lastAt: RECORD_TIMESTAMP }).confirmed, false);
+  assert.equal(link({ ...blocked, blocked: false }).confirmed, true);
+});
+
+test('PR1d R2 codev2 epoch-ms agent matches the actual session range, including hidden candidates', t => {
+  const fixture = createFixture(t);
+  fixture.options.now = new Date('2026-10-10T11:00:00.000Z');
+  const first = '2026-10-10T09:53:44.431Z', last = '2026-10-10T10:09:14.010Z';
+  const prompt = 'actual codev2 human instruction';
+  fixture.file('claude', 'live', [claudeUserRecord(prompt, { timestamp: first }),
+    { type: 'assistant', sessionId: 's', cwd: '/sensitive/repo', timestamp: last }]);
+  fixture.file('claude', 'hidden', [claudeUserRecord('different excluded instruction',
+    { sessionId: 'hidden', timestamp: first })]);
+  snapshotReader.loadConfig(fixture.options);
+  const config = fixture.config(); config.exclude.sessions.push('claude:hidden'); fixture.save(config);
+  const tree = orcaWorktree(prompt, 'p:leaf', { agentType: 'claude',
+    stateStartedAt: Date.parse('2026-10-10T10:06:11.981Z'), updatedAt: Date.parse('2026-10-10T10:09:14.006Z') });
+  fixture.options.runOrca = orcaRunner([tree], []);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.sessions.length, 1);
+  assert.equal(snapshot.coverage.orca.state, 'ok');
+  assert.equal(snapshot.sessions[0].orca_link.evidence, 'prompt_exact');
+  assert.equal(snapshot.sessions[0].orca_link.confirmed, true);
+  const scanned = loadReaderWithInternals().scanSessions(fixture.options, fixture.config());
+  assert.equal(scanned.linkCandidates[0].firstAt, first);
+  assert.equal(scanned.all[0].lastAt, last);
+  // A partial inventory deliberately cancels an otherwise eligible numeric-time match.
+  fixture.options.runOrca = args => JSON.stringify(orcaResponse(args[0] === 'worktree' ? 'worktrees' : 'terminals',
+    args[0] === 'worktree' ? [tree] : [], { truncated: args[0] === 'terminal' }));
+  const partial = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(partial.coverage.orca.state, 'partial');
+  assert.equal(partial.sessions[0].orca_link.evidence, 'prompt_exact');
+  assert.equal(partial.sessions[0].orca_link.confirmed, false);
+});
+
+test('PR1d R2 workflow sidechains and sessionless journals do not withhold the main session', t => {
+  const fixture = createFixture(t);
+  fixture.file('claude', 'project/main', [claudeUserRecord('main human instruction')]);
+  fixture.file('claude', 'project/s/subagents/workflows/wf_1/agent-worker', [
+    claudeUserRecord('sidechain', { isSidechain: true }),
+    { type: 'assistant', isSidechain: true, sessionId: 's', timestamp: RECORD_TIMESTAMP }
+  ]);
+  fixture.file('claude', 'project/s/subagents/workflows/wf_1/journal', [
+    { type: 'launched' }, { type: 'started' }, { type: 'result' }
+  ]);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.sessions.length, 1);
+  assert.equal(snapshot.instructions[0].text, 'main human instruction');
+  assert.equal(snapshot.coverage.claude.files_skipped, 2);
+  assert.equal(snapshot.coverage.claude.multi_file_withheld, 0);
+});
+for (const variant of ['not-sidechain', 'missing-session', 'mixed-session', 'wrong-depth', 'wrong-name', 'unsafe-wfid', 'journal-session']) {
+  test(`PR1d R2 workflow condition ${variant} stays a regular transcript`, t => {
+    const fixture = createFixture(t);
+    fixture.file('claude', 'project/main', [claudeUserRecord('main')]);
+    let name = 'project/s/subagents/workflows/wf_1/agent-worker';
+    let rows = [claudeUserRecord('sidechain', { isSidechain: true })];
+    if (variant === 'not-sidechain') rows[0].isSidechain = false;
+    if (variant === 'missing-session') rows.push({ type: 'assistant', isSidechain: true, timestamp: RECORD_TIMESTAMP });
+    if (variant === 'mixed-session') rows.push({ type: 'assistant', sessionId: 'other', isSidechain: true, timestamp: RECORD_TIMESTAMP });
+    if (variant === 'wrong-depth') name = 'project/s/subagents/workflows/wf_1/nested/agent-worker';
+    if (variant === 'wrong-name') name = 'project/s/subagents/workflows/wf_1/worker';
+    if (variant === 'unsafe-wfid') name = 'project/s/subagents/workflows/wf.1/agent-worker';
+    if (variant === 'journal-session') { name = 'project/s/subagents/workflows/wf_1/journal'; rows = [{ type: 'result', sessionId: 's' }]; }
+    fixture.file('claude', name, rows);
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(snapshot.sessions.length, 0);
+    assert.equal(snapshot.coverage.claude.multi_file_withheld, 1);
+    assert.equal(snapshot.coverage.claude.files_skipped, 0);
+  });
+}
+
+test('PR1d R2 verified workflow sidechains skip record counters, including duplicate UUIDs', t => {
+  const fixture = createFixture(t);
+  fixture.file('claude', 'project/main', [claudeUserRecord('main')]);
+  const side = claudeUserRecord('side', { isSidechain: true });
+  fixture.file('claude', 'project/s/subagents/workflows/wf_1/agent-worker', [side, side]);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.sessions.length, 1);
+  assert.equal(snapshot.coverage.claude.files_skipped, 1);
+  assert.equal(snapshot.coverage.claude.records_unverified, 0);
+});
+
+test('PR1d R2 a failed body read retains identity as a blocker and prevents sibling export', t => {
+  const fixture = createFixture(t);
+  const file = fixture.file('claude', 'a-failed', [claudeUserRecord('first identity'),
+    { type: 'assistant', timestamp: RECORD_TIMESTAMP, padding: 'x'.repeat(500000) }]);
+  fixture.file('claude', 'b-sibling', [claudeUserRecord('must be withheld', { uuid: 'sibling' })]);
+  const originalOpen = fs.openSync, originalRead = fs.readSync;
+  let descriptor, chunks = 0;
+  t.mock.method(fs, 'openSync', function(filePath, ...args) {
+    const fd = originalOpen(filePath, ...args); if (filePath === file) descriptor = fd; return fd;
+  });
+  t.mock.method(fs, 'readSync', function(fd, buffer, ...args) {
+    if (fd === descriptor && buffer.length === 256 * 1024 && ++chunks === 2) throw Object.assign(new Error(), { code: 'EIO' });
+    return originalRead(fd, buffer, ...args);
+  });
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.coverage.claude.files_failed, 1);
+  assert.equal(snapshot.coverage.claude.multi_file_withheld, 1);
+  assert.equal(snapshot.sessions.length, 0);
+});
+
+test('PR1d R2 a withheld transcript preserves known times and cannot block a disjoint live agent', t => {
+  const fixture = createFixture(t);
+  fixture.file('claude', 'active', [claudeUserRecord('the live exact instruction')]);
+  const old = new Date(Date.parse(RECORD_TIMESTAMP) - 86400000).toISOString();
+  const duplicate = claudeUserRecord('old duplicate', { sessionId: 'old', uuid: 'old', timestamp: old });
+  fixture.file('claude', 'withheld', [duplicate, duplicate]);
+  fixture.options.runOrca = orcaRunner([orcaWorktree('the live exact instruction')], []);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.sessions.length, 1);
+  assert.equal(snapshot.sessions[0].orca_link.confirmed, true);
+  const scanned = loadReaderWithInternals().scanSessions(fixture.options, fixture.config());
+  assert.equal(scanned.linkCandidates.length, 1);
+  assert.equal(scanned.linkCandidates[0].blocked, true);
+  assert.equal(scanned.linkCandidates[0].firstAt, old);
+  assert.equal(scanned.linkCandidates[0].lastAt, old);
 });

@@ -110,7 +110,7 @@
 - **창 밖 파일**(수정 시각이 `now - 14일` 이전)은 어떤 레코드도 창 안일 수 없으므로 세션 신원만 확인한다. 앞부분(최대 64KB)의 레코드에서 신원을 얻고, 못 얻으면 그 파일 하나만 상한 안에서 전체를 읽는다. 다중 파일 판정에는 참여하지만 내용은 파싱하지 않는다. 따라서 **coverage 의 레코드 카운트(unknown·unverified 등)는 관측 창 기준**이다. 창 밖 판정은 "mtime 이 창 밖이고, 파일 끝 레코드의 시각도 창 밖"일 때만이다(시각 보존 복사로 mtime 만 오래된 파일은 그대로 읽는다). **한계(수용)**: mtime 을 인위로 되돌리고 끝에 옛 레코드를 덧붙인 파일은 최근 레코드가 있어도 보이지 않을 수 있다 — 결과는 비반출이라 안전 측이다.
 - **보유 개수 상한**: 스캔 중 지시 상세를 보유하는 세션은 마지막 관측 기준 상위 300개(출력 상한과 같음)이고, 세션마다 처음 지시와 최근 200개 지시만 보유한다. 그 밖의 세션은 그룹·다중 파일 판정 신원·시각과 머신 내부 연결 비교 요약만 남긴다. 화면 타임라인은 세션당 최근 200개까지이고, 잘린 지시는 `records_unverified` 로 센다.
 - **보유 문자열 상한**: 파일 하나를 처리한 뒤 남기는 모든 문자열(표시 텍스트·제목·branch·cwd·버전 등)은 파싱 시점에 용도별 상한으로 자르고 독립 복사한다(잘라 낸 문자열이 원문을 참조해 메모리를 붙잡지 않게). 지문·ref 는 그 전에 원문으로 계산한다.
-- **Claude 하위 에이전트 파일**(`<sessionId>/subagents/agent-*.jsonl`, 레코드가 모두 `isSidechain`)은 본 세션과 같은 `sessionId` 를 쓰지만 사람 지시가 없다. 세션 그룹에서 빼고 `files_skipped` 로 센다(그러지 않으면 본 세션이 다중 파일로 통째 보류된다 — 실측 codev2 20/46).
+- **Claude 하위 에이전트 파일**: 정확히 `<project>/<sid>/subagents/agent-*.jsonl` 또는 `<project>/<sid>/subagents/workflows/<wfid>/agent-*.jsonl` 이고, 모든 레코드가 `isSidechain=true`·`sessionId=<sid>` 이면 그룹에서 빼고 `files_skipped` 로 센다. wfid 는 `[A-Za-z0-9_-]+` 의 디렉터리 1단이다. 같은 workflow 폴더의 `journal.jsonl` 은 sessionId 없는 `launched/started/result` 저널이면 세션 신원 없이 `files_skipped` 다. 다른 깊이·이름·조건 불일치는 일반 transcript 로 처리한다(본 세션 보류를 막기 위한 정확 경로 예외 — 실측 workflow agent 219개).
 - **최초 지시 복구 상태**는 세 값으로 표시한다. 첫 레코드의 타입만으로 판정하지 않는다. 실측에서 Claude 파일이 `last-prompt`·`queue-operation` 으로 시작하는 경우는 정상이었다.
   - **Claude**
     - 첫 human 지시의 `parentUuid` 가 null 이거나 파일 안에서 해소되고, 그보다 앞에 `isCompactSummary` 가 없으면 `recoverable`.
@@ -131,7 +131,7 @@
 
 ---
 
-- **PR1d 스트리밍**: 창 판정은 그대로다. 창 안 파일은 16MB 초과도 fs.readSync 청크·줄 단위로 전체 검증한다. 원문·레코드는 처리 직후 폐기하고 처음 + 최근 200 지시(기존 timestamp→position 정렬 기준), 검증 메타데이터만 보유한다. 줄 8MB, 파일 읽기 256MB, 신원 메타데이터 100000 항목 상한은 테스트에서 바꿀 수 있는 상수다. 초과는 `large_file_withheld`; 신원은 그룹에 남겨 작은 형제도 단독 반출하지 않는다. 처음 지시 증거를 못 읽으면 unknown 이며 compact/부모 체인 증거 없이 unrecoverable 로 승격하지 않는다. exclude 대상 재탐색도 같은 스트리밍을 쓰며 지문·순번·확인 토큰을 유지한다.
+- **PR1d 스트리밍**: 창 판정은 그대로다. 창 안 파일은 16MB 초과도 fs.readSync 청크·줄 단위로 전체 검증한다. 원문·레코드는 처리 직후 폐기하고 처음 + 최근 200 지시(기존 timestamp→position 정렬 기준), 검증 메타데이터만 보유한다. 줄 8MB, 파일 읽기 256MB, 신원 메타데이터 100000 항목 상한은 테스트에서 바꿀 수 있는 상수다. 초과는 `large_file_withheld`; 신원은 그룹에 남겨 작은 형제도 단독 반출하지 않는다. 처음 지시 증거를 못 읽으면 unknown 이며 compact/부모 체인 증거 없이 unrecoverable 로 승격하지 않는다. exclude 대상 재탐색도 같은 스트리밍을 쓰며 지문·순번·확인 토큰을 유지한다. 정상적인 앞부분 메타데이터가 있는 파일은 신원·시간·중복 검증과 지시 추출을 한 순차 패스에 수행한다. 메타데이터가 늦거나 불충분한 경우만 전체 검증 후 다시 읽는다. 256KB 청크의 줄바꿈 검색·청크 내부 문자열 변환, 상한 있는 최근 지시 정렬 삽입을 사용한다.
 
 ## 2. 읽기 모듈 (snapshot CLI)
 
@@ -142,6 +142,7 @@
   - 살균은 `memorySanitize.redactSecrets` 를 require 해서 쓴다. 로직을 복제하지 않는다.
   - npm 의존성이 없고 Node 18 이상에서 돈다. 시작할 때 Node major 를 검사하고, 미달이면 고정 코드 `node_unsupported` 로 끝낸다. 이 코드는 Node 14.18 이상에서 보장한다. 그보다 오래된 Node(`node:` 접두사 require 미지원)에서는 일반 실패로 끝나고, Mac 은 아무것도 기록하지 않는다.
   - **원격 머신에는 Node 만 있으면 된다.** repo checkout 도, 파일 설치도 필요 없다(§2.3). 원격에 남는 것은 `observe.json` 하나뿐이다.
+- **하위 에이전트·workflow**: §1.4 의 정확 경로와 전체 레코드 조건을 모두 검증한 파일만 그룹에서 제외한다. workflow journal 도 정확 경로·sessionId 없음·저널 타입을 검증한다. 그 밖의 파일은 기존 보류 판정에 참여한다.
 - **읽는 경로**: Claude·Codex transcript 디렉터리 두 종류만 허용한다(기본 `~/.claude/projects`, `~/.codex/sessions`). 다른 종류의 경로는 거부한다. 심볼릭 링크는 따라가지 않는다. 파일 수와 파일당 바이트에 상한을 둔다.
 - **머신 측 설정** `~/.config/palantir/observe.json` (0600):
   - `machine_id`: 최초 실행 때 생성하는 랜덤 값. hostname 과 무관하다.
@@ -191,7 +192,7 @@
 - **절단**: 출력 루프가 200 단위에 도달했거나, 스캔 상한 뒤 WS 아닌 원문이 남았거나, p 가 high surrogate 를 제거하면 true 다. 길이만으로 판단하지 않는다(`a`×199+이모지도 true).
 - **증거 등급**: 같은 cwd + producer 값 일치에서 절단 아님·길이 ≥8 은 `prompt_exact`, 절단됨은 `prompt_trunc` 다. 기존 `prompt_prefix`·`cwd_only` 는 후보 표시만 하며 유일성 판정에서 제외한다.
 - **시간·provider**: stateStartedAt 또는 updatedAt 중 하나라도 `[first_record_at, last_record_at + 10분]` 안이고 agent.agentType 이 세션 provider 와 같아야 확정 후보가 된다.
-- **유일성**: 확정 후보끼리 pane→session, session→pane 양방향 1:1 일 때만 confirmed 다. 제외·보유 상한 밖·출력 예산 밖 세션도 머신 내부의 상한 있는 해시·길이·절단·시간·provider·cwdHash 요약으로 경쟁에 참여한다. 요약을 못 만든 보류·읽기 상한 세션이 같은 cwd 에 있으면 `ambiguous`, confirmed=false 다. 이 요약은 반출하지 않는다. Orca inventory partial/truncated 면 확정을 취소한다.
+- **유일성**: 확정 후보끼리 pane→session, session→pane 양방향 1:1 일 때만 confirmed 다. 제외·보유 상한 밖·출력 예산 밖 세션도 머신 내부의 상한 있는 해시·길이·절단·시간·provider·cwdHash 요약으로 경쟁에 참여한다. 요약 계산 불가인 보류·읽기 상한 세션은 명시적 blocked 다. 확정 후보 agent 의 pane 에 대해서만 같은 cwd·provider 일치(미상 포함)의 blocked 경쟁을 검사한다. 알려진 `[first, last + 10분]` 과 agent 시각이 겹쳐야 경쟁하며, 범위를 모르면 겹친다고 본다. 사람 지시 0개·text_missing·Orca 특수 요약 등 비교 불가가 확정된 세션은 blocked 가 아니다. 경쟁이 있으면 `ambiguous`, confirmed=false 다. 이 요약은 반출하지 않는다. Orca inventory partial/truncated 면 확정을 취소한다.
 - **화면 표시**: confirmed 만 "Orca 터미널 연결됨 (스냅샷 시점 관측)"으로 표시한다.
 
 ### 2.3 실행 경로 — 번들 하나, 로컬·원격 공통
@@ -553,3 +554,5 @@
 - **PR2b (2026-10-10)**: `#work` 보드 + 진입 분기 + observe 전용 e2e. 실데이터(Mac 97 + codev2 56 세션)로 띄워 사용자 결정 2건(카드 제목줄, 미검증 배지 위치)을 받았다. codex 적대리뷰 R1~R2 NO-GO → R3 GO. 반영: observe 테스트 서버의 호스트 tmux·TMPDIR 공유(토큰을 켠 빈 DB 서버의 부팅 복구가 실제 워커를 종료할 수 있었다 → 전용 TMPDIR·TMUX_TMPDIR), observe 403 의 로그인 bounce(→ `allowAppForbidden`, abort 는 재전파), 기존 a11y·visual 명령이 observe 까지 실행하던 문제(→ `PALANTIR_OBSERVE_UI=1` opt-in), 복구 상태 숨김, 카드 줄 중복. 범위 밖으로 확정: 데스크톱 `.nav-brand` 36px(기존 공통 chrome, 바꾸면 기존 baseline 변경). 기존 visual 의 manager 4개 실패는 main 에서도 동일한 기존 문제.
 
 - **PR1d (2026-10-10, 측정 전 실데이터 점검)**: 수집·연결 원인 3건(16MB 초과 활발한 transcript 통째 누락, 작업 중 전달된 human queued_command attachment 누락, cwd-only 경쟁·200자 producer 절단으로 Orca 확정 0건)과 footer 지시 수 표시를 고친다. Claude 호스트·codex 2라운드 교차검토 **AMEND→AMEND** 합의: 상한 있는 전체 스트리밍·신원 보존 보류, attachment 기존 신원 경로 편입·이중 기록 세션 보류(병합 금지), producer 변환·실제 절단·시간 OR·provider·확정 후보 양방향 1:1·숨은 경쟁, instruction_total 추가·unknown 비율 유지.
+
+- **PR1d 호스트 검증 1차 수정 (2026-10-11)**: 0f9b77d 의 호스트 DoD 307 pass·npm 3988 pass 뒤 실데이터에서 숨은 경쟁 과잉(Mac ambiguous 100/110), workflow 하위 에이전트 다중 파일 보류, 스트리밍 성능 퇴행을 확인했다. blocked 를 계산 불가 경로에 한정하고 확정 후보 pane·cwd·provider·시간으로 경쟁을 좁혔다. 정확 workflow 경로와 sessionless journal 예외를 추가했다. 전체 이중 JSON 파싱·바이트별 줄 탐색·반복 Set/신원 검증·매 지시 재정렬을 줄여 한 패스 검증과 상한 내 정렬 삽입으로 바꿨다. 72.9MB/20파일/100000레코드(파일당 3.65MB, 서로 다른 시각) 로컬 중앙값은 PR1c 251ms → 1차 PR1d 952ms → 수정본 269ms 다. codev2 의 제시된 숫자 agent 시각·Claude provider·출력/숨은 후보 시간 보존은 fixture 에서 confirmed=true 를 확인했다. 같은 fixture 에 partial inventory 를 주면 prompt_exact/false 가 재현된다. 이는 기존 확정 취소 계약이며, 실제 3건의 coverage·truncated 값은 호스트에서 대조한다.
