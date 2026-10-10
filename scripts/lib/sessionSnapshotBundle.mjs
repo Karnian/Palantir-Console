@@ -26,11 +26,14 @@ function rejectBundle() {
   throw error;
 }
 function checkSource(name, source) {
-  if (/module\s*\.\s*require|\bimport\b|process\s*\.\s*binding/.test(source)) rejectBundle();
-  if (/\b(?:getBuiltinModule|createRequire)\b|process\s*\.\s*dlopen\b/.test(source)) rejectBundle();
-  for (const match of source.matchAll(/\brequire\s*\(\s*([^)]*)\)/g)) {
-    const literal = /^(['"])([^'"\n]*)\1\s*$/.exec(match[1]);
-    if (!literal || !resolveModule(name, literal[2])) rejectBundle();
+  if (/\b(?:import|binding|dlopen|getBuiltinModule|createRequire)\b/.test(source)) rejectBundle();
+  for (const match of source.matchAll(/\brequire\b/g)) {
+    if (source[match.index - 1] === '.') rejectBundle();
+    const following = source.slice(match.index + match[0].length);
+    const literal = /^\((['"])([^'"\r\n]*)\1\)/.exec(following);
+    if (literal) {
+      if (!resolveModule(name, literal[2])) rejectBundle();
+    } else if (!/^[ \t]+[A-Za-z]/.test(following)) rejectBundle();
   }
 }
 export function buildBundle({ request, sourceOverrides = {} }) {

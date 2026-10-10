@@ -208,7 +208,7 @@
 - **번들**: Mac 이 실행할 때마다 메모리에서 만든다. 커밋하지 않는다.
   - 대상은 **고정 manifest** 다: `memorySanitize.js`, `observeSnapshotPolicy.js`, `sessionSnapshotReader.cjs`, 번들 launcher.
   - 작은 모듈 레지스트리로 감싼다. **런타임 resolver** 는 manifest 안 상대경로와 내장 모듈 allowlist(`node:fs`, `node:path`, `node:os`, `node:crypto`, `node:child_process`)만 해석하고, 그 밖은 throw 한다.
-  - **정적 검사**: manifest 소스에 리터럴이 아닌 `require(`, `module.require`, `import` 토큰(동적 import·`import.meta` 를 형태와 무관하게 금지), `process.binding`, `getBuiltinModule`, `createRequire`, `process.dlopen` 이 있으면 번들 생성이 고정 코드로 실패한다. 런타임도 모듈 컴파일 전에 `process.getBuiltinModule` 을 없앤다.
+  - **정적 검사 (단어 규칙)**: 형태별 정규식이 아니라 단어로 판정한다. manifest 소스에 `import`, `binding`, `dlopen`, `getBuiltinModule`, `createRequire` 단어가 하나라도 있으면 번들 생성이 고정 코드로 실패한다. `require` 단어는 모든 출현이 `require('<manifest 또는 allowlist>')` 형태(사이 공백·주석 불허)이거나, 뒤에 영문자가 오는 산문(주석)이어야 한다. 앞에 `.` 이 오거나(`module.require`), 그 밖의 문자가 따라오면(별칭 대입·주석 끼우기 등) 실패한다. 런타임도 모듈 컴파일 전에 `process.getBuiltinModule` 을 없앤다.
   - **위협 모델 (PR1b 확정)**: 정적 검사와 런타임 resolver 는 **검토된 manifest 코드가 실수로 import 를 넓히는 것**을 막는다. 악의적인 manifest 코드를 격리하지는 않는다(manifest 는 이 repo 의 코드다). 그 범위 안에서 다음을 둔다: 모듈은 전역 스코프에서 strict mode 로 지연 컴파일한다(`new Function`, 런타임 클로저·호출 스택 비노출). 실행 전에 전역 `require`·`module`·`exports` 를 지운다. 내장 allowlist 는 null-prototype 객체로 조회한다. prototype 변조 같은 적대적 코드 경로는 다루지 않는다.
   - `reader_build` 는 **출처 추적값**이다. 정의는 SHA-256(정규 인코딩 `["palantir.snapshot-bundle/1", [경로, 바이트 길이, 바이트]…]`, manifest 경로순)의 앞 16 hex 이고, 문법은 `^[0-9a-f]{16}$` 다. REQUEST 줄은 해시 입력에 포함하지 않는다. Mac 은 받은 응답의 `reader_build` 가 **자기가 보낸 번들의 값과 같은지** 확인한다.
 - **응답 프로토콜 — stdout 의 envelope 하나.**
@@ -527,3 +527,4 @@
   - exclude 도 `--now` 를 받는다. 조회와 기록은 같은 now 를 쓴다.
   - R2: `process.getBuiltinModule`·`createRequire` 로 import 를 넓히는 경로를 정적 검사와 런타임 양쪽에서 막았다. spawn 가드 음성 테스트는 실제 spawn 을 부르지 않는 기록 전용 스텁으로 바꿨다(가드를 지워도 fixture 밖 프로그램이 실행되지 않음). `node_unsupported` 보장 범위를 Node 14.18 이상으로 좁혔다.
   - R3: 주석을 끼운 동적 import 가 정적 검사를 피했다 → 형태를 쫓지 않고 `import` 토큰 자체를 금지했다(manifest 에 이 단어가 없다). 테스트가 import 성공과 차단을 구분하도록, 쓰기 허용 목록이 잠금·정확한 tmp 형식만 받도록 좁혔다.
+  - R4: 같은 계열(주석을 끼운 `process.binding`·`dlopen`·`require`)이 다시 나왔다 → 정적 검사를 **형태 추적에서 단어 규칙으로** 바꿔 계열 전체를 닫았다(§2.3). 그 밖에 CLI timeout 뒤 기존 파일 보존, 큰 정상 envelope 의 flush 를 테스트로 고정했다.

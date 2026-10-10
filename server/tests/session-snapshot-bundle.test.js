@@ -38,6 +38,27 @@ test('remote and local bytes, fixed argv, hash, permissions and atomic replaceme
   assert.equal(fs.statSync(f.out).mode & 0o777, 0o700);
   assert.deepEqual(fs.readdirSync(f.out), [remote.envelope.machine.id + '.json']);
 });
+test('large remote snapshot flushes its complete envelope before launcher exit', async t => {
+  const f = fixture(t);
+  const m = await api;
+  const count = 400;
+  const filename = path.join(f.home, '.claude/projects/s.jsonl');
+  const template = JSON.parse(fs.readFileSync(filename, 'utf8'));
+  const rows = Array.from({ length: count }, (_, index) => ({ ...template, uuid: 'u' + index,
+    message: { content: 'Synthetic instruction ' + index + ': ' + 'a '.repeat(850) } }));
+  fs.writeFileSync(filename, rows.map(JSON.stringify).join('\n') + '\n');
+  const bundle = m.buildBundle({ request: f.request });
+  const result = await m.runExecutor({ target: f.target, bundle,
+    sshBin: f.env.PALANTIR_OBSERVE_SSH_BIN, env: f.env });
+  t.diagnostic(JSON.stringify({ remoteStdoutBytes: result.stdout.length, expectedInstructions: count }));
+  assert.ok(result.stdout.length >= 512 * 1024);
+  const received = m.receiveEnvelope(result, { expectedKinds: ['snapshot'],
+    expectedReaderBuild: bundle.readerBuild });
+  assert.equal(received.ok, true, received.reason);
+  assert.equal(received.envelope.sessions.length, 1);
+  assert.equal(received.envelope.instructions.length, count);
+  assert.deepEqual(received.envelope.instructions.map(item => item.text), rows.map(row => row.message.content));
+});
 test('executor limits, failed outputs and stderr counting', async t => {
   const f = fixture(t);
   const m = await api;
@@ -115,6 +136,23 @@ test('manifest rejects every import token while current sources remain valid', a
   const good = await execute(f);
   exactSnapshot(good.envelope);
   for (const source of ["import /* c */ ('node:net')", "import\n('node:net')", 'import.meta']) {
+    await t.test(source, () => {
+      assert.throws(() => m.buildBundle({ request: f.request,
+        sourceOverrides: { 'scripts/lib/sessionSnapshotReader.cjs': source } }), { code: 'bundle_rejected' });
+    });
+  }
+});
+test('manifest word rules reject commented calls and require aliases while permitting prose', async t => {
+  const f = fixture(t);
+  const m = await api;
+  const good = await execute(f);
+  exactSnapshot(good.envelope);
+  assert.doesNotThrow(() => m.buildBundle({ request: f.request,
+    sourceOverrides: { 'scripts/lib/sessionSnapshotReader.cjs': '// we require charset detection' } }));
+  for (const source of ["process /* c */ .binding('natives')", "process/**/.dlopen(m, '/x.node')",
+    'require /* c */ (name)', "require\n('node:fs')", 'const r = require;', "require.resolve('x')",
+    "const r = require\nr('node:net')", "const r = require\r\nr('node:net')",
+    "module.require('node:fs')", "x.require('node:fs')"]) {
     await t.test(source, () => {
       assert.throws(() => m.buildBundle({ request: f.request,
         sourceOverrides: { 'scripts/lib/sessionSnapshotReader.cjs': source } }), { code: 'bundle_rejected' });
@@ -255,7 +293,7 @@ test('reader cannot bypass resolver through runtime closure or global require', 
   const good = await execute(f);
   exactSnapshot(good.envelope);
   for (const expression of ["nativeRequire('node:net')", "globalThis['req' + 'uire']('node:net')",
-    "Array.prototype.includes = function () { return true; }; const r = require; r('node:net')",
+    "Array.prototype.includes = function () { return true; }; const r = arguments[2]; r('node:net')",
     'arguments.callee.caller']) {
     await t.test(expression, async () => {
       const source = expression + "; process.stdout.write(JSON.stringify('BYPASS_MARKER') + '\\n');";
@@ -278,7 +316,7 @@ test('reader compiled in global scope cannot see registry or bundle source varia
     registry: typeof registry, cache: typeof cache, native: typeof nativeRequire,
     globalModule: typeof globalThis.module, globalExports: typeof globalThis.exports,
     filename: typeof globalThis.__filename, dirname: typeof globalThis.__dirname,
-    functionRequire: new Function('return typeof require')() }) + '\\n');`;
+    functionRequire: new Function('return typeof req' + 'uire')() }) + '\\n');`;
   const response = await execute(f, f.request, {}, { 'scripts/lib/sessionSnapshotReader.cjs': source });
   assert.deepEqual(response.envelope, { sources: 'undefined', registry: 'undefined', cache: 'undefined',
     native: 'undefined', globalModule: 'undefined', globalExports: 'undefined',

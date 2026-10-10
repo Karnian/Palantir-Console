@@ -10,10 +10,23 @@ function args(f, extra = []) {
   return ['remote', '--host', 'synthetic@host', 'snapshot', '--now', NOW,
     '--out-dir', f.out, '--orca-bin', f.request.orca_bin, ...extra];
 }
-async function invoke(f, argv, input = '', env = f.env, executorSpawn) {
+async function invoke(f, argv, input = '', env = f.env, executorSpawn, timeoutMs) {
   const io = capture(input, executorSpawn);
-  const code = await (await cli).main(argv, { ...io, env });
-  return { ...io, code };
+  let timeoutKills = 0;
+  if (timeoutMs !== undefined) {
+    const originalSpawn = io.spawnImpl;
+    io.spawnImpl = (...args) => {
+      const child = originalSpawn(...args);
+      const originalKill = child.kill.bind(child);
+      child.kill = (...signals) => { timeoutKills++; return originalKill(...signals); };
+      // Bound regression runs even when main ignores timeoutMs.
+      const watchdog = setTimeout(() => originalKill('SIGKILL'), 3000);
+      child.once('close', () => clearTimeout(watchdog));
+      return child;
+    };
+  }
+  const code = await (await cli).main(argv, { ...io, env, timeoutMs });
+  return { ...io, code, timeoutKills };
 }
 async function initialize(f) {
   const result = await invoke(f, args(f));
@@ -42,13 +55,15 @@ function exclusionArgs(f) {
 test('CLI writes a snapshot and preserves exact existing bytes on every rejected response', async t => {
   const f = fixture(t);
   const initial = await initialize(f);
-  for (const mode of ['flood', 'exit3', 'envelope_then_exit3', 'two_envelopes', 'garbage', 'unsanitized',
+  for (const mode of ['hang', 'flood', 'exit3', 'envelope_then_exit3', 'two_envelopes', 'garbage', 'unsanitized',
     'build_mismatch', 'status_bad_code', 'status_bad_counts']) {
-    const result = await invoke(f, args(f), '', { ...f.env, FAKE_SSH_MODE: mode });
+    const result = await invoke(f, args(f), '', { ...f.env, FAKE_SSH_MODE: mode },
+      undefined, mode === 'hang' ? 100 : undefined);
     assert.equal(result.code, 1, mode);
     assert.equal((result.output() + result.errors()).includes('UNTRUSTED_SENTINEL'), false);
     assert.deepEqual(fs.readFileSync(initial.file), initial.bytes);
     assert.deepEqual(fs.readdirSync(f.out), [path.basename(initial.file)]);
+    if (mode === 'hang') assert.equal(result.timeoutKills, 1);
   }
   const noisy = await invoke(f, args(f), '', { ...f.env, FAKE_ORCA_STDERR: 'ORCA_SENTINEL' });
   assert.equal(noisy.code, 0);

@@ -78,7 +78,7 @@ async function readAnswer(stdin) {
   return '';
 }
 export async function main(argv, { stdin = process.stdin, stdout = process.stdout, stderr = process.stderr,
-  env = process.env, spawnImpl } = {}) {
+  env = process.env, spawnImpl, timeoutMs = 120000 } = {}) {
   let options;
   try {
     options = parseArguments(argv, env);
@@ -88,7 +88,7 @@ export async function main(argv, { stdin = process.stdin, stdout = process.stdou
   } catch (error) { stderr.write((error.code || 'request_invalid') + '\n'); return 2; }
   async function execute(request, expectedKinds) {
     const bundle = buildBundle({ request });
-    const result = await runExecutor({ ...options, bundle, env, spawnImpl });
+    const result = await runExecutor({ ...options, bundle, env, spawnImpl, timeoutMs });
     return receiveEnvelope(result, { expectedKinds, expectedReaderBuild: bundle.readerBuild });
   }
   try {
