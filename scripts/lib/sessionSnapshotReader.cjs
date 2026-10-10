@@ -336,8 +336,11 @@ function listFiles(root, providerCoverage, budget) {
   return result;
 }
 
-// Spec §1.1/§2: slash display is independent of the legacy text used for content identity.
-function formatClaudeSlashText(text) {
+// Spec §1.1/§2: wrapper-only display preserves classification and content identity.
+function formatCommandWrapperText(text) {
+  if (text.replace(/<command-(name|message|args)>[\s\S]*?<\/command-\1>/g, '').trim()) {
+    return text;
+  }
   const name = text.match(/<command-name>([\s\S]*?)<\/command-name>/)?.[1]
     ?? text.match(/<command-message>([\s\S]*?)<\/command-message>/)?.[1];
   if (name === undefined) {
@@ -382,7 +385,7 @@ function classifyClaudeRecord(record) {
     return {
       kind: 'slash',
       text: [name, args].filter(Boolean).join(' '),
-      displayText: formatClaudeSlashText(text),
+      displayText: formatCommandWrapperText(text),
       attachments
     };
   }
@@ -1027,8 +1030,7 @@ function buildSnapshotSession(config, parsedSession, key, kept) {
 }
 
 function buildSnapshotInstruction(instruction, key, index) {
-  const text = instruction.kind === 'slash'
-    ? instruction.displayText ?? formatClaudeSlashText(instruction.text) : instruction.text;
+  const text = instruction.displayText ?? formatCommandWrapperText(instruction.text);
   const finalizedText = snapshotPolicy.finalizeText(text);
   return {
     id: instruction.id,

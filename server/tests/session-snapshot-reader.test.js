@@ -279,7 +279,7 @@ test('Claude ordered decision table explicitly protects rows 4,6,7, queue and ti
   const snapshot = snapshotReader.runSnapshot(testFixture.options);
   assert.equal(snapshot.instructions.length, 7);
   assert.deepEqual(snapshot.instructions.map(instruction => instruction.text), [
-    'normal', '/good arg', '<command-name>/not-absent</command-name>',
+    'normal', '/good arg', '/not-absent',
     'echo safe', 'pasted safe', 'queued safe', ''
   ]);
   assert.equal(snapshot.instructions[2].kind, 'human');
@@ -1299,7 +1299,7 @@ test('review 3 human-origin command wrapper falls through to human while absent 
   assert.equal(snapshot.instructions[0].text, 'safe preserved');
   assert.equal(snapshot.instructions.length, 3);
   assert.deepEqual(snapshot.instructions.map(instruction => instruction.kind), ['human', 'human', 'slash']);
-  assert.equal(snapshot.instructions[1].text, '<command-name>/help</command-name>');
+  assert.equal(snapshot.instructions[1].text, '/help');
   assert.equal(snapshot.coverage.claude.records_unknown, 1);
 });
 
@@ -2989,4 +2989,87 @@ test('PR1c E slash display changes preserve legacy fingerprints refs and registe
   const excluded = snapshotReader.runSnapshot(fixture.options);
   assert.equal(excluded.instructions.length, 2);
   assert.deepEqual(excluded.instructions.map(item => item.ref), [refs[0], refs[2]]);
+});
+
+// Spec §1.1/§2: display formatting must preserve human classification and content identity.
+test('PR1c correction 1 human command wrappers preserve legacy fingerprint ref and deletion identity', testContext => {
+  const fixture = createFixture(testContext);
+  const text = ' \n<command-message>ignored</command-message><command-name>///review</command-name>'
+    + '\n<command-args>scripts/lib</command-args>\t';
+  const record = claudeUserRecord(text, { uuid: 'human-wrapper' });
+  fixture.file('claude', 'human-wrapper', [record]);
+  const config = snapshotReader.loadConfig(fixture.options);
+  config.machine_id = 'fixture-machine';
+  config.local_key = 'b'.repeat(64);
+  config.key_fingerprint = crypto.createHash('sha256').update(config.local_key).digest('hex');
+  fixture.save(config);
+  const internals = loadReaderWithInternals();
+  const coverage = Object.fromEntries(snapshotPolicy.COVERAGE_KEYS.claude.map(key => [key, 0]));
+  const parsed = internals.parseFile('claude', [record], coverage);
+  assert.equal(parsed.items.length, 1);
+  const instruction = parsed.items[0];
+  assert.equal(instruction.kind, 'human');
+  assert.equal(instruction.text, text);
+  instruction.fp = internals.computeInstructionFingerprint(config, instruction);
+  assert.equal(instruction.fp, '09ba6cf30247bdc65057edb2e3df860bc83976aa2f092014760f724bf1be8f14');
+  const ref = '230bb5cd26e1217d';
+  assert.equal(internals.computeInstructionRef(config, instruction), ref);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.instructions.length, 1);
+  assert.equal(snapshot.instructions[0].id, 'claude:s:uhuman-wrapper');
+  assert.equal(snapshot.instructions[0].kind, 'human');
+  assert.equal(snapshot.instructions[0].ref, ref);
+  assert.equal(snapshot.instructions[0].text, '/review scripts/lib');
+  const target = { kind: 'instruction', instrId: 'claude:s:uhuman-wrapper', ref };
+  const preview = snapshotReader.excludeQuery({ ...fixture.options, target });
+  assert.equal(snapshotReader.excludeCommit({ ...fixture.options, target, token: preview.token }).counts.registered, 1);
+  assert.equal(snapshotReader.runSnapshot(fixture.options).instructions.length, 0);
+});
+
+test('PR1c correction 1 human wrapper-only text accepts every order and sanitizes command arguments', testContext => {
+  const fixture = createFixture(testContext);
+  const tags = ['<command-name>/review</command-name>', '<command-message>ignored</command-message>',
+    '<command-args>scripts/lib</command-args>'];
+  const orders = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+  const records = orders.map((order, index) => claudeUserRecord(
+    ' \n' + order.map(tagIndex => tags[tagIndex]).join('\n') + ' \t', { uuid: `human-${index}` }));
+  records.push(claudeUserRecord(
+    `<command-message>review</command-message><command-args>${SECRET_SENTINEL}</command-args>`,
+    { uuid: 'human-secret' }));
+  fixture.file('claude', 'orders', records);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.instructions.length, 7);
+  assert.deepEqual(snapshot.instructions.map(item => item.kind), records.map(() => 'human'));
+  assert.deepEqual(snapshot.instructions.map(item => item.text), [
+    ...orders.map(() => '/review scripts/lib'), '/review [REDACTED]'
+  ]);
+  assert.equal(snapshot.instructions.at(-1).redacted, true);
+  assert.equal(JSON.stringify(snapshot).includes(SECRET_SENTINEL), false);
+  for (const item of snapshot.instructions) {
+    assert.equal(snapshotPolicy.finalizeText(item.text).value, item.text);
+  }
+});
+
+test('PR1c correction 1 wrappers with outside text preserve the original display for human and slash', testContext => {
+  const fixture = createFixture(testContext);
+  const wrapper = '<command-message>review</command-message><command-name>/review</command-name>'
+    + '<command-args>scripts/lib</command-args>';
+  const cases = [
+    [wrapper + ' Please also check tests.', 'human'],
+    ['Please also check tests. ' + wrapper, 'human'],
+    ['<command-message>review</command-message> Please also check tests.'
+      + '<command-name>/review</command-name><command-args>scripts/lib</command-args>', 'human'],
+    [wrapper + '<other>extra</other>', 'human'],
+    [wrapper + '<command-args>unfinished', 'human'],
+    [wrapper + ' Please also check tests.', 'slash'],
+    ['<command-message>review</command-message> Please also check tests.'
+      + '<command-name>/review</command-name><command-args>scripts/lib</command-args>', 'slash']
+  ];
+  fixture.file('claude', 'outside', cases.map(([text, kind], index) => claudeUserRecord(text, {
+    uuid: `outside-${index}`, origin: kind === 'human' ? { kind: 'human' } : undefined
+  })));
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.instructions.length, cases.length);
+  assert.deepEqual(snapshot.instructions.map(item => item.kind), cases.map(([, kind]) => kind));
+  assert.deepEqual(snapshot.instructions.map(item => item.text), cases.map(([text]) => text));
 });
