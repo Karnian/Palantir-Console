@@ -1111,7 +1111,8 @@ function createApp(options = {}) {
   const observeDir = options.observeSnapshotDir === undefined
     ? process.env.PALANTIR_OBSERVE_SNAPSHOT_DIR
     : options.observeSnapshotDir;
-  const observeState = sealObserveState({ dir: observeDir, authToken });
+  const publicDir = path.join(__dirname, 'public');
+  const observeState = sealObserveState({ dir: observeDir, authToken, publicDir });
   if (observeDir && !observeState.on) console.warn(observeState.code);
   const actorTokenOptions = {
     actorTokenSource: options.actorTokenSource,
@@ -1805,10 +1806,16 @@ function createApp(options = {}) {
     res.setHeader('Referrer-Policy', 'no-referrer');
     next();
   });
-  const serveStatic = express.static(path.join(__dirname, 'public'));
+  const serveStatic = express.static(publicDir);
   app.use(function servePublic(req, res, next) {
-    // Spec §5.3: rejected observe IDs must not trigger static-file probes either.
-    if (/^\/api\/observe(?:\/|$)/i.test(req.path)) return next();
+    // Spec §5.2/§5.3: static serving must not probe any decoded API path.
+    let decoded;
+    try {
+      decoded = path.posix.normalize(decodeURIComponent(req.path));
+    } catch {
+      return next();
+    }
+    if (/^\/api(?:\/|$)/i.test(decoded)) return next();
     return serveStatic(req, res, next);
   });
 

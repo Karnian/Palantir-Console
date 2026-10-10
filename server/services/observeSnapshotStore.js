@@ -12,12 +12,17 @@ function offState(code) {
 }
 
 // Spec §5.1: seal once; requests never change the activation decision.
-function sealObserveState({ dir, authToken, uid = process.getuid?.() }) {
+function sealObserveState({
+  dir, authToken, uid = process.getuid?.(), publicDir = path.join(__dirname, '..', 'public'),
+}) {
   if (!dir) return offState('observe_dir_unset');
   if (!authToken) return offState('observe_auth_off');
   try {
     if (!path.isAbsolute(dir) || fs.realpathSync(dir) !== dir) return offState('observe_root_invalid');
     const root = dir;
+    const relative = path.relative(fs.realpathSync(publicDir), root);
+    if (relative === '' || (!path.isAbsolute(relative) && relative !== '..'
+      && !relative.startsWith(`..${path.sep}`))) return offState('observe_root_invalid');
     const stat = fs.statSync(root);
     if (!stat.isDirectory()) return offState('observe_root_invalid');
     if (uid === undefined || stat.uid !== uid) return offState('observe_root_owner');

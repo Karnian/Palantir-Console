@@ -102,12 +102,14 @@ endpoint 오류는 고정 코드만 돌려준다.
 | 401 | `authentication_required` (observe 무인증) |
 | 403 | `cookie auth required`, `authentication_failed` |
 | 404 | `observe_off`, `not_found`, `route_not_found` (GET 외 메서드 포함) |
-| 413 | `too_large` (파일 16MB), `total_limit` (목록 읽기 합계 64MB 또는 대상 파일 256개 초과) |
+| 413 | 상세의 `too_large` (단일 파일 16MB 초과), 목록 전체의 `total_limit` (대상 파일 256개 초과) |
 | 422 | `symlink`, `not_regular`, `identity_mismatch`, `parse_error`, `policy_violation` |
 | 503 | `observe_root_changed`, `read_error` |
 | 500 | `internal_error` |
 
 목록은 200 안에 실패 항목의 `{name_id, error_code}`를 포함할 수 있다.
+목록 읽기 합계 64MB 초과는 전체 200을 유지하고 해당 항목에 `total_limit`을 표시한다.
+목록의 단일 파일 16MB 초과도 항목의 `too_large`로 표시한다. 파일 수 256개 초과만 목록 전체 413이다.
 루트 변경은 상태를 바꾸지 않고 503으로 거부한다. 원래 실제 디렉터리를 복원하거나 설정을 고쳐 재시작한다.
 
 ## 평가 종료

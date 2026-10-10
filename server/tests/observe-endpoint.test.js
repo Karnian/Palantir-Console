@@ -14,7 +14,8 @@ const { validateSnapshot, SNAPSHOT_LIMITS } = require('../services/observeSnapsh
 const {
   sealObserveState, listSnapshots, readSnapshot, createObserveSnapshotStore, STORE_LIMITS,
 } = require('../services/observeSnapshotStore');
-const { ERROR_STATUS } = require('../routes/observe');
+const { ERROR_STATUS, observeErrorHandler } = require('../routes/observe');
+const { AppError } = require('../utils/errors');
 
 const TOKEN = 'observe-human-fixture';
 const PM_TOKEN = 'observe-pm-fixture';
@@ -851,5 +852,106 @@ test('endpoint: R1 safe IDs, file count boundary and exact filename status are e
     assertError(result, 422, 'not_regular');
   } finally {
     fs.openSync = originalOpen;
+  }
+});
+
+test('store: R2 public root and descendants cannot be sealed on', (t) => {
+  const fx = fixture(t);
+  const publicDir = path.join(fx.root, 'public');
+  const nested = path.join(publicDir, 'api', 'observe', 'snapshots');
+  fs.mkdirSync(nested, { recursive: true, mode: 0o700 });
+  fs.chmodSync(publicDir, 0o700);
+  const options = { authToken: TOKEN, publicDir };
+  assert.equal(sealObserveState({ ...options, dir: fx.dir }).on, true);
+  for (const dir of [publicDir, nested]) {
+    assert.deepEqual(sealObserveState({ ...options, dir }),
+      { on: false, code: 'observe_root_invalid', root: null });
+  }
+  const sibling = `${publicDir}-private`;
+  fs.mkdirSync(sibling, { mode: 0o700 });
+  assert.equal(sealObserveState({ ...options, dir: sibling }).on, true);
+  const alias = path.join(fx.root, 'public-link');
+  fs.symlinkSync(publicDir, alias);
+  assert.equal(sealObserveState({ ...options, publicDir: alias, dir: nested }).code, 'observe_root_invalid');
+});
+
+test('boot: R2 createApp supplies the static public root to sealing', (t) => {
+  const fx = fixture(t);
+  const publicDir = path.join(__dirname, '..', 'public');
+  const realpath = fs.realpathSync;
+  let publicChecks = 0;
+  const warn = console.warn;
+  const warnings = [];
+  try {
+    fs.realpathSync = function mapPublicRoot(filename, ...args) {
+      if (filename === publicDir) {
+        publicChecks++;
+        return fx.root;
+      }
+      return realpath(filename, ...args);
+    };
+    console.warn = function captureWarning(code) { warnings.push(code); };
+    makeApp(fx);
+    assert.ok(publicChecks > 0);
+    assert.deepEqual(warnings, ['observe_root_invalid']);
+  } finally {
+    fs.realpathSync = realpath;
+    console.warn = warn;
+  }
+});
+
+test('endpoint: R2 encoded API paths never probe static files on or off', async (t) => {
+  const fx = fixture(t);
+  const apps = [makeApp(fx), makeApp(fx, { observeSnapshotDir: null })];
+  const spy = spyFs(['stat', 'open', 'createReadStream', 'statSync', 'openSync', 'lstatSync',
+    'realpathSync', 'readdirSync', 'readSync', 'readFile', 'readFileSync']);
+  try {
+    for (const app of apps) {
+      const script = await request(app).get('/app.js');
+      assert.equal(script.status, 200);
+      assert.ok(script.text.length > 0);
+      assert.ok(spy.calls.stat > 0);
+      assert.ok(spy.calls.open > 0);
+      assert.ok(spy.calls.createReadStream > 0);
+      for (const url of ['/api/%6fbserve/snapshots/x.json', '/API/observe/snapshots/x.json',
+        '/api/obs%65rve/snapshots/x.json', '/%61pi/observe/snapshots/x.json',
+        '/%2fapi%2fobserve/snapshots/x.json', '/prefix%2f..%2fapi/observe/snapshots/x.json',
+        '/api/observe/snapshots/%GG']) {
+        spy.reset();
+        const response = await request(app).get(url);
+        assert.notEqual(response.status, 200);
+        for (const [name, count] of Object.entries(spy.calls)) assert.equal(count, 0, `${url}: ${name}`);
+      }
+    }
+  } finally {
+    spy.restore();
+  }
+});
+
+test('route: R2 ID decoding errors require cookie auth before returning 400', () => {
+  for (const error of [new URIError('fixture'), new AppError('invalid_machine_id', 400)]) {
+    const response = {
+      headersSent: false,
+      set: function setHeader() { return this; },
+      status: function setStatus(status) { this.statusCode = status; return this; },
+      json: function setBody(body) { this.body = body; return this; },
+    };
+    observeErrorHandler(error, { auth: { method: 'cookie' } }, response);
+    assert.equal(response.statusCode, 400);
+    for (const method of ['bearer', 'worker', 'none']) {
+      observeErrorHandler(error, { auth: { method } }, response);
+      assert.equal(response.statusCode, 403);
+      assert.deepEqual(response.body, { error: 'cookie auth required', reason: 'cookie auth required' });
+    }
+  }
+});
+
+test('endpoint: R2 malformed ID is 400 for cookies and 403 for human and PM bearer', async (t) => {
+  const fx = fixture(t);
+  const app = makeApp(fx);
+  const url = `${LIST}/%GG`;
+  assertError(await cookieGet(app, url), 400, 'invalid_machine_id');
+  for (const token of [TOKEN, PM_TOKEN]) {
+    assertError(await request(app).get(url).set('Authorization', `Bearer ${token}`), 403, 'cookie auth required');
   }
 });
