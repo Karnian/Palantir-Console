@@ -2383,7 +2383,8 @@ function loadReaderWithInternals() {
   loaded.filename = filename;
   const source = fs.readFileSync(filename, 'utf8');
   loaded._compile(source + '\nmodule.exports.testInternals = '
-    + '{ listFiles, summarizeTranscriptFile, groupTranscriptFiles };', filename);
+    + '{ listFiles, summarizeTranscriptFile, groupTranscriptFiles, parseFile, '
+    + 'computeInstructionFingerprint, computeInstructionRef, buildSnapshotInstruction };', filename);
   return loaded.exports.testInternals;
 }
 
@@ -2848,4 +2849,144 @@ test('PR1c D bare arrays and legacy Orca field names retain their previous proje
   assert.equal(snapshot.coverage.orca.state, 'ok');
   assert.equal(snapshot.orca.worktrees[0].live_terminals, 7);
   assert.equal(snapshot.sessions[0].orca_link.terminal_handle, 'h');
+});
+
+// Spec §1.1: title selection follows file order, independently of instruction timestamps.
+test('PR1c E timestamp-less AI titles use the last string in file order', testContext => {
+  const fixture = createFixture(testContext);
+  fixture.file('claude', 'titles', [
+    { type: 'ai-title', aiTitle: 'earlier title', sessionId: 's' },
+    claudeUserRecord('instruction'),
+    { type: 'ai-title', aiTitle: 'last title', sessionId: 's' },
+    { type: 'ai-title', aiTitle: 42, sessionId: 's' },
+    { type: 'ai-title', aiTitle: { text: 'invalid title' }, sessionId: 's' }
+  ]);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.sessions.length, 1);
+  assert.equal(snapshot.instructions.length, 1);
+  assert.equal(snapshot.sessions[0].ai_title, 'last title');
+});
+
+test('PR1c E timestamp-less AI titles retain the 200-character sanitized fixed point', testContext => {
+  const fixture = createFixture(testContext);
+  const title = `Research ${SECRET_SENTINEL} ` + 'x'.repeat(300);
+  fixture.file('claude', 'secret-title', [
+    claudeUserRecord('instruction'),
+    { type: 'ai-title', aiTitle: title, sessionId: 's' }
+  ]);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  const displayed = snapshot.sessions[0].ai_title;
+  assert.equal(typeof displayed, 'string');
+  assert.equal(displayed.length, 200);
+  assert.equal(displayed.startsWith('Research [REDACTED] '), true);
+  assert.equal(JSON.stringify(snapshot).includes(SECRET_SENTINEL), false);
+  assert.equal(snapshotPolicy.finalizeText(displayed, 200).value, displayed);
+});
+
+test('PR1c E absent or nonstring AI titles remain null', testContext => {
+  const fixture = createFixture(testContext);
+  fixture.file('claude', 'absent', [claudeUserRecord('no title', { sessionId: 'absent' })]);
+  fixture.file('claude', 'invalid', [
+    claudeUserRecord('invalid title', { sessionId: 'invalid' }),
+    { type: 'ai-title', aiTitle: 42, sessionId: 'invalid' }
+  ]);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.sessions.length, 2);
+  assert.deepEqual(snapshot.sessions.map(session => session.ai_title), [null, null]);
+});
+
+test('PR1c E slash display prefers command-name and sanitizes arguments after formatting', testContext => {
+  const fixture = createFixture(testContext);
+  const cases = [
+    ['<command-message>deep-research</command-message>', '/deep-research'],
+    ['<command-name>deep-research</command-name><command-message>ignored</command-message>'
+      + '<command-args></command-args>', '/deep-research'],
+    ['<command-message>ignored</command-message><command-args>scripts/lib</command-args>'
+      + '<command-name>///review</command-name>', '/review scripts/lib'],
+    ['<command-name>/review</command-name><command-args>scripts/lib</command-args>'
+      + '<command-message>ignored</command-message>', '/review scripts/lib'],
+    ['<command-message>review</command-message><command-args>scripts/lib</command-args>', '/review scripts/lib'],
+    [`<command-message>review</command-message><command-args>${SECRET_SENTINEL}</command-args>`,
+      '/review [REDACTED]']
+  ];
+  fixture.file('claude', 'slash', cases.map(([text], index) => claudeUserRecord(text, {
+    uuid: `slash-${index}`, origin: undefined
+  })));
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.sessions.length, 1);
+  assert.equal(snapshot.instructions.length, cases.length);
+  assert.deepEqual(snapshot.instructions.map(item => item.kind), cases.map(() => 'slash'));
+  assert.deepEqual(snapshot.instructions.map(item => item.text), cases.map(([, expected]) => expected));
+  assert.equal(snapshot.instructions.at(-1).redacted, true);
+  assert.equal(JSON.stringify(snapshot).includes(SECRET_SENTINEL), false);
+  for (const item of snapshot.instructions) {
+    assert.equal(snapshotPolicy.finalizeText(item.text).value, item.text);
+  }
+});
+
+test('PR1c E already-classified slash display accepts every tag order and preserves tagless text', () => {
+  const { buildSnapshotInstruction } = loadReaderWithInternals();
+  const tags = ['<command-name>/review</command-name>', '<command-message>ignored</command-message>',
+    '<command-args>scripts/lib</command-args>'];
+  const orders = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+  const instruction = { id: 'claude:s:uone', ts: RECORD_TIMESTAMP, kind: 'slash', attachments: 0,
+    ref: '0'.repeat(16) };
+  for (const order of orders) {
+    const text = order.map(index => tags[index]).join('\n');
+    const displayed = buildSnapshotInstruction({ ...instruction, text }, 'session-key', 0);
+    assert.equal(displayed.kind, 'slash');
+    assert.equal(displayed.text, '/review scripts/lib');
+  }
+  const text = '/legacy scripts/lib';
+  assert.equal(buildSnapshotInstruction({ ...instruction, text }, 'session-key', 0).text, text);
+});
+
+// Spec §2/§3: frozen pre-E fingerprints and refs preserve existing board deletion targets.
+test('PR1c E slash display changes preserve legacy fingerprints refs and registered exclusions', testContext => {
+  const fixture = createFixture(testContext);
+  const texts = [
+    '<command-message>deep-research</command-message><command-name>/deep-research</command-name>'
+      + '<command-args></command-args>',
+    '<command-message>review</command-message><command-args>scripts/lib</command-args>'
+      + '<command-name>///review</command-name>',
+    `<command-message>review</command-message><command-args>${SECRET_SENTINEL}</command-args>`
+  ];
+  const records = texts.map((text, index) => claudeUserRecord(text, { uuid: `slash-${index}`, origin: undefined }));
+  fixture.file('claude', 'identity', records);
+  const config = snapshotReader.loadConfig(fixture.options);
+  config.machine_id = 'fixture-machine';
+  config.local_key = 'b'.repeat(64);
+  config.key_fingerprint = crypto.createHash('sha256').update(config.local_key).digest('hex');
+  fixture.save(config);
+  const internals = loadReaderWithInternals();
+  const coverage = Object.fromEntries(snapshotPolicy.COVERAGE_KEYS.claude.map(key => [key, 0]));
+  const parsed = internals.parseFile('claude', records, coverage);
+  assert.equal(parsed.items.length, 3);
+  const fingerprints = [
+    '4ef6c039330c29a8d356506f85ba1e55f5fe215bea725b8d051d9d0474197177',
+    'd9eeeef2c1906e74d481c23fb031a4b0e164b730f2a9cc0da8f5f2f229da8572',
+    '4048bb79b0e935da8f75be561104cff749885406cba0b282f43a106d3fd91bef'
+  ];
+  const refs = ['0d41f97426049275', 'c86dd5f327d369d9', 'a7d9b3a58fa39071'];
+  const legacyTexts = ['/deep-research', '///review scripts/lib', `review ${SECRET_SENTINEL}`];
+  for (const [index, instruction] of parsed.items.entries()) {
+    assert.equal(instruction.text, legacyTexts[index]);
+    instruction.fp = internals.computeInstructionFingerprint(config, instruction);
+    assert.equal(instruction.fp, fingerprints[index]);
+    assert.equal(internals.computeInstructionRef(config, instruction), refs[index]);
+  }
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.instructions.length, 3);
+  assert.deepEqual(snapshot.instructions.map(item => item.ref), refs);
+  assert.deepEqual(snapshot.instructions.map(item => item.text), [
+    '/deep-research', '/review scripts/lib', '/review [REDACTED]'
+  ]);
+  const target = { kind: 'instruction', instrId: 'claude:s:uslash-1', ref: refs[1] };
+  const preview = snapshotReader.excludeQuery({ ...fixture.options, target });
+  assert.equal(preview.preview, legacyTexts[1]);
+  const result = snapshotReader.excludeCommit({ ...fixture.options, target, token: preview.token });
+  assert.equal(result.counts.registered, 1);
+  const excluded = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(excluded.instructions.length, 2);
+  assert.deepEqual(excluded.instructions.map(item => item.ref), [refs[0], refs[2]]);
 });

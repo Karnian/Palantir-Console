@@ -336,6 +336,17 @@ function listFiles(root, providerCoverage, budget) {
   return result;
 }
 
+// Spec §1.1/§2: slash display is independent of the legacy text used for content identity.
+function formatClaudeSlashText(text) {
+  const name = text.match(/<command-name>([\s\S]*?)<\/command-name>/)?.[1]
+    ?? text.match(/<command-message>([\s\S]*?)<\/command-message>/)?.[1];
+  if (name === undefined) {
+    return text;
+  }
+  const args = text.match(/<command-args>([\s\S]*?)<\/command-args>/)?.[1] || '';
+  return '/' + name.trim().replace(/^\/+/, '') + (args ? ' ' + args : '');
+}
+
 // Spec §1.1: first matching row wins; output and origin conflicts precede slash/shell wrappers.
 function classifyClaudeRecord(record) {
   const content = record.message?.content;
@@ -371,6 +382,7 @@ function classifyClaudeRecord(record) {
     return {
       kind: 'slash',
       text: [name, args].filter(Boolean).join(' '),
+      displayText: formatClaudeSlashText(text),
       attachments
     };
   }
@@ -602,7 +614,7 @@ function parseFile(provider, records, providerCoverage) {
       }
       if (record.type === 'ai-title') {
         const entry = record.aiTitle ?? record.title;
-        if (timestamp && typeof entry === 'string') {
+        if (typeof entry === 'string') {
           title = entry;
         }
         continue;
@@ -1015,7 +1027,9 @@ function buildSnapshotSession(config, parsedSession, key, kept) {
 }
 
 function buildSnapshotInstruction(instruction, key, index) {
-  const finalizedText = snapshotPolicy.finalizeText(instruction.text);
+  const text = instruction.kind === 'slash'
+    ? instruction.displayText ?? formatClaudeSlashText(instruction.text) : instruction.text;
+  const finalizedText = snapshotPolicy.finalizeText(text);
   return {
     id: instruction.id,
     session_key: key,
@@ -1023,8 +1037,8 @@ function buildSnapshotInstruction(instruction, key, index) {
     ts: instruction.ts,
     kind: instruction.kind,
     text: finalizedText.value,
-    text_missing: !instruction.text,
-    truncated: instruction.text.length > 2000,
+    text_missing: !text,
+    truncated: text.length > 2000,
     redacted: finalizedText.redacted,
     attachments: instruction.attachments,
     unknown_blocks: instruction.unknown_blocks || 0,
