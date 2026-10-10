@@ -46,17 +46,32 @@ test('card conversion preserves exact instructions, recent/first, omission and a
   assert.equal(cards[0].instructions.length, 2);
   assert.equal(cards[0].recent, '로그인 리다이렉트 테스트를 추가해 주세요.');
   assert.equal(cards[0].first, '인증 흐름을 검토해 주세요.');
-  assert.equal(cards[0].omitFirst, false);
+  assert.equal(cards[0].title, '합성 세션 검토');
+  assert.equal(cards[0].titleSource, 'ai');
+  assert.equal(cards[0].showFirst, true);
+  assert.equal(cards[0].recentAt, alpha.instructions[1].ts);
+  assert.equal(cards[0].omitRecent, false);
   assert.equal(cards[0].agent.state, 'waiting');
   const one = structuredClone(alpha);
   one.instructions = one.instructions.slice(0, 1);
-  assert.equal(snapshotCards(one)[0].omitFirst, true);
+  assert.equal(snapshotCards(one)[0].omitRecent, true);
+  one.sessions[0].ai_title = null;
+  const fallback = snapshotCards(one)[0];
+  assert.equal(fallback.title, '인증 흐름을 검토해 주세요.');
+  assert.equal(fallback.titleSource, 'first');
+  assert.equal(fallback.showFirst, false);
+  one.sessions[0].ai_title = '';
+  assert.equal(snapshotCards(one)[0].title, '인증 흐름을 검토해 주세요.');
+  assert.equal(snapshotCards(one)[0].showFirst, false);
   for (const state of ['unrecoverable', 'unknown']) {
     one.sessions[0].first_instruction = state;
     const card = snapshotCards(one)[0];
     assert.equal(card.first_instruction, state);
     assert.equal(card.first, null);
-    assert.equal(card.omitFirst, false);
+    assert.equal(card.title, null);
+    assert.equal(card.titleSource, 'first');
+    assert.equal(card.showFirst, false);
+    assert.equal(card.omitRecent, false);
   }
 });
 
@@ -229,7 +244,8 @@ test('DOM preserves XSS instruction/title/repo as text, timeline flags and selec
   assert.equal(cards.length, 2);
   assert.equal(cards[0].querySelector('.work-recent').textContent, attack);
   assert.equal(cards[0].querySelector('.work-repo').textContent, attack);
-  assert.ok(cards[0].textContent.includes(`AI 제목: ${attack}`));
+  assert.equal(cards[0].querySelector('.work-title').textContent, attack);
+  assert.equal(cards[0].querySelector('.work-title').previousElementSibling.textContent, 'AI 제목');
   assert.ok(env.document.querySelector('.work-coverage').textContent.includes('읽지 못한 스냅샷'));
   assert.equal(env.document.querySelectorAll('img, script').length, 0);
   assert.equal(env.document.querySelectorAll('[onerror]').length, 0);
@@ -380,8 +396,102 @@ test('coverage aggregates every board counter and renders machine totals with Ko
   ]);
   assert.deepEqual(rows, [
     ['스캔', '11'], ['건너뜀', '2'], ['읽기 실패', '10'], ['세션 제외', '14'], ['지시 삭제', '16'],
-    ['판별 불명', '18'], ['미검증', '20'], ['exec 제외', '14'], ['보류', '36'], ['Orca', '수집됨'],
+    ['판별 불명', '18'], ['미검증', '20'], ['exec 제외', '14'], ['보류', '36'],
+    ['형식 미검증 세션', '2'], ['Orca', '수집됨'],
   ]);
-  assert.ok(root.querySelector('.work-snapshot-times').textContent.includes('2026-10-10 03:00:00 UTC'));
-  assert.equal(root.querySelector('.work-snapshot-times').textContent.includes('01:00:00'), false);
+  const { formatLocalSnapshotTime } = await logic;
+  const snapshotTime = root.querySelector('.work-snapshot-times').textContent;
+  assert.ok(snapshotTime.includes(formatLocalSnapshotTime(alpha.generated_at)));
+  assert.equal(snapshotTime.includes(formatLocalSnapshotTime('2026-10-10T01:00:00.000Z')), false);
+});
+
+test('local absolute time follows browser timezone and omits only the local current year', async () => {
+  const { execFileSync } = require('node:child_process');
+  const moduleUrl = `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
+  for (const [timezone, expected] of [
+    ['Asia/Seoul', ['10/10 18:02', '2025/12/31 00:00', '01/01 03:30', null]],
+    ['America/Los_Angeles', ['10/10 02:02', '2025/12/30 07:00', '2025/12/31 10:30', null]],
+  ]) {
+    const script = `import(${JSON.stringify(moduleUrl)}).then(({formatLocalSnapshotTime: format}) => {
+      const now = Date.parse('2026-10-10T12:00:00.000Z');
+      console.log(JSON.stringify(['2026-10-10T09:02:00.000Z', '2025-12-30T15:00:00.000Z',
+        '2025-12-31T18:30:00.000Z', 'invalid'].map(value => format(value, now))));
+    });`;
+    const output = execFileSync(process.execPath, ['-e', script], {
+      env: { ...process.env, TZ: timezone }, encoding: 'utf8',
+    });
+    assert.deepEqual(JSON.parse(output), expected);
+  }
+});
+
+test('normal and search cards share title rules, omit duplicate rows and limit warnings', async t => {
+  const { alpha } = fixtures(t);
+  const env = boardEnv(t), root = env.document.getElementById('root');
+  env.context.Date = class extends Date { static now() { return Date.parse('2026-10-10T03:00:00.000Z'); } };
+  const cases = [
+    { ai: '인증 설계 검토', state: 'recoverable', title: '인증 설계 검토', first: true },
+    { ai: null, state: 'recoverable', title: '인증 흐름을 검토해 주세요.', first: false },
+    { ai: null, state: 'unrecoverable', title: '최초 지시 복구 불가', first: false },
+    { ai: null, state: 'unknown', title: '최초 지시 복구 여부 불명', first: false },
+    { ai: '인증 설계 검토', state: 'recoverable', title: '인증 설계 검토', first: true, same: true },
+    { ai: null, state: 'recoverable', title: '인증 흐름을 검토해 주세요.', first: false, same: true },
+  ];
+  for (const variant of cases) {
+    const snapshot = structuredClone(alpha);
+    snapshot.sessions = snapshot.sessions.slice(0, 1);
+    snapshot.instructions = snapshot.instructions.slice(0, 2);
+    Object.assign(snapshot.sessions[0], {
+      ai_title: variant.ai, first_instruction: variant.state,
+      format_unverified: true, compact_only_history: true, unknown_count: 1,
+      orca_link: { confirmed: false, evidence: 'none', pane_key: null, terminal_handle: null },
+    });
+    if (variant.same) snapshot.instructions[1].text = snapshot.instructions[0].text;
+    env.context.apiFetch = async url => url.endsWith('/snapshots') ? { snapshots: [{
+      machine_id: 'alpha', machine_label: 'Mac', generated_at: snapshot.generated_at,
+    }] } : snapshot;
+    env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
+    const card = root.querySelector('.work-card');
+    assert.equal(root.querySelectorAll('.work-card').length, 1);
+    assert.equal(card.querySelector('.work-title').textContent, variant.title);
+    assert.equal(card.querySelectorAll('.work-first-block').length, variant.first ? 1 : 0);
+    assert.equal(card.querySelectorAll('.work-recent-block').length, variant.same ? 0 : 1);
+    if (!variant.same) {
+      assert.equal(card.querySelector('.work-recent').textContent,
+        '로그인 리다이렉트 테스트를 추가해 주세요.');
+      assert.equal(card.querySelector('.work-recent-block .work-label').textContent.trim(),
+        '최근 지시 · 59분 전');
+    }
+    assert.deepEqual(Array.from(card.querySelectorAll('.work-warning'), node => node.textContent.trim()),
+      ['compact 이력', '판별 불명 1/3']);
+    assert.equal(card.textContent.includes('형식 미검증'), false);
+    assert.equal(card.querySelectorAll('.work-orca').length, 0);
+    assert.equal(card.textContent.includes('스냅샷 시점 관측'), false);
+    assert.equal(card.textContent.includes('Orca 연결 불명'), false);
+    assert.equal(root.querySelectorAll('.work-observation-note').length, 1);
+    const coverage = root.querySelector('.work-coverage');
+    assert.ok(coverage.textContent.includes('형식 미검증 세션1'));
+    const pill = root.querySelector('.work-snapshot-times .work-pill');
+    assert.ok(pill.textContent.trim().startsWith('Mac · 방금 스냅샷 · '));
+    if (variant.state === 'recoverable') {
+      const query = root.querySelector('#work-query');
+      query.value = variant.same ? '인증흐름' : '로그인리다';
+      query.dispatchEvent(new env.window.Event('input', { bubbles: true })); await flushEffects();
+      assert.equal(root.querySelectorAll('.work-card').length, 1);
+      assert.equal(root.querySelector('.work-title').textContent, variant.title);
+      assert.equal(root.querySelectorAll('.work-first-block').length, variant.first ? 1 : 0);
+      assert.equal(root.querySelectorAll('.work-recent-block').length, variant.same ? 0 : 1);
+      assert.equal(root.querySelector('.work-match mark').textContent,
+        variant.same ? '인증 흐름' : '로그인 리다');
+      if (variant.ai) {
+        query.value = '설계';
+        query.dispatchEvent(new env.window.Event('input', { bubbles: true })); await flushEffects();
+        assert.equal(root.querySelectorAll('.work-card').length, 1);
+        assert.equal(root.querySelector('.work-title').textContent, variant.title);
+        assert.equal(root.querySelector('.work-title mark').textContent, '설계');
+        assert.equal(root.querySelector('.work-match .work-label').textContent, 'AI 제목 일치');
+        assert.equal(root.querySelectorAll('.work-first-block').length, 1);
+      }
+    }
+    env.render(null, root);
+  }
 });

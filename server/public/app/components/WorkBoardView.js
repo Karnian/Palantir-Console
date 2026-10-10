@@ -4,19 +4,22 @@ import htm from '../../vendor/htm.module.js';
 import { apiFetch } from '../lib/api.js';
 import { WORK_BOARD_LABELS as W } from '../lib/copy.js';
 import { snapshotCards, rankCards, highlightParts, matchedLines,
-  coverageCounts, loadWorkSnapshots } from '../lib/workBoard.js';
+  coverageCounts, loadWorkSnapshots, formatLocalSnapshotTime } from '../lib/workBoard.js';
 
 const html = htm.bind(h);
 const emptyLoad = () => ({ entries: [], snapshots: [], failures: [], done: 0, total: 0 });
 
-function SnapshotTime({ value, now }) {
+function SnapshotTime({ value, now, relativeOnly = false, snapshot = false }) {
   const epoch = Date.parse(value);
   if (!Number.isFinite(epoch)) return html`<span>${W.timeUnknown}</span>`;
   const minutes = Math.floor((now - epoch) / 60000);
   const relative = minutes < 0 ? W.future : minutes < 1 ? W.secondsAgo : minutes < 60
     ? W.minutesAgo(minutes) : minutes < 1440 ? W.hoursAgo(Math.floor(minutes / 60))
       : W.daysAgo(Math.floor(minutes / 1440));
-  return html`<time dateTime=${value}>${relative} · ${W.absolute(new Date(epoch).toISOString())}</time>`;
+  const absolute = formatLocalSnapshotTime(value, now);
+  const text = relativeOnly ? relative : snapshot ? `${relative} ${W.snapshot} · ${absolute}`
+    : `${relative} · ${absolute}`;
+  return html`<time dateTime=${value}>${text}</time>`;
 }
 
 function Highlight({ text, query }) {
@@ -71,30 +74,28 @@ function SessionCard({ card, query, rank, now }) {
       <span class="work-repo">${card.repo_label || W.repoUnknown}</span>
       <span>${card.git_branch || W.branchUnknown}</span>
     </div>
-    <div><span class="work-label">${W.recent}</span>
-      <h2 class="work-recent"><${Highlight}
-        text=${card.recent || (card.recentMissing ? W.missing : W.noInstruction)} query=${query} /></h2></div>
-    ${!card.omitFirst && html`<div><span class="work-label">${W.first}</span>
+    <div><span class="work-label">${card.titleSource === 'ai' ? W.aiTitle : W.first}</span>
+      <h2 class="work-title"><${Highlight} text=${card.title || first} query=${query} /></h2></div>
+    ${!card.omitRecent && html`<div class="work-recent-block">
+      <span class="work-label">${W.recent}${' · '}
+        <${SnapshotTime} value=${card.recentAt} now=${now} relativeOnly=${true} /></span>
+      <p class="work-recent"><${Highlight}
+        text=${card.recent || (card.recentMissing ? W.missing : W.noInstruction)} query=${query} /></p></div>`}
+    ${card.showFirst && html`<div class="work-first-block"><span class="work-label">${W.first}</span>
       <p class="work-first"><${Highlight} text=${first} query=${query} /></p></div>`}
     ${card.match && html`<div class="work-match">
       <span class="work-label">${card.match.target === 0 ? W.instructionMatch : W.titleMatch}</span>
       <p><${Highlight} text=${matchedLines(card.match.text, query)} query=${query} /></p>
     </div>`}
-    ${card.ai_title && html`<p class="work-first">${W.aiTitle}: <${Highlight}
-      text=${card.ai_title} query=${query} /></p>`}
     <div class="work-meta"><span>${W.lastObserved}</span>
       <${SnapshotTime} value=${card.last_record_at} now=${now} /></div>
-    <div class="work-meta"><span>${card.orca_link.confirmed ? W.connected : W.unconfirmed}</span>
-      ${card.orca_link.confirmed && card.orca_link.terminal_handle
-        && html`<span>${card.orca_link.terminal_handle}</span>`}
-      <span>${W.observed} · ${W.states[card.agent?.state || 'unknown']}</span>
-    </div>
-    <div class="work-meta">
-      ${card.format_unverified && html`<span class="work-warning">${W.unverified}</span>`}
+    ${card.orca_link.confirmed && html`<div class="work-meta work-orca">
+      <span>Orca · ${W.states[card.agent?.state || 'unknown']}</span></div>`}
+    ${(card.compact_only_history || card.unknown_count > 0) && html`<div class="work-meta">
       ${card.compact_only_history && html`<span class="work-warning">${W.compact}</span>`}
       ${card.unknown_count > 0 && html`<span class="work-warning">
         ${W.unknownRatio(card.unknown_count, card.unknown_count + card.instruction_count)}</span>`}
-    </div>
+    </div>`}
     <footer class="work-card-footer"><span>${W.instructions(card.instruction_count)}</span>
       <button class="work-button" type="button" aria-expanded=${expanded}
         aria-controls=${timelineId} onClick=${() => setExpanded(value => !value)}>
@@ -124,6 +125,8 @@ function Coverage({ load }) {
         <h3>${snapshot.machine.label}</h3><dl>
           ${Object.entries(coverageCounts(snapshot.coverage)).map(([key, value]) => html`
             <div key=${key}><dt>${W.coverageFields[key]}</dt><dd>${value}</dd></div>`)}
+          <div><dt>${W.unverifiedSessions}</dt>
+            <dd>${snapshot.sessions.filter(session => session.format_unverified).length}</dd></div>
           <div><dt>Orca</dt><dd>${W.orcaStates[snapshot.coverage.orca.state]}</dd></div>
         </dl>
       </div>`)}
@@ -165,9 +168,11 @@ export function WorkBoardView({ activation = 'on' }) {
       <div class="work-snapshot-times">${load.entries.filter(entry => entry.machine_id).map(entry => {
         const snapshot = load.snapshots.find(item => item.machine.id === entry.machine_id);
         return html`<span class="work-pill" key=${entry.machine_id}>
-          ${snapshot?.machine.label || entry.machine_label} · ${W.snapshot} ·
-          <${SnapshotTime} value=${snapshot?.generated_at || entry.generated_at} now=${now} /></span>`;
+          ${snapshot?.machine.label || entry.machine_label}${' · '}
+          <${SnapshotTime} value=${snapshot?.generated_at || entry.generated_at} now=${now}
+            snapshot=${true} /></span>`;
       })}</div>
+      <p class="work-label work-observation-note">${W.observationNote}</p>
       <button type="button" class="work-button" disabled=${loading}
         onClick=${() => setRevision(value => value + 1)}>${W.refresh}</button>
     </header>

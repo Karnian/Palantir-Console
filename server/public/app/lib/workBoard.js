@@ -9,6 +9,14 @@ const epoch = value => Date.parse(value) || 0;
 const firstLine = instruction => instruction?.text_missing
   ? null : instruction?.text.split(/\r?\n/u)[0] || null;
 
+export function formatLocalSnapshotTime(value, now = Date.now()) {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return null;
+  const pad = number => String(number).padStart(2, '0');
+  const year = date.getFullYear() === new Date(now).getFullYear() ? '' : `${date.getFullYear()}/`;
+  return `${year}${pad(date.getMonth() + 1)}/${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 export function snapshotCards(snapshot) {
   const bySession = new Map();
   for (const instruction of snapshot.instructions) {
@@ -22,8 +30,10 @@ export function snapshotCards(snapshot) {
     const first = session.first_instruction === 'recoverable' ? firstLine(instructions[0]) : null;
     return {
       ...session, machine: snapshot.machine, instructions, recent, first,
+      title: session.ai_title || first, titleSource: session.ai_title ? 'ai' : 'first',
+      showFirst: !!session.ai_title, recentAt: instructions.at(-1)?.ts || null,
       recentMissing: !!instructions.at(-1)?.text_missing,
-      omitFirst: session.first_instruction === 'recoverable' && first !== null && first === recent,
+      omitRecent: session.first_instruction === 'recoverable' && first !== null && first === recent,
       agent: session.orca_link.confirmed
         ? agents.find(agent => agent.pane_key === session.orca_link.pane_key) || null : null,
     };

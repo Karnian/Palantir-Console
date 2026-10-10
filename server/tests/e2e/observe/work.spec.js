@@ -16,6 +16,13 @@ async function openBoard(page, theme, viewport) {
   await expect(page.getByRole('status').filter({ hasText: '세션 3개' })).toBeVisible();
   await expect(page.locator('.nav-work-label')).toHaveText('작업');
   await expect(page.locator('.nav-work')).toHaveAccessibleName('작업');
+  await expect(page.locator('.work-title')).toHaveText([
+    '합성 세션 검토', '최초 지시 복구 불가', '최초 지시 복구 여부 불명',
+  ]);
+  await expect(page.locator('.work-observation-note')).toHaveText('상태는 스냅샷 시점 관측');
+  await expect(page.locator('.work-snapshot-times')).toContainText('Mac · 방금 스냅샷 · 10/10 12:00');
+  await expect(page.locator('.work-orca')).toHaveText('Orca · 응답 대기');
+  await expect(page.locator('.work-card').getByText('형식 미검증', { exact: true })).toHaveCount(0);
   await page.evaluate(() => document.fonts.ready);
 }
 
@@ -46,6 +53,7 @@ for (const theme of ['light', 'dark']) {
       await cards.first().getByRole('button', { name: '타임라인 접기', exact: true }).click();
       await page.getByLabel('지시 검색', { exact: true }).fill('로그인리다');
       await expect(cards).toHaveCount(1);
+      await expect(cards.locator('.work-title')).toHaveText('합성 세션 검토');
       await expect(page.locator('.work-match mark')).toHaveText('로그인 리다');
       await scan(page);
       await expect(page).toHaveScreenshot(`search-${theme}-${viewport.name}.png`, {

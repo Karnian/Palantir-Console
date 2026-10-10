@@ -56,6 +56,7 @@ module.exports = defineConfig({
       testIgnore: '**/observe/setup.js',
       dependencies: ['observe-setup'],
       use: { ...devices['Desktop Chrome'], baseURL: 'http://localhost:4191',
+        timezoneId: 'Asia/Seoul',
         storageState: 'test-results/observe-auth.json' },
     },
   ],

@@ -1333,7 +1333,8 @@ export const OPERATOR_PROFILES_LABELS = {
 
 // Session snapshot board — spec §6.
 export const WORK_BOARD_LABELS = {
-  title: '작업', description: '세션 스냅샷 보드', observed: '스냅샷 시점 관측',
+  title: '작업', description: '세션 스냅샷 보드',
+  observationNote: '상태는 스냅샷 시점 관측',
   refresh: '스냅샷 새로고침', pending: '작업 보드를 확인하는 중',
   loading: (n, m) => `불러오는 중 (${n}/${m})`,
   error: '스냅샷을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.',
@@ -1343,7 +1344,7 @@ export const WORK_BOARD_LABELS = {
   searchHint: '지시와 AI 제목을 검색합니다. 띄어쓰기 변형과 단어 일부도 찾습니다.',
   searchPlaceholder: '예: 로그인 리다이렉트, reader 리뷰', machine: '머신', tool: '도구', all: '전체',
   recent: '최근 지시',
-  first: '처음 지시',
+  first: '처음',
   missing: '텍스트 없는 지시',
   noInstruction: '관측된 지시 없음',
   unrecoverable: '최초 지시 복구 불가', unknownFirst: '최초 지시 복구 여부 불명',
@@ -1351,8 +1352,8 @@ export const WORK_BOARD_LABELS = {
   timeline: '타임라인', closeTimeline: '타임라인 접기', timelineEmpty: '관측된 지시가 없습니다.',
   instructions: n => `지시 ${n}개`, results: n => `세션 ${n}개`,
   order: '마지막 관측순', searchOrder: '일치 대상 · 공백 형태 · 위치 · 시각 순',
-  lastObserved: '마지막 관측', connected: 'Orca 연결됨', unconfirmed: 'Orca 연결 불명',
-  repoUnknown: '저장소 불명', branchUnknown: '브랜치 불명', unverified: '형식 미검증',
+  lastObserved: '마지막 관측', unverifiedSessions: '형식 미검증 세션',
+  repoUnknown: '저장소 불명', branchUnknown: '브랜치 불명',
   compact: 'compact 이력', unknownRatio: (n, total) => `판별 불명 ${n}/${total}`,
   truncated: '잘림', redacted: '살균됨', attachments: n => `첨부 ${n}개`,
   unknownBlocks: n => `판별 불명 블록 ${n}개`,
@@ -1363,7 +1364,6 @@ export const WORK_BOARD_LABELS = {
   coverage: '수집 범위',
   machineFailure: '이 머신의 스냅샷을 읽지 못했습니다.',
   unnamedFailure: '읽지 못한 스냅샷', snapshot: '스냅샷', timeUnknown: '시각 불명',
-  absolute: value => `${value.slice(0, 19).replace('T', ' ')} UTC`,
   secondsAgo: '방금', minutesAgo: n => `${n}분 전`, hoursAgo: n => `${n}시간 전`, daysAgo: n => `${n}일 전`,
   future: '기준 시각 이후',
   kinds: { human: '사람 지시', slash: '슬래시 명령', shell: '셸 명령', reply: '답변' },

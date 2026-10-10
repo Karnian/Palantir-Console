@@ -23,6 +23,7 @@
 }
 .work-snapshot-times { display: flex; flex: 1; flex-wrap: wrap; gap: 8px; }
 .work-snapshot-times .work-pill { white-space: normal; }
+.work-observation-note { flex-basis: 100%; order: 1; }
 .work-body { display: flex; flex-direction: column; gap: 12px; padding: 24px 28px 40px; }
 .work-label, .work-meta, .work-first { color: var(--text-secondary); font-size: 13px; line-height: 1.6; }
 .work-search, .work-selector {
@@ -88,7 +89,15 @@
 }
 .work-warning { background: var(--warning-bg-subtle); color: var(--warning-badge-fg); }
 .work-rank { background: var(--accent-muted); color: var(--accent-light); }
-.work-board .work-recent { font-size: 16px; line-height: 1.6; font-weight: 600; }
+.work-title, .work-recent {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.work-board .work-title { font-size: 18px; line-height: 1.5; font-weight: 600; }
+.work-recent { color: var(--text-secondary); font-size: 14px; line-height: 1.6; }
+.work-first { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .work-match { padding: 12px; border-left: 2px solid var(--accent); background: var(--bg-elevated); }
 .work-match p, .work-instruction { white-space: pre-wrap; line-height: 1.6; }
 .work-board mark { color: var(--text-primary); background: var(--accent-muted); border-radius: 2px; }

@@ -45,6 +45,7 @@ function createSnapshots(root) {
   alpha.instructions = alpha.instructions.filter(row =>
     alpha.sessions.some(session => session.key === row.session_key));
   alpha.sessions[1].first_instruction = 'unrecoverable';
+  alpha.sessions[1].ai_title = null;
   alpha.sessions[1].compact_only_history = true;
   alpha.instructions[1].redacted = true;
   alpha.instructions[1].truncated = true;
@@ -64,6 +65,7 @@ function createSnapshots(root) {
   beta.sessions[0].key = 'beta:codex:session-2';
   beta.sessions[0].provider = 'codex';
   beta.sessions[0].first_instruction = 'unknown';
+  beta.sessions[0].ai_title = null;
   beta.sessions[0].format_unverified = true;
   beta.sessions[0].unknown_count = 1;
   beta.instructions = beta.instructions.filter(row => row.session_key === oldKey).map((row, index) => ({
