@@ -68,7 +68,7 @@ test('card conversion preserves exact instructions, recent/first, omission and a
     const card = snapshotCards(one)[0];
     assert.equal(card.first_instruction, state);
     assert.equal(card.first, null);
-    assert.equal(card.title, null);
+    assert.equal(card.title, '인증 흐름을 검토해 주세요.');
     assert.equal(card.titleSource, 'first');
     assert.equal(card.showFirst, false);
     assert.equal(card.omitRecent, false);
@@ -285,8 +285,9 @@ test('DOM cleanup aborts detail requests and removes data; recovery messages rem
     ? { snapshots: [{ machine_id: 'alpha' }, { machine_id: 'beta' }] } : url.endsWith('alpha') ? alpha : beta;
   env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
   assert.equal(root.querySelectorAll('.work-card').length, 3);
-  assert.ok(root.textContent.includes('최초 지시 복구 불가'));
-  assert.ok(root.textContent.includes('최초 지시 복구 여부 불명'));
+  assert.deepEqual(Array.from(root.querySelectorAll('.work-title'), node => node.textContent),
+    ['합성 세션 검토', '이미지 크기별 결과를 정리해 주세요.',
+      '주간 보고 초안을 작성해 주세요.']);
 });
 
 test('observe nav is labeled and gated in both sidebar items and palette', async t => {
@@ -431,8 +432,8 @@ test('normal and search cards share title rules, omit duplicate rows and limit w
   const cases = [
     { ai: '인증 설계 검토', state: 'recoverable', title: '인증 설계 검토', first: true },
     { ai: null, state: 'recoverable', title: '인증 흐름을 검토해 주세요.', first: false },
-    { ai: null, state: 'unrecoverable', title: '최초 지시 복구 불가', first: false },
-    { ai: null, state: 'unknown', title: '최초 지시 복구 여부 불명', first: false },
+    { ai: null, state: 'unrecoverable', title: '인증 흐름을 검토해 주세요.', first: false },
+    { ai: null, state: 'unknown', title: '인증 흐름을 검토해 주세요.', first: false },
     { ai: '인증 설계 검토', state: 'recoverable', title: '인증 설계 검토', first: true, same: true },
     { ai: null, state: 'recoverable', title: '인증 흐름을 검토해 주세요.', first: false, same: true },
   ];
@@ -493,5 +494,96 @@ test('normal and search cards share title rules, omit duplicate rows and limit w
       }
     }
     env.render(null, root);
+  }
+});
+
+test('title selects the earliest nonempty text by seq, with AI priority and recovery fallback', async t => {
+  const { snapshotCards } = await logic;
+  const { alpha } = fixtures(t);
+  alpha.sessions = alpha.sessions.slice(0, 1);
+  alpha.sessions[0].ai_title = null;
+  const base = alpha.instructions[0];
+  const instruction = (seq, text, missing = false) => ({ ...base, seq, text, text_missing: missing });
+  alpha.instructions = [instruction(4, '나중 지시'), instruction(0, '', true),
+    instruction(3, '첫 텍스트 지시\n둘째 줄'), instruction(1, ''),
+    instruction(2, '무시할 텍스트', true)];
+  const card = snapshotCards(alpha)[0];
+  assert.equal(card.instructions.length, 5);
+  assert.deepEqual(card.instructions.map(row => row.seq), [0, 1, 2, 3, 4]);
+  assert.equal(card.title, '첫 텍스트 지시');
+  assert.equal(card.first, null);
+  assert.equal(card.showFirst, false);
+  for (const state of ['recoverable', 'unrecoverable', 'unknown']) {
+    alpha.sessions[0].first_instruction = state;
+    assert.equal(snapshotCards(alpha)[0].title, '첫 텍스트 지시');
+  }
+  alpha.sessions[0].ai_title = 'AI 세션 제목';
+  assert.equal(snapshotCards(alpha)[0].title, 'AI 세션 제목');
+  assert.equal(snapshotCards(alpha)[0].showFirst, false);
+  alpha.sessions[0].ai_title = null;
+  alpha.instructions = [instruction(0, '', true), instruction(1, '')];
+  assert.equal(snapshotCards(alpha)[0].title, null);
+});
+
+test('attachment-first cards hide empty first rows and fall back only when no text exists', async t => {
+  const { alpha } = fixtures(t);
+  const env = boardEnv(t), root = env.document.getElementById('root');
+  const variants = [
+    { ai: null, state: 'recoverable', text: '검색 가능한 첫 텍스트', title: '검색 가능한 첫 텍스트' },
+    { ai: 'AI 세션 제목', state: 'recoverable', text: '검색 가능한 첫 텍스트', title: 'AI 세션 제목' },
+    { ai: null, state: 'recoverable', text: '', title: '텍스트가 있는 지시 없음' },
+    { ai: null, state: 'unrecoverable', text: '', title: '최초 지시 복구 불가' },
+    { ai: null, state: 'unknown', text: '', title: '최초 지시 복구 여부 불명' },
+  ];
+  for (const variant of variants) {
+    const snapshot = structuredClone(alpha);
+    snapshot.sessions = snapshot.sessions.slice(0, 1);
+    Object.assign(snapshot.sessions[0], { ai_title: variant.ai, first_instruction: variant.state });
+    snapshot.instructions = snapshot.instructions.slice(0, 2);
+    Object.assign(snapshot.instructions[0], { text: '', text_missing: true, attachments: 1 });
+    Object.assign(snapshot.instructions[1], { text: variant.text, text_missing: false });
+    env.context.apiFetch = async url => url.endsWith('/snapshots')
+      ? { snapshots: [{ machine_id: 'alpha' }] } : snapshot;
+    env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
+    assert.equal(root.querySelectorAll('.work-card').length, 1);
+    assert.equal(root.querySelector('.work-title').textContent, variant.title);
+    assert.equal(root.querySelectorAll('.work-first-block').length, 0);
+    if (variant.text) {
+      const query = root.querySelector('#work-query');
+      query.value = '검색가능'; query.dispatchEvent(new env.window.Event('input', { bubbles: true }));
+      await flushEffects();
+      assert.equal(root.querySelectorAll('.work-card').length, 1);
+      assert.equal(root.querySelector('.work-title').textContent, variant.title);
+      assert.equal(root.querySelector('.work-match mark').textContent, '검색 가능');
+      assert.equal(root.querySelectorAll('.work-first-block').length, 0);
+    }
+    env.render(null, root);
+  }
+});
+
+test('all composed separators have one space on each side; machine pill uses one complete time text node', async t => {
+  const { alpha } = fixtures(t);
+  const env = boardEnv(t), root = env.document.getElementById('root');
+  env.context.Date = class extends Date { static now() { return Date.parse('2026-10-10T03:10:00.000Z'); } };
+  env.context.apiFetch = async url => url.endsWith('/snapshots') ? { snapshots: [{
+    machine_id: 'alpha', machine_label: 'Mac', generated_at: alpha.generated_at,
+  }] } : alpha;
+  env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
+  assert.equal(root.querySelectorAll('.work-card').length, 2);
+  const { formatLocalSnapshotTime } = await logic;
+  const absolute = formatLocalSnapshotTime(alpha.generated_at, Date.parse('2026-10-10T03:10:00.000Z'));
+  const pill = root.querySelector('.work-snapshot-times .work-pill');
+  assert.equal(pill.textContent, `Mac · 10분 전 스냅샷 · ${absolute}`);
+  assert.equal(pill.childNodes.length, 1);
+  assert.equal(pill.firstChild.tagName, 'TIME');
+  assert.equal(pill.firstChild.childNodes.length, 1);
+  assert.equal(pill.firstChild.firstChild.nodeType, env.window.Node.TEXT_NODE);
+  assert.equal(root.querySelector('.work-recent-block .work-label').textContent, '최근 지시 · 1시간 전');
+  assert.equal(root.querySelector('.work-orca').textContent.trim(), 'Orca · 응답 대기');
+  root.querySelector('.work-card button').click(); await flushEffects();
+  assert.equal(root.querySelectorAll('.work-event').length, 2);
+  const walker = env.document.createTreeWalker(root, env.window.NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (node.textContent.includes('·')) assert.doesNotMatch(node.textContent, /(?<! )·|·(?! )| {2}·|· {2}/u);
   }
 });

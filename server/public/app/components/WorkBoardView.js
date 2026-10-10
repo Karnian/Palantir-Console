@@ -9,9 +9,9 @@ import { snapshotCards, rankCards, highlightParts, matchedLines,
 const html = htm.bind(h);
 const emptyLoad = () => ({ entries: [], snapshots: [], failures: [], done: 0, total: 0 });
 
-function SnapshotTime({ value, now, relativeOnly = false, snapshot = false }) {
+function SnapshotTime({ value, now, relativeOnly = false, snapshot = false, label = '' }) {
   const epoch = Date.parse(value);
-  if (!Number.isFinite(epoch)) return html`<span>${W.timeUnknown}</span>`;
+  if (!Number.isFinite(epoch)) return html`<span>${label ? `${label} · ${W.timeUnknown}` : W.timeUnknown}</span>`;
   const minutes = Math.floor((now - epoch) / 60000);
   const relative = minutes < 0 ? W.future : minutes < 1 ? W.secondsAgo : minutes < 60
     ? W.minutesAgo(minutes) : minutes < 1440 ? W.hoursAgo(Math.floor(minutes / 60))
@@ -19,7 +19,7 @@ function SnapshotTime({ value, now, relativeOnly = false, snapshot = false }) {
   const absolute = formatLocalSnapshotTime(value, now);
   const text = relativeOnly ? relative : snapshot ? `${relative} ${W.snapshot} · ${absolute}`
     : `${relative} · ${absolute}`;
-  return html`<time dateTime=${value}>${text}</time>`;
+  return html`<time dateTime=${value}>${label ? `${label} · ${text}` : text}</time>`;
 }
 
 function Highlight({ text, query }) {
@@ -65,6 +65,8 @@ function SessionCard({ card, query, rank, now }) {
   const [expanded, setExpanded] = useState(false);
   const first = card.first_instruction === 'unrecoverable' ? W.unrecoverable
     : card.first_instruction === 'unknown' ? W.unknownFirst : card.first || W.missing;
+  const titleFallback = card.first_instruction === 'unrecoverable' ? W.unrecoverable
+    : card.first_instruction === 'unknown' ? W.unknownFirst : W.noTextInstruction;
   const timelineId = `work-timeline-${encodeURIComponent(card.key)}`;
   return html`<article class="work-card">
     <div class="work-meta">
@@ -75,10 +77,10 @@ function SessionCard({ card, query, rank, now }) {
       <span>${card.git_branch || W.branchUnknown}</span>
     </div>
     <div><span class="work-label">${card.titleSource === 'ai' ? W.aiTitle : W.first}</span>
-      <h2 class="work-title"><${Highlight} text=${card.title || first} query=${query} /></h2></div>
+      <h2 class="work-title"><${Highlight} text=${card.title || titleFallback} query=${query} /></h2></div>
     ${!card.omitRecent && html`<div class="work-recent-block">
-      <span class="work-label">${W.recent}${' · '}
-        <${SnapshotTime} value=${card.recentAt} now=${now} relativeOnly=${true} /></span>
+      <span class="work-label"><${SnapshotTime} value=${card.recentAt} now=${now}
+        label=${W.recent} relativeOnly=${true} /></span>
       <p class="work-recent"><${Highlight}
         text=${card.recent || (card.recentMissing ? W.missing : W.noInstruction)} query=${query} /></p></div>`}
     ${card.showFirst && html`<div class="work-first-block"><span class="work-label">${W.first}</span>
@@ -167,10 +169,9 @@ export function WorkBoardView({ activation = 'on' }) {
       <div><h1>${W.title}</h1><p class="work-label">${W.description}</p></div>
       <div class="work-snapshot-times">${load.entries.filter(entry => entry.machine_id).map(entry => {
         const snapshot = load.snapshots.find(item => item.machine.id === entry.machine_id);
-        return html`<span class="work-pill" key=${entry.machine_id}>
-          ${snapshot?.machine.label || entry.machine_label}${' · '}
-          <${SnapshotTime} value=${snapshot?.generated_at || entry.generated_at} now=${now}
-            snapshot=${true} /></span>`;
+        return html`<span class="work-pill" key=${entry.machine_id}><${SnapshotTime}
+          value=${snapshot?.generated_at || entry.generated_at} now=${now}
+          label=${snapshot?.machine.label || entry.machine_label} snapshot=${true} /></span>`;
       })}</div>
       <p class="work-label work-observation-note">${W.observationNote}</p>
       <button type="button" class="work-button" disabled=${loading}

@@ -17,10 +17,14 @@ async function openBoard(page, theme, viewport) {
   await expect(page.locator('.nav-work-label')).toHaveText('작업');
   await expect(page.locator('.nav-work')).toHaveAccessibleName('작업');
   await expect(page.locator('.work-title')).toHaveText([
-    '합성 세션 검토', '최초 지시 복구 불가', '최초 지시 복구 여부 불명',
+    '합성 세션 검토', '이미지 크기별 결과를 정리해 주세요.',
+    '주간 보고 초안을 작성해 주세요.',
   ]);
   await expect(page.locator('.work-observation-note')).toHaveText('상태는 스냅샷 시점 관측');
-  await expect(page.locator('.work-snapshot-times')).toContainText('Mac · 방금 스냅샷 · 10/10 12:00');
+  await expect(page.locator('.work-snapshot-times .work-pill')).toHaveCount(2);
+  expect(await page.locator('.work-snapshot-times .work-pill').allTextContents()).toEqual([
+    'Mac · 방금 스냅샷 · 10/10 12:00', 'codev2 · 5분 전 스냅샷 · 10/10 11:55',
+  ]);
   await expect(page.locator('.work-orca')).toHaveText('Orca · 응답 대기');
   await expect(page.locator('.work-card').getByText('형식 미검증', { exact: true })).toHaveCount(0);
   await page.evaluate(() => document.fonts.ready);

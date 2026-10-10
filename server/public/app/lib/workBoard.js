@@ -28,10 +28,12 @@ export function snapshotCards(snapshot) {
     const instructions = (bySession.get(session.key) || []).sort((a, b) => a.seq - b.seq);
     const recent = firstLine(instructions.at(-1));
     const first = session.first_instruction === 'recoverable' ? firstLine(instructions[0]) : null;
+    const titleInstruction = instructions.find(instruction => !instruction.text_missing && instruction.text !== '');
+    const firstHasText = !!instructions[0] && !instructions[0].text_missing && instructions[0].text !== '';
     return {
       ...session, machine: snapshot.machine, instructions, recent, first,
-      title: session.ai_title || first, titleSource: session.ai_title ? 'ai' : 'first',
-      showFirst: !!session.ai_title, recentAt: instructions.at(-1)?.ts || null,
+      title: session.ai_title || firstLine(titleInstruction), titleSource: session.ai_title ? 'ai' : 'first',
+      showFirst: !!session.ai_title && firstHasText, recentAt: instructions.at(-1)?.ts || null,
       recentMissing: !!instructions.at(-1)?.text_missing,
       omitRecent: session.first_instruction === 'recoverable' && first !== null && first === recent,
       agent: session.orca_link.confirmed

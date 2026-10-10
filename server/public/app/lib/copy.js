@@ -1345,6 +1345,7 @@ export const WORK_BOARD_LABELS = {
   searchPlaceholder: '예: 로그인 리다이렉트, reader 리뷰', machine: '머신', tool: '도구', all: '전체',
   recent: '최근 지시',
   first: '처음',
+  noTextInstruction: '텍스트가 있는 지시 없음',
   missing: '텍스트 없는 지시',
   noInstruction: '관측된 지시 없음',
   unrecoverable: '최초 지시 복구 불가', unknownFirst: '최초 지시 복구 여부 불명',
