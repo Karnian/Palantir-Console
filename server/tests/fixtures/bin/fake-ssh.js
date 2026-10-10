@@ -8,6 +8,13 @@ if (process.env.FAKE_SSH_ARGV_LOG) fs.writeFileSync(process.env.FAKE_SSH_ARGV_LO
 if (process.env.FAKE_SSH_STDERR) process.stderr.write(process.env.FAKE_SSH_STDERR);
 const mode = process.env.FAKE_SSH_MODE;
 if (mode === 'hang') { process.stdin.resume(); setInterval(function hang() {}, 1000); }
+else if (mode === 'hang_descendant') {
+  process.stdin.resume();
+  const source = "require('node:fs').writeFileSync(process.env.FAKE_SSH_DESCENDANT_PID, String(process.pid));" +
+    'setInterval(function hang() {}, 1000);';
+  spawn(process.execPath, ['-e', source], { stdio: 'inherit', env: process.env });
+  setInterval(function hang() {}, 1000);
+}
 else if (mode === 'flood') {
   process.stdin.resume();
   const chunk = Buffer.alloc(65536, 120);

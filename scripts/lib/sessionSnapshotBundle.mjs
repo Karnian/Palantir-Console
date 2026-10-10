@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 const require = createRequire(import.meta.url);
 const policy = require('../../server/services/observeSnapshotPolicy.js');
 const { computeReaderBuild } = require('./sessionSnapshotLauncher.cjs');
-const { assertSpawnAllowed } = require('../../server/utils/spawnGuard.js');
+const spawnGuard = require('../../server/utils/spawnGuard.js');
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 export const MANIFEST = Object.freeze([
   'scripts/lib/sessionSnapshotLauncher.cjs', 'scripts/lib/sessionSnapshotReader.cjs',
@@ -92,15 +92,32 @@ export function runExecutor({ target, bundle, sshBin = 'ssh', env = process.env,
   const command = target.kind === 'local' ? process.execPath : resolveExecutable(sshBin, env);
   const args = target.kind === 'local' ? ['--no-warnings', '-']
     : ['-o', 'BatchMode=yes', '--', target.host, target.remoteNode || 'node', '--no-warnings', '-'];
-  assertSpawnAllowed({ command, source: 'session-snapshot:executor' });
+  spawnGuard.assertSpawnAllowed({ command, source: 'session-snapshot:executor' });
   return new Promise((resolve, reject) => {
-    const child = spawnImpl(command, args, { shell: false, env, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawnImpl(command, args, { shell: false, detached: true, env, stdio: ['pipe', 'pipe', 'pipe'] });
     const chunks = [];
     let bytes = 0;
     let stderrBytes = 0;
     let killedReason = null;
+    let settled = false;
+    let backstop;
+    function finish(exitCode, signal) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(backstop);
+      resolve({ exitCode, signal, stdout: Buffer.concat(chunks), stderrBytes, killedReason });
+    }
     function kill(reason) {
-      if (!killedReason) { killedReason = reason; child.kill('SIGKILL'); }
+      if (killedReason || settled) return;
+      killedReason = reason;
+      clearTimeout(timer);
+      backstop = setTimeout(() => finish(null, 'SIGKILL'), 2000);
+      if (child.pid) {
+        try { process.kill(-child.pid, 'SIGKILL'); }
+        catch { child.kill('SIGKILL'); }
+      }
+      for (const stream of [child.stdout, child.stderr, child.stdin]) stream.destroy();
     }
     const timer = setTimeout(() => kill('timeout'), timeoutMs);
     child.stdout.on('data', chunk => {
@@ -109,11 +126,14 @@ export function runExecutor({ target, bundle, sshBin = 'ssh', env = process.env,
       else chunks.push(chunk);
     });
     child.stderr.on('data', chunk => { stderrBytes += chunk.length; });
-    child.on('error', error => { clearTimeout(timer); reject(error); });
-    child.on('close', (exitCode, signal) => {
+    child.on('error', error => {
+      if (settled || killedReason) return;
+      settled = true;
       clearTimeout(timer);
-      resolve({ exitCode, signal, stdout: Buffer.concat(chunks), stderrBytes, killedReason });
+      clearTimeout(backstop);
+      reject(error);
     });
+    child.on('close', finish);
     child.stdin.on('error', function ignorePipeError() {});
     child.stdin.end(typeof bundle === 'string' ? bundle : bundle.code);
   });

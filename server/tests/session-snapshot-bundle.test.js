@@ -3,7 +3,9 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { fixture, recordingSpawn } = require('./fixtures/session-snapshot/helpers.cjs');
+const { EventEmitter } = require('node:events');
+const { PassThrough } = require('node:stream');
+const { fixture, recordingSpawn, descendantProbe } = require('./fixtures/session-snapshot/helpers.cjs');
 const api = import('../../scripts/lib/sessionSnapshotBundle.mjs');
 async function execute(f, request = f.request, extra = {}, overrides) {
   const m = await api;
@@ -37,6 +39,86 @@ test('remote and local bytes, fixed argv, hash, permissions and atomic replaceme
   assert.equal(fs.statSync(file).mode & 0o777, 0o600);
   assert.equal(fs.statSync(f.out).mode & 0o777, 0o700);
   assert.deepEqual(fs.readdirSync(f.out), [remote.envelope.machine.id + '.json']);
+});
+test('executor guard is looked up for each local and remote execution', async t => {
+  const f = fixture(t);
+  await api;
+  const guard = require('../utils/spawnGuard.js');
+  const original = guard.assertSpawnAllowed;
+  const calls = [];
+  t.after(() => { guard.assertSpawnAllowed = original; });
+  guard.assertSpawnAllowed = options => { calls.push(options); return original(options); };
+  for (const target of [{ kind: 'local' }, f.target]) {
+    await t.test(target.kind, async () => {
+      calls.length = 0;
+      const extra = { target };
+      if (target.kind === 'remote') {
+        extra.sshBin = path.basename(f.env.PALANTIR_OBSERVE_SSH_BIN);
+        extra.env = { ...f.env, PATH: path.dirname(f.env.PALANTIR_OBSERVE_SSH_BIN) + path.delimiter + f.env.PATH };
+      }
+      const response = await execute(f, f.request, extra);
+      exactSnapshot(response.envelope);
+      const command = target.kind === 'local' ? process.execPath : fs.realpathSync(f.env.PALANTIR_OBSERVE_SSH_BIN);
+      assert.deepEqual(calls, [{ command, source: 'session-snapshot:executor' }]);
+    });
+  }
+});
+test('executor fallback and backstop settle killed streams', { timeout: 10000 }, async t => {
+  const m = await api;
+  for (const fallback of [true, false]) {
+    await t.test(fallback ? 'group kill fallback' : 'missing pid and close backstop', async sub => {
+      const child = new EventEmitter();
+      for (const name of ['stdin', 'stdout', 'stderr']) child[name] = new PassThrough();
+      child.stdin.resume();
+      sub.after(() => { for (const name of ['stdin', 'stdout', 'stderr']) child[name].destroy(); });
+      if (fallback) child.pid = 12345;
+      const groupKill = sub.mock.method(process, 'kill', () => { throw new Error('synthetic group failure'); });
+      const signals = [];
+      child.kill = signal => {
+        signals.push(signal);
+        setImmediate(() => child.emit('close', null, signal));
+        return true;
+      };
+      const timeoutMs = 20;
+      const started = performance.now();
+      const result = await m.runExecutor({ target: { kind: 'local' }, bundle: '', timeoutMs,
+        spawnImpl: (_, __, options) => {
+          assert.equal(options.detached, true);
+          setImmediate(() => { child.stdout.write('partial'); child.stderr.write('discarded'); });
+          return child;
+        } });
+      assert.ok(performance.now() - started <= timeoutMs + 3000);
+      assert.deepEqual(result, { exitCode: null, signal: 'SIGKILL', stdout: Buffer.from('partial'),
+        stderrBytes: 9, killedReason: 'timeout' });
+      assert.ok(['stdin', 'stdout', 'stderr'].every(name => child[name].destroyed));
+      assert.deepEqual(groupKill.mock.calls.map(call => call.arguments), fallback ? [[-12345, 'SIGKILL']] : []);
+      assert.deepEqual(signals, fallback ? ['SIGKILL'] : []);
+      child.emit('close', 0, null);
+      child.emit('error', new Error('late child error'));
+    });
+  }
+});
+test('executor timeout terminates inherited-pipe descendants', { timeout: 15000 }, async t => {
+  const f = fixture(t);
+  const probe = descendantProbe(t, f.root);
+  const m = await api;
+  const bundle = m.buildBundle({ request: f.request });
+  const timeoutMs = 1000;
+  const started = performance.now();
+  const pending = m.runExecutor({ target: f.target, bundle, timeoutMs,
+    sshBin: f.env.PALANTIR_OBSERVE_SSH_BIN, env: { ...f.env, FAKE_SSH_MODE: 'hang_descendant',
+      FAKE_SSH_DESCENDANT_PID: probe.pidFile } });
+  const pid = await probe.readPid();
+  const result = await pending;
+  if (t.signal.aborted) return;
+  const elapsedMs = performance.now() - started;
+  assert.ok(elapsedMs <= timeoutMs + 3000, String(elapsedMs));
+  assert.equal(result.killedReason, 'timeout');
+  assert.equal(m.receiveEnvelope(result, { expectedKinds: ['snapshot'],
+    expectedReaderBuild: bundle.readerBuild }).ok, false);
+  await probe.waitForExit();
+  assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+  t.diagnostic(JSON.stringify({ elapsedMs, descendantExited: true }));
 });
 test('large remote snapshot flushes its complete envelope before launcher exit', async t => {
   const f = fixture(t);

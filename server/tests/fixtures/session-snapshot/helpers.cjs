@@ -57,4 +57,36 @@ function recordingSpawn(t) {
   }
   return { calls, spawnImpl };
 }
-module.exports = { fixture, capture, recordingSpawn, NOW, BIN };
+function descendantProbe(t, root) {
+  const pidFile = path.join(root, 'descendant.pid');
+  let pid;
+  t.after(() => {
+    if (pid) {
+      try { process.kill(pid, 'SIGKILL'); }
+      catch (error) { if (error.code !== 'ESRCH') throw error; }
+    }
+  });
+  async function waitUntil(check) {
+    const deadline = Date.now() + 5000;
+    while (!check()) {
+      if (t.signal.aborted) throw t.signal.reason;
+      if (Date.now() >= deadline) throw new Error('descendant_probe_timeout');
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+  }
+  async function readPid() {
+    await waitUntil(() => fs.existsSync(pidFile));
+    pid = Number(fs.readFileSync(pidFile, 'utf8'));
+    if (!Number.isInteger(pid) || pid <= 1) throw new Error('invalid_descendant_pid');
+    t.diagnostic(JSON.stringify({ descendantPid: pid }));
+    return pid;
+  }
+  async function waitForExit() {
+    await waitUntil(() => {
+      try { process.kill(pid, 0); return false; }
+      catch (error) { if (error.code !== 'ESRCH') throw error; return true; }
+    });
+  }
+  return { pidFile, readPid, waitForExit };
+}
+module.exports = { fixture, capture, recordingSpawn, descendantProbe, NOW, BIN };

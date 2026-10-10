@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { fixture, capture, recordingSpawn, NOW } = require('./fixtures/session-snapshot/helpers.cjs');
+const { fixture, capture, recordingSpawn, descendantProbe, NOW } = require('./fixtures/session-snapshot/helpers.cjs');
 const api = import('../../scripts/lib/sessionSnapshotBundle.mjs');
 const cli = import('../../scripts/session-snapshot.mjs');
 function args(f, extra = []) {
@@ -18,9 +18,10 @@ async function invoke(f, argv, input = '', env = f.env, executorSpawn, timeoutMs
     io.spawnImpl = (...args) => {
       const child = originalSpawn(...args);
       const originalKill = child.kill.bind(child);
-      child.kill = (...signals) => { timeoutKills++; return originalKill(...signals); };
+      let watchdogKilled = false;
+      child.once('exit', (_, signal) => { if (signal === 'SIGKILL' && !watchdogKilled) timeoutKills++; });
       // Bound regression runs even when main ignores timeoutMs.
-      const watchdog = setTimeout(() => originalKill('SIGKILL'), 3000);
+      const watchdog = setTimeout(() => { watchdogKilled = true; originalKill('SIGKILL'); }, 3000);
       child.once('close', () => clearTimeout(watchdog));
       return child;
     };
@@ -69,6 +70,29 @@ test('CLI writes a snapshot and preserves exact existing bytes on every rejected
   assert.equal(noisy.code, 0);
   assert.equal((noisy.output() + noisy.errors()).includes('ORCA_SENTINEL'), false);
   assert.equal(noisy.output().includes('Synthetic instruction A'), false);
+});
+test('CLI timeout terminates inherited-pipe descendants and preserves snapshot bytes', { timeout: 15000 }, async t => {
+  const f = fixture(t);
+  const initial = await initialize(f);
+  const listing = fs.readdirSync(f.out);
+  const probe = descendantProbe(t, f.root);
+  const io = capture();
+  const timeoutMs = 1000;
+  const started = performance.now();
+  const pending = (await cli).main(args(f), { ...io, timeoutMs,
+    env: { ...f.env, FAKE_SSH_MODE: 'hang_descendant', FAKE_SSH_DESCENDANT_PID: probe.pidFile } });
+  const pid = await probe.readPid();
+  const code = await pending;
+  if (t.signal.aborted) return;
+  const elapsedMs = performance.now() - started;
+  assert.ok(elapsedMs <= timeoutMs + 3000, String(elapsedMs));
+  assert.equal(code, 1);
+  assert.equal(io.spawns(), 1);
+  assert.deepEqual(fs.readFileSync(initial.file), initial.bytes);
+  assert.deepEqual(fs.readdirSync(f.out), listing);
+  await probe.waitForExit();
+  assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+  t.diagnostic(JSON.stringify({ elapsedMs, descendantExited: true }));
 });
 test('Mac validation and Orca guard reject before spawn; target metacharacters remain request data', async t => {
   const f = fixture(t);
