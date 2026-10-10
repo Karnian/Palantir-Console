@@ -7,6 +7,7 @@ const { execFileSync } = require('node:child_process');
 const snapshotPolicy = require('../../server/services/observeSnapshotPolicy.js');
 const MAX_FILES = 10000;
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
+const IDENTITY_PREFIX_BYTES = 64 * 1024;
 class ReaderError extends Error {
   constructor(code) {
     super(code);
@@ -307,25 +308,7 @@ function listFiles(root, providerCoverage, budget) {
             providerCoverage.files_failed++;
             continue;
           }
-          const fileDescriptor = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-          try {
-            const openedStats = fs.fstatSync(fileDescriptor);
-            if (openedStats.dev !== fileStats.dev || openedStats.ino !== fileStats.ino || openedStats
-              .size > MAX_FILE_BYTES) {
-              throw Error();
-            }
-            const data = fs.readFileSync(fileDescriptor, 'utf8');
-            if (Buffer.byteLength(data) > MAX_FILE_BYTES) {
-              throw Error();
-            }
-            result.push({
-              file: filePath,
-              records: data.split('\n').filter(value => value.trim()).map(parseTranscriptRecord)
-            });
-            providerCoverage.files_scanned++;
-          } finally {
-            fs.closeSync(fileDescriptor);
-          }
+          result.push({ file: filePath, stats: fileStats });
         }
       } catch {
         providerCoverage.files_failed++;
@@ -727,14 +710,14 @@ function transcriptSessionId(provider, records) {
 
 // Host R2 decision: group file identities only; metadata and messages never cross file boundaries.
 function groupTranscriptFiles(groups, provider, file) {
-  const sessionId = transcriptSessionId(provider, file.records);
+  const sessionId = file.sessionId;
   const key = isIdentityComponent(sessionId) ? `${provider}:${sessionId}` : `${provider}:file:${file.file}`;
   let group = groups.get(key);
   if (!group) {
     group = { provider, sessionId, files: new Map() };
     groups.set(key, group);
   }
-  // Spec §1.3: enumerate a given file once, then retain each of its original record positions once.
+  // Spec §1.3: retain one compact result per file, never its original records.
   group.files.set(file.file, file);
 }
 
@@ -777,16 +760,16 @@ function countInvalidTimeRecords(records) {
     && !snapshotPolicy.isSafeTimestamp(record.timestamp)).length;
 }
 
-function parseIndependentTranscript(group, file, providerCoverage, multiFile) {
+function parseIndependentTranscript(provider, records, providerCoverage) {
   // Host R5: a single file cannot assign instructions from multiple explicit session identities.
-  const mixedSession = hasMixedSessionIdentities(group.provider, file.records);
+  const mixedSession = hasMixedSessionIdentities(provider, records);
   if (mixedSession) {
     providerCoverage.mixed_session_withheld++;
   }
-  const duplicates = countDuplicateRecordIdentities(group.provider, file.records);
+  const duplicates = countDuplicateRecordIdentities(provider, records);
   providerCoverage.records_unverified += duplicates;
   // Host R9: one explicit invalid TIME withholds the file from export, lookup, and Orca evidence.
-  const invalidTimeRecords = countInvalidTimeRecords(file.records);
+  const invalidTimeRecords = countInvalidTimeRecords(records);
   if (invalidTimeRecords > 0) {
     providerCoverage.records_unverified += invalidTimeRecords;
     providerCoverage.invalid_time_withheld++;
@@ -794,22 +777,81 @@ function parseIndependentTranscript(group, file, providerCoverage, multiFile) {
   }
   let session;
   try {
-    session = parseFile(group.provider, file.records, providerCoverage);
+    session = parseFile(provider, records, providerCoverage);
   } catch {
     // Spec §1: malformed candidates cannot abort unrelated sessions.
     providerCoverage.files_failed++;
   }
-  if (!session && !multiFile && duplicates === 0) {
-    if (group.provider === 'claude') {
-      providerCoverage.files_skipped++;
+  // Spec §1.3 / v11: defer group-dependent coverage until all file identities are known.
+  return {
+    session: mixedSession || duplicates > 0 ? null : session,
+    skipIfSingle: !session && duplicates === 0
+  };
+}
+
+// Spec §1.4: old files contribute identity only, using complete records within a bounded prefix.
+function readTranscriptIdentity(provider, fileDescriptor, fileSize) {
+  const prefix = Buffer.alloc(Math.min(fileSize, IDENTITY_PREFIX_BYTES));
+  let bytesRead = 0;
+  while (bytesRead < prefix.length) {
+    const count = fs.readSync(fileDescriptor, prefix, bytesRead, prefix.length - bytesRead, bytesRead);
+    if (count === 0) {
+      break;
     }
-    return null;
+    bytesRead += count;
   }
-  // Host R2: parse coverage independently, but export no candidate from ambiguous files.
-  if (multiFile || mixedSession || duplicates > 0) {
-    return null;
+  const data = prefix.subarray(0, bytesRead);
+  const completeEnd = bytesRead < prefix.length || fileSize <= bytesRead ? bytesRead : data.lastIndexOf(10) + 1;
+  for (const line of data.subarray(0, completeEnd).toString('utf8').split('\n')) {
+    let record;
+    try {
+      record = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!isRecordObject(record)) {
+      continue;
+    }
+    const sessionId = transcriptSessionId(provider, [record]);
+    if (provider === 'codex' ? record.type === 'session_meta' : isIdentityComponent(sessionId)) {
+      return sessionId;
+    }
   }
-  return session;
+  return undefined;
+}
+
+// Spec §2: verify the enumerated inode before reading; only one file's records remain in scope.
+function summarizeTranscriptFile(provider, file, providerCoverage, windowSince) {
+  let fileDescriptor;
+  try {
+    fileDescriptor = fs.openSync(file.file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const openedStats = fs.fstatSync(fileDescriptor);
+    if (openedStats.dev !== file.stats.dev || openedStats.ino !== file.stats.ino
+      || openedStats.size > MAX_FILE_BYTES) {
+      throw Error();
+    }
+    if (file.stats.mtimeMs < windowSince) {
+      const sessionId = readTranscriptIdentity(provider, fileDescriptor, openedStats.size);
+      providerCoverage.files_scanned++;
+      return { file: file.file, sessionId, outsideWindow: true };
+    }
+    const data = fs.readFileSync(fileDescriptor, 'utf8');
+    if (Buffer.byteLength(data) > MAX_FILE_BYTES) {
+      throw Error();
+    }
+    const records = data.split('\n').filter(value => value.trim()).map(parseTranscriptRecord);
+    providerCoverage.files_scanned++;
+    const sessionId = transcriptSessionId(provider, records);
+    const parsed = parseIndependentTranscript(provider, records, providerCoverage);
+    return { file: file.file, sessionId, ...parsed };
+  } catch {
+    providerCoverage.files_failed++;
+    return null;
+  } finally {
+    if (fileDescriptor !== undefined) {
+      fs.closeSync(fileDescriptor);
+    }
+  }
 }
 
 function scanSessions(readerOptions, config) {
@@ -826,7 +868,11 @@ function scanSessions(readerOptions, config) {
   ];
   for (const [provider, root] of roots) {
     for (const file of listFiles(root, coverage[provider], budget)) {
-      groupTranscriptFiles(groups, provider, file);
+      const summary = summarizeTranscriptFile(provider, file, coverage[provider],
+        +readerOptions.now - 14 * 86400000);
+      if (summary) {
+        groupTranscriptFiles(groups, provider, summary);
+      }
     }
   }
   const parsedSessions = [];
@@ -837,7 +883,19 @@ function scanSessions(readerOptions, config) {
       providerCoverage.multi_file_withheld++;
     }
     for (const file of group.files.values()) {
-      const session = parseIndependentTranscript(group, file, providerCoverage, multiFile);
+      if (file.outsideWindow) {
+        if (!multiFile && group.provider === 'claude') {
+          providerCoverage.files_skipped++;
+        }
+        if (!multiFile && group.provider === 'codex' && config.invalidContentRuleSessions?.has(group.sessionId)) {
+          providerCoverage.withheld_sessions++;
+        }
+        continue;
+      }
+      if (!multiFile && file.skipIfSingle && group.provider === 'claude') {
+        providerCoverage.files_skipped++;
+      }
+      const session = multiFile ? null : file.session;
       if (session) {
         parsedSessions.push(session);
       }
