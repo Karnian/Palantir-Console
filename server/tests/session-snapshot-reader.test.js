@@ -2400,13 +2400,15 @@ for (const provider of ['claude', 'codex']) {
   });
 }
 
-function loadReaderWithInternals(maxFiles) {
+function loadReaderWithInternals(maxFiles, summaries) {
   const Module = require('node:module');
   const filename = require.resolve('../../scripts/lib/sessionSnapshotReader.cjs');
   const loaded = new Module(filename, module);
   loaded.filename = filename;
   let source = fs.readFileSync(filename, 'utf8');
   if (maxFiles !== undefined) source = source.replace('const MAX_FILES = 10000;', `const MAX_FILES = ${maxFiles};`);
+  if (summaries !== undefined) source = source.replace('const LINK_LIMITS = { summaries: MAX_FILES };',
+    `const LINK_LIMITS = { summaries: ${summaries} };`);
   loaded._compile(source + '\nmodule.exports.testInternals = '
     + '{ listFiles, summarizeTranscriptFile, groupTranscriptFiles, parseFile, '
     + 'computeInstructionFingerprint, computeInstructionRef, buildSnapshotInstruction, scanSessions, buildOrcaLinkCandidates, applyOrcaLinks };', filename);
@@ -5209,4 +5211,116 @@ test('PR1d S1 correction reread notices newly completed broken JSON without chan
   assert.equal(snapshot.coverage.claude.link_blocked, 1);
   assert.equal(snapshot.sessions.some(session => session.session_id === 's0'), true);
   assert.equal(snapshot.sessions.find(session => session.session_id === 's1').orca_link.evidence, 'ambiguous');
+});
+
+test('PR1d R3-A1 rejected complete instruction IDs invalidate the provider comparison', t => {
+  const fixture = createFixture(t), prompt = 'shared human prompt';
+  fixture.file('claude', 'visible', [claudeUserRecord(prompt, { sessionId: 'visible' })]);
+  fixture.file('claude', 'hidden', [claudeUserRecord('different human prompt', { sessionId: 'token', uuid: 'a' }),
+    claudeUserRecord(prompt, { sessionId: 'token', uuid: 'tail' })]);
+  fixture.options.runOrca = orcaRunner([orcaWorktree(prompt)], []);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.coverage.claude.link_blocked, 1);
+  assert.equal(snapshot.sessions.find(session => session.session_id === 'visible').orca_link.evidence, 'ambiguous');
+  assert.equal(snapshot.instructions.some(instruction => instruction.id === 'claude:token:utail'), false);
+});
+
+for (const excluded of [false, true]) {
+  test(`PR1d R3-${excluded ? 'C1' : 'A2'} original parse marker keys cannot erase a completed competing instruction`, t => {
+    const fixture = createFixture(t), prompt = 'shared human prompt';
+    fixture.file('claude', 'visible', [claudeUserRecord(prompt, { sessionId: 'visible', cwd: '/repo' })]);
+    const hidden = fixture.file('claude', 'hidden', [claudeUserRecord('older different prompt',
+      { sessionId: 'hidden', uuid: 'a', cwd: '/repo' }), claudeUserRecord(prompt, {
+      sessionId: 'hidden', uuid: 'tail', cwd: '/repo', timestamp: '2026-10-08T02:01:00.000Z',
+      __invalid: true, __pending: true, __parseFailed: true })]);
+    fs.appendFileSync(hidden, '\n');
+    snapshotReader.loadConfig(fixture.options);
+    if (excluded) { const config = fixture.config(); config.exclude.sessions = ['claude:hidden']; fixture.save(config); }
+    fixture.options.runOrca = orcaRunner([{ ...orcaWorktree(prompt, 'p:leaf', {
+      updatedAt: Date.parse('2026-10-08T02:01:00.000Z'), stateStartedAt: Date.parse('2026-10-08T02:01:00.000Z') }), path: '/repo' }], []);
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(snapshot.coverage.claude.link_blocked, 0);
+    assert.equal(snapshot.sessions.find(session => session.session_id === 'visible').orca_link.evidence, 'ambiguous');
+    if (!excluded) assert.equal(snapshot.instructions.some(instruction => instruction.id === 'claude:hidden:utail'), true);
+  });
+}
+
+test('PR1d R3-A3 repeated queued instruction IDs count queued duplicate withholding', t => {
+  const fixture = createFixture(t);
+  fixture.file('claude', 'queued', [queuedHuman('first', { uuid: 'q' }), queuedHuman('second', { uuid: 'q' })]);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.sessions.length, 0);
+  assert.equal(snapshot.coverage.claude.queued_duplicate_withheld, 1);
+  assert.equal(snapshot.coverage.claude.records_unverified, 1);
+  assert.equal(snapshot.coverage.claude.link_blocked, 0);
+});
+
+test('PR1d R3-C2 same-cwd inventories use bounded indexed edges and stop competing agent queries at two', () => {
+  const { buildOrcaLinkCandidates, applyOrcaLinks } = loadReaderWithInternals();
+  const cwdHash = 'a'.repeat(64), hash = 'b'.repeat(64), count = 1000;
+  let timeChecks = 0;
+  const sessions = Array.from({ length: count }, (_, index) => ({ provider: 'claude', cwdHash,
+    firstAt: RECORD_TIMESTAMP, lastAt: RECORD_TIMESTAMP, link_text: { hash, length: 8, truncated: false },
+    ...(index === count - 1 ? { output: {} } : {}) }));
+  const agents = Array.from({ length: count }, (_, index) => ({ provider: 'claude', cwdHash, pane: `p:${index}`,
+    prompt: { hash, length: 8, prefix_hashes: [] }, get times() { timeChecks++; return [Date.parse(RECORD_TIMESTAMP)]; } }));
+  const edges = buildOrcaLinkCandidates(sessions, agents);
+  assert.ok(edges.length <= 2, `retained ${edges.length} edges for one output session`);
+  assert.ok(timeChecks < count * 10, `${timeChecks} time checks exceeded bounded matching`);
+  applyOrcaLinks(sessions, edges);
+  assert.deepEqual(sessions.at(-1).output.orca_link,
+    { evidence: 'ambiguous', confirmed: false, pane_key: null, terminal_handle: null });
+});
+
+
+test('PR1d R3 parse marker keys in text blocks remain ordinary source fields', t => {
+  const fixture = createFixture(t);
+  fixture.file('claude', 'main', [claudeUserRecord([{ type: 'text', text: 'a regular human instruction',
+    __invalid: true, __pending: true, __parseFailed: true }])]);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.instructions[0].text, 'a regular human instruction');
+  assert.equal(snapshot.coverage.claude.records_unverified, 0);
+  assert.equal(snapshot.coverage.claude.link_blocked, 0);
+});
+
+test('PR1d R3 comparison summary cap blocks only its provider and bounds retained competitors', t => {
+  const fixture = createFixture(t), prompt = 'shared human prompt';
+  for (let index = 0; index < 3; index++) fixture.file('claude', `file-${index}`, [claudeUserRecord(prompt,
+    { sessionId: `s${index}` })]);
+  fixture.file('codex', 'codex', [codexSessionMeta(), codexMessage(prompt)]);
+  fixture.options.runOrca = orcaRunner([orcaWorktree(prompt),
+    { ...orcaWorktree(prompt, 'cx:leaf', { agentType: 'codex' }), worktreeId: 'cx' }], []);
+  const reader = loadReaderWithInternals(undefined, 2);
+  const snapshot = reader.runSnapshot(fixture.options);
+  assert.equal(snapshot.coverage.claude.link_blocked, 1);
+  assert.equal(snapshot.coverage.codex.link_blocked, 0);
+  assert.equal(snapshot.sessions.filter(session => session.provider === 'claude').every(session =>
+    session.orca_link.evidence === 'ambiguous' && !session.orca_link.confirmed), true);
+  assert.equal(snapshot.sessions.find(session => session.provider === 'codex').orca_link.confirmed, true);
+  const { linkCandidates } = reader.scanSessions(fixture.options, fixture.config());
+  assert.ok(linkCandidates.filter(session => session.provider === 'claude').length <= 2);
+});
+
+test('PR1d R3 full hidden summary and agent dimensions fit a 64MB heap without output edges', { timeout: 30000 }, () => {
+  const { spawnSync } = require('node:child_process');
+  const filename = require.resolve('../../scripts/lib/sessionSnapshotReader.cjs');
+  const source = `
+    const fs = require('node:fs'), Module = require('node:module');
+    const loaded = new Module(process.argv[1], module);
+    loaded.filename = process.argv[1];
+    loaded._compile(fs.readFileSync(process.argv[1], 'utf8') +
+      '\\nmodule.exports.testBuild = buildOrcaLinkCandidates;', process.argv[1]);
+    const timestamp = '2026-10-08T02:00:00.000Z', cwdHash = 'a'.repeat(64), hash = 'b'.repeat(64);
+    const sessions = Array.from({ length: 9900 }, () => ({ provider: 'claude', cwdHash,
+      firstAt: timestamp, lastAt: timestamp, link_text: { hash, length: 8, truncated: false } }));
+    const agents = Array.from({ length: 30000 }, (_, index) => ({ provider: 'claude', cwdHash,
+      pane: 'p:' + index, prompt: { hash, length: 8 }, times: [Date.parse(timestamp)] }));
+    const edges = loaded.exports.testBuild(sessions, agents);
+    if (edges.length !== 0 || edges.paneMatches.size !== 30000) throw new Error('unbounded or incomplete matching');
+    process.stdout.write('bounded');
+  `;
+  const child = spawnSync(process.execPath, ['--max-old-space-size=64', '-e', source, filename],
+    { encoding: 'utf8', timeout: 25000, env: { ...process.env, PALANTIR_BLOCK_REAL_SPAWN: '1' } });
+  assert.equal(child.status, 0, child.stderr);
+  assert.equal(child.stdout, 'bounded');
 });

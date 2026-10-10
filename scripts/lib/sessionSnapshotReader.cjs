@@ -6,6 +6,8 @@ const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 const snapshotPolicy = require('../../server/services/observeSnapshotPolicy.js');
 const MAX_FILES = 10000;
+const LINK_LIMITS = { summaries: MAX_FILES };
+const PARSE_STATES = new WeakMap();
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
 const STREAM_LIMITS = { lineBytes: 8 * 1024 * 1024, fileBytes: 256 * 1024 * 1024, identities: 100000, smallFileBytes: MAX_FILE_BYTES };
 function streamLimit() { const error = new Error('stream_limit'); error.streamLimit = true; throw error; }
@@ -24,8 +26,7 @@ function selectFirstTranscriptIdentity(provider, record, identity) {
 function* transcriptRecords(fd, observation) {
   const limited = observation?.limited !== false;
   function consume(line, terminated = true) {
-    const record = parseTranscriptRecord(line);
-    if (!terminated && record.__parseFailed) record.__pending = true;
+    const record = parseTranscriptRecord(line, terminated);
     if (observation) selectFirstTranscriptIdentity(observation.provider, record, observation);
     return record;
   }
@@ -59,13 +60,14 @@ function transcriptSource(fd, provider, validateOnly = false, observation) {
   const source = { streaming: true, limited: observation?.limited !== false, find(predicate) { return headers.find(predicate); } };
   const analysis = { byUuid: new Map(), firstTime: null, lastTime: null, duplicates: 0, invalidTime: 0,
     mixed: false, queuedDuplicate: false, sidechainOnly: true, singleSession: true, count: 0,
-    brokenJson: false, hasSessionIdentity: false, instructionCandidates: 0, skippedCandidates: false };
+    brokenJson: false, hasSessionIdentity: false, instructionCandidates: 0, summaryCandidates: 0 };
   const seen = new Set(), users = new Set(), queued = new Set(), sessions = new Set();
   let hasMeta = false, hasSid = false, hasCwd = false, hasBranch = false, firstSid;
-  let timestampInput, timestampOutput, userOrdinal = 0;
+  let timestampInput, timestampOutput;
   function observe(record) {
     analysis.count++;
-    if (record.__invalid && !record.__pending) analysis.brokenJson = true;
+    const state = PARSE_STATES.get(record);
+    if (state?.invalid && !state.pending) analysis.brokenJson = true;
     if (provider === 'codex' && record.type === 'session_meta' && !hasMeta) {
       hasMeta = true;
       const payload = record.payload;
@@ -98,22 +100,17 @@ function transcriptSource(fd, provider, validateOnly = false, observation) {
       ? { parentUuid: typeof record.parentUuid === 'string' || record.parentUuid === null ? record.parentUuid : false } : {});
     const user = provider === 'claude' ? record.type === 'user'
       : record.type === 'response_item' && record.payload?.type === 'message' && record.payload.role === 'user';
-    if (provider === 'codex' && user) userOrdinal++;
     const classification = provider === 'claude' ? classifyClaudeRecord(record)
       : user ? classifyCodexMessage(record.payload) : null;
     analysis.currentClassification = classification;
     const attachment = provider === 'claude' && isQueuedInstruction(record, classification);
-    if (classification?.kind && !classification.empty) {
-      analysis.instructionCandidates++;
-      const suffix = provider === 'claude' ? isIdentityComponent(record.uuid)
-        : codexIdentitySuffix(record.payload.id, userOrdinal);
-      const contentValid = provider !== 'claude' || record.type !== 'user'
-        || typeof record.message?.content === 'string' || Array.isArray(record.message?.content);
-      if (!ts || !suffix || !contentValid) analysis.skippedCandidates = true;
-    }
+    if (classification?.kind && !classification.empty) analysis.instructionCandidates++;
     const identity = provider === 'claude' ? record.uuid : record.payload?.id;
     if ((user || attachment) && isIdentityComponent(identity)) {
-      if (seen.has(identity)) analysis.duplicates++;
+      if (seen.has(identity)) {
+        analysis.duplicates++;
+        if (attachment) analysis.queuedDuplicate = true;
+      }
       seen.add(identity);
     }
     if (provider === 'claude' && user) for (const id of [record.uuid, record.source_uuid, record.delivery_id,
@@ -141,10 +138,10 @@ function transcriptSource(fd, provider, validateOnly = false, observation) {
   }
   const seedTime = analysis.firstTime;
   const ready = !validateOnly && analysis.firstTime && isIdentityComponent(transcriptSessionId(provider, source));
-  analysis.byUuid.clear(); seen.clear(); users.clear(); queued.clear(); sessions.clear(); userOrdinal = 0;
+  analysis.byUuid.clear(); seen.clear(); users.clear(); queued.clear(); sessions.clear();
   Object.assign(analysis, { firstTime: null, lastTime: null, count: 0, duplicates: 0,
     invalidTime: 0, singleSession: true, sidechainOnly: true, mixed: false, queuedDuplicate: false,
-    brokenJson: false, hasSessionIdentity: false, instructionCandidates: 0, skippedCandidates: false });
+    brokenJson: false, hasSessionIdentity: false, instructionCandidates: 0, summaryCandidates: 0 });
   if (ready) {
     source.lazy = true;
     // parseFile checks timestamp availability before it consumes the iterator.
@@ -393,26 +390,36 @@ function isRecordObject(value) {
 }
 
 // Spec §1: unsupported JSON values and blocks become coverage, never collection-wide exceptions.
-function parseTranscriptRecord(line) {
+function parseTranscriptRecord(line, terminated = true) {
+  let record;
   try {
-    const record = JSON.parse(line);
-    if (!isRecordObject(record)) {
-      return { __invalid: true };
-    }
-    for (const container of [record.message, record.payload]) {
-      if (isRecordObject(container) && Array.isArray(container.content)) {
-        container.content = container.content.map(block => isRecordObject(block) ? block : { __invalid: true });
-      }
-    }
-    return record;
+    record = JSON.parse(line);
   } catch {
-    return { __invalid: true, __parseFailed: true };
+    record = {};
+    PARSE_STATES.set(record, { invalid: true, pending: !terminated });
+    return record;
   }
+  if (!isRecordObject(record)) {
+    record = {};
+    PARSE_STATES.set(record, { invalid: true, pending: false });
+    return record;
+  }
+  for (const container of [record.message, record.payload]) {
+    if (isRecordObject(container) && Array.isArray(container.content)) {
+      container.content = container.content.map(block => {
+        if (isRecordObject(block)) return block;
+        const replacement = {};
+        PARSE_STATES.set(replacement, { invalid: true, pending: false });
+        return replacement;
+      });
+    }
+  }
+  return record;
 }
 
 function countInvalidBlocks(record) {
   const content = record.message?.content ?? record.payload?.content;
-  return Array.isArray(content) ? content.filter(block => block.__invalid).length : 0;
+  return Array.isArray(content) ? content.filter(block => PARSE_STATES.get(block)?.invalid).length : 0;
 }
 
 function listFiles(root, providerCoverage, budget) {
@@ -703,7 +710,7 @@ function parseFile(provider, records, providerCoverage, config = {}, retainAllIn
     }
   }
   if (!firstTime) {
-    for (const record of records) if (record.__invalid || (provider === 'claude'
+    for (const record of records) if (PARSE_STATES.get(record)?.invalid || (provider === 'claude'
       ? record.type === 'user' || classifyClaudeRecord(record)
       : record.type === 'response_item' && record.payload?.type === 'message' && record.payload.role === 'user'))
       providerCoverage.records_unverified++;
@@ -757,7 +764,7 @@ function parseFile(provider, records, providerCoverage, config = {}, retainAllIn
   for (const record of records) {
     position++;
     const timestamp = records.lazy ? records.analysis.currentTime : toIsoTimestamp(record.timestamp);
-    if (record.__invalid) {
+    if (PARSE_STATES.get(record)?.invalid) {
       providerCoverage.records_unverified++;
       continue;
     }
@@ -805,6 +812,7 @@ function parseFile(provider, records, providerCoverage, config = {}, retainAllIn
         providerCoverage.records_unverified++;
         continue;
       }
+      if (records.analysis) records.analysis.summaryCandidates++;
       if (record.type === 'attachment') providerCoverage.queued_delivered_attachment++;
       items.push(compactInstruction(config, {
         ...classification,
@@ -865,6 +873,7 @@ function parseFile(provider, records, providerCoverage, config = {}, retainAllIn
         providerCoverage.records_unverified++;
         continue;
       }
+      if (records.analysis) records.analysis.summaryCandidates++;
       items.push(compactInstruction(config, {
         ...classification,
         id: `codex:${sessionId}:${suffix}`,
@@ -1163,8 +1172,13 @@ function parseIndependentTranscript(provider, records, providerCoverage, config,
         record.message?.source_uuid, record.message?.delivery_id]) if (typeof id === 'string') userIds.add(id);
       checkMetadata(userIds.size);
     }
-    for (const record of records) if (isQueuedInstruction(record)
-      && [record.uuid, record.attachment.source_uuid, record.attachment.delivery_id].some(id => userIds.has(id))) queuedDuplicate = true;
+    const queuedIds = new Set();
+    for (const record of records) if (isQueuedInstruction(record)) {
+      if (queuedIds.has(record.uuid) || [record.uuid, record.attachment.source_uuid, record.attachment.delivery_id]
+        .some(id => userIds.has(id))) queuedDuplicate = true;
+      queuedIds.add(record.uuid);
+      checkMetadata(queuedIds.size);
+    }
     if (queuedDuplicate) providerCoverage.queued_duplicate_withheld++;
   }
   providerCoverage.records_unverified += duplicates;
@@ -1208,7 +1222,7 @@ function parseTranscriptIdentityRecord(line) {
         isSidechain: record.isSidechain };
     }
   } catch {}
-  return { __invalid: true };
+  return {};
 }
 
 function inspectTranscriptIdentity(provider, data, observation) {
@@ -1391,7 +1405,8 @@ function summarizeTranscriptFile(provider, file, providerCoverage, windowSince, 
     }
     const ignored = !records.analysis.hasSessionIdentity && !records.analysis.instructionCandidates;
     const comparisonFailed = Boolean(parsed?.comparisonFailed || records.analysis.brokenJson
-      || records.analysis.invalidTime || records.analysis.mixed || records.analysis.skippedCandidates
+      || records.analysis.invalidTime || records.analysis.mixed
+      || records.analysis.instructionCandidates !== records.analysis.summaryCandidates
       || (!ignored && !parsed?.comparison));
     const rawCwd = provider === 'claude' ? records.find(record => typeof record.cwd === 'string')?.cwd
       : records.find(record => record.type === 'session_meta')?.payload?.cwd;
@@ -1532,6 +1547,7 @@ function scanSessions(readerOptions, config, requestedTarget = null) {
   const scanContext = { readerOptions, groups };
   const details = new Map();
   const linkCandidates = [];
+  const summaryCounts = { claude: 0, codex: 0 };
   const windowSince = +readerOptions.now - 14 * 86400000;
   let scanIndex = 0;
   const budget = { entries: 0, files: 0 };
@@ -1556,7 +1572,8 @@ function scanSessions(readerOptions, config, requestedTarget = null) {
             : snapshotSessionExclusion(readerOptions, config, summary.session);
         }
         if (!requestedTarget && !summary.comparisonFailed && summary.comparison) {
-          linkCandidates.push({ file: summary, session: { ...summary.comparison,
+          if (++summaryCounts[provider] > LINK_LIMITS.summaries) coverage[provider].link_blocked = 1;
+          else linkCandidates.push({ file: summary, session: { ...summary.comparison,
             cwd: null, cwdHash: summary.cwdHash } });
         }
         delete summary.comparison;
@@ -1867,7 +1884,7 @@ function readOrca(readerOptions, config, all, coverage, outputBudget) {
     ids
   } = parseOrcaWorktrees(worktrees, config, out, coverage.orca, outputBudget);
   const globalPartial = coverage.orca.state !== 'ok';
-  const edges = buildOrcaLinkCandidates(all, agents);
+  const edges = buildOrcaLinkCandidates(all, agents, coverage);
   applyOrcaLinks(all, edges, coverage);
   const terminalPartial = parseOrcaTerminals(terminals, edges, agents, ids, out, coverage.orca, outputBudget);
   // Spec §2.2: trusted terminal paths restrict cancellation; inventory failures remain global.
@@ -2003,55 +2020,101 @@ function parseOrcaWorktrees(worktrees, config, out, orcaCoverage, outputBudget) 
 }
 
 
-// Spec §2.2: exact/prefix thresholds and the [first, last + 10 minutes] window are independent evidence.
-function buildOrcaLinkCandidates(all, agents) {
-  const edges = [];
-  for (const parsedSession of all) {
-    const text = parsedSession.link_text;
-    for (const agent of agents) {
-      const sameCwd = parsedSession.cwdHash ? parsedSession.cwdHash === agent.cwdHash
-        : parsedSession.cwd !== null && parsedSession.cwd === agent.cwd;
-      if (!sameCwd) {
-        continue;
-      }
-      let evidence = 'cwd_only';
-      if (text && agent.prompt && text.length >= 8 && text.hash === agent.prompt.hash && text.length === agent.prompt.length) {
-        if (text.truncated) evidence = 'prompt_trunc';
-        else if (text.length >= 8) evidence = 'prompt_exact';
-      }
-      if (evidence === 'cwd_only' && text && agent.prompt && !text.truncated && text.length >= 24 && text.length < agent.prompt.length
-        && agent.prompt.prefix_hashes[text.length - 24] === text.hash) evidence = 'prompt_prefix';
-      const inTime = agent.times.some(time => time >= Date.parse(parsedSession.firstAt)
-        && time <= Date.parse(parsedSession.lastAt) + 600000);
-      const eligible = ['prompt_exact', 'prompt_trunc'].includes(evidence) && inTime
-        && agent.provider === parsedSession.provider;
-      edges.push({
-        session: parsedSession,
-        agent,
-        evidence,
-        inTime, eligible
-      });
-    }
+// Spec §2.2: hash indexes bound competing matches; cwd membership needs no cross-product edges.
+function orcaCwdKey(value) {
+  return value.cwdHash || (typeof value.cwd === 'string'
+    ? crypto.createHash('sha256').update(value.cwd).digest('hex') : null);
+}
+function orcaComparisonKey(cwd, provider, text) {
+  return text && text.length >= 8 ? JSON.stringify([cwd, provider, text.hash, text.length]) : null;
+}
+function orcaInTime(range, agent) {
+  return agent.times.some(time => time >= range.first && time <= range.last + 600000);
+}
+function indexOrcaEdges(edges) {
+  const bySession = new Map(), byPane = new Map();
+  for (const edge of edges) {
+    if (!bySession.has(edge.session)) bySession.set(edge.session, []);
+    if (!byPane.has(edge.agent.pane)) byPane.set(edge.agent.pane, []);
+    bySession.get(edge.session).push(edge);
+    byPane.get(edge.agent.pane).push(edge);
   }
+  return { bySession, byPane };
+}
+function buildOrcaLinkCandidates(all, agents, coverage) {
+  const edges = [], sessionsByForm = new Map(), firstAgentByCwd = new Map(), agentsByForm = new Map();
+  const ranges = new Map(), counts = { claude: 0, codex: 0 }, paneMatches = new Map();
+  for (const session of all) {
+    if (++counts[session.provider] > LINK_LIMITS.summaries) {
+      if (coverage?.[session.provider]) coverage[session.provider].link_blocked = 1;
+      continue;
+    }
+    const cwd = orcaCwdKey(session);
+    const range = { first: Date.parse(session.firstAt), last: Date.parse(session.lastAt) };
+    ranges.set(session, range);
+    if (cwd === null) continue;
+    const key = orcaComparisonKey(cwd, session.provider, session.link_text);
+    if (key === null) continue;
+    if (!sessionsByForm.has(key)) sessionsByForm.set(key, []);
+    sessionsByForm.get(key).push(range);
+  }
+  for (const agent of agents) {
+    const cwd = orcaCwdKey(agent);
+    if (cwd === null) continue;
+    if (!firstAgentByCwd.has(cwd)) firstAgentByCwd.set(cwd, agent);
+    const key = orcaComparisonKey(cwd, agent.provider, agent.prompt);
+    if (key === null) continue;
+    let matches = 0;
+    for (const range of sessionsByForm.get(key) || []) {
+      if (orcaInTime(range, agent) && ++matches === 2) break;
+    }
+    if (!matches) continue;
+    paneMatches.set(agent.pane, Math.min(2, (paneMatches.get(agent.pane) || 0) + matches));
+    if (!agentsByForm.has(key)) agentsByForm.set(key, []);
+    agentsByForm.get(key).push(agent);
+  }
+  for (const session of all) {
+    if (!session.output) continue;
+    const cwd = orcaCwdKey(session), range = ranges.get(session);
+    const key = orcaComparisonKey(cwd, session.provider, session.link_text);
+    let matches = 0;
+    if (range) for (const agent of agentsByForm.get(key) || []) {
+      if (!orcaInTime(range, agent)) continue;
+      edges.push({ session, agent, evidence: session.link_text.truncated ? 'prompt_trunc' : 'prompt_exact',
+        inTime: true, eligible: true });
+      if (++matches === 2) break;
+    }
+    if (matches) continue;
+    const agent = firstAgentByCwd.get(cwd);
+    if (!agent) continue;
+    const text = session.link_text;
+    let evidence = 'cwd_only';
+    if (text && agent.prompt && text.length >= 8 && text.hash === agent.prompt.hash && text.length === agent.prompt.length)
+      evidence = text.truncated ? 'prompt_trunc' : 'prompt_exact';
+    else if (text && agent.prompt && !text.truncated && text.length >= 24 && text.length < agent.prompt.length
+      && agent.prompt.prefix_hashes[text.length - 24] === text.hash) evidence = 'prompt_prefix';
+    edges.push({ session, agent, evidence, inTime: range ? orcaInTime(range, agent) : false, eligible: false });
+  }
+  edges.paneMatches = paneMatches;
+  Object.assign(edges, indexOrcaEdges(edges));
   return edges;
 }
 
-
-// Spec §2.2: uniqueness must hold from pane to session and session to pane.
+// Spec §2.2: both directions must be unique, including nonexported file summaries.
 function applyOrcaLinks(all, edges, coverage) {
+  const { bySession, byPane } = edges.bySession ? edges : indexOrcaEdges(edges);
   for (const parsedSession of all.filter(parsedSession => parsedSession.output)) {
     if (coverage?.[parsedSession.provider]?.link_blocked) {
       parsedSession.output.orca_link = { evidence: 'ambiguous', confirmed: false, pane_key: null, terminal_handle: null };
       continue;
     }
-    const sessionEdges = edges.filter(edge => edge.session === parsedSession);
-    if (!sessionEdges.length) {
-      continue;
-    }
+    const sessionEdges = bySession.get(parsedSession) || [];
+    if (!sessionEdges.length) continue;
     const candidates = sessionEdges.filter(edge => edge.eligible);
     const edge = candidates[0] || sessionEdges[0];
-    const ambiguous = candidates.length > 1 || (edge.eligible && edges.filter(value => value.eligible
-      && value.agent.pane === edge.agent.pane).length > 1);
+    const paneCount = edges.paneMatches?.get(edge.agent.pane)
+      ?? (byPane.get(edge.agent.pane) || []).filter(value => value.eligible).length;
+    const ambiguous = candidates.length > 1 || (edge.eligible && paneCount > 1);
     parsedSession.output.orca_link = {
       evidence: ambiguous ? 'ambiguous' : edge.evidence,
       confirmed: !ambiguous && edge.eligible,
@@ -2061,10 +2124,10 @@ function applyOrcaLinks(all, edges, coverage) {
   }
 }
 
-
 // Host R4/R6: project terminal fields without titles; only valid mapped worktrees are exported.
 function parseOrcaTerminals(terminals, edges, agents, ids, out, orcaCoverage, outputBudget) {
   const partial = { global: false, cwds: new Set(), cwdHashes: new Set() };
+  const byPane = edges.byPane || indexOrcaEdges(edges).byPane;
   function rejectTerminal(terminal) {
     markOrcaPartial(orcaCoverage);
     const rawPath = terminal?.worktreePath;
@@ -2099,7 +2162,7 @@ function parseOrcaTerminals(terminals, edges, agents, ids, out, orcaCoverage, ou
       continue;
     }
     const paneKey = orcaTerminalPaneKey(terminal);
-    const related = edges.filter(edge => edge.agent.pane === paneKey);
+    const related = byPane.get(paneKey) || [];
     const projectedTerminal = {
       handle: terminal.handle,
       worktree_id: ids.get(terminal.worktreeId),
