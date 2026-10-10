@@ -8,13 +8,15 @@ export function displayInstructionText(text) {
   let end = 0;
   for (const match of trimmed.matchAll(tags)) {
     if (trimmed.slice(end, match.index).trim()) return text;
-    values[match[1]] ??= match[2];
+    if (Object.hasOwn(values, match[1])) return text;
+    values[match[1]] = match[2];
     end = match.index + match[0].length;
   }
-  const name = values.name || values.message;
-  if (!name || trimmed.slice(end).trim()) return text;
+  if (!values.name || trimmed.slice(end).trim()) return text;
+  const name = values.name.replace(/^\/+/u, '');
+  if (values.message !== undefined && values.message.trim().replace(/^\/+/u, '') !== name) return text;
   const args = values.args || '';
-  return `/${name.replace(/^\/+/u, '')}${args ? ` ${args}` : ''}`;
+  return `/${name}${args ? ` ${args}` : ''}`;
 }
 
 export function normalizeSearch(text) {

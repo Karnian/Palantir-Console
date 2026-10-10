@@ -29,21 +29,22 @@ const drain = async () => { await Promise.resolve(); await Promise.resolve(); };
 const commandText = (name, args = '') =>
   `<command-name>${name}</command-name><command-args>${args}</command-args>`;
 
-test('command display accepts tag combinations and every order, preferring name over message', async () => {
+test('command display accepts one name and matching optional message in every order', async () => {
   const { displayInstructionText } = await logic;
-  const tags = ['<command-message>fallback</command-message>',
+  const tags = ['<command-message> \t///deep-research\n </command-message>',
     '<command-name>///deep-research</command-name>', '<command-args></command-args>'];
   const orders = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
   for (const order of orders) {
     const text = order.map(index => tags[index]).join('\n \t');
     assert.equal(displayInstructionText(` \n${text}\t `), '/deep-research');
+    assert.equal(displayInstructionText(text.replace('<command-args></command-args>',
+      '<command-args>scripts/lib</command-args>')), '/deep-research scripts/lib');
   }
   const cases = [
     [tags[1], '/deep-research'],
-    ['<command-message>deep-research</command-message>', '/deep-research'],
-    ['<command-name></command-name><command-message>/deep-research</command-message>', '/deep-research'],
+    [tags[1] + tags[0], '/deep-research'],
     [commandText('/review', 'scripts/lib'), '/review scripts/lib'],
-    ['<command-args>scripts/lib</command-args><command-message>review</command-message>', '/review scripts/lib'],
+    [commandText('/review', 'scripts/lib') + '<command-message> /review </command-message>', '/review scripts/lib'],
     [commandText('review', '  scripts/lib\n[REDACTED] &lt;secret&gt;  '),
       '/review   scripts/lib\n[REDACTED] &lt;secret&gt;  '],
     [commandText('review', '<img src=x onerror=alert(1)>'), '/review <img src=x onerror=alert(1)>'],
@@ -61,8 +62,29 @@ test('command display preserves outside text, unknown tags and incomplete wrappe
     `  ${wrapper}\n<unknown>extra</unknown>  `,
     '<command-name>review</command-message>', '<command-name>review',
     '<command-name data-x="1">review</command-name>', '<command-args>scripts/lib</command-args>',
+    '<command-message>deep-research</command-message>',
+    '<command-name></command-name><command-message>/deep-research</command-message>',
+    '<command-args>scripts/lib</command-args><command-message>review</command-message>',
   ];
   for (const text of cases) assert.equal(displayInstructionText(text), text);
+});
+
+test('command display preserves mismatched messages and every repeated tag without losing text', async () => {
+  const { displayInstructionText } = await logic;
+  const wrapper = commandText('/review', 'x');
+  const cases = [
+    `${wrapper}<command-message>[REDACTED]</command-message>`,
+    `${wrapper}<command-message>Review</command-message>`,
+    `${wrapper}<command-message>/review x</command-message>`,
+    `${wrapper}<command-args>[REDACTED]</command-args>`,
+    `${wrapper}<command-args></command-args>`,
+    `${wrapper}<command-name>/review</command-name>`,
+    `${wrapper}<command-name></command-name>`,
+    `${wrapper}<command-message>review</command-message><command-message>review</command-message>`,
+    `${wrapper}<command-message></command-message>`,
+    '<command-name> review </command-name><command-message>review</command-message>',
+  ];
+  for (const text of cases) assert.equal(displayInstructionText(` \n${text}\t `), ` \n${text}\t `);
 });
 
 test('card display unwraps before selecting lines and deduplicates display strings while search stays raw', async t => {
@@ -71,7 +93,7 @@ test('card display unwraps before selecting lines and deduplicates display strin
   alpha.sessions = alpha.sessions.slice(0, 1);
   alpha.sessions[0].ai_title = null;
   alpha.instructions = alpha.instructions.slice(0, 2);
-  const first = '<command-message>fallback</command-message>\n'
+  const first = '<command-message>review</command-message>\n'
     + '<command-args>scripts/lib\n[REDACTED]</command-args>\n<command-name>//review</command-name>';
   alpha.instructions[0].text = first;
   alpha.instructions[1].text = '/review scripts/lib';
@@ -99,7 +121,8 @@ test('DOM displays command cards, timeline and raw search matches as safe litera
   alpha.sessions = alpha.sessions.slice(0, 1);
   alpha.instructions = alpha.instructions.slice(0, 2);
   alpha.sessions[0].ai_title = '/review scripts/lib';
-  alpha.instructions[0].text = '<command-message>deep-research</command-message>\n<command-args></command-args>';
+  alpha.instructions[0].text = '<command-message>deep-research</command-message>\n'
+    + '<command-name>/deep-research</command-name>\n<command-args></command-args>';
   const attack = '<img src=x onerror=alert(1)><script>alert(2)</script>';
   const args = `scripts/lib [REDACTED] ${attack}\n&lt;literal&gt;`;
   alpha.instructions[1].text = commandText('///review', args);
@@ -118,14 +141,11 @@ test('DOM displays command cards, timeline and raw search matches as safe litera
     await flushEffects();
     assert.equal(root.querySelectorAll('.work-card').length, 1);
     const match = root.querySelector('.work-match');
-    if (term.startsWith('command-')) {
-      assert.equal(match.querySelectorAll('mark').length, 0);
-      assert.equal(match.querySelector('p').textContent,
-        term === 'command-name' ? `/review ${args}` : '/deep-research');
-    } else {
-      assert.equal(match.querySelector('mark').textContent, term);
-      assert.equal(match.querySelector('p').textContent, `/review scripts/lib [REDACTED] ${attack}`);
-    }
+    assert.equal(match.querySelectorAll('mark').length, 1);
+    assert.equal(match.querySelector('mark').textContent, term);
+    const expected = term === 'command-message' ? '<command-message>deep-research</command-message>'
+      : `<command-name>///review</command-name><command-args>scripts/lib [REDACTED] ${attack}`;
+    assert.equal(match.querySelector('p').textContent, expected);
     assert.equal(root.querySelectorAll('img, script, [onerror]').length, 0);
     assert.equal(root.querySelectorAll('command-name, command-message, command-args').length, 0);
   }
@@ -163,6 +183,41 @@ test('DOM command card rows use the existing display deduplication priority', as
     query.value = 'command-name'; query.dispatchEvent(new env.window.Event('input', { bubbles: true }));
     await flushEffects(); check();
     env.render(null, root);
+  }
+});
+
+test('DOM search highlights original lines without matching a synthesized command line', async t => {
+  const { alpha } = fixtures(t);
+  alpha.sessions = alpha.sessions.slice(0, 1);
+  alpha.sessions[0].ai_title = null;
+  alpha.instructions = alpha.instructions.slice(0, 2);
+  const mismatched = commandText('/review', 'x') + '<command-message>[REDACTED]</command-message>';
+  const args = 'x\n/review x original line\n[REDACTED]';
+  const wrapped = commandText('/review', args) + '<command-message>review</command-message>';
+  alpha.instructions[0].text = mismatched;
+  alpha.instructions[1].text = wrapped;
+  const env = boardEnv(t), root = env.document.getElementById('root');
+  env.context.apiFetch = async url => url.endsWith('/snapshots') ? { snapshots: [{ machine_id: 'alpha' }] } : alpha;
+  env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
+  assert.equal(root.querySelector('.work-title').textContent, mismatched);
+  assert.equal(root.querySelector('.work-recent').textContent, '/review x');
+  root.querySelector('.work-card button').click(); await flushEffects();
+  assert.deepEqual(Array.from(root.querySelectorAll('.work-instruction'), node => node.textContent),
+    [`/review ${args}`, mismatched]);
+  const cases = [
+    { query: '/review x', expected: '/review x original line' },
+    { query: 'command-name', expected: '<command-name>/review</command-name><command-args>x' },
+  ];
+  for (const { query, expected } of cases) {
+    const input = root.querySelector('#work-query');
+    input.value = query; input.dispatchEvent(new env.window.Event('input', { bubbles: true }));
+    await flushEffects();
+    assert.equal(root.querySelectorAll('.work-card').length, 1);
+    const match = root.querySelector('.work-match p');
+    assert.equal(match.textContent, expected);
+    assert.equal(match.querySelectorAll('mark').length, 1);
+    assert.equal(match.querySelector('mark').textContent, query);
+    assert.equal(root.querySelector('.work-title').textContent, mismatched);
   }
 });
 

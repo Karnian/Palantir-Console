@@ -92,7 +92,7 @@ function SessionCard({ card, query, rank, now }) {
       <p class="work-first"><${Highlight} text=${first} query=${query} /></p></div>`}
     ${card.match && html`<div class="work-match">
       <span class="work-label">${card.match.target === 0 ? W.instructionMatch : W.titleMatch}</span>
-      <p><${Highlight} text=${matchedLines(displayInstructionText(card.match.text), query)} query=${query} /></p>
+      <p><${Highlight} text=${matchedLines(card.match.text, query)} query=${query} /></p>
     </div>`}
     <div class="work-meta"><span>${W.lastObserved}</span>
       <${SnapshotTime} value=${card.last_record_at} now=${now} /></div>
