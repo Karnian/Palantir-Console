@@ -2400,7 +2400,7 @@ for (const provider of ['claude', 'codex']) {
   });
 }
 
-function loadReaderWithInternals(maxFiles, summaries) {
+function loadReaderWithInternals(maxFiles, summaries, smallFileBytes) {
   const Module = require('node:module');
   const filename = require.resolve('../../scripts/lib/sessionSnapshotReader.cjs');
   const loaded = new Module(filename, module);
@@ -2409,6 +2409,8 @@ function loadReaderWithInternals(maxFiles, summaries) {
   if (maxFiles !== undefined) source = source.replace('const MAX_FILES = 10000;', `const MAX_FILES = ${maxFiles};`);
   if (summaries !== undefined) source = source.replace('const LINK_LIMITS = { summaries: MAX_FILES };',
     `const LINK_LIMITS = { summaries: ${summaries} };`);
+  if (smallFileBytes !== undefined) source = source.replace('smallFileBytes: MAX_FILE_BYTES',
+    `smallFileBytes: ${smallFileBytes}`);
   loaded._compile(source + '\nmodule.exports.testInternals = '
     + '{ listFiles, summarizeTranscriptFile, groupTranscriptFiles, parseFile, '
     + 'computeInstructionFingerprint, computeInstructionRef, buildSnapshotInstruction, scanSessions, buildOrcaLinkCandidates, applyOrcaLinks, summarizeLinkText };', filename);
@@ -5635,4 +5637,117 @@ test('PR1d R7 large unreadable transcript has no fstat-confirmed size', t => {
   assert.equal(snapshot.coverage.claude.large_file_withheld, 0);
   assert.equal(snapshot.coverage.claude.link_blocked, 1);
   assert.equal(snapshot.sessions.length, 0);
+});
+
+test('PR1d mutation coverage small outside-window file growth is rejected after identity reading', t => {
+  const fixture = createFixture(t), prompt = 'unique live instruction';
+  fixture.file('claude', 'a-visible', [claudeUserRecord(prompt, { sessionId: 'visible' })]);
+  const file = fixture.file('claude', 'b-growing', [claudeUserRecord('old instruction',
+    { sessionId: 'old', timestamp: OLD_RECORD_TIMESTAMP })]);
+  setTranscriptMtime(file, OLD_RECORD_TIMESTAMP);
+  assert.ok(fs.statSync(file).size < snapshotReader.MAX_FILE_BYTES);
+  assert.equal(snapshotReader.STREAM_LIMITS.smallFileBytes, snapshotReader.MAX_FILE_BYTES);
+  assert.equal(snapshotReader.STREAM_LIMITS.fileBytes, 256 * 1024 * 1024);
+  fixture.options.runOrca = orcaRunner([orcaWorktree(prompt)], []);
+  const originalOpen = fs.openSync, originalRead = fs.readSync;
+  let descriptor, reads = 0, grew = false;
+  t.mock.method(fs, 'openSync', function(filename, ...args) {
+    const fd = originalOpen(filename, ...args);
+    if (filename === file) descriptor = fd;
+    return fd;
+  });
+  t.mock.method(fs, 'readSync', function(fd, ...args) {
+    const count = originalRead(fd, ...args);
+    // The first read proves the old tail; the second supplies the identity prefix.
+    if (fd === descriptor && count > 0 && ++reads === 2) {
+      fs.truncateSync(file, snapshotReader.MAX_FILE_BYTES + 1);
+      grew = true;
+    }
+    return count;
+  });
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(grew, true);
+  assert.equal(reads, 2);
+  assert.ok(fs.statSync(file).size > snapshotReader.MAX_FILE_BYTES);
+  assert.equal(snapshot.coverage.claude.files_failed, 1);
+  assert.equal(snapshot.coverage.claude.large_file_withheld, 0);
+  assert.equal(snapshot.coverage.claude.link_blocked, 1);
+  assert.deepEqual(snapshot.sessions.map(session => session.session_id), ['visible']);
+  assert.equal(snapshot.sessions[0].orca_link.confirmed, false);
+  assert.equal(snapshot.sessions[0].orca_link.evidence, 'ambiguous');
+});
+
+for (const variant of ['valid', 'session-id', 'other-type']) {
+  test(`PR1d mutation coverage streaming workflow journal ${variant} respects skip conditions`, t => {
+    const fixture = createFixture(t);
+    fixture.file('claude', 'project/main', [claudeUserRecord('main instruction survives')]);
+    const rows = [{ type: 'launched', timestamp: RECORD_TIMESTAMP },
+      variant === 'session-id' ? { type: 'started', sessionId: 's', timestamp: RECORD_TIMESTAMP }
+        : { type: variant === 'other-type' ? 'unexpected-workflow-event' : 'started', timestamp: RECORD_TIMESTAMP },
+      { type: 'result', timestamp: RECORD_TIMESTAMP }];
+    const journal = fixture.file('claude', 'project/s/subagents/workflows/wf_1/journal', rows);
+    const internals = loadReaderWithInternals(undefined, undefined, 0);
+    const config = snapshotReader.loadConfig(fixture.options);
+    const counters = Object.fromEntries(snapshotPolicy.COVERAGE_KEYS.claude.map(key => [key, 0]));
+    const summary = internals.summarizeTranscriptFile('claude', { file: journal, stats: fs.lstatSync(journal),
+      root: path.join(fixture.options.homeDir, '.claude/projects') }, counters,
+      +SNAPSHOT_TIME - 14 * 86400000, config);
+    assert.equal(counters.files_scanned, 1);
+    assert.equal(counters.files_failed, 0);
+    assert.equal(counters.large_file_withheld, 0);
+    assert.equal(counters.files_skipped, variant === 'valid' ? 1 : 0);
+    if (variant === 'valid') assert.equal(summary, null);
+    else assert.ok(summary, 'a failed journal condition must return a normal transcript summary');
+    const snapshot = internals.runSnapshot(fixture.options);
+    assert.equal(snapshot.coverage.claude.files_scanned, 2);
+    assert.equal(snapshot.coverage.claude.files_failed, 0);
+    assert.equal(snapshot.coverage.claude.multi_file_withheld, variant === 'session-id' ? 1 : 0);
+    assert.equal(snapshot.sessions.length, variant === 'session-id' ? 0 : 1);
+    if (variant === 'valid') {
+      assert.equal(snapshot.coverage.claude.files_skipped, 1);
+      assert.equal(snapshot.coverage.claude.link_blocked, 0);
+      assert.deepEqual(snapshot.instructions.map(instruction => instruction.text), ['main instruction survives']);
+    }
+  });
+}
+
+test('PR1d mutation coverage large-file shrink after all S0 bytes were read is withheld', t => {
+  const fixture = createFixture(t);
+  forceLargeFileLimits(t);
+  const file = fixture.file('claude', 'large', [claudeUserRecord('fully read instruction'),
+    { type: 'assistant', padding: 'x'.repeat(400000) }]);
+  const initial = fs.statSync(file);
+  const originalOpen = fs.openSync, originalRead = fs.readSync, originalFstat = fs.fstatSync;
+  let descriptor, bytes = 0, statsRead = 0, truncated = false;
+  t.mock.method(fs, 'openSync', function(filename, ...args) {
+    const fd = originalOpen(filename, ...args);
+    if (filename === file) descriptor = fd;
+    return fd;
+  });
+  t.mock.method(fs, 'readSync', function(fd, ...args) {
+    const count = originalRead(fd, ...args);
+    if (fd === descriptor) bytes += count;
+    return count;
+  });
+  t.mock.method(fs, 'fstatSync', function(fd, ...args) {
+    if (fd === descriptor && ++statsRead === 2) {
+      assert.equal(bytes, initial.size, 'truncate must occur after the complete initial boundary was consumed');
+      fs.truncateSync(file, initial.size - 1);
+      truncated = true;
+    }
+    return originalFstat(fd, ...args);
+  });
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  const final = fs.statSync(file);
+  assert.equal(truncated, true);
+  assert.equal(statsRead, 2);
+  assert.equal(bytes, initial.size);
+  assert.equal(final.dev, initial.dev);
+  assert.equal(final.ino, initial.ino);
+  assert.equal(final.size, initial.size - 1);
+  assert.equal(snapshot.coverage.claude.files_failed, 1);
+  assert.equal(snapshot.coverage.claude.large_file_withheld, 1);
+  assert.equal(snapshot.coverage.claude.link_blocked, 1);
+  assert.equal(snapshot.sessions.length, 0);
+  assert.equal(snapshot.instructions.length, 0);
 });
