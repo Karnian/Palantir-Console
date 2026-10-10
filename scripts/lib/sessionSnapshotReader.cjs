@@ -1408,7 +1408,7 @@ function summarizeTranscriptFile(provider, file, providerCoverage, windowSince, 
     && /^[A-Za-z0-9_-]+$/.test(parts[4]) && parts[5] === 'journal.jsonl';
   let fileDescriptor;
   let identity = {};
-  const observation = { provider, selected: false, sessionId: null, limited: true };
+  const observation = { provider, selected: false, sessionId: null, limited: false };
   try {
     fileDescriptor = fs.openSync(file.file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
     const openedStats = fs.fstatSync(fileDescriptor);

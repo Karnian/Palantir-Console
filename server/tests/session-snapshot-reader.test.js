@@ -5584,3 +5584,15 @@ test('PR1d R5 incomplete JSON at the initial large-file boundary is only unverif
   assert.equal(snapshot.coverage.claude.records_unverified, 1);
   assert.equal(snapshot.coverage.claude.link_blocked, 0);
 });
+
+test('PR1d R6 small unreadable transcript fails without large-file withholding', t => {
+  const fixture = createFixture(t);
+  const file = fixture.file('claude', 'unreadable', [{}]);
+  fs.writeFileSync(file, '{}\n');
+  fs.chmodSync(file, 0);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.coverage.claude.files_failed, 1);
+  assert.equal(snapshot.coverage.claude.large_file_withheld, 0);
+  assert.equal(snapshot.coverage.claude.link_blocked, 1);
+  assert.equal(snapshot.sessions.length, 0);
+});
