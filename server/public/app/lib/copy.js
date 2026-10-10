@@ -78,13 +78,15 @@ export const THEME_TOGGLE_LABELS = {
     // attaches after vowels and ㄹ. Match per-mode so future mode
     // additions extend this table rather than rebuild the regex.
     const particle = (m) => m === 'system' ? '으로' : '로';
-    return `${this.tooltipPrefix}: ${label(current)}. ${this.tooltipActionPrefix} ${label(next)}${particle(next)} 전환`;
+    return `${this.tooltipPrefix}: ${label(current)}. `
+      + `${this.tooltipActionPrefix} ${label(next)}${particle(next)} 전환`;
   },
 };
 
 // Top-level navigation. Keys match `NAV_ITEMS[].hash` in app/lib/nav.js
 // so the nav module can stay a thin route table.
 export const NAV_LABELS = {
+  work: '작업',
   dashboard: '대시보드',
   manager: '매니저',
   board: '작업 보드',
@@ -191,14 +193,17 @@ export const RUN_INSPECTOR_LABELS = {
   noEvents: '아직 이벤트가 없습니다.',
   // Diff
   loadingDiff: 'Diff 불러오는 중...',
-  diffTruncated: '⚠ Diff가 1MiB에서 잘렸습니다 — 앞부분만 표시됩니다. 전체 변경은 워크트리에서 직접 확인하세요.',
+  diffTruncated: '⚠ Diff가 1MiB에서 잘렸습니다 — 앞부분만 표시됩니다. 전체 '
+    + '변경은 워크트리에서 직접 확인하세요.',
   diffNoWorktree: '이 실행은 격리된 git 워크트리를 생성하지 않았습니다.',
-  diffWorktreeMissing: '워크트리 디렉터리가 더 이상 존재하지 않습니다 (정리되었을 수 있습니다).',
+  diffWorktreeMissing: '워크트리 디렉터리가 더 이상 존재하지 않습니다 (정리되었을 수 '
+    + '있습니다).',
   diffComputeFailed: 'Diff를 계산할 수 없습니다.',
   diffNoChanges: '워크트리에 커밋되지 않은 변경이 없습니다.',
   // Costs
   costEmpty: '이 어댑터는 비용 데이터를 제공하지 않습니다.',
-  costEmptySub: 'Claude Code 워커와 Codex 매니저 세션은 사용량을 보고합니다. 그 외 어댑터는 비용 데이터를 제공하지 않습니다.',
+  costEmptySub: 'Claude Code 워커와 Codex 매니저 세션은 사용량을 보고합니다. 그 외 '
+    + '어댑터는 비용 데이터를 제공하지 않습니다.',
   workerCost: '워커 비용',
   workerCostSub: '워커 어댑터가 완료 시 보고한 값입니다.',
   inputTokens: '입력 토큰',
@@ -208,7 +213,8 @@ export const RUN_INSPECTOR_LABELS = {
   managerUsage: '매니저 사용량',
   managerUsageTurnSuffix: '턴',
   tokensUnit: '토큰',
-  managerUsageSub: '실행 이벤트의 mgr.usage를 합산합니다. Codex는 달러 비용을 보고하지 않습니다.',
+  managerUsageSub: '실행 이벤트의 mgr.usage를 합산합니다. Codex는 달러 비용을 '
+    + '보고하지 않습니다.',
   // Skills
   skillsLoading: '불러오는 중...',
   skillsEmpty: '이 실행에 적용된 스킬 팩이 없습니다.',
@@ -221,15 +227,19 @@ export const RUN_INSPECTOR_LABELS = {
   presetIdLabel: '프리셋 ID',
   presetSnapshotHash: '스냅샷 해시',
   presetApplied: '적용 시각',
-  presetDeleted: '⚠ 이 실행 이후 프리셋이 삭제되었습니다. 아래 스냅샷이 유일한 기록입니다.',
-  presetFileDriftError: '⚠ 프리셋 파일 드리프트를 계산할 수 없습니다. 핵심 필드 드리프트는 표시되지만 플러그인 파일 비교는 사용할 수 없습니다.',
+  presetDeleted: '⚠ 이 실행 이후 프리셋이 삭제되었습니다. 아래 스냅샷이 유일한 '
+    + '기록입니다.',
+  presetFileDriftError: '⚠ 프리셋 파일 드리프트를 계산할 수 없습니다. 핵심 필드 '
+    + '드리프트는 표시되지만 플러그인 파일 비교는 사용할 수 '
+    + '없습니다.',
   presetFileDriftReason: '사유',
   presetDrift: '⚠ 프리셋 드리프트가 감지되었습니다.',
   presetChangedFields: '변경된 필드',
   presetChangedFiles: '변경된 플러그인 파일',
   presetMatch: '✓ 프리셋이 스냅샷과 일치합니다 — 드리프트 없음.',
   mcpDriftIntro: 'MCP 템플릿이 실행 시작 이후 수정되었습니다.',
-  mcpDriftDetail: '프리셋 스냅샷은 템플릿 본문이 아니라 ID만 동결합니다. 다음 alias가 실행 spawn 이후 변경되었습니다:',
+  mcpDriftDetail: '프리셋 스냅샷은 템플릿 본문이 아니라 ID만 동결합니다. 다음 '
+    + 'alias가 실행 spawn 이후 변경되었습니다:',
   mcpDriftUpdated: '업데이트',
   snapshotRunTime: '스냅샷 (실행 시점)',
   currentPreset: '현재 프리셋',
@@ -337,7 +347,8 @@ export const EXECUTE_MODAL_LABELS = {
   presetTaskDefaultPrefix: '작업 기본값',
   presetTaskDefaultSuffix: '입니다.',
   skillPacksTitle: '스킬 팩',
-  skillPacksNoPromptSupport: '이 에이전트는 {system_prompt_file}을 지원하지 않습니다. 스킬 팩 프롬프트는 건너뜁니다.',
+  skillPacksNoPromptSupport: '이 에이전트는 {system_prompt_file}을 지원하지 않습니다. 스킬 팩 '
+    + '프롬프트는 건너뜁니다.',
   skillSourceAuto: '자동 적용',
   skillSourceTask: '작업 바인딩',
   skillExcludedSuffix: ' (제외)',
@@ -372,7 +383,8 @@ export const DIRECTORY_PICKER_LABELS = {
   // three different operator actions, not one "browse failed".
   localNodeLabel: '컨트롤 플레인 (local)',
   nodeScopePrefix: '노드',
-  nodeChangedReset: '노드를 변경하여 선택한 디렉터리를 해제했습니다. 새 노드에서 다시 선택하세요.',
+  nodeChangedReset: '노드를 변경하여 선택한 디렉터리를 해제했습니다. 새 노드에서 '
+    + '다시 선택하세요.',
   truncatedNotice: '항목이 많아 일부만 표시합니다.',
   errorReasons: {
     node_not_found: '선택한 노드를 찾을 수 없습니다. 노드 설정을 확인하세요.',
@@ -452,12 +464,14 @@ export const PROJECTS_LABELS = {
   mcpConfigRelpathHint: '레포 루트 기준 상대 경로입니다.',
   fieldTestCommand: '테스트 명령',
   testCommandPlaceholder: '예: npm test',
-  testCommandHint: '워커가 완료되면 harvest 단계에서 워크트리 안에서 실행합니다. 비워두면 건너뜁니다.',
+  testCommandHint: '워커가 완료되면 harvest 단계에서 워크트리 안에서 실행합니다. '
+    + '비워두면 건너뜁니다.',
   fieldNode: '노드',
   defaultExecNodeLabel: '기본 실행 노드',
   nodeDefaultOption: '기본 local 노드',
   nodeSelectLoading: '노드 불러오는 중...',
-  nodeUnreachableWarning: '선택한 노드는 현재 연결되지 않았습니다. 값은 저장할 수 있지만 실행은 대기하거나 실패할 수 있습니다.',
+  nodeUnreachableWarning: '선택한 노드는 현재 연결되지 않았습니다. 값은 저장할 수 있지만 '
+    + '실행은 대기하거나 실패할 수 있습니다.',
   // task_85d43f96 — a save rejected by the node↔directory binding check
   // carries the same reason vocabulary as the /api/fs picker, so the form can
   // name the real cause instead of echoing the raw server string.
@@ -470,12 +484,14 @@ export const PROJECTS_LABELS = {
     repo_preflight_timeout: '레포 확인 시간이 초과되었습니다.',
   },
   rebindResetRequired: 'Operator 를 먼저 리셋해야 합니다.',
-  rebindResetDetail: '현재 Operator 스레드가 기존 노드에 묶여 있어 노드 변경을 저장할 수 없습니다.',
+  rebindResetDetail: '현재 Operator 스레드가 기존 노드에 묶여 있어 노드 변경을 저장할 '
+    + '수 없습니다.',
   rebindResetButton: '오퍼레이터 리셋',
   rebindResetting: '리셋 중...',
   rebindResetSuccess: '오퍼레이터를 리셋했습니다. 다시 저장하세요.',
   retargetQueuedBannerTitle: '옛 노드에 대기 중인 작업을 새 노드로 이동하시겠습니까?',
-  retargetQueuedBannerDetail: '프로젝트 폴더 노드는 바뀌었지만 기존 대기열 작업은 아직 옛 노드에 고정되어 있을 수 있습니다.',
+  retargetQueuedBannerDetail: '프로젝트 폴더 노드는 바뀌었지만 기존 대기열 작업은 아직 옛 '
+    + '노드에 고정되어 있을 수 있습니다.',
   retargetQueuedButton: '대기 작업 이동',
   retargetQueuedMoving: '이동 중...',
   retargetQueuedDonePrefix: '대기 작업 이동 완료: ',
@@ -494,7 +510,8 @@ export const PROJECTS_LABELS = {
   operatorWarmAlreadyReadyToast: '이미 준비된 오퍼레이터가 있습니다',
   operatorWarmConflictError: '먼저 Top 매니저를 시작하거나 노드/설정을 확인하세요.',
   operatorWarmAuthError: '오퍼레이터 인증을 확인하세요.',
-  operatorWarmSpawnFailedError: '오퍼레이터 준비에 실패했습니다. 어댑터 또는 실행기를 확인하세요.',
+  operatorWarmSpawnFailedError: '오퍼레이터 준비에 실패했습니다. 어댑터 또는 실행기를 '
+    + '확인하세요.',
   operatorWarmDefaultError: '오퍼레이터 준비에 실패했습니다.',
   creating: '생성 중...',
   saving: '저장 중...',
@@ -507,7 +524,8 @@ export const PROJECTS_LABELS = {
   skillPackManual: '수동',
   skillPackAutoToggleHint: 'auto_apply 활성화는 오퍼레이터 리셋이 필요할 수 있습니다',
   skillPackPriorityTitle: '우선순위',
-  skillPackPmActiveWarning: '⚠ 오퍼레이터가 활성 상태일 때 auto_apply 변경은 적용을 위해 오퍼레이터 리셋이 필요할 수 있습니다.',
+  skillPackPmActiveWarning: '⚠ 오퍼레이터가 활성 상태일 때 auto_apply 변경은 적용을 위해 '
+    + '오퍼레이터 리셋이 필요할 수 있습니다.',
 };
 
 // AgentsView — list, AgentModal, AgentDetailModal. Agent type values
@@ -582,7 +600,8 @@ export const MANAGER_CHAT_AUX = {
   refreshAuth: '인증 상태 새로고침',
   authStateOk: '인증됨',
   authStateOkSourceSeparator: ' · ',
-  authStateUnknown: '인증 상태를 확인할 수 없습니다. 서버가 구버전일 수 있습니다 — 서버를 재시작하고 새로고침하세요.',
+  authStateUnknown: '인증 상태를 확인할 수 없습니다. 서버가 구버전일 수 있습니다 '
+    + '— 서버를 재시작하고 새로고침하세요.',
   authStateMissing: '이 프로필에 대한 자격 증명이 없습니다.',
   remediationFixPrefix: '자격 증명을 ',
   remediationFixLink: '에이전트 페이지',
@@ -590,7 +609,8 @@ export const MANAGER_CHAT_AUX = {
   remediationRefreshLink: '새로고침',
   remediationFixEnd: '하세요.',
   remediationTryRefreshLink: '새로고침',
-  remediationTryAfter: ' 해 보세요. 문제가 지속되면 서버를 재시작해 최신 코드를 반영하세요.',
+  remediationTryAfter: ' 해 보세요. 문제가 지속되면 서버를 재시작해 최신 코드를 '
+    + '반영하세요.',
 };
 
 // CommandPalette (Cmd+K) — overlay chrome + filter input + empty state.
@@ -726,7 +746,8 @@ export const PRESETS_LABELS = {
   pluginWarningsCountSuffix: '개 플러그인 디렉터리의 plugin.json 이 잘못되어 건너뜁니다:',
   // Empty state
   emptyText: '아직 프리셋이 없습니다',
-  emptySub: '워커 프리셋은 플러그인 디렉터리, MCP 서버, 시스템 프롬프트를 묶어 워커 실행 간에 재사용합니다. 시작하려면 하나 만드세요.',
+  emptySub: '워커 프리셋은 플러그인 디렉터리, MCP 서버, 시스템 프롬프트를 '
+    + '묶어 워커 실행 간에 재사용합니다. 시작하려면 하나 만드세요.',
   // Card
   badgeIsolated: '격리 (Tier 2)',
   cardCountPlugin: '개 플러그인',
@@ -734,7 +755,8 @@ export const PRESETS_LABELS = {
   cardMinVersionPrefix: '최소 Claude',
   // Delete confirm
   deleteTitle: '프리셋 삭제',
-  deleteBodySuffix: ' 을(를) 삭제할까요? 이 프리셋에 연결된 작업의 링크는 해제되며, 과거 실행 스냅샷은 보존됩니다.',
+  deleteBodySuffix: ' 을(를) 삭제할까요? 이 프리셋에 연결된 작업의 링크는 해제되며, '
+    + '과거 실행 스냅샷은 보존됩니다.',
   toastDeleted: '프리셋이 삭제되었습니다',
 };
 
@@ -748,19 +770,23 @@ export const MCP_TEMPLATES_LABELS = {
   fieldAlias: 'Alias',
   aliasHint: '영문 / 숫자 / _ / -',
   aliasPlaceholder: 'graphify',
-  aliasImmutableHint: 'Alias 는 변경할 수 없습니다 — 스킬 팩이 이 이름으로 템플릿을 참조합니다.',
+  aliasImmutableHint: 'Alias 는 변경할 수 없습니다 — 스킬 팩이 이 이름으로 템플릿을 '
+    + '참조합니다.',
   // M4-a: transport selector
   fieldTransport: 'Transport',
   transportStdio: 'stdio (로컬 프로세스)',
   transportHttp: 'http (원격 Streamable HTTP)',
-  transportImmutableHint: 'Transport 는 변경할 수 없습니다 — 다른 transport 가 필요하면 새 alias 를 만드세요.',
+  transportImmutableHint: 'Transport 는 변경할 수 없습니다 — 다른 transport 가 필요하면 새 '
+    + 'alias 를 만드세요.',
   fieldUrl: 'URL',
   urlHint: 'http:// 또는 https:// — 사설 IP / metadata / 로컬 (옵트아웃 가능) 은 차단됩니다',
   urlPlaceholder: 'http://localhost:3100/mcp?profile=default',
   fieldBearerEnvVar: 'Bearer 토큰 env 변수 이름 (선택)',
-  bearerEnvVarHint: '값이 아닌 *이름* 을 입력하세요. 워커는 spawn 시 process.env 에서 값을 읽습니다.',
+  bearerEnvVarHint: '값이 아닌 *이름* 을 입력하세요. 워커는 spawn 시 process.env 에서 '
+    + '값을 읽습니다.',
   bearerEnvVarPlaceholder: 'BIFROST_MCP_TOKEN',
-  bearerEnvVarWarn: '프로세스 로더 / 경로 가로채기 패턴 (NODE_OPTIONS, PATH 등) 은 전역적으로 차단됩니다.',
+  bearerEnvVarWarn: '프로세스 로더 / 경로 가로채기 패턴 (NODE_OPTIONS, PATH 등) 은 '
+    + '전역적으로 차단됩니다.',
   validateHttpUrl: 'http transport 는 url 이 필수입니다',
   fieldCommand: '명령',
   commandPlaceholder: 'npx',
@@ -969,7 +995,8 @@ export const SKILL_PACKS_LABELS = {
   updateConfirmQuestion: '업데이트를 적용할까요?',
   // Delete
   deleteTitle: '스킬 팩 삭제',
-  deleteBodySuffix: ' 을(를) 삭제할까요? 모든 프로젝트 폴더와 작업 바인딩이 함께 제거됩니다.',
+  deleteBodySuffix: ' 을(를) 삭제할까요? 모든 프로젝트 폴더와 작업 바인딩이 함께 '
+    + '제거됩니다.',
   // SkillPackModal — fields and tabs
   modalNew: '새 스킬 팩',
   modalEdit: '스킬 팩 편집',
@@ -1076,11 +1103,13 @@ export const PACK_PREVIEW_LABELS = {
 // UrlInstallDialog — install-from-URL flow (gallery v1.1).
 export const URL_INSTALL_LABELS = {
   modalTitle: 'URL 에서 설치',
-  helpText: 'https:// 로 시작하는 스킬 팩 JSON 파일 URL 을 붙여넣으세요 (예: GitHub raw, gist). 서버가 가져오기 / 검증 / 미리보기 후 설치합니다.',
+  helpText: 'https:// 로 시작하는 스킬 팩 JSON 파일 URL 을 붙여넣으세요 (예: '
+    + 'GitHub raw, gist). 서버가 가져오기 / 검증 / 미리보기 후 설치합니다.',
   fieldUrlLabel: '스킬 팩 URL',
   urlPlaceholder: 'https://raw.githubusercontent.com/...',
   securityNotePrefix: '보안',
-  securityNote: 'HTTPS 만 허용됩니다. 사설 IP, 루프백, 메타데이터 엔드포인트는 차단됩니다. 응답 크기는 256KB 로 제한됩니다.',
+  securityNote: 'HTTPS 만 허용됩니다. 사설 IP, 루프백, 메타데이터 엔드포인트는 '
+    + '차단됩니다. 응답 크기는 256KB 로 제한됩니다.',
   fetchPreviewBtn: '가져오기 및 미리보기',
   fetching: '가져오는 중...',
   invalidHttpsToast: 'URL 은 https:// 로 시작해야 합니다',
@@ -1140,14 +1169,18 @@ export const OPERATOR_ROSTER_LABELS = {
   adapterClaude: 'Claude Code',
   adapterAuto: '자동 (프로젝트/서버 기본값)',
   adapterHint: '나중에 로스터 카드에서 바꿀 수 있습니다.',
-  adapterChangeConfirm: 'CLI를 바꾸면 현재 오퍼레이터 대화 스레드가 종료됩니다. 오퍼레이터 ID, 프로필, 폴더 매핑, 스케줄은 유지되며 다음 메시지부터 선택한 CLI로 시작합니다. 계속할까요?',
+  adapterChangeConfirm: 'CLI를 바꾸면 현재 오퍼레이터 대화 스레드가 종료됩니다. '
+    + '오퍼레이터 ID, 프로필, 폴더 매핑, 스케줄은 유지되며 다음 '
+    + '메시지부터 선택한 CLI로 시작합니다. 계속할까요?',
   adapterChangeSuccess: 'CLI가 변경되었습니다. 다음 메시지부터 새 CLI로 시작합니다.',
   primaryFolderLabel: '담당 프로젝트 폴더',
   primaryFolderOptional: '나중에 매핑',
   createSubmit: '오퍼레이터 만들기',
   archiveAction: '오퍼레이터 삭제',
   archivingAction: '삭제 중...',
-  archiveConfirm: '오퍼레이터를 로스터에서 삭제할까요? 실행 중인 대화가 종료되고 폴더 매핑, 스케줄, 대기 메시지가 정리됩니다. 과거 run과 감사 귀속, 프로필은 보존됩니다.',
+  archiveConfirm: '오퍼레이터를 로스터에서 삭제할까요? 실행 중인 대화가 '
+    + '종료되고 폴더 매핑, 스케줄, 대기 메시지가 정리됩니다. 과거 '
+    + 'run과 감사 귀속, 프로필은 보존됩니다.',
   archiveAffectedCodebases: '영향받는 코드베이스',
   archiveNoCodebases: '영향받는 코드베이스 없음',
   archiveSuccess: '오퍼레이터가 로스터에서 삭제되었습니다.',
@@ -1162,7 +1195,8 @@ export const OPERATOR_ROSTER_LABELS = {
   detailsTitleSuffix: '상세 정보',
   briefAction: '브리프 편집',
   briefTitle: '오퍼레이터 브리프',
-  briefDescription: '오퍼레이터의 역할과 선택한 코드베이스 맥락을 하나의 브리프로 관리합니다.',
+  briefDescription: '오퍼레이터의 역할과 선택한 코드베이스 맥락을 하나의 브리프로 '
+    + '관리합니다.',
   briefProjectLabel: '코드베이스',
   briefNoProject: '매핑된 코드베이스가 없어 역할과 행동 방식만 편집할 수 있습니다.',
   briefPersonaLabel: '역할과 행동 방식',
@@ -1175,7 +1209,8 @@ export const OPERATOR_ROSTER_LABELS = {
   briefConventionsPlaceholder: '코딩 규칙, 테스트 명령, 작업 관례 등을 입력하세요.',
   briefPitfallsLabel: '주의사항',
   briefPitfallsPlaceholder: '깨지기 쉬운 영역, 금지 사항, 알려진 함정을 입력하세요.',
-  briefResetWarning: '변경된 브리프를 즉시 적용하기 위해 영향받는 오퍼레이터 대화가 재설정됩니다.',
+  briefResetWarning: '변경된 브리프를 즉시 적용하기 위해 영향받는 오퍼레이터 '
+    + '대화가 재설정됩니다.',
   briefSaved: '오퍼레이터 브리프가 저장되었습니다.',
   briefSavedWithReset: '브리프가 저장되고 영향받는 오퍼레이터 대화가 재설정되었습니다.',
   scheduleAction: '스케줄',
@@ -1292,5 +1327,53 @@ export const OPERATOR_PROFILES_LABELS = {
   emptySub: '새 프로필을 만들어 스페셜리스트에 사용하세요.',
   // Delete confirm
   deleteTitle: '프로필 삭제',
-  deleteBodySuffix: ' 을(를) 삭제할까요? 이 프로필을 참조하는 향후 스페셜리스트 호출은 실패합니다(404). 진행 중인 호출은 영향받지 않습니다.',
+  deleteBodySuffix: ' 을(를) 삭제할까요? 이 프로필을 참조하는 향후 스페셜리스트 '
+    + '호출은 실패합니다(404). 진행 중인 호출은 영향받지 않습니다.',
+};
+
+// Session snapshot board — spec §6.
+export const WORK_BOARD_LABELS = {
+  title: '작업', description: '세션 스냅샷 보드', observed: '스냅샷 시점 관측',
+  refresh: '스냅샷 새로고침', pending: '작업 보드를 확인하는 중',
+  loading: (n, m) => `불러오는 중 (${n}/${m})`,
+  error: '스냅샷을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.',
+  off: '작업 보드가 활성화되지 않았습니다.', retry: '다시 시도',
+  empty: '표시할 세션이 없습니다.', noResults: '일치하는 세션이 없습니다.',
+  search: '지시 검색',
+  searchHint: '지시와 AI 제목을 검색합니다. 띄어쓰기 변형과 단어 일부도 찾습니다.',
+  searchPlaceholder: '예: 로그인 리다이렉트, reader 리뷰', machine: '머신', tool: '도구', all: '전체',
+  recent: '최근 지시',
+  first: '처음 지시',
+  missing: '텍스트 없는 지시',
+  noInstruction: '관측된 지시 없음',
+  unrecoverable: '최초 지시 복구 불가', unknownFirst: '최초 지시 복구 여부 불명',
+  aiTitle: 'AI 제목', instructionMatch: '지시 일치', titleMatch: 'AI 제목 일치',
+  timeline: '타임라인', closeTimeline: '타임라인 접기', timelineEmpty: '관측된 지시가 없습니다.',
+  instructions: n => `지시 ${n}개`, results: n => `세션 ${n}개`,
+  order: '마지막 관측순', searchOrder: '일치 대상 · 공백 형태 · 위치 · 시각 순',
+  lastObserved: '마지막 관측', connected: 'Orca 연결됨', unconfirmed: 'Orca 연결 불명',
+  repoUnknown: '저장소 불명', branchUnknown: '브랜치 불명', unverified: '형식 미검증',
+  compact: 'compact 이력', unknownRatio: (n, total) => `판별 불명 ${n}/${total}`,
+  truncated: '잘림', redacted: '살균됨', attachments: n => `첨부 ${n}개`,
+  unknownBlocks: n => `판별 불명 블록 ${n}개`,
+  copy: '등록 지정자 복사',
+  copied: '복사됨',
+  copyFallback: '복사하지 못했습니다. 지정자를 선택해 복사하세요.',
+  selector: '등록 지정자',
+  coverage: '수집 범위',
+  machineFailure: '이 머신의 스냅샷을 읽지 못했습니다.',
+  unnamedFailure: '읽지 못한 스냅샷', snapshot: '스냅샷', timeUnknown: '시각 불명',
+  absolute: value => `${value.slice(0, 19).replace('T', ' ')} UTC`,
+  secondsAgo: '방금', minutesAgo: n => `${n}분 전`, hoursAgo: n => `${n}시간 전`, daysAgo: n => `${n}일 전`,
+  future: '기준 시각 이후',
+  kinds: { human: '사람 지시', slash: '슬래시 명령', shell: '셸 명령', reply: '답변' },
+  states: { idle: '대기', running: '실행 중', busy: '작업 중', waiting: '응답 대기',
+    completed: '완료', error: '오류', stopped: '중지', unknown: '불명' },
+  orcaStates: { ok: '수집됨', unavailable: '수집 불가', partial: '부분 수집' },
+  coverageFields: { scanned: '스캔', skipped: '건너뜀', failed: '읽기 실패', excluded: '세션 제외',
+    deleted: '지시 삭제',
+    unknown: '판별 불명',
+    unverified: '미검증',
+    exec: 'exec 제외',
+    withheld: '보류' },
 };
