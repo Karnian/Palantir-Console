@@ -109,10 +109,27 @@ test('oracle: token floors, alphabets, fixed lengths, and both sides of word bou
     for (const b of [0, 7, 8, 9]) {
       for (const c of [0, 7, 8, 9]) {
         for (const delimiter of ['.', '..', '/', '']) {
-          equivalent(`eyJ${'x'.repeat(a)}${delimiter}${'y'.repeat(b)}.${'z'.repeat(c)}-eyJ`);
+          equivalent(`eyJ${'x'.repeat(a)}${delimiter}${'y'.repeat(b)}.${'z'.repeat(c)}`);
         }
       }
     }
+  }
+});
+
+test('oracle: exact JWT 7/8 body floors without alphabet suffixes', () => {
+  // The first body floor counts characters after the fixed eyJ prefix.
+  for (const [a, b, c, redacted] of [
+    [8, 8, 7, false],
+    [8, 8, 8, true],
+    [7, 8, 8, false],
+    [8, 7, 8, false],
+  ]) {
+    const input = `eyJ${'x'.repeat(a)}.${'y'.repeat(b)}.${'z'.repeat(c)}`;
+    equivalent(input);
+    assert.deepEqual(current.redactSecrets(input), {
+      text: redacted ? '[REDACTED]' : input,
+      redacted,
+    });
   }
 });
 
