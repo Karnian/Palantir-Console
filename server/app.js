@@ -70,6 +70,8 @@ const { createDispatchAuditRouter } = require('./routes/dispatchAudit');
 const { createRouterService } = require('./services/routerService');
 const { createRouterRouter } = require('./routes/router');
 const { createAuthRouter } = require('./routes/auth');
+const { sealObserveState } = require('./services/observeSnapshotStore');
+const { createObserveOffGate, createObserveRouter, observeErrorHandler } = require('./routes/observe');
 const { createSkillPackService } = require('./services/skillPackService');
 const { createRegistryService } = require('./services/registryService');
 const { createSkillPacksRouter } = require('./routes/skillPacks');
@@ -1106,6 +1108,11 @@ function createApp(options = {}) {
   const pmToken = pmTokenFromOptions
     ? optionPmToken
     : actorTokenEnv.PALANTIR_PM_TOKEN;
+  const observeDir = options.observeSnapshotDir === undefined
+    ? process.env.PALANTIR_OBSERVE_SNAPSHOT_DIR
+    : options.observeSnapshotDir;
+  const observeState = sealObserveState({ dir: observeDir, authToken });
+  if (!observeState.on) console.warn(observeState.code);
   const actorTokenOptions = {
     actorTokenSource: options.actorTokenSource,
     agentProcessIsolation: options.agentProcessIsolation,
@@ -1780,6 +1787,8 @@ function createApp(options = {}) {
   });
 
   // Middleware
+  // Spec §5.2: gate before auth and body parsing, even for malformed POST bodies.
+  app.use('/api/observe', createObserveOffGate(observeState));
   app.use(express.json({ limit: '2mb' }));
   app.use((req, res, next) => {
     // All assets self-hosted: vendor/ has Preact/HTM/marked/DOMPurify,
@@ -1857,6 +1866,8 @@ function createApp(options = {}) {
     },
   });
   app.use('/api', auth);
+  app.use('/api/observe', createObserveRouter({ state: observeState, store: options.observeSnapshotStore }));
+  app.use('/api/observe', observeErrorHandler);
   app.use('/api/agent-context', createAgentContextRouter({
     goalFeatureActive,
     isSpecialistAvailable,
