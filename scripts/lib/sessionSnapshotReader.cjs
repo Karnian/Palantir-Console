@@ -24,7 +24,7 @@ function selectFirstTranscriptIdentity(provider, record, identity) {
   }
 }
 function* transcriptRecords(fd, observation) {
-  let limited = observation?.limited !== false;
+  const limited = true;
   function consume(line, terminated = true) {
     const record = parseTranscriptRecord(line, terminated);
     if (observation) selectFirstTranscriptIdentity(observation.provider, record, observation);
@@ -32,14 +32,11 @@ function* transcriptRecords(fd, observation) {
   }
   const chunk = Buffer.allocUnsafe(256 * 1024);
   let offset = 0, pending = [], pendingBytes = 0;
-  while (true) {
-    const count = fs.readSync(fd, chunk, 0, Math.min(chunk.length, STREAM_LIMITS.fileBytes + 1 - offset), offset);
-    if (!count) break;
+  const endOffset = observation.size;
+  while (offset < endOffset) {
+    const count = fs.readSync(fd, chunk, 0, Math.min(chunk.length, endOffset - offset, STREAM_LIMITS.fileBytes + 1 - offset), offset);
+    if (!count) streamLimit();
     offset += count;
-    if (offset > STREAM_LIMITS.smallFileBytes) {
-      limited = true;
-      if (observation) observation.limited = true;
-    }
     if (offset > STREAM_LIMITS.fileBytes) streamLimit();
     let start = 0, end;
     while ((end = chunk.indexOf(10, start)) >= 0 && end < count) {
@@ -59,17 +56,21 @@ function* transcriptRecords(fd, observation) {
     if (line.trim()) yield consume(line, false);
   }
 }
-function transcriptSource(fd, provider, validateOnly = false, observation) {
+function transcriptSource(input, provider, observation) {
   const headers = [];
-  const source = { streaming: true, get limited() { return observation?.limited !== false; }, find(predicate) { return headers.find(predicate); } };
+  const array = Array.isArray(input);
+  const source = array ? input : { streaming: true, limited: true, find(predicate) { return headers.find(predicate); } };
+  if (array) source.limited = false;
   const analysis = { byUuid: new Map(), firstTime: null, lastTime: null, duplicates: 0, invalidTime: 0,
     mixed: false, queuedDuplicate: false, sidechainOnly: true, singleSession: true, count: 0,
-    brokenJson: false, hasSessionIdentity: false, instructionCandidates: 0, summaryCandidates: 0 };
+    journalOnly: true, brokenJson: false, hasSessionIdentity: false, instructionCandidates: 0, summaryCandidates: 0 };
+  if (array) analysis.classifications = new WeakMap();
   const seen = new Set(), users = new Set(), queued = new Set(), sessions = new Set();
   let hasMeta = false, hasSid = false, hasCwd = false, hasBranch = false, firstSid;
   let timestampInput, timestampOutput;
   function observe(record) {
     analysis.count++;
+    if (analysis.journalOnly && (Object.hasOwn(record, 'sessionId') || !['launched', 'started', 'result'].includes(record.type))) analysis.journalOnly = false;
     const state = PARSE_STATES.get(record);
     if (state?.invalid && !state.pending) analysis.brokenJson = true;
     if (provider === 'codex' && record.type === 'session_meta' && !hasMeta) {
@@ -107,6 +108,7 @@ function transcriptSource(fd, provider, validateOnly = false, observation) {
     const classification = provider === 'claude' ? classifyClaudeRecord(record)
       : user ? classifyCodexMessage(record.payload) : null;
     analysis.currentClassification = classification;
+    if (array) analysis.classifications.set(record, classification);
     const attachment = provider === 'claude' && isQueuedInstruction(record, classification);
     if (classification?.kind && !classification.empty) analysis.instructionCandidates++;
     const identity = provider === 'claude' ? record.uuid : record.payload?.id;
@@ -120,7 +122,7 @@ function transcriptSource(fd, provider, validateOnly = false, observation) {
     if (provider === 'claude' && user) for (const id of [record.uuid, record.source_uuid, record.delivery_id,
       record.message?.uuid, record.message?.source_uuid, record.message?.delivery_id])
       if (typeof id === 'string') users.add(id);
-    if (attachment) for (const id of [record.uuid, record.attachment.source_uuid, record.attachment.delivery_id])
+    if (attachment) for (const id of [record.uuid, record.source_uuid, record.delivery_id, record.attachment.source_uuid, record.attachment.delivery_id])
       if (typeof id === 'string') queued.add(id);
     if (source.limited) checkMetadata(analysis.byUuid.size + seen.size + users.size + queued.size + sessions.size);
   }
@@ -133,33 +135,13 @@ function transcriptSource(fd, provider, validateOnly = false, observation) {
     for (const id of queued) if (users.has(id)) { analysis.queuedDuplicate = true; break; }
   }
   source.analysis = analysis;
-  // Most transcripts establish their identity and a timestamp in the first record.
-  // A bounded lookahead leaves late metadata on the complete validation path.
-  let lookahead = 0;
-  for (const record of transcriptRecords(fd, observation)) {
-    observe(record);
-    if (analysis.firstTime && isIdentityComponent(transcriptSessionId(provider, source))) break;
-    if (++lookahead >= 16) break;
-  }
-  const seedTime = analysis.firstTime;
-  const ready = !validateOnly && analysis.firstTime && isIdentityComponent(transcriptSessionId(provider, source));
-  analysis.byUuid.clear(); seen.clear(); users.clear(); queued.clear(); sessions.clear();
-  Object.assign(analysis, { firstTime: null, lastTime: null, count: 0, duplicates: 0,
-    invalidTime: 0, singleSession: true, sidechainOnly: true, mixed: false, queuedDuplicate: false,
-    brokenJson: false, hasSessionIdentity: false, instructionCandidates: 0, summaryCandidates: 0 });
-  if (ready) {
-    source.lazy = true;
-    // parseFile checks timestamp availability before it consumes the iterator.
-    analysis.firstTime = seedTime;
-  }
-  source[Symbol.iterator] = function* () {
-    for (const record of transcriptRecords(fd, observation)) { observe(record); yield record; }
+  if (array) {
+    for (const record of input) { observe(record); selectFirstTranscriptIdentity(provider, record, observation); }
+    finish();
+  } else source[Symbol.iterator] = function* () {
+    for (const record of transcriptRecords(input, observation)) { observe(record); yield record; }
     finish();
   };
-  if (!ready) {
-    for (const record of source) {}
-    source[Symbol.iterator] = () => transcriptRecords(fd, observation);
-  }
   return source;
 }
 const IDENTITY_PREFIX_BYTES = 64 * 1024;
@@ -714,7 +696,7 @@ function parseFile(provider, records, providerCoverage, config = {}, retainAllIn
       if (records.limited !== false) checkMetadata(byUuid.size);
     }
   }
-  if (!firstTime) {
+  if (!firstTime && !records.streaming) {
     for (const record of records) if (PARSE_STATES.get(record)?.invalid || (provider === 'claude'
       ? record.type === 'user' || classifyClaudeRecord(record)
       : record.type === 'response_item' && record.payload?.type === 'message' && record.payload.role === 'user'))
@@ -739,23 +721,23 @@ function parseFile(provider, records, providerCoverage, config = {}, retainAllIn
   let userNo = 0;
   let firstClaudeRecord = null;
   if (provider === 'codex') {
-    const meta = records.find(record => record.type === 'session_meta')?.payload;
+    const meta = records.find(record => record.type === 'session_meta')?.payload || (records.streaming ? {} : null);
     if (!meta) {
       providerCoverage.records_unverified++;
       return null;
     }
     sessionId = transcriptSessionId(provider, records);
-    cwd = typeof meta.cwd === 'string' ? meta.cwd : '';
+    cwd = representativeTranscriptCwd(provider, records);
     branch = meta.git?.branch;
     const source = meta.source;
     const thread = meta.thread_source;
     run_mode = determineCodexRunMode(source, thread);
   } else {
     sessionId = transcriptSessionId(provider, records);
-    cwd = records.find(record => typeof record.cwd === 'string')?.cwd || '';
+    cwd = representativeTranscriptCwd(provider, records);
     branch = records.find(record => typeof record.gitBranch === 'string')?.gitBranch;
   }
-  if (!isIdentityComponent(sessionId)) {
+  if (!isIdentityComponent(sessionId) && !records.streaming) {
     providerCoverage.records_unverified++;
     return null;
   }
@@ -768,7 +750,8 @@ function parseFile(provider, records, providerCoverage, config = {}, retainAllIn
   let position = -1;
   for (const record of records) {
     position++;
-    const timestamp = records.lazy ? records.analysis.currentTime : toIsoTimestamp(record.timestamp);
+    if (records.streaming) sessionId = transcriptSessionId(provider, records) || 'pending';
+    const timestamp = records.streaming ? records.analysis.currentTime : toIsoTimestamp(record.timestamp);
     if (PARSE_STATES.get(record)?.invalid) {
       providerCoverage.records_unverified++;
       continue;
@@ -799,7 +782,7 @@ function parseFile(provider, records, providerCoverage, config = {}, retainAllIn
       if (record.isCompactSummary) {
         compactBefore = true;
       }
-      const classification = records.lazy ? records.analysis.currentClassification : classifyClaudeRecord(record);
+      const classification = records.streaming ? records.analysis.currentClassification : records.analysis?.classifications ? records.analysis.classifications.get(record) : classifyClaudeRecord(record);
       if (!classification) {
         continue;
       }
@@ -809,15 +792,15 @@ function parseFile(provider, records, providerCoverage, config = {}, retainAllIn
         continue;
       }
       if (!first) {
-        first = compactBefore ? 'unrecoverable' : records.lazy ? 'unknown' : recoverClaudeFirstInstruction(record, byUuid);
-        if (records.lazy && !compactBefore) firstClaudeRecord = Object.hasOwn(record, 'parentUuid') ? { parentUuid: record.parentUuid } : {};
+        first = compactBefore ? 'unrecoverable' : records.streaming ? 'unknown' : recoverClaudeFirstInstruction(record, byUuid);
+        if (records.streaming && !compactBefore) firstClaudeRecord = Object.hasOwn(record, 'parentUuid') ? { parentUuid: record.parentUuid } : {};
       }
       if (!isIdentityComponent(record.uuid) || !timestamp || !snapshotPolicy.isSafeInstructionId(
         `claude:${sessionId}:u${record.uuid}`)) {
         providerCoverage.records_unverified++;
         continue;
       }
-      if (records.analysis) records.analysis.summaryCandidates++;
+      if (records.analysis && !records.streaming) records.analysis.summaryCandidates++;
       if (record.type === 'attachment') providerCoverage.queued_delivered_attachment++;
       items.push(compactInstruction(config, {
         ...classification,
@@ -831,7 +814,8 @@ function parseFile(provider, records, providerCoverage, config = {}, retainAllIn
         const item = items[items.length - 1];
         retainedText.set(item, item.text);
         delete item.text;
-        if (displayOptions.target?.instrId === item.id) targetText = retainedText.get(item);
+        item.identitySuffix = item.id.slice(item.id.indexOf(':', item.id.indexOf(':') + 1) + 1);
+        if (displayOptions.target?.instrId?.endsWith(':' + item.identitySuffix)) targetText = retainedText.get(item);
         let low = 0, high = retainedOrder.length;
         while (low < high) {
           const middle = (low + high) >>> 1;
@@ -863,7 +847,7 @@ function parseFile(provider, records, providerCoverage, config = {}, retainAllIn
       if (!first) {
         first = compactBefore ? 'unrecoverable' : metaBefore ? 'recoverable' : 'unknown';
       }
-      const classification = records.lazy ? records.analysis.currentClassification : classifyCodexMessage(record.payload);
+      const classification = records.streaming ? records.analysis.currentClassification : records.analysis?.classifications ? records.analysis.classifications.get(record) : classifyCodexMessage(record.payload);
       if (classification.unverified) {
         providerCoverage.records_unverified++;
         continue;
@@ -878,7 +862,7 @@ function parseFile(provider, records, providerCoverage, config = {}, retainAllIn
         providerCoverage.records_unverified++;
         continue;
       }
-      if (records.analysis) records.analysis.summaryCandidates++;
+      if (records.analysis && !records.streaming) records.analysis.summaryCandidates++;
       items.push(compactInstruction(config, {
         ...classification,
         id: `codex:${sessionId}:${suffix}`,
@@ -891,7 +875,8 @@ function parseFile(provider, records, providerCoverage, config = {}, retainAllIn
         const item = items[items.length - 1];
         retainedText.set(item, item.text);
         delete item.text;
-        if (displayOptions.target?.instrId === item.id) targetText = retainedText.get(item);
+        item.identitySuffix = item.id.slice(item.id.indexOf(':', item.id.indexOf(':') + 1) + 1);
+        if (displayOptions.target?.instrId?.endsWith(':' + item.identitySuffix)) targetText = retainedText.get(item);
         let low = 0, high = retainedOrder.length;
         while (low < high) {
           const middle = (low + high) >>> 1;
@@ -904,12 +889,22 @@ function parseFile(provider, records, providerCoverage, config = {}, retainAllIn
     }
   }
   if (records.limited !== false) checkMetadata(items.length);
-  if (records.lazy) {
+  if (records.streaming) {
     firstTime = records.analysis.firstTime; lastTime = records.analysis.lastTime;
     if (firstClaudeRecord) first = recoverClaudeFirstInstruction(firstClaudeRecord, byUuid);
-    if (provider === 'claude') {
-      cwd = records.find(record => typeof record.cwd === 'string')?.cwd || '';
-      branch = records.find(record => typeof record.gitBranch === 'string')?.gitBranch;
+    sessionId = transcriptSessionId(provider, records);
+    if (!firstTime || !isIdentityComponent(sessionId)) { providerCoverage.records_unverified++; return null; }
+    cwd = representativeTranscriptCwd(provider, records);
+    const meta = records.find(record => record.type === 'session_meta')?.payload;
+    branch = provider === 'claude' ? records.find(record => typeof record.gitBranch === 'string')?.gitBranch : meta?.git?.branch;
+    if (provider === 'codex') run_mode = determineCodexRunMode(meta?.source, meta?.thread_source);
+    for (let index = items.length - 1; index >= 0; index--) {
+      const item = items[index];
+      item.id = `${provider}:${sessionId}:${item.identitySuffix}`;
+      delete item.identitySuffix;
+      item.ref = retainString(computeInstructionRef(config, item), 16);
+      if (!snapshotPolicy.isSafeInstructionId(item.id)) { items.splice(index, 1); providerCoverage.records_unverified++; }
+      else records.analysis.summaryCandidates++;
     }
     displayExcluded = displayOptions.withheld || records.analysis.mixed || records.analysis.duplicates > 0
       || records.analysis.queuedDuplicate || records.analysis.invalidTime > 0 || (!retainAllInstructions && readerOptions
@@ -1135,7 +1130,7 @@ function countDuplicateRecordIdentities(provider, records) {
       duplicates++;
     }
     seen.add(identity);
-    checkMetadata(seen.size);
+    if (records.limited !== false) checkMetadata(seen.size);
   }
   return duplicates;
 }
@@ -1164,7 +1159,7 @@ function parseIndependentTranscript(provider, records, providerCoverage, config,
   displayOptions = {}) {
   let streamedSession;
   let streamedCoverage;
-  if (records.lazy) {
+  if (records.streaming) {
     streamedCoverage = Object.fromEntries(Object.keys(providerCoverage).map(key => [key, 0]));
     streamedSession = parseFile(provider, records, streamedCoverage, config, retainAllInstructions, displayOptions);
   }
@@ -1183,14 +1178,14 @@ function parseIndependentTranscript(provider, records, providerCoverage, config,
     for (const record of records) if (record.type === 'user') {
       for (const id of [record.uuid, record.source_uuid, record.delivery_id, record.message?.uuid,
         record.message?.source_uuid, record.message?.delivery_id]) if (typeof id === 'string') userIds.add(id);
-      checkMetadata(userIds.size);
+      if (records.limited !== false) checkMetadata(userIds.size);
     }
     const queuedIds = new Set();
     for (const record of records) if (isQueuedInstruction(record)) {
-      if (queuedIds.has(record.uuid) || [record.uuid, record.attachment.source_uuid, record.attachment.delivery_id]
+      if (queuedIds.has(record.uuid) || [record.uuid, record.source_uuid, record.delivery_id, record.attachment.source_uuid, record.attachment.delivery_id]
         .some(id => userIds.has(id))) queuedDuplicate = true;
       queuedIds.add(record.uuid);
-      checkMetadata(queuedIds.size);
+      if (records.limited !== false) checkMetadata(queuedIds.size);
     }
     if (queuedDuplicate) providerCoverage.queued_duplicate_withheld++;
   }
@@ -1205,7 +1200,7 @@ function parseIndependentTranscript(provider, records, providerCoverage, config,
   let session;
   let comparisonFailed = false;
   try {
-    if (records.lazy) {
+    if (records.streaming) {
       session = streamedSession;
       for (const key of Object.keys(providerCoverage)) providerCoverage[key] += streamedCoverage[key];
     } else session = parseFile(provider, records, providerCoverage, config, retainAllInstructions,
@@ -1295,6 +1290,7 @@ function readTranscriptIdentity(provider, fileDescriptor, fileSize, verifySidech
     }
   }
   if (!completeFile && (!identity.selected || verifySidechain && identity.sidechainOnly)) {
+    if (observation?.limited === false) return inspectTranscriptIdentity(provider, readTranscriptData(fileDescriptor), observation);
     const chosen = { selected: false };
     let cwdHash = null, singleSession = true, sidechainOnly = true, count = 0;
     for (const record of transcriptRecords(fileDescriptor, observation)) {
@@ -1345,6 +1341,51 @@ function isTranscriptOutsideWindow(stats, fileDescriptor, windowSince) {
   return tailTime !== null && Date.parse(tailTime) < windowSince;
 }
 
+function readTranscriptData(fileDescriptor) {
+  const size = fs.fstatSync(fileDescriptor).size;
+  if (size > MAX_FILE_BYTES) {
+    throw Error();
+  }
+  const chunks = [];
+  let bytesRead = 0;
+  let ended = false;
+  while (!ended && bytesRead <= MAX_FILE_BYTES) {
+    const buffer = Buffer.alloc(Math.min(128 * 1024, bytesRead === 0 ? size + 1 : MAX_FILE_BYTES + 1,
+      MAX_FILE_BYTES + 1 - bytesRead));
+    let filled = 0;
+    while (filled < buffer.length) {
+      const count = fs.readSync(fileDescriptor, buffer, filled, buffer.length - filled, bytesRead + filled);
+      if (count === 0) {
+        ended = true;
+        break;
+      }
+      filled += count;
+    }
+    bytesRead += filled;
+    if (filled > 0) {
+      chunks.push(buffer.subarray(0, filled));
+    }
+  }
+  if (bytesRead > MAX_FILE_BYTES) {
+    throw Error();
+  }
+  return Buffer.concat(chunks, bytesRead).toString('utf8');
+}
+
+function representativeTranscriptCwd(provider, records) {
+  if (provider === 'codex') {
+    const cwd = records.find(record => record.type === 'session_meta')?.payload?.cwd;
+    return typeof cwd === 'string' ? cwd : '';
+  }
+  return records.find(record => typeof record.cwd === 'string')?.cwd || '';
+}
+function validateStreamEnd(fd, filename, initial) {
+  const current = fs.fstatSync(fd);
+  const named = fs.statSync(filename);
+  if (current.dev !== initial.dev || current.ino !== initial.ino || current.size < initial.size
+    || named.dev !== initial.dev || named.ino !== initial.ino) streamLimit();
+}
+
 // Spec §1.4: only the exact projects-relative layout can identify a sidechain transcript.
 function claudeSubagentSessionId(provider, file, root) {
   if (provider !== 'claude' || !root) {
@@ -1374,61 +1415,53 @@ function summarizeTranscriptFile(provider, file, providerCoverage, windowSince, 
     if (openedStats.dev !== file.stats.dev || openedStats.ino !== file.stats.ino) {
       throw Error();
     }
-    fs.fstatSync(fileDescriptor);
+    observation.size = openedStats.size;
     observation.limited = openedStats.size > STREAM_LIMITS.smallFileBytes;
-    if (workflowJournal) {
-      let journalOnly = true;
-      for (const record of transcriptRecords(fileDescriptor, observation)) {
-        if (Object.hasOwn(record, 'sessionId') || !['launched', 'started', 'result'].includes(record.type)) { journalOnly = false; break; }
-      }
-      if (journalOnly) { providerCoverage.files_scanned++; providerCoverage.files_skipped++; return null; }
-    }
     const outsideWindow = isTranscriptOutsideWindow(openedStats, fileDescriptor, windowSince);
-    if (outsideWindow || requestedTarget) {
-      identity = readTranscriptIdentity(provider, fileDescriptor, openedStats.size,
-        subagentSid !== null, observation, outsideWindow);
-
-      if (subagentSid !== null && subagentSid === identity.sessionId && identity.sidechainOnly
-        && identity.singleSession) {
-        providerCoverage.files_scanned++;
-        providerCoverage.files_skipped++;
-        return null;
+    if (outsideWindow) {
+      identity = readTranscriptIdentity(provider, fileDescriptor, openedStats.size, subagentSid !== null, observation, true);
+      if (observation.limited) validateStreamEnd(fileDescriptor, file.file, openedStats);
+      else if (fs.fstatSync(fileDescriptor).size > MAX_FILE_BYTES) throw Error();
+      providerCoverage.files_scanned++;
+      if (subagentSid !== null && subagentSid === identity.sessionId && identity.sidechainOnly && identity.singleSession) {
+        providerCoverage.files_skipped++; return null;
       }
-      // Spec §4: inspect unrelated identities for grouping, retaining full details only for the requested session.
-      if (outsideWindow || !matchesRequestedSession(requestedTarget, { provider, sid: identity.sessionId })) {
-        providerCoverage.files_scanned++;
-        return { file: retainedFile,
-          sessionId: identity.sessionId?.length <= 64 ? retainString(identity.sessionId, 64) : null, outsideWindow, identityOnly: true };
-      }
+      return { file: retainedFile, sessionId: identity.sessionId?.length <= 64 ? retainString(identity.sessionId, 64) : null,
+        outsideWindow: true, identityOnly: true };
     }
-    const records = transcriptSource(fileDescriptor, provider, subagentSid !== null, observation);
+    let records;
+    if (observation.limited) records = transcriptSource(fileDescriptor, provider, observation);
+    else {
+      const lines = readTranscriptData(fileDescriptor).split('\n');
+      records = transcriptSource(lines.map((line, index) => line.trim() ? parseTranscriptRecord(line, index < lines.length - 1) : null)
+        .filter(Boolean), provider, observation);
+    }
+    const counters = Object.fromEntries(Object.keys(providerCoverage).map(key => [key, 0]));
+    const parsed = parseIndependentTranscript(provider, records, counters, config, requestedTarget !== null,
+      { readerOptions: scanContext.readerOptions, target: requestedTarget });
+    if (observation.limited) validateStreamEnd(fileDescriptor, file.file, openedStats);
     providerCoverage.files_scanned++;
     const sessionId = transcriptSessionId(provider, records);
-    const sidechainOnly = !records.lazy && records.analysis.sidechainOnly && records.analysis.singleSession;
-    if (subagentSid !== null && subagentSid === sessionId && sidechainOnly) {
-      providerCoverage.files_skipped++;
-      return null;
+    // Eligibility checks use the same consumed records, never another file pass.
+    const journalOnly = workflowJournal && (records.streaming ? records.analysis.journalOnly
+      : records.length > 0 && records.every(record => !Object.hasOwn(record, 'sessionId') && ['launched', 'started', 'result'].includes(record.type)));
+    if (journalOnly || subagentSid !== null && subagentSid === sessionId
+      && records.analysis.sidechainOnly && records.analysis.singleSession) {
+      providerCoverage.files_skipped++; return null;
     }
-    const parsed = parseIndependentTranscript(provider, records, providerCoverage, config, requestedTarget !== null,
-      { readerOptions: scanContext.readerOptions, target: requestedTarget,
-        withheld: scanContext.groups?.get(`${provider}:${sessionId}`)?.files.size > 0 });
-    if (subagentSid !== null && subagentSid === sessionId && records.analysis.sidechainOnly && records.analysis.singleSession) {
-      providerCoverage.files_skipped++;
-      return null;
-    }
+    for (const key of Object.keys(providerCoverage)) providerCoverage[key] += counters[key];
     const ignored = !records.analysis.hasSessionIdentity && !records.analysis.instructionCandidates;
     const comparisonFailed = Boolean(parsed?.comparisonFailed || records.analysis.brokenJson
       || records.analysis.invalidTime || records.analysis.mixed
       || records.analysis.instructionCandidates !== records.analysis.summaryCandidates
       || (!ignored && !parsed?.comparison));
-    const rawCwd = provider === 'claude' ? records.find(record => typeof record.cwd === 'string')?.cwd
-      : records.find(record => record.type === 'session_meta')?.payload?.cwd;
+    const rawCwd = representativeTranscriptCwd(provider, records);
     return { file: retainedFile, firstAt: records.analysis.firstTime, lastAt: records.analysis.lastTime,
       cwdHash: typeof rawCwd === 'string' ? hashComparisonText(rawCwd) : null,
       sessionId: sessionId?.length <= 64 ? retainString(sessionId, 64) : null, ...parsed, comparisonFailed };
   } catch (error) {
     providerCoverage.files_failed++;
-    if (error.streamLimit) providerCoverage.large_file_withheld++;
+    if (observation.limited) providerCoverage.large_file_withheld++;
     if (error.streamLimit || isIdentityComponent(observation.sessionId) || isIdentityComponent(identity.sessionId))
       return { file: retainedFile, sessionId: isIdentityComponent(observation.sessionId)
         ? observation.sessionId : isIdentityComponent(identity.sessionId) ? identity.sessionId : null };
@@ -1447,9 +1480,9 @@ function compareSessionFiles(left, right) {
 
 function discardSessionDetails(file, details) {
   if (file.session) {
-    const { provider, sid, firstAt, lastAt, link_text } = file.session;
+    const { provider, sid, firstAt, lastAt, link_text, sessionFingerprint } = file.session;
     details.delete(`${provider}:${sid}`);
-    file.session = { provider, sid, firstAt, lastAt, link_text };
+    file.session = { provider, sid, firstAt, lastAt, link_text, sessionFingerprint };
     file.detailsDiscarded = true;
   }
 }
@@ -1536,6 +1569,8 @@ function restoreSelectedDetails(files, details, config, coverage, windowSince, r
       if (restored?.comparisonFailed) coverage[provider].link_blocked = 1;
       if (!restored?.session || restored.session.sid !== file.session.sid
         || restored.session.lastAt !== file.session.lastAt || restored.session.firstAt !== file.session.firstAt
+        || restored.session.sessionFingerprint !== file.session.sessionFingerprint || restored.cwdHash !== file.cwdHash
+        || JSON.stringify(restored.session.link_text) !== JSON.stringify(file.session.link_text)
         || (!requestedTarget && snapshotSessionExclusion(readerOptions, config, restored.session) !== null)) {
         coverage[provider].files_failed++;
         coverage[provider].link_blocked = 1;

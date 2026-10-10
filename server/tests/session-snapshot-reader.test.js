@@ -3694,7 +3694,7 @@ for (const old of [false, true]) {
     assert.ok(bytes > 0);
     assert.ok(bytes <= snapshotReader.MAX_FILE_BYTES + 1 + 128 * 1024);
     assert.ok(bytes >= snapshotReader.MAX_FILE_BYTES + 1);
-    assert.equal(snapshot.coverage.claude.large_file_withheld, 1);
+    assert.equal(snapshot.coverage.claude.large_file_withheld, 0);
     assert.equal(snapshot.coverage.claude.files_failed, 1);
     assert.equal(snapshot.sessions.length, 0);
     assert.equal(descriptors.size, 0);
@@ -4422,6 +4422,7 @@ test('PR1d R2 verified workflow sidechains skip record counters, including dupli
 
 test('PR1d R2 a failed body read retains identity as a blocker and prevents sibling export', t => {
   const fixture = createFixture(t);
+  forceLargeFileLimits(t);
   const file = fixture.file('claude', 'a-failed', [claudeUserRecord('first identity'),
     { type: 'assistant', timestamp: RECORD_TIMESTAMP, padding: 'x'.repeat(500000) }]);
   fixture.file('claude', 'b-sibling', [claudeUserRecord('must be withheld', { uuid: 'sibling' })]);
@@ -5325,7 +5326,7 @@ test('PR1d R3 full hidden summary and agent dimensions fit a 64MB heap without o
   assert.equal(child.stdout, 'bounded');
 });
 
-test('PR1d R4-A a 7MiB transcript growing to 17MiB activates default 8MiB line limit', t => {
+test('PR1d R5 small 7MiB transcript growing to 17MiB fails the main bounded read', t => {
   const fixture = createFixture(t);
   const file = fixture.file('claude', 'growing', [claudeUserRecord('recent'),
     ...Array.from({ length: 7 }, () => ({ type: 'assistant', padding: 'x'.repeat(1024 * 1024) }))]);
@@ -5350,7 +5351,7 @@ test('PR1d R4-A a 7MiB transcript growing to 17MiB activates default 8MiB line l
   const snapshot = snapshotReader.runSnapshot(fixture.options);
   assert.equal(grew, true);
   assert.ok(fs.statSync(file).size > snapshotReader.MAX_FILE_BYTES);
-  assert.equal(snapshot.coverage.claude.large_file_withheld, 1);
+  assert.equal(snapshot.coverage.claude.large_file_withheld, 0);
   assert.equal(snapshot.coverage.claude.files_failed, 1);
   assert.equal(snapshot.coverage.claude.link_blocked, 1);
   assert.equal(snapshot.sessions.length, 0);
@@ -5388,7 +5389,7 @@ test('PR1d R4-C2 special Orca agent summaries cannot confirm a human line-folded
 
 
 for (const provider of ['claude', 'codex']) {
-  test(`PR1d R4 growth updates ${provider === 'claude' ? 'identity metadata' : 'instruction'} limit state`, t => {
+  test(`PR1d R5 small growth ignores new ${provider === 'claude' ? 'identity metadata' : 'instruction'} limits`, t => {
     const fixture = createFixture(t);
     const previous = { ...snapshotReader.STREAM_LIMITS };
     Object.assign(snapshotReader.STREAM_LIMITS, { smallFileBytes: 4096, identities: 5 });
@@ -5411,9 +5412,9 @@ for (const provider of ['claude', 'codex']) {
     });
     const snapshot = snapshotReader.runSnapshot(fixture.options);
     assert.equal(grew, true);
-    assert.equal(snapshot.coverage[provider].large_file_withheld, 1);
-    assert.equal(snapshot.coverage[provider].files_failed, 1);
-    assert.equal(snapshot.sessions.length, 0);
+    assert.equal(snapshot.coverage[provider].large_file_withheld, 0);
+    assert.equal(snapshot.coverage[provider].files_failed, 0);
+    assert.equal(snapshot.sessions.length, 1);
   });
 }
 
@@ -5444,4 +5445,142 @@ test('PR1d R4 agent special summary detection shares the producer whitespace pre
     assert.equal(summarizeLinkText(prefix + special + '\nbootstrap', true), null);
   }
   assert.notEqual(summarizeLinkText('ordinary human instructions', true), null);
+});
+
+for (const field of ['source_uuid', 'delivery_id']) {
+  test(`PR1d R5-A top-level queued ${field} prevents deleted user replay`, t => {
+    const fixture = createFixture(t);
+    fixture.file('claude', 'main', [claudeUserRecord('confidential human request'),
+      queuedHuman('confidential human request', { uuid: 'q', [field]: 'u' })]);
+    snapshotReader.loadConfig(fixture.options);
+    const config = fixture.config(); config.exclude.instructions = [{ id: 'claude:s:uu' }]; fixture.save(config);
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(snapshot.coverage.claude.queued_duplicate_withheld, 1);
+    assert.equal(snapshot.sessions.length, 0);
+    assert.equal(snapshot.instructions.length, 0);
+  });
+}
+
+test('PR1d R5-A workflow condition failure uses one buffer read rather than a full validation reread', t => {
+  const fixture = createFixture(t);
+  const file = fixture.file('claude', 'project/s/subagents/workflows/wf/agent-a', [claudeUserRecord('main'),
+    ...Array.from({ length: 4 }, () => ({ type: 'assistant', padding: 'x'.repeat(1024 * 1024) }))]);
+  const totals = trackTranscriptReads(t, file);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.sessions.length, 1);
+  assert.equal(totals.bytes, fs.statSync(file).size);
+  forceLargeFileLimits(t);
+  totals.bytes = 0;
+  assert.deepEqual(snapshotReader.runSnapshot(fixture.options), snapshot);
+  assert.equal(totals.bytes, fs.statSync(file).size);
+});
+
+test('PR1d R5-C1 small files cannot combine lookahead identity with a replacement body', t => {
+  const fixture = createFixture(t), prompt = 'shared human prompt';
+  fixture.file('claude', 'a-visible', [claudeUserRecord(prompt, { sessionId: 'visible', cwd: '/repo' })]);
+  const hidden = fixture.file('claude', 'b-hidden', [claudeUserRecord('older unrelated task', { sessionId: 'before', cwd: '/other' })]);
+  snapshotReader.loadConfig(fixture.options);
+  const config = fixture.config(); config.exclude.sessions = ['claude:hidden']; fixture.save(config);
+  fixture.options.runOrca = orcaRunner([{ ...orcaWorktree(prompt), path: '/repo' }], []);
+  const originalOpen = fs.openSync, originalRead = fs.readSync;
+  let descriptor, starts = 0;
+  t.mock.method(fs, 'openSync', function(filename, ...args) {
+    const fd = originalOpen(filename, ...args); if (filename === hidden) descriptor = fd; return fd;
+  });
+  t.mock.method(fs, 'readSync', function(fd, buffer, offset, length, position) {
+    if (fd === descriptor && position === 0 && ++starts === 2) fs.writeFileSync(hidden,
+      JSON.stringify(claudeUserRecord(prompt, { sessionId: 'hidden', cwd: '/repo' })));
+    return originalRead(fd, buffer, offset, length, position);
+  });
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.instructions.some(item => item.id.startsWith('claude:before:') && item.text === prompt), false);
+  assert.equal(starts, 1);
+});
+
+test('PR1d R5-C2 missing Codex cwd uses the same empty representative cwd in hidden summaries', t => {
+  const fixture = createFixture(t), prompt = 'abcdefgh';
+  for (const id of ['visible', 'hidden']) fixture.file('codex', id, [codexSessionMeta({ id, cwd: undefined }), codexMessage(prompt)]);
+  snapshotReader.loadConfig(fixture.options);
+  const config = fixture.config(); config.exclude.sessions = ['codex:hidden']; fixture.save(config);
+  fixture.options.runOrca = orcaRunner([{ ...orcaWorktree(prompt, 'p:leaf', { agentType: 'codex' }), path: '', repoLabel: 'repo' }], []);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.coverage.codex.link_blocked, 0);
+  assert.equal(snapshot.sessions.length, 1);
+  assert.equal(snapshot.sessions[0].orca_link.evidence, 'ambiguous');
+  assert.equal(snapshot.sessions[0].orca_link.confirmed, false);
+});
+
+for (const mutation of ['append', 'truncate', 'replace', 'early-eof']) {
+  test(`PR1d R5 large single-pass boundary validates ${mutation}`, t => {
+    const fixture = createFixture(t);
+    forceLargeFileLimits(t);
+    const file = fixture.file('claude', 'large', [claudeUserRecord('initial instruction'),
+      { type: 'assistant', padding: 'x'.repeat(400000) }]);
+    const initialSize = fs.statSync(file).size;
+    const originalOpen = fs.openSync, originalRead = fs.readSync;
+    let descriptor, mutated = false, bytes = 0, starts = 0;
+    t.mock.method(fs, 'openSync', function(filename, ...args) {
+      const fd = originalOpen(filename, ...args); if (filename === file) descriptor = fd; return fd;
+    });
+    t.mock.method(fs, 'readSync', function(fd, buffer, offset, length, position) {
+      if (fd !== descriptor) return originalRead(fd, buffer, offset, length, position);
+      if (position === 0) starts++;
+      if (mutation === 'early-eof' && position > 0) { mutated = true; return 0; }
+      const count = originalRead(fd, buffer, offset, length, position);
+      bytes += count;
+      if (!mutated && count > 0) {
+        mutated = true;
+        if (mutation === 'append') fs.appendFileSync(file, '\n' + JSON.stringify(claudeUserRecord('appended instruction', { uuid: 'later' })) + '\n');
+        if (mutation === 'truncate') fs.truncateSync(file, 0);
+        if (mutation === 'replace') {
+          fs.writeFileSync(file + '.replacement', JSON.stringify(claudeUserRecord('replacement instruction')));
+          fs.renameSync(file + '.replacement', file);
+        }
+      }
+      return count;
+    });
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(mutated, true);
+    assert.equal(starts, 1);
+    if (mutation === 'append') {
+      assert.equal(bytes, initialSize);
+      assert.equal(snapshot.coverage.claude.link_blocked, 0);
+      assert.equal(snapshot.sessions[0].instruction_total, 1);
+      assert.equal(snapshot.instructions[0].text, 'initial instruction');
+    } else {
+      assert.equal(snapshot.sessions.length, 0);
+      assert.equal(snapshot.coverage.claude.large_file_withheld, 1);
+      assert.equal(snapshot.coverage.claude.files_failed, 1);
+      assert.equal(snapshot.coverage.claude.link_blocked, 1);
+    }
+  });
+}
+
+for (const provider of ['claude', 'codex']) {
+  test(`PR1d R5 ${provider} resolves late headers and parents in one bounded pass`, t => {
+    const fixture = createFixture(t);
+    const records = provider === 'claude' ? [
+      { type: 'assistant', padding: 'x'.repeat(70000) },
+      claudeUserRecord('late instruction', { parentUuid: 'parent', cwd: undefined }),
+      { type: 'assistant', uuid: 'parent', parentUuid: null, sessionId: 's', cwd: '/repo', timestamp: RECORD_TIMESTAMP }
+    ] : [codexMessage('late instruction'), codexSessionMeta({ cwd: '/repo' })];
+    const file = fixture.file(provider, 'late', records);
+    const expected = snapshotReader.runSnapshot(fixture.options);
+    forceLargeFileLimits(t);
+    const reads = trackTranscriptReads(t, file);
+    const actual = snapshotReader.runSnapshot(fixture.options);
+    assert.deepEqual(actual, expected);
+    assert.equal(reads.bytes, fs.statSync(file).size);
+  });
+}
+
+test('PR1d R5 incomplete JSON at the initial large-file boundary is only unverified', t => {
+  const fixture = createFixture(t);
+  forceLargeFileLimits(t);
+  const file = fixture.file('claude', 'large', [claudeUserRecord('initial instruction')]);
+  fs.appendFileSync(file, '\n{"type":"user","sessionId":"s","message":');
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.sessions[0].instruction_total, 1);
+  assert.equal(snapshot.coverage.claude.records_unverified, 1);
+  assert.equal(snapshot.coverage.claude.link_blocked, 0);
 });
