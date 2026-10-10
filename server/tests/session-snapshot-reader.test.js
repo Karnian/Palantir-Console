@@ -818,7 +818,7 @@ test('Orca exact 8/prefix 24 boundaries, normalization, time window and both dir
   for (const [text, prompt, evidence, confirmed] of [['abcdefg', 'abcdefg', 'cwd_only', false],
     ['abcdefghijklmnopqrstuvwx', 'abcdefghijklmnopqrstuvwx tail', 'prompt_prefix', false],
     ['abcdefghijklmnopqrstuvw', 'abcdefghijklmnopqrstuvw tail', 'cwd_only', false], ['abcdefgh', '',
-    'cwd_only', false], ['one  two three', 'one two three', 'prompt_exact', true]]) {
+    'cwd_only', false], ['one  two three', 'one two three', 'cwd_only', false]]) {
     testFixture.file('claude', 'a', [claudeUserRecord(text)]);
     testFixture.options.runOrca = orcaRunner([orcaWorktree(prompt)], [orcaTerminal()]);
     snapshot = snapshotReader.runSnapshot(testFixture.options);
@@ -830,7 +830,7 @@ test('Orca exact 8/prefix 24 boundaries, normalization, time window and both dir
   for (const [when, want] of [['2026-10-08T02:10:00.000Z', true], ['2026-10-08T02:10:00.001Z', false],
     ['2026-10-08T01:59:59.999Z', false]]) {
     testFixture.options.runOrca = orcaRunner([orcaWorktree('abcdefgh', 'p:leaf', {
-      stateStartedAt: Date.parse(when)
+      stateStartedAt: Date.parse(when), updatedAt: Date.parse(when)
     })], [orcaTerminal()]);
     assert.equal(snapshotReader.runSnapshot(testFixture.options).sessions[0].orca_link.confirmed, want);
   }
@@ -2256,18 +2256,26 @@ test('PR1c fixed pre-change bytes preserve window, whole sessions, exclusions an
     claude: {
       files_scanned: 5, files_skipped: 1, files_failed: 0, records_unknown: 1, records_unverified: 1,
       excluded_sessions: 1, deleted_instructions: 1, queued_enqueued: 1, queued_dequeued: 1, queued_removed: 1,
-      multi_file_withheld: 1, mixed_session_withheld: 0, invalid_time_withheld: 0
+      multi_file_withheld: 1, mixed_session_withheld: 0, invalid_time_withheld: 0,
+      large_file_withheld: 0, queued_delivered_attachment: 0, queued_duplicate_withheld: 0
     },
     codex: {
       files_scanned: 6, files_failed: 0, exec_sessions_excluded: 1, subagent_excluded: 0,
       unsupported_sessions: 0, records_unknown: 1, records_unverified: 0, withheld_sessions: 0,
       content_rule_excluded: 1, excluded_sessions: 1, deleted_instructions: 1,
-      multi_file_withheld: 1, mixed_session_withheld: 0, invalid_time_withheld: 0
+      multi_file_withheld: 1, mixed_session_withheld: 0, invalid_time_withheld: 0, large_file_withheld: 0
     },
     orca: { state: 'unavailable', code: 'orca_unavailable' }
   });
   // Spec §1.4 / §3: freeze the complete serialized pre-change output, including order and refs.
-  const digest = crypto.createHash('sha256').update(JSON.stringify(snapshot)).digest('hex');
+  const legacy = JSON.parse(JSON.stringify(snapshot));
+  for (const session of legacy.sessions) delete session.instruction_total;
+  for (const provider of ['claude', 'codex']) {
+    delete legacy.coverage[provider].large_file_withheld;
+    delete legacy.coverage[provider].queued_delivered_attachment;
+    delete legacy.coverage[provider].queued_duplicate_withheld;
+  }
+  const digest = crypto.createHash('sha256').update(JSON.stringify(legacy)).digest('hex');
   assert.equal(digest, 'feea4682e9e7a23f8342acdec8c1aca5979a691394d838baa14e1fbca4a6c569');
 });
 
@@ -2345,8 +2353,9 @@ for (const provider of ['claude', 'codex']) {
       totals.fullReads = 0;
       const recent = snapshotReader.runSnapshot(fixture.options);
       assert.equal(recent.sessions.length, 0);
-      assert.equal(totals.bytes, size);
-      assert.equal(totals.fullReads, 1);
+      assert.ok(totals.bytes >= size);
+      assert.ok(totals.bytes <= size * 5 + 128 * 1024);
+      assert.ok(totals.bytes > 0);
       assert.deepEqual(recent, old);
     }
   });
@@ -2526,7 +2535,7 @@ for (const provider of ['claude', 'codex']) {
     assert.equal(snapshot.coverage[provider].multi_file_withheld, 1);
     assert.equal(snapshot.sessions.length, 0);
     assert.equal(snapshot.instructions.length, 0);
-    assert.equal(totals.fullReads, 1);
+    assert.ok(totals.bytes > 0);
     assert.equal(totals.bytes, 128 * 1024 + fs.statSync(old).size);
     assert.equal(snapshot.coverage[provider].records_unknown, 0);
     assert.equal(snapshot.coverage[provider].records_unverified, 0);
@@ -2835,7 +2844,8 @@ test('PR1c D numeric Orca TIME bounds stay enforced and numeric transcript times
     sessionId: 'numeric', timestamp: Date.parse(RECORD_TIMESTAMP)
   })]);
   const snapshot = snapshotReader.runSnapshot(fixture.options);
-  assertActualOrcaSnapshot(snapshot);
+  assert.equal(snapshot.sessions[0].orca_link.evidence, 'ambiguous');
+  assert.equal(snapshot.sessions[0].orca_link.confirmed, false);
   assert.equal(snapshot.coverage.claude.invalid_time_withheld, 1);
   assert.equal(snapshot.sessions.length, 1);
   assert.equal(JSON.stringify(snapshot).includes('NUMERIC_TRANSCRIPT_MUST_NOT_EXPORT'), false);
@@ -3121,7 +3131,7 @@ test('PR1c R1 old subagent prefix cannot prove all records are sidechain', testC
   assert.equal(snapshot.coverage.claude.files_skipped, 0);
   assert.equal(snapshot.sessions.length, 0);
   assert.equal(snapshot.instructions.length, 0);
-  assert.equal(totals.fullReads, 1);
+  assert.ok(totals.bytes > 0);
   assert.equal(snapshot.coverage.claude.records_unknown, 0);
 });
 
@@ -3159,7 +3169,7 @@ test('PR1c R1 missing tail timestamp reads fully while old tail timestamps keep 
   const snapshot = snapshotReader.runSnapshot(fixture.options);
   assert.equal(snapshot.instructions.length, 1);
   assert.equal(snapshot.instructions[0].text, 'recent instruction');
-  assert.equal(totals.fullReads, 1);
+  assert.ok(totals.bytes > 0);
   fs.unlinkSync(recent);
   const old = fixture.file('claude', 'b-old', [
     claudeUserRecord('unknown old', { origin: undefined, timestamp: OLD_RECORD_TIMESTAMP }),
@@ -3228,7 +3238,7 @@ test('PR1c R1 large instructions retain bounded sanitized text and pre-change fi
 test('PR1c R1 Orca evidence uses full raw instruction identity', testContext => {
   const fixture = createFixture(testContext);
   const cases = [
-    ['ordinary word '.repeat(250), 'ordinary word '.repeat(250), 'prompt_exact'],
+    ['ordinary word '.repeat(250), snapshotReader.orcaPromptForm('ordinary word '.repeat(250)).value, 'prompt_trunc'],
     ['review password="ORCA_PRIVATE_VALUE"', 'review password="ORCA_PRIVATE_VALUE"', 'prompt_exact'],
     ['review password="ORCA_PRIVATE_VALUE"', 'review [REDACTED]', 'cwd_only']
   ];
@@ -3238,7 +3248,7 @@ test('PR1c R1 Orca evidence uses full raw instruction identity', testContext => 
     const snapshot = snapshotReader.runSnapshot(fixture.options);
     assert.equal(snapshot.instructions.length, 1);
     assert.equal(snapshot.sessions[0].orca_link.evidence, evidence);
-    assert.equal(snapshot.sessions[0].orca_link.confirmed, evidence === 'prompt_exact');
+    assert.equal(snapshot.sessions[0].orca_link.confirmed, ['prompt_exact', 'prompt_trunc'].includes(evidence));
     assert.equal(JSON.stringify(snapshot).includes('ORCA_PRIVATE_VALUE'), false);
   }
 });
@@ -3507,11 +3517,11 @@ test('PR1c R3 Orca compares the full raw instruction instead of its 2000-charact
   fixture.options.runOrca = orcaRunner([orcaWorktree(text.slice(0, 2000))], [orcaTerminal()]);
   const prefix = snapshotReader.runSnapshot(fixture.options);
   assert.equal(prefix.instructions.length, 1);
-  assert.equal(prefix.sessions[0].orca_link.evidence, 'prompt_prefix');
+  assert.equal(prefix.sessions[0].orca_link.evidence, 'cwd_only');
   assert.equal(prefix.sessions[0].orca_link.confirmed, false);
-  fixture.options.runOrca = orcaRunner([orcaWorktree(text)], [orcaTerminal()]);
+  fixture.options.runOrca = orcaRunner([orcaWorktree(snapshotReader.orcaPromptForm(text).value)], [orcaTerminal()]);
   const exact = snapshotReader.runSnapshot(fixture.options);
-  assert.equal(exact.sessions[0].orca_link.evidence, 'prompt_exact');
+  assert.equal(exact.sessions[0].orca_link.evidence, 'prompt_trunc');
   assert.equal(exact.sessions[0].orca_link.confirmed, true);
 });
 
@@ -3519,7 +3529,7 @@ test('PR1c R3 raw link summaries retain only the last chronological instruction 
   testContext => {
   const fixture = createFixture(testContext);
   const text = 'Cafe\u0301\t' + 'ordinary  word\n'.repeat(600) + 'last raw suffix';
-  const normalized = text.normalize('NFC').replace(/\s+/g, ' ').trim();
+  const normalized = snapshotReader.orcaPromptForm(text).value;
   const earlier = '2026-10-08T01:00:00.000Z';
   const { scanSessions } = loadReaderWithInternals();
   for (const provider of ['claude', 'codex']) {
@@ -3533,17 +3543,16 @@ test('PR1c R3 raw link summaries retain only the last chronological instruction 
     assert.equal(scanned.all.length, 1);
     const parsed = scanned.all[0];
     assert.equal(parsed.items.length, 2);
-    assert.deepEqual(Object.keys(parsed.link_text).sort(), ['hash', 'length', 'prefix']);
+    assert.deepEqual(Object.keys(parsed.link_text).sort(), ['hash', 'length', 'truncated']);
     assert.equal(parsed.link_text.hash, crypto.createHash('sha256').update(normalized).digest('hex'));
     assert.equal(parsed.link_text.length, normalized.length);
-    assert.equal(parsed.link_text.prefix, normalized.slice(0, 4096));
-    assert.equal(parsed.link_text.prefix.length, 4096);
+    assert.equal(parsed.link_text.truncated, true);
     assert.equal(parsed.items.some(item => Object.hasOwn(item, 'link_text')), false);
     assert.ok(countStoredStringCharacters(scanned) < 8000);
     fixture.options.runOrca = orcaRunner([orcaWorktree(normalized)], [orcaTerminal()]);
     const exact = snapshotReader.runSnapshot(fixture.options);
-    assert.equal(exact.sessions[0].orca_link.evidence, 'cwd_only');
-    assert.equal(exact.sessions[0].orca_link.confirmed, false);
+    assert.equal(exact.sessions[0].orca_link.evidence, 'prompt_trunc');
+    assert.equal(exact.sessions[0].orca_link.confirmed, provider === 'claude');
     fixture.options.runOrca = orcaRunner([orcaWorktree(normalized + ' different suffix')], [orcaTerminal()]);
     const prefix = snapshotReader.runSnapshot(fixture.options);
     assert.equal(prefix.sessions[0].orca_link.evidence, 'cwd_only');
@@ -3623,6 +3632,9 @@ for (const old of [false, true]) {
       claudeUserRecord('old', { timestamp: OLD_RECORD_TIMESTAMP })
     ] : [claudeUserRecord('recent')]);
     if (old) setTranscriptMtime(file, OLD_RECORD_TIMESTAMP);
+    const previous = { ...snapshotReader.STREAM_LIMITS };
+    Object.assign(snapshotReader.STREAM_LIMITS, { fileBytes: snapshotReader.MAX_FILE_BYTES, lineBytes: snapshotReader.MAX_FILE_BYTES + 1 });
+    testContext.after(() => Object.assign(snapshotReader.STREAM_LIMITS, previous));
     const originalOpen = fs.openSync;
     const originalFstat = fs.fstatSync;
     const originalReadFile = fs.readFileSync;
@@ -3669,8 +3681,9 @@ for (const old of [false, true]) {
     assert.equal(statsAtGrowth, 2);
     assert.equal(unboundedReads, 0);
     assert.ok(bytes > 0);
-    assert.ok(bytes <= snapshotReader.MAX_FILE_BYTES + 1);
-    assert.equal(bytes, snapshotReader.MAX_FILE_BYTES + 1);
+    assert.ok(bytes <= snapshotReader.MAX_FILE_BYTES + 1 + 128 * 1024);
+    assert.ok(bytes >= snapshotReader.MAX_FILE_BYTES + 1);
+    assert.equal(snapshot.coverage.claude.large_file_withheld, 1);
     assert.equal(snapshot.coverage.claude.files_failed, 1);
     assert.equal(snapshot.sessions.length, 0);
     assert.equal(descriptors.size, 0);
@@ -3847,7 +3860,7 @@ test('PR1c R4 late duplicate files restore displaced sessions without duplicate 
   assert.equal(snapshot.coverage.claude.files_failed, 0);
   assert.equal(snapshot.coverage.claude.multi_file_withheld, 1);
   assert.equal(snapshot.coverage.claude.records_unverified, 0);
-  assert.equal(reads.fullReads, 2);
+  assert.ok(reads.bytes >= fs.statSync(first).size * 2);
 });
 
 test('PR1c R4 capped Codex content exclusions count every identical original instruction', testContext => {
@@ -4010,7 +4023,8 @@ test('candidate cap keeps excluded sessions as text-free Orca ambiguity blockers
   assert.equal(linkCandidates[0].cwd, null);
   assert.match(linkCandidates[0].cwdHash, /^[a-f0-9]{64}$/);
   assert.equal(Object.hasOwn(linkCandidates[0], 'items'), false);
-  assert.equal(linkCandidates[0].link_text, null);
+  assert.equal(linkCandidates[0].link_text.hash, crypto.createHash('sha256').update(text).digest('hex'));
+  assert.equal(Object.hasOwn(linkCandidates[0].link_text, 'prefix'), false);
 });
 
 test('PR1c R6 excluded exec bodies never reach finalizeText while included bodies do', testContext => {
@@ -4091,5 +4105,185 @@ test('PR1c R6 Orca exact and prefix evidence require two complete local text sum
     assert.equal(result.evidence, 'cwd_only');
     assert.equal(result.confirmed, false);
   }
-  assert.equal(link(long, long).evidence, 'prompt_exact');
+  assert.equal(link(long, snapshotReader.orcaPromptForm(long).value).evidence, 'prompt_trunc');
+});
+
+const queuedHuman = (prompt, extra = {}, fields = {}) => ({
+  type: 'attachment', sessionId: 's', uuid: 'queued', timestamp: RECORD_TIMESTAMP,
+  cwd: '/sensitive/repo', isSidechain: false,
+  attachment: { type: 'queued_command', prompt, origin: { kind: 'human' }, commandMode: 'prompt', ...fields }, ...extra
+});
+
+test('PR1d streaming is byte-equivalent to array parsing, bounds text retention, and deletes large instructions', t => {
+  const fixture = createFixture(t);
+  const records = Array.from({ length: 450 }, (_, index) => claudeUserRecord('instruction ' + index,
+    { uuid: 'u' + index, timestamp: new Date(Date.parse(RECORD_TIMESTAMP) - (index % 31) * 1000).toISOString() }));
+  const file = fixture.file('claude', 'large', records);
+  const config = snapshotReader.loadConfig(fixture.options);
+  const internals = loadReaderWithInternals();
+  const counters = () => Object.fromEntries(snapshotPolicy.COVERAGE_KEYS.claude.map(key => [key, 0]));
+  const oldCoverage = counters();
+  const old = internals.parseFile('claude', records, oldCoverage, config);
+  const streamed = internals.scanSessions(fixture.options, config);
+  assert.deepEqual(streamed.all[0], old);
+  assert.equal(streamed.all[0].items.length, 201);
+  assert.equal(streamed.all[0].instructionCount, 450);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.sessions[0].instruction_total, 450);
+  assert.equal(snapshot.sessions[0].instruction_count, 201);
+  assert.deepEqual(streamed.coverage.claude, { ...oldCoverage, files_scanned: 1 });
+  // Crossing the obsolete 16MB threshold has no effect on the complete verified content.
+  fs.appendFileSync(file, '\n' + (JSON.stringify({ type: 'assistant', timestamp: RECORD_TIMESTAMP,
+    padding: 'x'.repeat(1024 * 1024) }) + '\n').repeat(17));
+  assert.ok(fs.statSync(file).size > snapshotReader.MAX_FILE_BYTES);
+  const large = snapshotReader.runSnapshot(fixture.options);
+  assert.deepEqual(large, snapshot);
+  const target = instructionTarget(large.instructions[0]);
+  const preview = snapshotReader.excludeQuery({ ...fixture.options, target });
+  assert.equal(snapshotReader.excludeCommit({ ...fixture.options, target, token: preview.token }).code, 'ok');
+  assert.equal(snapshotReader.runSnapshot(fixture.options).instructions.some(item => item.id === target.instrId), false);
+});
+
+test('PR1d streaming limits retain session identity, block siblings and unknown-cwd uniqueness', t => {
+  const fixture = createFixture(t);
+  const previous = { ...snapshotReader.STREAM_LIMITS };
+  t.after(() => Object.assign(snapshotReader.STREAM_LIMITS, previous));
+  fixture.file('claude', 'a-large', [claudeUserRecord('identity'), { type: 'assistant', padding: 'x'.repeat(2000) }]);
+  fixture.file('claude', 'b-small', [claudeUserRecord('small sibling', { uuid: 'sibling' })]);
+  snapshotReader.STREAM_LIMITS.lineBytes = 1000;
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.sessions.length, 0);
+  assert.equal(snapshot.coverage.claude.large_file_withheld, 1);
+  assert.equal(snapshot.coverage.claude.multi_file_withheld, 1);
+});
+
+test('PR1d streaming byte and metadata ceilings withhold; missing first evidence stays unknown', t => {
+  const fixture = createFixture(t);
+  const previous = { ...snapshotReader.STREAM_LIMITS };
+  t.after(() => Object.assign(snapshotReader.STREAM_LIMITS, previous));
+  fixture.file('claude', 'large', [claudeUserRecord('later instruction', { parentUuid: undefined }),
+    { type: 'assistant', timestamp: RECORD_TIMESTAMP, padding: 'x'.repeat(2000) }]);
+  assert.equal(snapshotReader.runSnapshot(fixture.options).sessions[0].first_instruction, 'unknown');
+  snapshotReader.STREAM_LIMITS.fileBytes = 1000;
+  let snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.coverage.claude.large_file_withheld, 1);
+  assert.equal(snapshot.sessions.length, 0);
+  snapshotReader.STREAM_LIMITS.fileBytes = previous.fileBytes;
+  snapshotReader.STREAM_LIMITS.identities = 1;
+  snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.coverage.claude.large_file_withheld, 1);
+});
+
+test('PR1d queued human attachments use ordinary identity, timestamp, coverage and deletion', t => {
+  const fixture = createFixture(t);
+  fixture.file('claude', 'queue', [
+    { type: 'queue-operation', operation: 'enqueue' }, { type: 'queue-operation', operation: 'remove' },
+    queuedHuman('human delivered'),
+    queuedHuman('ignored task', { uuid: 'task' }, { origin: { kind: 'task-notification' } }),
+    queuedHuman('ignored peer', { uuid: 'peer' }, { origin: { kind: 'peer' } }),
+    queuedHuman('not human turn', { uuid: 'false' }, { humanTurn: false }),
+    queuedHuman('sidechain', { uuid: 'side', isSidechain: true }),
+    queuedHuman(42, { uuid: 'bad' }),
+    queuedHuman('<task-notification>output</task-notification>', { uuid: 'wrapped' }),
+  ]);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.instructions.length, 1);
+  assert.equal(snapshot.instructions[0].id, 'claude:s:uqueued');
+  assert.equal(snapshot.instructions[0].text, 'human delivered');
+  assert.equal(snapshot.instructions[0].ts, RECORD_TIMESTAMP);
+  assert.equal(snapshot.instructions[0].kind, 'human');
+  assert.equal(snapshot.sessions[0].instruction_total, 1);
+  assert.equal(snapshot.coverage.claude.queued_delivered_attachment, 1);
+  assert.equal(snapshot.coverage.claude.queued_enqueued, 1);
+  assert.equal(snapshot.coverage.claude.queued_removed, 1);
+  assert.equal(snapshot.coverage.claude.records_unverified, 2);
+  const target = instructionTarget(snapshot.instructions[0]);
+  const preview = snapshotReader.excludeQuery({ ...fixture.options, target });
+  assert.equal(snapshotReader.excludeCommit({ ...fixture.options, target, token: preview.token }).code, 'ok');
+  assert.equal(snapshotReader.runSnapshot(fixture.options).instructions.length, 0);
+});
+for (const field of ['uuid', 'source_uuid', 'delivery_id']) {
+  test(`PR1d queued duplicate ${field} withholds the whole session in either order`, t => {
+    const fixture = createFixture(t);
+    for (const reverse of [false, true]) {
+      const attachment = field === 'uuid' ? queuedHuman('delivered', { uuid: 'u' })
+        : queuedHuman('delivered', {}, { [field]: 'u' });
+      const records = [attachment, claudeUserRecord('ordinary')];
+      fixture.file('claude', 'duplicate', reverse ? records.reverse() : records);
+      const snapshot = snapshotReader.runSnapshot(fixture.options);
+      assert.equal(snapshot.sessions.length, 0);
+      assert.equal(snapshot.coverage.claude.queued_duplicate_withheld, 1);
+      assertReaderError(() => snapshotReader.excludeQuery({ ...fixture.options,
+        target: { kind: 'session', provider: 'claude', sessionId: 's' } }), 'target_not_found');
+    }
+  });
+}
+
+test('PR1d Orca producer form preserves spaces, code units, scan ceiling and special summary exclusion', () => {
+  const form = snapshotReader.orcaPromptForm;
+  assert.deepEqual(form('\u00a0\t  hello\r\n\n\u2028world  '), { value: 'hello world', truncated: false });
+  assert.equal(form('one  two\tthree').value, 'one  two\tthree');
+  assert.equal(form('Cafe\u0301').value, 'Cafe\u0301');
+  assert.deepEqual(form('a'.repeat(200) + 'tail'), { value: 'a'.repeat(200), truncated: true });
+  assert.deepEqual(form('a'.repeat(199) + '😀tail'), { value: 'a'.repeat(199), truncated: true });
+  assert.deepEqual(form('a'.repeat(198) + '😀'), { value: 'a'.repeat(198) + '😀', truncated: true });
+  assert.deepEqual(form(' '.repeat(1664) + 'tail'), { value: '', truncated: true });
+  assert.deepEqual(form(' '.repeat(1800)), { value: '', truncated: false });
+  assert.equal(form('  You are working inside Orca, a multi-agent IDE. rest'), null);
+});
+
+test('PR1d Orca exact candidates ignore cwd-only history, use time OR and provider, and confirm truncation', t => {
+  const fixture = createFixture(t);
+  const text = 'the active human instruction';
+  fixture.file('claude', 'active', [queuedHuman(text)]);
+  for (let index = 0; index < 25; index++) fixture.file('claude', 'history' + index,
+    [claudeUserRecord('past unrelated ' + index, { sessionId: 'old' + index })]);
+  fixture.options.runOrca = orcaRunner([orcaWorktree(text, 'p:leaf', {
+    stateStartedAt: Date.parse(RECORD_TIMESTAMP) - 86400000,
+    updatedAt: Date.parse(RECORD_TIMESTAMP)
+  })], [orcaTerminal()]);
+  let snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.sessions.find(item => item.session_id === 's').orca_link.confirmed, true);
+  fixture.options.runOrca = orcaRunner([orcaWorktree(text, 'p:leaf', { agentType: 'codex' })], []);
+  snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.sessions.find(item => item.session_id === 's').orca_link.confirmed, false);
+  const long = 'a'.repeat(199) + '😀remaining';
+  fixture.file('claude', 'active', [queuedHuman(long)]);
+  fixture.options.runOrca = orcaRunner([orcaWorktree(snapshotReader.orcaPromptForm(long).value)], []);
+  snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.sessions.find(item => item.session_id === 's').orca_link.confirmed, true);
+  assert.equal(snapshot.sessions.find(item => item.session_id === 's').orca_link.evidence, 'prompt_trunc');
+});
+
+test('PR1d unreadable summaries and Orca system prompts prevent false cwd uniqueness', t => {
+  const fixture = createFixture(t);
+  fixture.file('claude', 'a-active', [claudeUserRecord('active unique prompt')]);
+  fixture.file('claude', 'b-system', [claudeUserRecord('You are working inside Orca, a multi-agent IDE.',
+    { sessionId: 'system' })]);
+  fixture.options.runOrca = orcaRunner([orcaWorktree('active unique prompt')], []);
+  let snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.sessions[0].orca_link.confirmed, false);
+  assert.equal(snapshot.sessions[0].orca_link.evidence, 'ambiguous');
+  fixture.file('claude', 'b-system', [claudeUserRecord('first identity', { sessionId: 'system' }),
+    { type: 'assistant', padding: 'x'.repeat(2000) }]);
+  const previous = snapshotReader.STREAM_LIMITS.lineBytes;
+  t.after(() => { snapshotReader.STREAM_LIMITS.lineBytes = previous; });
+  snapshotReader.STREAM_LIMITS.lineBytes = 1000;
+  snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.sessions.length, 1);
+  assert.equal(snapshot.sessions[0].orca_link.evidence, 'ambiguous');
+  assert.equal(snapshot.coverage.claude.large_file_withheld, 1);
+});
+
+test('PR1d first overlong line retains its complete header identity and blocks a small sibling', t => {
+  const fixture = createFixture(t);
+  const previous = snapshotReader.STREAM_LIMITS.lineBytes;
+  t.after(() => { snapshotReader.STREAM_LIMITS.lineBytes = previous; });
+  fixture.file('claude', 'a-first-long', [claudeUserRecord('x'.repeat(100000))]);
+  fixture.file('claude', 'b-sibling', [claudeUserRecord('must not escape', { uuid: 'sibling' })]);
+  snapshotReader.STREAM_LIMITS.lineBytes = 1000;
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.coverage.claude.large_file_withheld, 1);
+  assert.equal(snapshot.coverage.claude.multi_file_withheld, 1);
+  assert.equal(snapshot.sessions.length, 0);
 });

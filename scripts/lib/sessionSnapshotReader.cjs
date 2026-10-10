@@ -7,6 +7,84 @@ const { execFileSync } = require('node:child_process');
 const snapshotPolicy = require('../../server/services/observeSnapshotPolicy.js');
 const MAX_FILES = 10000;
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
+const STREAM_LIMITS = { lineBytes: 8 * 1024 * 1024, fileBytes: 256 * 1024 * 1024, identities: 100000 };
+function streamLimit() { const error = new Error('stream_limit'); error.streamLimit = true; throw error; }
+function checkMetadata(size) { if (size > STREAM_LIMITS.identities) streamLimit(); }
+function* transcriptRecords(fd) {
+  const chunk = Buffer.alloc(64 * 1024);
+  let offset = 0, pending = Buffer.alloc(0);
+  while (true) {
+    const count = fs.readSync(fd, chunk, 0, Math.min(chunk.length, STREAM_LIMITS.fileBytes + 1 - offset), offset);
+    if (!count) break;
+    offset += count;
+    if (offset > STREAM_LIMITS.fileBytes) streamLimit();
+    let start = 0;
+    for (let index = 0; index < count; index++) {
+      if (chunk[index] !== 10) continue;
+      if (pending.length + index - start > STREAM_LIMITS.lineBytes) streamLimit();
+      const line = Buffer.concat([pending, chunk.subarray(start, index)]).toString('utf8');
+      pending = Buffer.alloc(0); start = index + 1;
+      if (line.trim()) yield parseTranscriptRecord(line);
+    }
+    if (pending.length + count - start > STREAM_LIMITS.lineBytes) streamLimit();
+    pending = Buffer.concat([pending, chunk.subarray(start, count)]);
+  }
+  if (pending.length) { const line = pending.toString('utf8'); if (line.trim()) yield parseTranscriptRecord(line); }
+}
+function transcriptSource(fd, provider) {
+  const headers = [];
+  const source = { streaming: true, [Symbol.iterator]: () => transcriptRecords(fd),
+    find(predicate) { return headers.find(predicate); } };
+  const analysis = { byUuid: new Map(), firstTime: null, lastTime: null, duplicates: 0, invalidTime: 0,
+    mixed: false, queuedDuplicate: false, sidechainOnly: true, singleSession: true, count: 0 };
+  const seen = new Set(), users = new Set(), queued = new Set(), sessions = new Set();
+  for (const record of source) {
+    analysis.count++;
+    if (provider === 'codex' && record.type === 'session_meta' && !headers.some(header => header.type === 'session_meta')) {
+      const payload = record.payload;
+      headers.push({ type: 'session_meta', payload: payload ? { id: payload.id, cwd: payload.cwd,
+        git: { branch: payload.git?.branch }, source: isRecordObject(payload.source)
+          ? (Object.hasOwn(payload.source, 'subagent') ? { subagent: true } : {}) : payload.source,
+        thread_source: payload.thread_source } : undefined });
+    }
+    if (provider === 'claude') {
+      if (isIdentityComponent(record.sessionId) && !headers.some(header => isIdentityComponent(header.sessionId)))
+        headers.push({ sessionId: record.sessionId });
+      if (typeof record.cwd === 'string' && !headers.some(header => typeof header.cwd === 'string')) headers.push({ cwd: record.cwd });
+      if (typeof record.gitBranch === 'string' && !headers.some(header => typeof header.gitBranch === 'string')) headers.push({ gitBranch: record.gitBranch });
+    }
+    const ts = toIsoTimestamp(record.timestamp);
+    if (ts && (!analysis.firstTime || ts < analysis.firstTime)) analysis.firstTime = ts;
+    if (ts && (!analysis.lastTime || ts > analysis.lastTime)) analysis.lastTime = ts;
+    if (Object.hasOwn(record, 'timestamp') && !snapshotPolicy.isSafeTimestamp(record.timestamp)) analysis.invalidTime++;
+    const sid = provider === 'claude' ? record.sessionId : record.type === 'session_meta' ? record.payload?.id : undefined;
+    if (typeof sid === 'string') sessions.add(sid);
+    if (record.isSidechain !== true) analysis.sidechainOnly = false;
+    if (!isIdentityComponent(record.sessionId)) analysis.singleSession = false;
+    if (typeof record.uuid === 'string' && record.uuid) analysis.byUuid.set(record.uuid, Object.hasOwn(record, 'parentUuid')
+      ? { parentUuid: typeof record.parentUuid === 'string' || record.parentUuid === null ? record.parentUuid : false } : {});
+    const user = provider === 'claude' ? record.type === 'user'
+      : record.type === 'response_item' && record.payload?.type === 'message' && record.payload.role === 'user';
+    const attachment = provider === 'claude' && record.type === 'attachment' && record.attachment?.type === 'queued_command';
+    const identity = provider === 'claude' ? record.uuid : record.payload?.id;
+    if ((user || attachment) && isIdentityComponent(identity)) {
+      if (seen.has(identity)) analysis.duplicates++;
+      seen.add(identity);
+    }
+    if (provider === 'claude' && user) for (const id of [record.uuid, record.source_uuid, record.delivery_id,
+      record.message?.uuid, record.message?.source_uuid, record.message?.delivery_id])
+      if (typeof id === 'string') users.add(id);
+    if (attachment) for (const id of [record.uuid, record.attachment.source_uuid, record.attachment.delivery_id])
+      if (typeof id === 'string') queued.add(id);
+    checkMetadata(analysis.byUuid.size + seen.size + users.size + queued.size + sessions.size);
+  }
+  analysis.mixed = sessions.size > 1;
+  analysis.singleSession &&= sessions.size === 1;
+  analysis.sidechainOnly &&= analysis.count > 0;
+  analysis.queuedDuplicate = [...queued].some(id => users.has(id));
+  source.analysis = analysis;
+  return source;
+}
 const IDENTITY_PREFIX_BYTES = 64 * 1024;
 const RECENT_INSTRUCTIONS = 200;
 class ReaderError extends Error {
@@ -33,7 +111,6 @@ function toIsoTimestamp(value) {
 const safeId = snapshotPolicy.isSafeId;
 const isIdentityComponent = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(value) && safeId(value);
 const normalizeDeletionText = value => value.normalize('NFC').trim();
-const normalizeLinkText = value => value.normalize('NFC').replace(/\s+/g, ' ').trim();
 
 function isValidMachineLabel(value) {
   return typeof value === 'string' && /^[A-Za-z0-9._-]{1,32}$/.test(value) && !value.startsWith('-')
@@ -322,7 +399,7 @@ function listFiles(root, providerCoverage, budget) {
         if (fileStats.isDirectory()) {
           walk(filePath, depth + 1);
         } else if (fileStats.isFile() && name.endsWith('.jsonl')) {
-          if (budget.files++ >= MAX_FILES || fileStats.size > MAX_FILE_BYTES) {
+          if (budget.files++ >= MAX_FILES) {
             providerCoverage.files_failed++;
             continue;
           }
@@ -344,6 +421,15 @@ function retainString(value, max) {
 
 // Spec §1.1: first matching row wins; output and origin conflicts precede slash/shell wrappers.
 function classifyClaudeRecord(record) {
+  const queued = record.type === 'attachment' && record.attachment?.type === 'queued_command';
+  if (queued) {
+    const attachment = record.attachment;
+    if (attachment.origin?.kind !== 'human') return null;
+    if (record.isMeta || record.isCompactSummary || record.isSidechain === true) return null;
+    if (attachment.humanTurn === false || attachment.commandMode !== 'prompt'
+      || typeof attachment.prompt !== 'string') return { unverified: true };
+    record = { ...record, type: 'user', message: { content: attachment.prompt }, origin: attachment.origin };
+  }
   const content = record.message?.content;
   if (record.type !== 'user') {
     return null;
@@ -522,18 +608,22 @@ function compareRecordTimes(left, right) {
 function parseFile(provider, records, providerCoverage, config = {}, retainAllInstructions = false,
   displayOptions = {}) {
   // Spec §1.2/§1.4: parse a nonwithheld file in original order before timestamp display sorting.
-  const ordered = records.map((record, position) => ({
-    record,
-    position,
-    ts: toIsoTimestamp(record.timestamp)
-  }));
-  const times = ordered.map(value => value.ts).filter(Boolean).sort();
-  if (!times.length) {
-    // Host R9: absent timestamps do not withhold a file, but original user candidates remain unverified.
-    providerCoverage.records_unverified += records.filter(record => record.__invalid
-      || (provider === 'claude' ? record.type === 'user'
-        : record.type === 'response_item' && record.payload?.type === 'message'
-          && record.payload.role === 'user')).length;
+  let firstTime = records.analysis?.firstTime || null, lastTime = records.analysis?.lastTime || null;
+  const byUuid = records.analysis?.byUuid || new Map();
+  if (!records.analysis) for (const record of records) {
+    const ts = toIsoTimestamp(record.timestamp);
+    if (ts && (!firstTime || ts < firstTime)) firstTime = ts;
+    if (ts && (!lastTime || ts > lastTime)) lastTime = ts;
+    if (record.uuid) {
+      byUuid.set(record.uuid, Object.hasOwn(record, 'parentUuid') ? { parentUuid: record.parentUuid } : {});
+      checkMetadata(byUuid.size);
+    }
+  }
+  if (!firstTime) {
+    for (const record of records) if (record.__invalid || (provider === 'claude'
+      ? record.type === 'user' || classifyClaudeRecord(record)
+      : record.type === 'response_item' && record.payload?.type === 'message' && record.payload.role === 'user'))
+      providerCoverage.records_unverified++;
     return null;
   }
   let sessionId;
@@ -542,6 +632,7 @@ function parseFile(provider, records, providerCoverage, config = {}, retainAllIn
   let run_mode = 'interactive';
   let title = null;
   const items = [];
+  const retainedText = new Map();
   const linkState = {};
   let unknown = 0;
   let compact = false;
@@ -571,17 +662,15 @@ function parseFile(provider, records, providerCoverage, config = {}, retainAllIn
     return null;
   }
   const readerOptions = displayOptions.readerOptions;
-  const lastAt = Date.parse(times[times.length - 1]);
+  const lastAt = Date.parse(lastTime);
   const displayExcluded = displayOptions.withheld || (!retainAllInstructions && readerOptions
     && (lastAt < +readerOptions.now - 14 * 86400000 || lastAt > +readerOptions.now
       || snapshotSessionExclusion(readerOptions, config, { provider, sid: sessionId,
         cwd: cwd.length > 4096 ? null : cwd, run_mode }, false) !== null));
-  const byUuid = new Map(records.filter(record => record.uuid).map(record => [record.uuid, record]));
-  for (const {
-    record,
-    ts: timestamp,
-    position
-  } of ordered) {
+  let position = -1;
+  for (const record of records) {
+    position++;
+    const timestamp = toIsoTimestamp(record.timestamp);
     if (record.__invalid) {
       providerCoverage.records_unverified++;
       continue;
@@ -621,6 +710,7 @@ function parseFile(provider, records, providerCoverage, config = {}, retainAllIn
       if (!classification) {
         continue;
       }
+      if (classification.unverified) { providerCoverage.records_unverified++; continue; }
       if (classification.unknown) {
         unknown++;
         continue;
@@ -633,6 +723,7 @@ function parseFile(provider, records, providerCoverage, config = {}, retainAllIn
         providerCoverage.records_unverified++;
         continue;
       }
+      if (record.type === 'attachment') providerCoverage.queued_delivered_attachment++;
       items.push(compactInstruction(config, {
         ...classification,
         id: `claude:${sessionId}:u${record.uuid}`,
@@ -640,6 +731,18 @@ function parseFile(provider, records, providerCoverage, config = {}, retainAllIn
         position,
         structure: [['text', normalizeDeletionText(classification.text)], ['attachments', classification.attachments]]
       }, linkState));
+      checkMetadata(items.length);
+      if (records.streaming) {
+        const item = items[items.length - 1];
+        retainedText.set(item, item.text);
+        delete item.text;
+        const ranked = [...retainedText.keys()].sort(compareRecordTimes);
+        if (ranked.length > RECENT_INSTRUCTIONS + 1) {
+          const discard = ranked[1];
+          if (displayOptions.target?.instrId !== discard.id) retainedText.delete(discard);
+          else if (ranked.length > RECENT_INSTRUCTIONS + 2) retainedText.delete(ranked[2]);
+        }
+      }
     } else {
       if (record.type === 'session_meta') {
         metaBefore = true;
@@ -684,12 +787,32 @@ function parseFile(provider, records, providerCoverage, config = {}, retainAllIn
         position,
         structure: [...classification.structure, ['attachments', classification.attachments]]
       }, linkState));
+      checkMetadata(items.length);
+      if (records.streaming) {
+        const item = items[items.length - 1];
+        retainedText.set(item, item.text);
+        delete item.text;
+        const ranked = [...retainedText.keys()].sort(compareRecordTimes);
+        if (ranked.length > RECENT_INSTRUCTIONS + 1) {
+          const discard = ranked[1];
+          if (displayOptions.target?.instrId !== discard.id) retainedText.delete(discard);
+          else if (ranked.length > RECENT_INSTRUCTIONS + 2) retainedText.delete(ranked[2]);
+        }
+      }
     }
   }
   // Spec §1.2/§1.4: timestamp display ordering cannot alter n identities or recovery evidence.
   items.sort(compareRecordTimes);
   providerCoverage.records_unknown += unknown;
-  const detail = boundSessionInstructions(items, config, providerCoverage, retainAllInstructions);
+  const detail = boundSessionInstructions(items, config, providerCoverage, retainAllInstructions && !records.streaming);
+  if (records.streaming) {
+    if (displayOptions.target?.kind === 'instruction') detail.items = items.filter(item => item.id === displayOptions.target.instrId);
+    if (displayOptions.target?.kind === 'session') detail.items = [];
+    for (const item of detail.items) {
+      item.text = retainedText.get(item) || '';
+      item.equiv_count = items.filter(value => value.fp === item.fp).length;
+    }
+  }
   // Spec §1.4/§4: sanitize only retained output candidates; deletion rescans retain every instruction.
   detail.items = displayExcluded ? [] : detail.items.map(finalizeRetainedInstruction);
   if (cwd.length > 4096) {
@@ -705,19 +828,27 @@ function parseFile(provider, records, providerCoverage, config = {}, retainAllIn
     run_mode: retainString(run_mode, 32),
     title: displayExcluded || title === null ? null : retainString(snapshotPolicy.finalizeText(title, 200).value, 200),
     ...detail,
-    link_text: !displayExcluded && linkState.last ? summarizeLinkText(linkState.rawText) : null,
+    link_text: linkState.summary || null,
     unknown,
     first: retainString(first || 'unknown', 32),
     compact: compact && !items.length,
-    firstAt: retainString(times[0], 24),
-    lastAt: retainString(times[times.length - 1], 24)
+    firstAt: retainString(firstTime, 24),
+    lastAt: retainString(lastTime, 24)
   };
 }
 
 // Spec §1.4/§4: retain first plus recent instructions; confirmation still covers the whole file.
 function boundSessionInstructions(items, config, providerCoverage, retainAllInstructions) {
-  const sessionFingerprint = hasValidLocalKey(config) ? computeHmac(config.local_key, snapshotPolicy.canonicalEncode(
-    ['palantir.exclude-session/1', items.map(item => [item.id, item.fp, item.ts])])) : null;
+  let sessionFingerprint = null;
+  if (hasValidLocalKey(config)) {
+    const digest = crypto.createHmac('sha256', config.local_key);
+    digest.update('["palantir.exclude-session/1",[');
+    for (let index = 0; index < items.length; index++) {
+      if (index) digest.update(',');
+      digest.update(JSON.stringify([items[index].id, items[index].fp, items[index].ts]));
+    }
+    sessionFingerprint = digest.update(']]').digest('hex');
+  }
   const counts = new Map();
   for (const item of items) {
     counts.set(item.fp, (counts.get(item.fp) || 0) + 1);
@@ -757,20 +888,54 @@ function finalizeRetainedInstruction(instruction) {
 }
 
 // Spec §2.2: retain only a digest, length and bounded local prefix of normalized raw text.
-function summarizeLinkText(rawText) {
-  const normalized = normalizeLinkText(rawText);
-  return {
-    hash: retainString(crypto.createHash('sha256').update(normalized).digest('hex'), 64),
-    length: normalized.length,
-    prefix: retainString(normalized, 4096)
-  };
+function orcaWhitespace(c) {
+  return c === 32 || c >= 9 && c <= 13 || c === 160 || c === 5760 || c >= 8192 && c <= 8202
+    || [8232, 8233, 8239, 8287, 12288, 65279].includes(c);
+}
+function orcaPromptForm(raw) {
+  let leading = 0;
+  while (leading < Math.min(raw.length, 24576) && orcaWhitespace(raw.charCodeAt(leading))) leading++;
+  if (raw.startsWith('You are working inside Orca, a multi-agent IDE.', leading)) return null;
+  const n = Math.min(raw.length, 1664);
+  let r = 0, value = '', line = false;
+  while (r < n && orcaWhitespace(raw.charCodeAt(r))) r++;
+  while (r < n && value.length < 200) {
+    const c = raw.charCodeAt(r);
+    if ([13, 10, 8232, 8233].includes(c)) {
+      if (c === 13 && raw.charCodeAt(r + 1) === 10) r++;
+      if (!line) value += ' ';
+      line = true; r++; continue;
+    }
+    value += raw[r++]; line = false;
+  }
+  let truncated = value.length >= 200;
+  if (r >= n && n < raw.length) {
+    for (let rest = r; rest < raw.length; rest++) if (!orcaWhitespace(raw.charCodeAt(rest))) { truncated = true; break; }
+  }
+  if (value.length < 200) {
+    let end = value.length;
+    while (end && orcaWhitespace(value.charCodeAt(end - 1))) end--;
+    value = value.slice(0, end);
+  } else {
+    const last = value.charCodeAt(value.length - 1);
+    if (last >= 0xD800 && last <= 0xDBFF) { value = value.slice(0, -1); truncated = true; }
+  }
+  return { value, truncated };
+}
+function summarizeLinkText(rawText, agent = false) {
+  const form = agent ? { value: rawText, truncated: false } : orcaPromptForm(rawText);
+  if (!form) return null;
+  return { hash: crypto.createHash('sha256').update(form.value).digest('hex'),
+    length: form.value.length, truncated: form.truncated,
+    ...(agent ? { prefix_hashes: Array.from({ length: Math.min(form.value.length, 200) - Math.min(form.value.length, 23) },
+      (_, index) => crypto.createHash('sha256').update(form.value.slice(0, index + 24)).digest('hex')) } : {}) };
 }
 
 // Spec §1.4/§2/§3: compute identity before discarding unbounded text and block structure.
 function compactInstruction(config, instruction, linkState) {
   if (!linkState.last || compareRecordTimes(instruction, linkState.last) >= 0) {
     linkState.last = { ts: instruction.ts, position: instruction.position };
-    linkState.rawText = instruction.text;
+    linkState.summary = summarizeLinkText(instruction.text);
   }
   instruction.fp = computeInstructionFingerprint(config, instruction);
   const ref = computeInstructionRef(config, instruction);
@@ -828,11 +993,12 @@ function groupTranscriptFiles(groups, provider, file) {
 }
 
 function countDuplicateRecordIdentities(provider, records) {
+  if (records.analysis) return records.analysis.duplicates;
   const seen = new Set();
   let duplicates = 0;
   for (const record of records) {
     let identity;
-    if (provider === 'claude' && record.type === 'user') {
+    if (provider === 'claude' && (record.type === 'user' || record.type === 'attachment' && record.attachment?.type === 'queued_command')) {
       identity = record.uuid;
     } else if (provider === 'codex' && record.type === 'response_item'
       && record.payload?.type === 'message' && record.payload.role === 'user') {
@@ -845,11 +1011,13 @@ function countDuplicateRecordIdentities(provider, records) {
       duplicates++;
     }
     seen.add(identity);
+    checkMetadata(seen.size);
   }
   return duplicates;
 }
 
 function hasMixedSessionIdentities(provider, records) {
+  if (records.analysis) return records.analysis.mixed;
   const identities = new Set();
   for (const record of records) {
     const identity = provider === 'claude' ? record.sessionId
@@ -862,8 +1030,10 @@ function hasMixedSessionIdentities(provider, records) {
 }
 
 function countInvalidTimeRecords(records) {
-  return records.filter(record => Object.hasOwn(record, 'timestamp')
-    && !snapshotPolicy.isSafeTimestamp(record.timestamp)).length;
+  if (records.analysis) return records.analysis.invalidTime;
+  let count = 0;
+  for (const record of records) if (Object.hasOwn(record, 'timestamp') && !snapshotPolicy.isSafeTimestamp(record.timestamp)) count++;
+  return count;
 }
 
 function parseIndependentTranscript(provider, records, providerCoverage, config, retainAllInstructions,
@@ -874,6 +1044,21 @@ function parseIndependentTranscript(provider, records, providerCoverage, config,
     providerCoverage.mixed_session_withheld++;
   }
   const duplicates = countDuplicateRecordIdentities(provider, records);
+  let queuedDuplicate = false;
+  if (records.analysis) {
+    queuedDuplicate = records.analysis.queuedDuplicate;
+    if (queuedDuplicate) providerCoverage.queued_duplicate_withheld++;
+  } else if (provider === 'claude') {
+    const userIds = new Set();
+    for (const record of records) if (record.type === 'user') {
+      for (const id of [record.uuid, record.source_uuid, record.delivery_id, record.message?.uuid,
+        record.message?.source_uuid, record.message?.delivery_id]) if (typeof id === 'string') userIds.add(id);
+      checkMetadata(userIds.size);
+    }
+    for (const record of records) if (record.type === 'attachment' && record.attachment?.type === 'queued_command'
+      && [record.uuid, record.attachment.source_uuid, record.attachment.delivery_id].some(id => userIds.has(id))) queuedDuplicate = true;
+    if (queuedDuplicate) providerCoverage.queued_duplicate_withheld++;
+  }
   providerCoverage.records_unverified += duplicates;
   // Host R9: one explicit invalid TIME withholds the file from export, lookup, and Orca evidence.
   const invalidTimeRecords = countInvalidTimeRecords(records);
@@ -885,14 +1070,15 @@ function parseIndependentTranscript(provider, records, providerCoverage, config,
   let session;
   try {
     session = parseFile(provider, records, providerCoverage, config, retainAllInstructions,
-      { ...displayOptions, withheld: displayOptions.withheld || mixedSession || duplicates > 0 });
-  } catch {
+      { ...displayOptions, withheld: displayOptions.withheld || mixedSession || queuedDuplicate || duplicates > 0 });
+  } catch (error) {
+    if (error.streamLimit) throw error;
     // Spec §1: malformed candidates cannot abort unrelated sessions.
     providerCoverage.files_failed++;
   }
   // Spec §1.3 / v11: defer group-dependent coverage until all file identities are known.
   return {
-    session: mixedSession || duplicates > 0 ? null : session,
+    session: mixedSession || queuedDuplicate || duplicates > 0 ? null : session,
     skipIfSingle: !session && duplicates === 0
   };
 }
@@ -902,7 +1088,7 @@ function parseTranscriptIdentityRecord(line) {
   try {
     const record = JSON.parse(line);
     if (isRecordObject(record)) {
-      return { type: record.type, sessionId: record.sessionId, payload: { id: record.payload?.id },
+      return { type: record.type, sessionId: record.sessionId, cwd: record.cwd, payload: { id: record.payload?.id, cwd: record.payload?.cwd },
         isSidechain: record.isSidechain };
     }
   } catch {}
@@ -912,7 +1098,9 @@ function parseTranscriptIdentityRecord(line) {
 function inspectTranscriptIdentity(provider, data) {
   const records = data.split('\n').filter(value => value.trim()).map(parseTranscriptIdentityRecord);
   const sessionId = transcriptSessionId(provider, records);
-  return { sessionId, singleSession: records.every(record => record.sessionId === sessionId),
+  const cwd = records.find(record => typeof record.cwd === 'string' || typeof record.payload?.cwd === 'string');
+  const rawCwd = cwd?.cwd || cwd?.payload?.cwd;
+  return { sessionId, cwdHash: typeof rawCwd === 'string' ? crypto.createHash('sha256').update(rawCwd).digest('hex') : null, singleSession: records.every(record => record.sessionId === sessionId),
     sidechainOnly: records.length > 0 && records.every(record => record.isSidechain === true) };
 }
 
@@ -931,8 +1119,46 @@ function readTranscriptIdentity(provider, fileDescriptor, fileSize, verifySidech
   const completeFile = bytesRead < prefix.length || fileSize <= bytesRead;
   const completeEnd = completeFile ? bytesRead : data.lastIndexOf(10) + 1;
   const identity = inspectTranscriptIdentity(provider, data.subarray(0, completeEnd).toString('utf8'));
+  // A complete top-level header can precede an overlong message in the first line.
+  // Accept only syntactically complete fields; quoted or nested commas are never boundaries.
+  if (!isIdentityComponent(identity.sessionId) && !completeFile) {
+    const prefixText = data.toString('utf8');
+    let depth = 0, quoted = false, escaped = false, boundary = -1;
+    for (let index = 0; index < prefixText.length; index++) {
+      const character = prefixText[index];
+      if (quoted) {
+        if (escaped) escaped = false;
+        else if (character === '\\') escaped = true;
+        else if (character === '"') quoted = false;
+        continue;
+      }
+      if (character === '"') quoted = true;
+      else if (character === '{' || character === '[') depth++;
+      else if (character === '}' || character === ']') depth--;
+      else if (character === ',' && depth === 1) boundary = index;
+    }
+    if (boundary > 0) {
+      const header = inspectTranscriptIdentity(provider, prefixText.slice(0, boundary) + '}');
+      if (isIdentityComponent(header.sessionId)) {
+        identity.sessionId = header.sessionId;
+        identity.cwdHash = header.cwdHash;
+        identity.sidechainOnly = false;
+        identity.singleSession = false;
+      }
+    }
+  }
   if (!completeFile && (!isIdentityComponent(identity.sessionId) || verifySidechain && identity.sidechainOnly)) {
-    return inspectTranscriptIdentity(provider, readTranscriptData(fileDescriptor));
+    let sessionId, cwdHash = null, singleSession = true, sidechainOnly = true, count = 0;
+    for (const record of transcriptRecords(fileDescriptor)) {
+      count++;
+      const cwd = provider === 'claude' ? record.cwd : record.payload?.cwd;
+      if (!cwdHash && typeof cwd === 'string') cwdHash = crypto.createHash('sha256').update(cwd).digest('hex');
+      const id = provider === 'claude' ? record.sessionId : record.type === 'session_meta' ? record.payload?.id : undefined;
+      if (!sessionId && isIdentityComponent(id)) sessionId = id;
+      if (record.sessionId !== sessionId) singleSession = false;
+      if (record.isSidechain !== true) sidechainOnly = false;
+    }
+    return { sessionId, cwdHash, singleSession, sidechainOnly: count > 0 && sidechainOnly };
   }
   return identity;
 }
@@ -972,38 +1198,6 @@ function isTranscriptOutsideWindow(stats, fileDescriptor, windowSince) {
   return tailTime !== null && Date.parse(tailTime) < windowSince;
 }
 
-// Spec §2: allocate and read at most the byte limit plus one, including identity fallbacks.
-function readTranscriptData(fileDescriptor) {
-  const size = fs.fstatSync(fileDescriptor).size;
-  if (size > MAX_FILE_BYTES) {
-    throw Error();
-  }
-  const chunks = [];
-  let bytesRead = 0;
-  let ended = false;
-  while (!ended && bytesRead <= MAX_FILE_BYTES) {
-    const buffer = Buffer.alloc(Math.min(128 * 1024, bytesRead === 0 ? size + 1 : MAX_FILE_BYTES + 1,
-      MAX_FILE_BYTES + 1 - bytesRead));
-    let filled = 0;
-    while (filled < buffer.length) {
-      const count = fs.readSync(fileDescriptor, buffer, filled, buffer.length - filled, bytesRead + filled);
-      if (count === 0) {
-        ended = true;
-        break;
-      }
-      filled += count;
-    }
-    bytesRead += filled;
-    if (filled > 0) {
-      chunks.push(buffer.subarray(0, filled));
-    }
-  }
-  if (bytesRead > MAX_FILE_BYTES) {
-    throw Error();
-  }
-  return Buffer.concat(chunks, bytesRead).toString('utf8');
-}
-
 // Spec §1.4: only the exact projects-relative layout can identify a sidechain transcript.
 function claudeSubagentSessionId(provider, file, root) {
   if (provider !== 'claude' || !root) {
@@ -1020,20 +1214,19 @@ function summarizeTranscriptFile(provider, file, providerCoverage, windowSince, 
   const retainedFile = retainString(file.file, 4096);
   const subagentSid = claudeSubagentSessionId(provider, file.file, file.root);
   let fileDescriptor;
+  let identity = {};
   try {
     fileDescriptor = fs.openSync(file.file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
     const openedStats = fs.fstatSync(fileDescriptor);
-    if (openedStats.dev !== file.stats.dev || openedStats.ino !== file.stats.ino
-      || openedStats.size > MAX_FILE_BYTES) {
+    if (openedStats.dev !== file.stats.dev || openedStats.ino !== file.stats.ino) {
       throw Error();
     }
+    fs.fstatSync(fileDescriptor);
     const outsideWindow = isTranscriptOutsideWindow(openedStats, fileDescriptor, windowSince);
     if (outsideWindow || requestedTarget) {
-      const identity = readTranscriptIdentity(provider, fileDescriptor, openedStats.size,
+      identity = readTranscriptIdentity(provider, fileDescriptor, openedStats.size,
         subagentSid !== null);
-      if (fs.fstatSync(fileDescriptor).size > MAX_FILE_BYTES) {
-        throw Error();
-      }
+
       if (subagentSid !== null && subagentSid === identity.sessionId && identity.sidechainOnly
         && identity.singleSession) {
         providerCoverage.files_scanned++;
@@ -1047,22 +1240,26 @@ function summarizeTranscriptFile(provider, file, providerCoverage, windowSince, 
           sessionId: identity.sessionId?.length <= 64 ? retainString(identity.sessionId, 64) : null, outsideWindow };
       }
     }
-    const data = readTranscriptData(fileDescriptor);
-    const records = data.split('\n').filter(value => value.trim()).map(parseTranscriptRecord);
+    identity = readTranscriptIdentity(provider, fileDescriptor, openedStats.size, false);
+    const records = transcriptSource(fileDescriptor, provider);
     providerCoverage.files_scanned++;
     const sessionId = transcriptSessionId(provider, records);
-    const sidechainOnly = records.length > 0 && records.every(record => record.isSidechain === true
-      && record.sessionId === sessionId);
+    const sidechainOnly = records.analysis.sidechainOnly && records.analysis.singleSession;
     if (subagentSid !== null && subagentSid === sessionId && sidechainOnly) {
       providerCoverage.files_skipped++;
       return null;
     }
     const parsed = parseIndependentTranscript(provider, records, providerCoverage, config, requestedTarget !== null,
-      { readerOptions: scanContext.readerOptions,
+      { readerOptions: scanContext.readerOptions, target: requestedTarget,
         withheld: scanContext.groups?.get(`${provider}:${sessionId}`)?.files.size > 0 });
-    return { file: retainedFile, sessionId: sessionId?.length <= 64 ? retainString(sessionId, 64) : null, ...parsed };
-  } catch {
+    return { file: retainedFile, cwdHash: identity.cwdHash, sessionId: sessionId?.length <= 64 ? retainString(sessionId, 64) : null, ...parsed };
+  } catch (error) {
     providerCoverage.files_failed++;
+    if (error.streamLimit) {
+      providerCoverage.large_file_withheld++;
+      return { file: retainedFile, sessionId: identity.sessionId || subagentSid,
+        blocked: true, cwdHash: identity.cwdHash || null };
+    }
     return null;
   } finally {
     if (fileDescriptor !== undefined) {
@@ -1078,9 +1275,9 @@ function compareSessionFiles(left, right) {
 
 function discardSessionDetails(file, details) {
   if (file.session) {
-    const { provider, sid, firstAt, lastAt } = file.session;
+    const { provider, sid, firstAt, lastAt, link_text } = file.session;
     details.delete(`${provider}:${sid}`);
-    file.session = { provider, sid, firstAt, lastAt };
+    file.session = { provider, sid, firstAt, lastAt, link_text };
     file.detailsDiscarded = true;
   }
 }
@@ -1241,6 +1438,11 @@ function scanSessions(readerOptions, config, requestedTarget = null) {
     }
   }
   const linkCandidates = [];
+  for (const group of groups.values()) for (const file of group.files.values()) {
+    if ((!file.session || group.files.size > 1) && !file.outsideWindow && file.cwdHash)
+      linkCandidates.push({ file, session: { provider: group.provider, cwdHash: file.cwdHash,
+        cwd: null, link_text: null, blocked: true } });
+  }
   const selectedFiles = parsedFiles.filter(file => {
     const session = file.session;
     if (session.provider === 'codex' && config.invalidContentRuleSessions?.has(session.sid)) {
@@ -1259,7 +1461,7 @@ function scanSessions(readerOptions, config, requestedTarget = null) {
     if (!requestedTarget && file.cwdHash) {
       const { provider, sid, firstAt, lastAt } = session;
       linkCandidates.push({ file, session: { provider, sid, firstAt, lastAt,
-        cwd: null, link_text: null, cwdHash: file.cwdHash } });
+        cwd: null, link_text: session.link_text, cwdHash: file.cwdHash } });
     }
     if (file.snapshotExclusion !== null) {
       if (file.snapshotExclusion !== 'cwd_unavailable') {
@@ -1321,6 +1523,7 @@ function buildSnapshotSession(config, parsedSession, key, kept) {
     compact_only_history: parsedSession.compact,
     ai_title: parsedSession.title === null ? null : snapshotPolicy.finalizeText(parsedSession.title, 200).value,
     instruction_count: kept.length,
+    instruction_total: parsedSession.instructionCount,
     unknown_count: parsedSession.unknown,
     orca_link: {
       evidence: 'none',
@@ -1609,10 +1812,11 @@ function parseOrcaWorktrees(worktrees, config, out, orcaCoverage, outputBudget) 
       exportedAgents.push(projectedAgent);
       localAgents.push({
         pane: agent.paneKey,
-        prompt: summarizeLinkText(typeof agent.prompt === 'string' ? agent.prompt : ''),
+        prompt: summarizeLinkText(typeof agent.prompt === 'string' ? agent.prompt : '', true),
+        provider: agent.agentType,
         cwd: rawPath,
         cwdHash: crypto.createHash('sha256').update(rawPath).digest('hex'),
-        time: Date.parse(stateStartedAt || updatedAt)
+        times: [stateStartedAt, updatedAt].filter(Boolean).map(Date.parse)
       });
     }
     const projectedWorktree = {
@@ -1647,6 +1851,7 @@ function buildOrcaLinkCandidates(all, agents) {
   const edges = [];
   for (const parsedSession of all) {
     const text = parsedSession.link_text;
+    if (!text) parsedSession.blocked = true;
     for (const agent of agents) {
       const sameCwd = parsedSession.cwdHash ? parsedSession.cwdHash === agent.cwdHash
         : parsedSession.cwd !== null && parsedSession.cwd === agent.cwd;
@@ -1654,21 +1859,21 @@ function buildOrcaLinkCandidates(all, agents) {
         continue;
       }
       let evidence = 'cwd_only';
-      const complete = text && text.length <= 4096 && agent.prompt.length <= 4096;
-      if (complete && text.hash === agent.prompt.hash && text.length >= 8) {
-        evidence = 'prompt_exact';
-      } else if (complete && Math.min(text.length, agent.prompt.length) >= 24
-        && text.prefix.slice(0, Math.min(text.length, agent.prompt.length, 4096))
-          === agent.prompt.prefix.slice(0, Math.min(text.length, agent.prompt.length, 4096))) {
-        evidence = 'prompt_prefix';
+      if (text && text.hash === agent.prompt.hash && text.length === agent.prompt.length) {
+        if (text.truncated) evidence = 'prompt_trunc';
+        else if (text.length >= 8) evidence = 'prompt_exact';
       }
-      const inTime = agent.time >= Date.parse(parsedSession.firstAt) && agent.time <= Date.parse(parsedSession
-        .lastAt) + 600000;
+      if (evidence === 'cwd_only' && text && !text.truncated && text.length >= 24 && text.length < agent.prompt.length
+        && agent.prompt.prefix_hashes[text.length - 24] === text.hash) evidence = 'prompt_prefix';
+      const inTime = agent.times.some(time => time >= Date.parse(parsedSession.firstAt)
+        && time <= Date.parse(parsedSession.lastAt) + 600000);
+      const eligible = ['prompt_exact', 'prompt_trunc'].includes(evidence) && inTime
+        && agent.provider === parsedSession.provider;
       edges.push({
         session: parsedSession,
         agent,
         evidence,
-        inTime
+        inTime, eligible
       });
     }
   }
@@ -1683,11 +1888,14 @@ function applyOrcaLinks(all, edges) {
     if (!sessionEdges.length) {
       continue;
     }
-    const edge = sessionEdges[0];
-    const ambiguous = sessionEdges.length > 1 || edges.filter(value => value.agent.pane === edge.agent.pane).length > 1;
+    const candidates = sessionEdges.filter(edge => edge.eligible);
+    const edge = candidates[0] || sessionEdges[0];
+    const ambiguous = candidates.length > 1 || (edge.eligible && edges.filter(value => value.eligible
+      && value.agent.pane === edge.agent.pane).length > 1) || sessionEdges.some(value =>
+        edges.some(other => other.agent.pane === value.agent.pane && other.session.blocked));
     parsedSession.output.orca_link = {
       evidence: ambiguous ? 'ambiguous' : edge.evidence,
-      confirmed: !ambiguous && edge.evidence === 'prompt_exact' && edge.inTime,
+      confirmed: !ambiguous && edge.eligible,
       pane_key: ambiguous ? null : edge.agent.pane,
       terminal_handle: null
     };
@@ -1943,6 +2151,8 @@ module.exports = {
   excludeCommit,
   loadConfig,
   defaultRunOrca,
+  STREAM_LIMITS,
+  orcaPromptForm,
   MAX_FILES,
   MAX_FILE_BYTES
 };

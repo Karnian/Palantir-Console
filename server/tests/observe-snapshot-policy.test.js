@@ -171,3 +171,21 @@ test('R7 shared slot predicates enforce INT TIME LABEL and ENUM boundaries', () 
   assert.equal(snapshotPolicy.isSafeEnum('agent_type', {}), false);
   assert.equal(snapshotPolicy.isSafeEnum('unknown-slot', 'claude'), false);
 });
+
+test('PR1d session total is a required closed integer slot and prompt_trunc is accepted', t => {
+  const os = require('node:os');
+  const path = require('node:path');
+  const { createSnapshots } = require('./helpers/work-board-fixture.cjs');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pr1d-policy-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const snapshot = createSnapshots(root).alpha;
+  const session = snapshot.sessions[0];
+  session.instruction_total = 401;
+  session.orca_link.evidence = 'prompt_trunc';
+  assert.equal(snapshotPolicy.validateSnapshot(snapshot).ok, true);
+  for (const bad of [-1, 1.1, '401', null, undefined])
+    assert.equal(snapshotPolicy.validateSession({ ...session, instruction_total: bad }).ok, false);
+  assert.equal(snapshotPolicy.validateSession({ ...session, link_text: 'raw' }).ok, false);
+  snapshot.instructions.push({ ...snapshot.instructions[0] });
+  assert.equal(snapshotPolicy.validateSnapshot(snapshot).ok, false);
+});

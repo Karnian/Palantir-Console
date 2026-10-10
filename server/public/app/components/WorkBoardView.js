@@ -109,7 +109,7 @@ function SessionCard({ card, query, rank, now }) {
       ${card.unknown_count > 0 && html`<span class="work-warning">
         ${W.unknownRatio(card.unknown_count, card.unknown_count + card.instruction_count)}</span>`}
     </div>`}
-    <footer class="work-card-footer"><span>${W.instructions(card.instruction_count)}</span>
+    <footer class="work-card-footer"><span>${W.instructions(card.instruction_total)}</span>
       <button class="work-button" type="button" aria-expanded=${expanded}
         aria-controls=${timelineId} onClick=${() => setExpanded(value => !value)}>
         ${expanded ? W.closeTimeline : W.timeline}</button></footer>

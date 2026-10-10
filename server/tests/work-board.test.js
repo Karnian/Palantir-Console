@@ -1069,3 +1069,16 @@ test('all composed separators have one space on each side; machine pill uses one
     if (node.textContent.includes('·')) assert.doesNotMatch(node.textContent, /(?<! )·|·(?! )| {2}·|· {2}/u);
   }
 });
+
+test('PR1d footer shows total before retention while unknown ratio keeps the exported denominator', async t => {
+  const { alpha } = fixtures(t);
+  alpha.sessions = alpha.sessions.slice(0, 1);
+  alpha.sessions[0].instruction_total = 401;
+  alpha.sessions[0].instruction_count = 2;
+  alpha.sessions[0].unknown_count = 1;
+  const env = boardEnv(t), root = env.document.getElementById('root');
+  env.context.apiFetch = async url => url.endsWith('/snapshots') ? { snapshots: [{ machine_id: 'alpha' }] } : alpha;
+  env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
+  assert.equal(root.querySelector('.work-card-footer span').textContent, env.context.W.instructions(401));
+  assert.ok(root.textContent.includes(env.context.W.unknownRatio(1, 3)));
+});
