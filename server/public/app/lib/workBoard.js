@@ -14,6 +14,7 @@ export function displayInstructionText(text) {
     end = match.index + match[0].length;
   }
   if (!values.name || trimmed.slice(end).trim()) return text;
+  if (!values.name.trim().replace(/^\/+/u, '').trim()) return text;
   const name = values.name.replace(/^\/+/u, '');
   if (values.message !== undefined && values.message.trim().replace(/^\/+/u, '') !== name) return text;
   const args = values.args || '';

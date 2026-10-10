@@ -87,6 +87,14 @@ test('command display preserves mismatched messages and every repeated tag witho
   for (const text of cases) assert.equal(displayInstructionText(` \n${text}\t `), ` \n${text}\t `);
 });
 
+test('command display preserves names that are empty after removing whitespace and leading slashes', async () => {
+  const { displayInstructionText } = await logic;
+  for (const name of ['///', ' \t\n\u00a0 ', ' \t/// \n ', '/// \t\n']) {
+    const text = commandText(name, 'x');
+    assert.equal(displayInstructionText(text), text);
+  }
+});
+
 test('command display preserves nested or incomplete command tags inside values', async () => {
   const { displayInstructionText } = await logic;
   const cases = [
