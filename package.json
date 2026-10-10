@@ -15,6 +15,7 @@
     "test:e2e": "npx playwright test",
     "test:a11y": "npx playwright test --grep @a11y",
     "test:visual": "PALANTIR_VISUAL_ONLY=1 npx playwright test --grep @visual",
+    "test:observe-ui": "PALANTIR_OBSERVE_UI=1 npx playwright test --project=observe-setup --project=observe",
     "diagnose:isolation": "node scripts/diagnose-isolation.mjs",
     "diagnose:mcp": "node scripts/diagnose-mcp-conflicts.mjs",
     "diagnose:migrations": "node scripts/migration-audit.mjs",

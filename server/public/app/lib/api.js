@@ -48,7 +48,8 @@ export async function apiFetch(url, opts = {}) {
   // allowed to be a Headers instance or an array of tuples, and header names
   // are case-insensitive — a caller passing `content-type` must REPLACE the
   // default, not end up combined with it as `application/json, text/plain`.
-  const { allowAppForbidden = false, headers: callerHeaders, ...fetchOpts } = opts;
+  // Spec §6: observe activation requires exactly HTTP 200.
+  const { allowAppForbidden = false, expectedStatus, headers: callerHeaders, ...fetchOpts } = opts;
   const headers = new Headers(callerHeaders || undefined);
   if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
   const res = await fetch(url, { credentials: 'same-origin', ...fetchOpts, headers });
@@ -59,7 +60,11 @@ export async function apiFetch(url, opts = {}) {
   let parsed = false;
   if (res.status === 401 || res.status === 403) {
     if (allowAppForbidden) {
-      try { data = await res.json(); parsed = true; } catch { /* unparseable ⇒ treat as auth */ }
+      try { data = await res.json(); parsed = true; }
+      catch (error) {
+        if (error.name === 'AbortError' || fetchOpts.signal?.aborted) throw error;
+        // Unparseable bodies still follow the auth failure path.
+      }
     }
     const appDenial = res.status === 403
       && parsed
@@ -83,7 +88,7 @@ export async function apiFetch(url, opts = {}) {
       throw err;
     }
   }
-  if (!res.ok) {
+  if (!res.ok || (expectedStatus !== undefined && res.status !== expectedStatus)) {
     // Preserve status + parsed body so callers can map specific failures to
     // friendly messages (e.g. ProjectsView 409/400/502 warm errors,
     // repoPreflightMessage reason codes). Message stays backward-compatible.
