@@ -2023,14 +2023,23 @@ function parseOrcaTerminals(terminals, edges, agents, ids, out, orcaCoverage, ou
     const rawPath = terminal?.worktreePath;
     const rawId = terminal?.worktreeId;
     const separator = typeof rawId === 'string' ? rawId.indexOf('::') : -1;
-    if (typeof rawPath !== 'string' || !rawPath || !path.isAbsolute(rawPath)
-      || (separator >= 0 && rawId.slice(separator + 2) !== rawPath)
-      || agents.some(agent => agent.pane === orcaTerminalPaneKey(terminal || {}))) {
+    let scopedPath = null;
+    if (typeof rawPath === 'string' && rawPath) {
+      if (path.isAbsolute(rawPath) && (separator < 0 || rawId.slice(separator + 2) === rawPath)) {
+        scopedPath = rawPath;
+      }
+    } else if ((rawPath === '' || rawPath === undefined) && separator >= 0
+      && rawId.indexOf('::', separator + 2) < 0) {
+      const idPath = rawId.slice(separator + 2);
+      if (idPath && path.isAbsolute(idPath)) scopedPath = idPath;
+    }
+    if (!scopedPath || agents.some(agent => agent.pane === orcaTerminalPaneKey(terminal || {}))) {
       partial.global = true;
       return;
     }
-    partial.cwds.add(rawPath);
-    partial.cwdHashes.add(crypto.createHash('sha256').update(rawPath).digest('hex'));
+    // The derived path restricts cancellation only; it is never link evidence or output.
+    partial.cwds.add(scopedPath);
+    partial.cwdHashes.add(crypto.createHash('sha256').update(scopedPath).digest('hex'));
   }
   for (const terminal of terminals.slice(0, snapshotPolicy.SNAPSHOT_LIMITS.terminals)) {
     if (!isRecordObject(terminal)) {

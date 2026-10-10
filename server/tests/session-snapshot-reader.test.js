@@ -4477,8 +4477,6 @@ test('PR1d R3 unknown-worktree terminal scopes partial to its cwd with actual Or
 });
 
 for (const [variant, extra] of [
-  ['missing path', { worktreePath: undefined }],
-  ['empty path', { worktreePath: '' }],
   ['relative path', { worktreePath: 'private/orphan-repo' }],
   ['contradictory id path', { worktreeId: 'repoId::/different/repo' }],
   ['overlapping tab/leaf pane', { tabId: 'p', leafId: 'leaf' }],
@@ -4543,3 +4541,42 @@ test('PR1d R3 absent worktree agents means zero agents without partial', t => {
   assert.deepEqual(snapshot.coverage.orca, { state: 'ok', code: null });
   assert.equal(snapshot.sessions.find(session => session.session_id === 's').orca_link.confirmed, true);
 });
+
+
+for (const [variant, worktreePath] of [['empty', ''], ['absent', undefined]]) {
+  test(`PR1d R4 ${variant} terminal path scopes cancellation using a single absolute id suffix`, t => {
+    const { fixture, cwd } = orcaTerminalPartialFixture(t, { worktreePath });
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.deepEqual(snapshot.coverage.orca, { state: 'partial', code: 'orca_unavailable' });
+    assert.equal(snapshot.orca.terminals.length, 1);
+    assert.deepEqual(snapshot.sessions.find(session => session.session_id === 's').orca_link,
+      { evidence: 'prompt_exact', confirmed: true, pane_key: 'p:leaf', terminal_handle: 'h' });
+    assert.deepEqual(snapshot.sessions.find(session => session.session_id === 'orphan').orca_link,
+      { evidence: 'ambiguous', confirmed: false, pane_key: null, terminal_handle: null });
+    assert.equal(JSON.stringify(snapshot).includes(cwd), false);
+    assert.equal(JSON.stringify(snapshot).includes('worktreePath'), false);
+  });
+}
+
+for (const [variant, extra] of [
+  ['null path', { worktreePath: null }],
+  ['nonstring path', { worktreePath: 42 }],
+  ['two separators', { worktreePath: '', worktreeId: 'repoId::/private/orphan-repo::/nested' }],
+  ['relative id suffix', { worktreePath: '', worktreeId: 'repoId::private/orphan-repo' }],
+  ['empty id suffix', { worktreePath: '', worktreeId: 'repoId::' }],
+  ['no separator', { worktreePath: undefined, worktreeId: '/private/orphan-repo' }],
+  ['nonstring id', { worktreePath: '', worktreeId: 42 }],
+  ['derived path with pane conflict', { worktreePath: '', tabId: 'p', leafId: 'leaf' }]
+]) {
+  test(`PR1d R4 terminal ${variant} cancels confirmations globally`, t => {
+    const { fixture } = orcaTerminalPartialFixture(t, extra);
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.deepEqual(snapshot.coverage.orca, { state: 'partial', code: 'orca_unavailable' });
+    assert.equal(snapshot.orca.terminals.length, 1);
+    for (const session of snapshot.sessions) {
+      assert.equal(session.orca_link.evidence, 'prompt_exact');
+      assert.equal(session.orca_link.confirmed, false);
+      assert.equal(session.orca_link.terminal_handle, null);
+    }
+  });
+}
