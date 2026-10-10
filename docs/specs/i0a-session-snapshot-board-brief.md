@@ -42,7 +42,8 @@
 | 10 | 그 밖 | `unknown` (coverage) |
 
 - **큐**: `queue-operation` 은 지시로 내보내지 않고 coverage 에 `queued_enqueued / dequeued / removed` 개수만 기록한다. 실제로 전달된 입력은 행 9 의 `promptSource=queued` 로 잡힌다. 큐에서 제거된 입력은 "취소된 입력" 개수로만 남는다.
-- **`ai-title`**: 세션의 `ai_title` 로 쓴다. §2.1 의 TEXT 정책을 적용하고 마지막 값을 쓴다.
+- **`ai-title`**: 세션의 `ai_title` 로 쓴다. §2.1 의 TEXT 정책을 적용하고 파일 안 마지막 값을 쓴다. 실제 레코드에는 `timestamp` 가 없다(`type, aiTitle, sessionId` 만) — 시각을 요구하지 않는다.
+- **명령 래퍼 표시**: reader 는 표시를 정리하지 않는다 — 지시 텍스트는 **원문 전체를 살균**한 결과다(래퍼 태그가 남는다). 보기 좋은 `/name args` 표시는 화면이 이미 살균된 텍스트에서 태그를 걷어 만든다. 지문·ref 는 slash 지시도 원문 전체를 포함한다(표시가 바뀌는 모든 변경이 ref 변경이 되게). reader 단계 정리는 PR1c 리뷰 R1~R3 에서 같은 계열(살균 문맥 파괴, 지문 밖 문장, 긴 인자 소실)이 반복돼 범위를 줄여 닫았다.
 - **순서와 신원**: 순서는 `timestamp` → 파일 내 위치로 정한다. 세션 신원은 `sessionId`, **레코드 신원은 `uuid`** 다(§2 삭제 신원).
 
 ### 1.2 Codex — 세션 포함 여부와 실행 방식을 따로 판정한 뒤, 메시지·블록 단위로 판별
@@ -104,7 +105,11 @@
 ### 1.4 관측 창과 세션 최초 지시
 
 - **세션 선택**: `last_record_at` 이 최근 14일 안에 있는 세션만 고른다.
-- **선택한 세션은 파일 전체를 읽는다.**
+- **선택한 세션은 파일 전체를 읽는다.** 파일은 한 번에 하나씩 파싱하고, 지시 추출이 끝나면 원본 레코드를 버린다(실데이터 7GB 에서 전량 보유 시 OOM — PR1c).
+- **창 밖 파일**(수정 시각이 `now - 14일` 이전)은 어떤 레코드도 창 안일 수 없으므로 세션 신원만 확인한다. 앞부분(최대 64KB)의 레코드에서 신원을 얻고, 못 얻으면 그 파일 하나만 상한 안에서 전체를 읽는다. 다중 파일 판정에는 참여하지만 내용은 파싱하지 않는다. 따라서 **coverage 의 레코드 카운트(unknown·unverified 등)는 관측 창 기준**이다. 창 밖 판정은 "mtime 이 창 밖이고, 파일 끝 레코드의 시각도 창 밖"일 때만이다(시각 보존 복사로 mtime 만 오래된 파일은 그대로 읽는다). **한계(수용)**: mtime 을 인위로 되돌리고 끝에 옛 레코드를 덧붙인 파일은 최근 레코드가 있어도 보이지 않을 수 있다 — 결과는 비반출이라 안전 측이다.
+- **보유 개수 상한**: 스캔 중 지시 상세를 보유하는 세션은 마지막 관측 기준 상위 300개(출력 상한과 같음)이고, 세션마다 처음 지시와 최근 200개 지시만 보유한다. 그 밖의 세션은 그룹·다중 파일 판정에 필요한 신원·시각만 남긴다. 화면 타임라인은 세션당 최근 200개까지이고, 잘린 지시는 `records_unverified` 로 센다.
+- **보유 문자열 상한**: 파일 하나를 처리한 뒤 남기는 모든 문자열(표시 텍스트·제목·branch·cwd·버전 등)은 파싱 시점에 용도별 상한으로 자르고 독립 복사한다(잘라 낸 문자열이 원문을 참조해 메모리를 붙잡지 않게). 지문·ref 는 그 전에 원문으로 계산한다.
+- **Claude 하위 에이전트 파일**(`<sessionId>/subagents/agent-*.jsonl`, 레코드가 모두 `isSidechain`)은 본 세션과 같은 `sessionId` 를 쓰지만 사람 지시가 없다. 세션 그룹에서 빼고 `files_skipped` 로 센다(그러지 않으면 본 세션이 다중 파일로 통째 보류된다 — 실측 codev2 20/46).
 - **최초 지시 복구 상태**는 세 값으로 표시한다. 첫 레코드의 타입만으로 판정하지 않는다. 실측에서 Claude 파일이 `last-prompt`·`queue-operation` 으로 시작하는 경우는 정상이었다.
   - **Claude**
     - 첫 human 지시의 `parentUuid` 가 null 이거나 파일 안에서 해소되고, 그보다 앞에 `isCompactSummary` 가 없으면 `recoverable`.
@@ -137,12 +142,12 @@
 - **읽는 경로**: Claude·Codex transcript 디렉터리 두 종류만 허용한다(기본 `~/.claude/projects`, `~/.codex/sessions`). 다른 종류의 경로는 거부한다. 심볼릭 링크는 따라가지 않는다. 파일 수와 파일당 바이트에 상한을 둔다.
 - **머신 측 설정** `~/.config/palantir/observe.json` (0600):
   - `machine_id`: 최초 실행 때 생성하는 랜덤 값. hostname 과 무관하다.
-  - `machine_label`: `[A-Za-z0-9._-]{1,32}`.
+  - `machine_label`: `[A-Za-z0-9._-]{1,32}`. 기본값 `machine`, `snapshot --label <name>` 으로 지정한다(잠금 안에서 라벨만 갱신).
   - `path_salt` 와 `path_gen`: 경로 OPAQUE 용이다. 회전하면 `path_gen` 이 증가한다.
   - `exclude`: 세션 신원(`provider:session_id`), **지시 신원** 목록. (cwd 접두사 제외는 v11 에서 제거 — cwd 는 세션이 아니라 레코드마다 바뀌어 세션 단위 판정이 반복 우회됐다. I0b 이후 레코드 단위 모델로 재설계한다. 비어 있지 않은 옛 `cwd_prefixes` 가 있으면 `request_invalid` 로 반출을 멈춘다.)
   - **삭제 신원은 경로나 salt 에 의존하지 않는다.** Claude 는 `claude:<sessionId>:u<uuid>`, Codex 는 id 가 있으면 `codex:<session_id>:i<payload.id>`, 없으면 `codex:<session_id>:n<순번>`(+ 로컬 지문, §1.2) 이다. 파일 rename, 파일 이동, salt 회전이 있어도 삭제가 유지된다. 재실행해도 그대로 적용된다.
   - `local_key`: 지문 전용 랜덤 키. `path_salt` 를 회전해도 바뀌지 않는다.
-- **Orca**: 같은 실행 안에서 `orca worktree ps --json` / `orca terminal list --json` 을 호출한다. 그 머신의 Orca runtime 을 쓴다. 실패하면 고정 코드(`orca_unavailable` 등)를 coverage 에 기록하고 계속 진행한다.
+- **Orca**: 같은 실행 안에서 `orca worktree ps --json` / `orca terminal list --json` 을 호출한다. 실제 응답은 `{ok, result: {worktrees|terminals: [...], truncated}}` envelope 이고 시각은 epoch 밀리초 숫자, 터미널↔agent 연결 키는 `${tabId}:${leafId}` = agent `paneKey` 다(PR1c 실측). 비대화형 ssh 의 PATH 에 orca 가 없으면 `--orca-bin <절대경로>` 를 준다. 그 머신의 Orca runtime 을 쓴다. 실패하면 고정 코드(`orca_unavailable` 등)를 coverage 에 기록하고 계속 진행한다.
 - **출력**:
   - 번들은 결과를 stdout envelope 으로만 낸다(§2.3). **실행 머신의 디스크에는 스냅샷·중간본을 쓰지 않는다.** 실행 머신에서 쓰는 것은 `observe.json`(+ 잠금·tmp)뿐이다.
   - Mac 이 검증을 통과한 스냅샷만 보드 디렉터리(`--out-dir`, 기본 `PALANTIR_OBSERVE_SNAPSHOT_DIR`)에 `<machine_id>.json` **하나**로 원자적으로 덮어쓴다(같은 디렉터리의 tmp + rename). 파일 권한은 0600, 디렉터리 권한은 0700 이다. 머신당 파일이 하나이므로 예전 스냅샷이 쌓이지 않는다.
@@ -533,4 +538,5 @@
   - R4: 같은 계열(주석을 끼운 `process.binding`·`dlopen`·`require`)이 다시 나왔다 → 정적 검사를 **형태 추적에서 단어 규칙으로** 바꿔 계열 전체를 닫았다(§2.3). 그 밖에 CLI timeout 뒤 기존 파일 보존, 큰 정상 envelope 의 flush 를 테스트로 고정했다.
   - R5: 정적 검사 계열은 닫힘. timeout 때 ssh 자손이 파이프를 쥐면 끝나지 않던 문제 → 프로세스 그룹 kill + 파이프 닫기 + 2초 backstop. 로컬 실행기의 가드 호출을 호출 기록으로 검증.
 - **PR2a (2026-10-10)**: endpoint + runbook. codex 코드 적대리뷰 R1~R3 NO-GO → R4 GO. 반영: 파일명도 정책 ID 슬롯(비밀값 탐지)으로 거르기, `O_NONBLOCK`(FIFO 교체 대기), 목록 파일 수 상한 256, 상세의 정확한 파일명 대조(대소문자 무시 FS), 루트 설정값 글자 그대로 비교·공개 폴더 안 거부, 정적 서빙의 디코딩 기준 `/api` 제외, CLI 의 공개 폴더 출력 거부, cookie 아닌 요청은 오류 종류와 무관하게 403(단일 규칙). 범위 밖으로 확정: 죽은 manager capability 요청 때 전역 auth 의 `probeActive` 정리(전역 auth 기존 동작, "전역 auth 무변경").
+- **PR1c (2026-10-10, 실데이터 검증으로 발견)**: Mac 실데이터(Claude 1.6GB·Codex 5.6GB)에서 번들이 V8 힙 4GB OOM 으로 죽었다 — 합성 fixture 로는 드러나지 않았다. 고친 것: 창 밖 파일은 신원만, 창 안 파일은 한 번에 하나씩 파싱 후 원본 폐기(10.8초, 정상 종료). 하위 에이전트 파일 제외(codev2 보류 20→0), `--label`, Orca CLI 실제 envelope·숫자 시각·`tabId:leafId` 연결, `ai-title` 시각 미요구(AI 제목 0/153 → Mac 65/96). 명령 래퍼 표시 정리는 리뷰 R1~R3 에서 같은 계열 결함이 반복돼 reader 에서 빼고 화면으로 옮겼다. Orca 연결 비교는 원문(정규화) 해시·접두어 기준(§2.2). 리뷰 R4: 래퍼 추출 계열이 shell 에서도 재발 → **모든 kind 에서 표시·지문은 원문 전체**(추출 금지). 지시 개수 누적 OOM → **입력과 무관한 보유 상한**(상세는 마지막 관측 상위 300 세션, 세션당 처음 + 최근 200 지시, 나머지는 신원만; 잘린 지시는 `records_unverified`). 하위 에이전트 판정은 `<project>/<sid>/subagents/agent-*.jsonl` 정확 구조만. 파일 읽기는 fd 로 상한+1 바이트까지만. 리뷰 R5~R7: 하위 에이전트 제외는 모든 레코드의 sessionId 가 디렉터리 sid 와 같을 때만, 삭제 조회·기록의 대상 재탐색은 보유 상한 없이 대상 세션만 다시 읽음, 출력 제외가 확정된 세션·한도 밖 지시는 살균 생략, Orca 접두어가 4096자에서 잘린 쪽이 있으면 연결 판정 안 함. 실데이터 확인에서 보유 상한이 제외 판정 전·파일 단위로 적용돼 정상 세션 42개가 밀려난 회귀를 찾아 고쳤다. `redactSecrets` 자체의 이차 시간은 codex 교차검토 합의로 별도 PR(동치 선형 재작성)에서 고친다. codex 적대리뷰 R1~R6 NO-GO → R7 GO(R5 에서 사용자 승인으로 계속).
 - **PR2b (2026-10-10)**: `#work` 보드 + 진입 분기 + observe 전용 e2e. 실데이터(Mac 97 + codev2 56 세션)로 띄워 사용자 결정 2건(카드 제목줄, 미검증 배지 위치)을 받았다. codex 적대리뷰 R1~R2 NO-GO → R3 GO. 반영: observe 테스트 서버의 호스트 tmux·TMPDIR 공유(토큰을 켠 빈 DB 서버의 부팅 복구가 실제 워커를 종료할 수 있었다 → 전용 TMPDIR·TMUX_TMPDIR), observe 403 의 로그인 bounce(→ `allowAppForbidden`, abort 는 재전파), 기존 a11y·visual 명령이 observe 까지 실행하던 문제(→ `PALANTIR_OBSERVE_UI=1` opt-in), 복구 상태 숨김, 카드 줄 중복. 범위 밖으로 확정: 데스크톱 `.nav-brand` 36px(기존 공통 chrome, 바꾸면 기존 baseline 변경). 기존 visual 의 manager 4개 실패는 main 에서도 동일한 기존 문제.

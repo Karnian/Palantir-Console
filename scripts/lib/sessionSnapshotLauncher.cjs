@@ -42,12 +42,16 @@ function validRequest(value) {
   var keys = ['schema', 'op', 'now', 'include_exec', 'orca_bin'];
   if (value.op === 'exclude_query' || value.op === 'exclude_commit') keys.push('target');
   if (value.op === 'exclude_commit') keys.push('token');
+  var hasLabel = Object.prototype.hasOwnProperty.call(value, 'machine_label');
+  if (value.op === 'snapshot' && hasLabel) keys.push('machine_label');
   return Object.keys(value).length === keys.length && keys.every(function present(key) {
     return Object.prototype.hasOwnProperty.call(value, key);
   }) && value.schema === 'palantir.snapshot-request/1'
     && ['snapshot', 'exclude_query', 'exclude_commit'].indexOf(value.op) !== -1
     && typeof value.now === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value.now)
     && isFinite(Date.parse(value.now)) && new Date(value.now).toISOString() === value.now
+    && (!hasLabel || typeof value.machine_label === 'string'
+      && /^[A-Za-z0-9._-]{1,32}$/.test(value.machine_label) && value.machine_label.charAt(0) !== '-')
     && typeof value.include_exec === 'boolean' && typeof value.orca_bin === 'string'
     && /^[A-Za-z0-9._/-]{1,512}$/.test(value.orca_bin) && value.orca_bin.charAt(0) !== '-'
     && (value.op !== 'exclude_commit' || typeof value.token === 'string' && /^[0-9a-f]{64}$/.test(value.token));
@@ -69,6 +73,9 @@ function launch() {
   var options = { homeDir: home, configDir: require('node:path').join(home, '.config', 'palantir'),
     now: new Date(REQUEST.now), includeExec: REQUEST.include_exec, readerBuild: launcherBuild,
     runOrca: function runOrca(args) { return reader.defaultRunOrca(args, REQUEST.orca_bin); } };
+  if (REQUEST.op === 'snapshot' && Object.prototype.hasOwnProperty.call(REQUEST, 'machine_label')) {
+    options.machineLabel = REQUEST.machine_label;
+  }
   if (REQUEST.op !== 'snapshot') options.target = REQUEST.target;
   if (REQUEST.op === 'exclude_commit') options.token = REQUEST.token;
   try {

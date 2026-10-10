@@ -7,6 +7,8 @@ const { execFileSync } = require('node:child_process');
 const snapshotPolicy = require('../../server/services/observeSnapshotPolicy.js');
 const MAX_FILES = 10000;
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
+const IDENTITY_PREFIX_BYTES = 64 * 1024;
+const RECENT_INSTRUCTIONS = 200;
 class ReaderError extends Error {
   constructor(code) {
     super(code);
@@ -33,9 +35,14 @@ const isIdentityComponent = value => typeof value === 'string' && /^[A-Za-z0-9_-
 const normalizeDeletionText = value => value.normalize('NFC').trim();
 const normalizeLinkText = value => value.normalize('NFC').replace(/\s+/g, ' ').trim();
 
+function isValidMachineLabel(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9._-]{1,32}$/.test(value) && !value.startsWith('-')
+    && snapshotPolicy.finalizeLabel(value).value === value;
+}
+
 function validateReaderOptions(readerOptions) {
   const allowedKeys = [
-    'homeDir', 'configDir', 'now', 'includeExec', 'readerBuild', 'runOrca', 'target', 'token'
+    'homeDir', 'configDir', 'now', 'includeExec', 'readerBuild', 'runOrca', 'target', 'token', 'machineLabel'
   ];
   if (
     !readerOptions
@@ -46,6 +53,7 @@ function validateReaderOptions(readerOptions) {
     || !path.isAbsolute(readerOptions.configDir)
     || (readerOptions.includeExec !== undefined && typeof readerOptions.includeExec !== 'boolean')
     || (readerOptions.runOrca !== undefined && typeof readerOptions.runOrca !== 'function')
+    || (readerOptions.machineLabel !== undefined && !isValidMachineLabel(readerOptions.machineLabel))
     || !(readerOptions.now instanceof Date)
     || !Number.isFinite(+readerOptions.now)
     || !toIsoTimestamp(readerOptions.now.toISOString())
@@ -168,11 +176,14 @@ function writeConfig(readerOptions, config) {
 function loadConfig(readerOptions) {
   validateReaderOptions(readerOptions);
   let config = readConfig(readerOptions);
+  const existingConfig = config !== null;
   if (config) {
     if (!hasValidLocalKey(config)) {
       fail('key_unavailable');
     }
-    return config;
+    if (readerOptions.machineLabel === undefined || readerOptions.machineLabel === config.machine_label) {
+      return config;
+    }
   }
   return withConfigLock(readerOptions, () => {
     config = readConfig(readerOptions);
@@ -180,12 +191,20 @@ function loadConfig(readerOptions) {
       if (!hasValidLocalKey(config)) {
         fail('key_unavailable');
       }
+      // Spec §2: a label update rereads under the same lock and preserves every other stored field.
+      if (readerOptions.machineLabel !== undefined && readerOptions.machineLabel !== config.machine_label) {
+        config.machine_label = readerOptions.machineLabel;
+        writeConfig(readerOptions, config);
+      }
       return config;
+    }
+    if (existingConfig) {
+      fail('key_unavailable');
     }
     const key = crypto.randomBytes(32).toString('hex');
     config = {
       machine_id: crypto.randomBytes(8).toString('hex'),
-      machine_label: 'machine',
+      machine_label: readerOptions.machineLabel ?? 'machine',
       path_salt: crypto.randomBytes(32).toString('hex'),
       path_gen: 0,
       local_key: key,
@@ -307,25 +326,7 @@ function listFiles(root, providerCoverage, budget) {
             providerCoverage.files_failed++;
             continue;
           }
-          const fileDescriptor = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-          try {
-            const openedStats = fs.fstatSync(fileDescriptor);
-            if (openedStats.dev !== fileStats.dev || openedStats.ino !== fileStats.ino || openedStats
-              .size > MAX_FILE_BYTES) {
-              throw Error();
-            }
-            const data = fs.readFileSync(fileDescriptor, 'utf8');
-            if (Buffer.byteLength(data) > MAX_FILE_BYTES) {
-              throw Error();
-            }
-            result.push({
-              file: filePath,
-              records: data.split('\n').filter(value => value.trim()).map(parseTranscriptRecord)
-            });
-            providerCoverage.files_scanned++;
-          } finally {
-            fs.closeSync(fileDescriptor);
-          }
+          result.push({ file: filePath, stats: fileStats, root });
         }
       } catch {
         providerCoverage.files_failed++;
@@ -334,6 +335,11 @@ function listFiles(root, providerCoverage, budget) {
   }
   walk(root, 0);
   return result;
+}
+
+// Spec §1.4: copy bounded UTF-16 code units without retaining the source string.
+function retainString(value, max) {
+  return typeof value === 'string' ? Buffer.from(value.slice(0, max), 'utf16le').toString('utf16le') : null;
 }
 
 // Spec §1.1: first matching row wins; output and origin conflicts precede slash/shell wrappers.
@@ -365,19 +371,12 @@ function classifyClaudeRecord(record) {
     } : null;
   }
   if (slash && record.origin === undefined) {
-    const name = text.match(/<command-name>([\s\S]*?)<\/command-name>/)?.[1] || text.match(
-      /<command-message>([\s\S]*?)<\/command-message>/)?.[1] || '';
-    const args = text.match(/<command-args>([\s\S]*?)<\/command-args>/)?.[1] || '';
-    return {
-      kind: 'slash',
-      text: [name, args].filter(Boolean).join(' '),
-      attachments
-    };
+    return { kind: 'slash', text, attachments };
   }
   if (shell) {
     return {
       kind: 'shell',
-      text: text.match(/<bash-input>([\s\S]*?)<\/bash-input>/)?.[1] || '',
+      text,
       attachments
     };
   }
@@ -385,7 +384,7 @@ function classifyClaudeRecord(record) {
     'suggestion_accepted'].includes(record.promptSource)) {
     return {
       kind: 'human',
-      text: text.replace(/^<pasted>([\s\S]*?)<\/pasted>$/, '$1'),
+      text,
       attachments
     };
   }
@@ -520,7 +519,8 @@ function compareRecordTimes(left, right) {
   return (left.ts || '').localeCompare(right.ts || '') || left.position - right.position;
 }
 
-function parseFile(provider, records, providerCoverage) {
+function parseFile(provider, records, providerCoverage, config = {}, retainAllInstructions = false,
+  displayOptions = {}) {
   // Spec §1.2/§1.4: parse a nonwithheld file in original order before timestamp display sorting.
   const ordered = records.map((record, position) => ({
     record,
@@ -542,6 +542,7 @@ function parseFile(provider, records, providerCoverage) {
   let run_mode = 'interactive';
   let title = null;
   const items = [];
+  const linkState = {};
   let unknown = 0;
   let compact = false;
   let compactBefore = false;
@@ -569,6 +570,12 @@ function parseFile(provider, records, providerCoverage) {
     providerCoverage.records_unverified++;
     return null;
   }
+  const readerOptions = displayOptions.readerOptions;
+  const lastAt = Date.parse(times[times.length - 1]);
+  const displayExcluded = displayOptions.withheld || (!retainAllInstructions && readerOptions
+    && (lastAt < +readerOptions.now - 14 * 86400000 || lastAt > +readerOptions.now
+      || snapshotSessionExclusion(readerOptions, config, { provider, sid: sessionId,
+        cwd: cwd.length > 4096 ? null : cwd, run_mode }, false) !== null));
   const byUuid = new Map(records.filter(record => record.uuid).map(record => [record.uuid, record]));
   for (const {
     record,
@@ -602,7 +609,7 @@ function parseFile(provider, records, providerCoverage) {
       }
       if (record.type === 'ai-title') {
         const entry = record.aiTitle ?? record.title;
-        if (timestamp && typeof entry === 'string') {
+        if (typeof entry === 'string') {
           title = entry;
         }
         continue;
@@ -626,13 +633,13 @@ function parseFile(provider, records, providerCoverage) {
         providerCoverage.records_unverified++;
         continue;
       }
-      items.push({
+      items.push(compactInstruction(config, {
         ...classification,
         id: `claude:${sessionId}:u${record.uuid}`,
         ts: timestamp,
         position,
         structure: [['text', normalizeDeletionText(classification.text)], ['attachments', classification.attachments]]
-      });
+      }, linkState));
     } else {
       if (record.type === 'session_meta') {
         metaBefore = true;
@@ -670,31 +677,113 @@ function parseFile(provider, records, providerCoverage) {
         providerCoverage.records_unverified++;
         continue;
       }
-      items.push({
+      items.push(compactInstruction(config, {
         ...classification,
         id: `codex:${sessionId}:${suffix}`,
         ts: timestamp,
         position,
         structure: [...classification.structure, ['attachments', classification.attachments]]
-      });
+      }, linkState));
     }
   }
   // Spec §1.2/§1.4: timestamp display ordering cannot alter n identities or recovery evidence.
   items.sort(compareRecordTimes);
   providerCoverage.records_unknown += unknown;
+  const detail = boundSessionInstructions(items, config, providerCoverage, retainAllInstructions);
+  // Spec §1.4/§4: sanitize only retained output candidates; deletion rescans retain every instruction.
+  detail.items = displayExcluded ? [] : detail.items.map(finalizeRetainedInstruction);
+  if (cwd.length > 4096) {
+    cwd = null;
+    providerCoverage.records_unverified++;
+  }
   return {
-    provider,
-    sid: sessionId,
-    cwd,
-    branch,
-    run_mode,
-    title,
-    items,
+    provider: retainString(provider, 32),
+    sid: retainString(sessionId, 64),
+    cwd: retainString(cwd, 4096),
+    branch: !displayExcluded && typeof branch === 'string'
+      ? retainString(snapshotPolicy.finalizeLabel(branch).value, 64) : null,
+    run_mode: retainString(run_mode, 32),
+    title: displayExcluded || title === null ? null : retainString(snapshotPolicy.finalizeText(title, 200).value, 200),
+    ...detail,
+    link_text: !displayExcluded && linkState.last ? summarizeLinkText(linkState.rawText) : null,
     unknown,
-    first: first || 'unknown',
+    first: retainString(first || 'unknown', 32),
     compact: compact && !items.length,
-    firstAt: times[0],
-    lastAt: times[times.length - 1]
+    firstAt: retainString(times[0], 24),
+    lastAt: retainString(times[times.length - 1], 24)
+  };
+}
+
+// Spec §1.4/§4: retain first plus recent instructions; confirmation still covers the whole file.
+function boundSessionInstructions(items, config, providerCoverage, retainAllInstructions) {
+  const sessionFingerprint = hasValidLocalKey(config) ? computeHmac(config.local_key, snapshotPolicy.canonicalEncode(
+    ['palantir.exclude-session/1', items.map(item => [item.id, item.fp, item.ts])])) : null;
+  const counts = new Map();
+  for (const item of items) {
+    counts.set(item.fp, (counts.get(item.fp) || 0) + 1);
+  }
+  const retained = retainAllInstructions || items.length <= RECENT_INSTRUCTIONS + 1 ? items
+    : [items[0], ...items.slice(-RECENT_INSTRUCTIONS)];
+  const kept = new Set(retained);
+  let discardedDeleted = 0;
+  let discardedContent = 0;
+  for (const [index, item] of items.entries()) {
+    if (kept.has(item)) {
+      item.equiv_count = counts.get(item.fp);
+      if (retained !== items) {
+        item.original_seq = index + 1;
+      }
+    } else if (config.exclude && isInstructionExcluded(config, item)) {
+      discardedDeleted++;
+      if (/:n\d+$/.test(item.id)) {
+        discardedContent++;
+      }
+    }
+  }
+  providerCoverage.records_unverified += items.length - retained.length;
+  return { items: retained, instructionCount: items.length,
+    sessionFingerprint: retainString(sessionFingerprint, 64), discardedDeleted, discardedContent };
+}
+
+// Spec §2.1: sanitize the complete instruction before truncating its display.
+function finalizeInstructionText(rawText) {
+  const finalized = snapshotPolicy.finalizeText(rawText);
+  return { text: retainString(finalized.value, 2000), text_missing: !rawText, truncated: rawText.length > 2000,
+    redacted: finalized.redacted };
+}
+
+function finalizeRetainedInstruction(instruction) {
+  return { ...instruction, ...finalizeInstructionText(instruction.text) };
+}
+
+// Spec §2.2: retain only a digest, length and bounded local prefix of normalized raw text.
+function summarizeLinkText(rawText) {
+  const normalized = normalizeLinkText(rawText);
+  return {
+    hash: retainString(crypto.createHash('sha256').update(normalized).digest('hex'), 64),
+    length: normalized.length,
+    prefix: retainString(normalized, 4096)
+  };
+}
+
+// Spec §1.4/§2/§3: compute identity before discarding unbounded text and block structure.
+function compactInstruction(config, instruction, linkState) {
+  if (!linkState.last || compareRecordTimes(instruction, linkState.last) >= 0) {
+    linkState.last = { ts: instruction.ts, position: instruction.position };
+    linkState.rawText = instruction.text;
+  }
+  instruction.fp = computeInstructionFingerprint(config, instruction);
+  const ref = computeInstructionRef(config, instruction);
+  return {
+    id: retainString(instruction.id, 160),
+    ts: retainString(instruction.ts, 24),
+    position: instruction.position,
+    kind: retainString(instruction.kind, 32),
+    text: instruction.text,
+    attachments: instruction.attachments,
+    unknown_blocks: instruction.unknown_blocks || 0,
+    fp: retainString(instruction.fp, 64),
+    ref: retainString(ref, 16)
   };
 }
 
@@ -727,14 +816,14 @@ function transcriptSessionId(provider, records) {
 
 // Host R2 decision: group file identities only; metadata and messages never cross file boundaries.
 function groupTranscriptFiles(groups, provider, file) {
-  const sessionId = transcriptSessionId(provider, file.records);
+  const sessionId = file.sessionId;
   const key = isIdentityComponent(sessionId) ? `${provider}:${sessionId}` : `${provider}:file:${file.file}`;
   let group = groups.get(key);
   if (!group) {
     group = { provider, sessionId, files: new Map() };
     groups.set(key, group);
   }
-  // Spec §1.3: enumerate a given file once, then retain each of its original record positions once.
+  // Spec §1.3: retain one compact result per file, never its original records.
   group.files.set(file.file, file);
 }
 
@@ -777,16 +866,17 @@ function countInvalidTimeRecords(records) {
     && !snapshotPolicy.isSafeTimestamp(record.timestamp)).length;
 }
 
-function parseIndependentTranscript(group, file, providerCoverage, multiFile) {
+function parseIndependentTranscript(provider, records, providerCoverage, config, retainAllInstructions,
+  displayOptions = {}) {
   // Host R5: a single file cannot assign instructions from multiple explicit session identities.
-  const mixedSession = hasMixedSessionIdentities(group.provider, file.records);
+  const mixedSession = hasMixedSessionIdentities(provider, records);
   if (mixedSession) {
     providerCoverage.mixed_session_withheld++;
   }
-  const duplicates = countDuplicateRecordIdentities(group.provider, file.records);
+  const duplicates = countDuplicateRecordIdentities(provider, records);
   providerCoverage.records_unverified += duplicates;
   // Host R9: one explicit invalid TIME withholds the file from export, lookup, and Orca evidence.
-  const invalidTimeRecords = countInvalidTimeRecords(file.records);
+  const invalidTimeRecords = countInvalidTimeRecords(records);
   if (invalidTimeRecords > 0) {
     providerCoverage.records_unverified += invalidTimeRecords;
     providerCoverage.invalid_time_withheld++;
@@ -794,31 +884,312 @@ function parseIndependentTranscript(group, file, providerCoverage, multiFile) {
   }
   let session;
   try {
-    session = parseFile(group.provider, file.records, providerCoverage);
+    session = parseFile(provider, records, providerCoverage, config, retainAllInstructions,
+      { ...displayOptions, withheld: displayOptions.withheld || mixedSession || duplicates > 0 });
   } catch {
     // Spec §1: malformed candidates cannot abort unrelated sessions.
     providerCoverage.files_failed++;
   }
-  if (!session && !multiFile && duplicates === 0) {
-    if (group.provider === 'claude') {
-      providerCoverage.files_skipped++;
-    }
-    return null;
-  }
-  // Host R2: parse coverage independently, but export no candidate from ambiguous files.
-  if (multiFile || mixedSession || duplicates > 0) {
-    return null;
-  }
-  return session;
+  // Spec §1.3 / v11: defer group-dependent coverage until all file identities are known.
+  return {
+    session: mixedSession || duplicates > 0 ? null : session,
+    skipIfSingle: !session && duplicates === 0
+  };
 }
 
-function scanSessions(readerOptions, config) {
+// Spec §1.4: identity reads retain only grouping fields, never message content.
+function parseTranscriptIdentityRecord(line) {
+  try {
+    const record = JSON.parse(line);
+    if (isRecordObject(record)) {
+      return { type: record.type, sessionId: record.sessionId, payload: { id: record.payload?.id },
+        isSidechain: record.isSidechain };
+    }
+  } catch {}
+  return { __invalid: true };
+}
+
+function inspectTranscriptIdentity(provider, data) {
+  const records = data.split('\n').filter(value => value.trim()).map(parseTranscriptIdentityRecord);
+  const sessionId = transcriptSessionId(provider, records);
+  return { sessionId, singleSession: records.every(record => record.sessionId === sessionId),
+    sidechainOnly: records.length > 0 && records.every(record => record.isSidechain === true) };
+}
+
+// Spec §1.4: use complete prefix records; unresolved identities fall back to one bounded full read.
+function readTranscriptIdentity(provider, fileDescriptor, fileSize, verifySidechain) {
+  const prefix = Buffer.alloc(Math.min(fileSize, IDENTITY_PREFIX_BYTES));
+  let bytesRead = 0;
+  while (bytesRead < prefix.length) {
+    const count = fs.readSync(fileDescriptor, prefix, bytesRead, prefix.length - bytesRead, bytesRead);
+    if (count === 0) {
+      break;
+    }
+    bytesRead += count;
+  }
+  const data = prefix.subarray(0, bytesRead);
+  const completeFile = bytesRead < prefix.length || fileSize <= bytesRead;
+  const completeEnd = completeFile ? bytesRead : data.lastIndexOf(10) + 1;
+  const identity = inspectTranscriptIdentity(provider, data.subarray(0, completeEnd).toString('utf8'));
+  if (!completeFile && (!isIdentityComponent(identity.sessionId) || verifySidechain && identity.sidechainOnly)) {
+    return inspectTranscriptIdentity(provider, readTranscriptData(fileDescriptor));
+  }
+  return identity;
+}
+
+// Spec §1.4: preserved mtimes require a complete tail record to prove the file is outside the window.
+function readTranscriptTailTime(fileDescriptor, fileSize) {
+  const start = Math.max(0, fileSize - IDENTITY_PREFIX_BYTES);
+  const buffer = Buffer.alloc(fileSize - start);
+  let bytesRead = 0;
+  while (bytesRead < buffer.length) {
+    const count = fs.readSync(fileDescriptor, buffer, bytesRead, buffer.length - bytesRead, start + bytesRead);
+    if (count === 0) {
+      break;
+    }
+    bytesRead += count;
+  }
+  const data = buffer.subarray(0, bytesRead);
+  const firstComplete = start === 0 ? 0 : data.indexOf(10) + 1;
+  if (start > 0 && firstComplete === 0) {
+    return null;
+  }
+  const lines = data.subarray(firstComplete).toString('utf8').split('\n');
+  for (let index = lines.length - 1; index >= 0; index--) {
+    try {
+      const record = JSON.parse(lines[index]);
+      return isRecordObject(record) ? toIsoTimestamp(record.timestamp) : null;
+    } catch {}
+  }
+  return null;
+}
+
+function isTranscriptOutsideWindow(stats, fileDescriptor, windowSince) {
+  if (stats.mtimeMs >= windowSince) {
+    return false;
+  }
+  const tailTime = readTranscriptTailTime(fileDescriptor, stats.size);
+  return tailTime !== null && Date.parse(tailTime) < windowSince;
+}
+
+// Spec §2: allocate and read at most the byte limit plus one, including identity fallbacks.
+function readTranscriptData(fileDescriptor) {
+  const size = fs.fstatSync(fileDescriptor).size;
+  if (size > MAX_FILE_BYTES) {
+    throw Error();
+  }
+  const chunks = [];
+  let bytesRead = 0;
+  let ended = false;
+  while (!ended && bytesRead <= MAX_FILE_BYTES) {
+    const buffer = Buffer.alloc(Math.min(128 * 1024, bytesRead === 0 ? size + 1 : MAX_FILE_BYTES + 1,
+      MAX_FILE_BYTES + 1 - bytesRead));
+    let filled = 0;
+    while (filled < buffer.length) {
+      const count = fs.readSync(fileDescriptor, buffer, filled, buffer.length - filled, bytesRead + filled);
+      if (count === 0) {
+        ended = true;
+        break;
+      }
+      filled += count;
+    }
+    bytesRead += filled;
+    if (filled > 0) {
+      chunks.push(buffer.subarray(0, filled));
+    }
+  }
+  if (bytesRead > MAX_FILE_BYTES) {
+    throw Error();
+  }
+  return Buffer.concat(chunks, bytesRead).toString('utf8');
+}
+
+// Spec §1.4: only the exact projects-relative layout can identify a sidechain transcript.
+function claudeSubagentSessionId(provider, file, root) {
+  if (provider !== 'claude' || !root) {
+    return null;
+  }
+  const parts = path.relative(root, file).split(path.sep);
+  return parts.length === 4 && parts[0] !== '..' && isIdentityComponent(parts[1])
+    && parts[2] === 'subagents' && /^agent-.+\.jsonl$/.test(parts[3]) ? parts[1] : null;
+}
+
+// Spec §2: verify the enumerated inode before reading; only one file's records remain in scope.
+function summarizeTranscriptFile(provider, file, providerCoverage, windowSince, config = {}, requestedTarget = null,
+  scanContext = {}) {
+  const retainedFile = retainString(file.file, 4096);
+  const subagentSid = claudeSubagentSessionId(provider, file.file, file.root);
+  let fileDescriptor;
+  try {
+    fileDescriptor = fs.openSync(file.file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const openedStats = fs.fstatSync(fileDescriptor);
+    if (openedStats.dev !== file.stats.dev || openedStats.ino !== file.stats.ino
+      || openedStats.size > MAX_FILE_BYTES) {
+      throw Error();
+    }
+    const outsideWindow = isTranscriptOutsideWindow(openedStats, fileDescriptor, windowSince);
+    if (outsideWindow || requestedTarget) {
+      const identity = readTranscriptIdentity(provider, fileDescriptor, openedStats.size,
+        subagentSid !== null);
+      if (fs.fstatSync(fileDescriptor).size > MAX_FILE_BYTES) {
+        throw Error();
+      }
+      if (subagentSid !== null && subagentSid === identity.sessionId && identity.sidechainOnly
+        && identity.singleSession) {
+        providerCoverage.files_scanned++;
+        providerCoverage.files_skipped++;
+        return null;
+      }
+      // Spec §4: inspect unrelated identities for grouping, retaining full details only for the requested session.
+      if (outsideWindow || !matchesRequestedSession(requestedTarget, { provider, sid: identity.sessionId })) {
+        providerCoverage.files_scanned++;
+        return { file: retainedFile,
+          sessionId: identity.sessionId?.length <= 64 ? retainString(identity.sessionId, 64) : null, outsideWindow };
+      }
+    }
+    const data = readTranscriptData(fileDescriptor);
+    const records = data.split('\n').filter(value => value.trim()).map(parseTranscriptRecord);
+    providerCoverage.files_scanned++;
+    const sessionId = transcriptSessionId(provider, records);
+    const sidechainOnly = records.length > 0 && records.every(record => record.isSidechain === true
+      && record.sessionId === sessionId);
+    if (subagentSid !== null && subagentSid === sessionId && sidechainOnly) {
+      providerCoverage.files_skipped++;
+      return null;
+    }
+    const parsed = parseIndependentTranscript(provider, records, providerCoverage, config, requestedTarget !== null,
+      { readerOptions: scanContext.readerOptions,
+        withheld: scanContext.groups?.get(`${provider}:${sessionId}`)?.files.size > 0 });
+    return { file: retainedFile, sessionId: sessionId?.length <= 64 ? retainString(sessionId, 64) : null, ...parsed };
+  } catch {
+    providerCoverage.files_failed++;
+    return null;
+  } finally {
+    if (fileDescriptor !== undefined) {
+      fs.closeSync(fileDescriptor);
+    }
+  }
+}
+
+// Spec §1.4: rank by last observation, keeping only the bounded number of detailed sessions.
+function compareSessionFiles(left, right) {
+  return right.session.lastAt.localeCompare(left.session.lastAt) || left.scanIndex - right.scanIndex;
+}
+
+function discardSessionDetails(file, details) {
+  if (file.session) {
+    const { provider, sid, firstAt, lastAt } = file.session;
+    details.delete(`${provider}:${sid}`);
+    file.session = { provider, sid, firstAt, lastAt };
+    file.detailsDiscarded = true;
+  }
+}
+
+// Spec §1.2/§1.4/§2: only output-eligible sessions consume detail slots.
+function snapshotSessionExclusion(readerOptions, config, session, checkSchema = true) {
+  if (session.provider === 'codex' && config.invalidContentRuleSessions?.has(session.sid)) {
+    return 'withheld_sessions';
+  }
+  if (session.cwd === null) {
+    return 'cwd_unavailable';
+  }
+  if (session.run_mode === 'exec' && !readerOptions.includeExec) {
+    return 'exec_sessions_excluded';
+  }
+  if (session.run_mode === 'subagent' || session.run_mode === 'unsupported') {
+    return session.run_mode === 'subagent' ? 'subagent_excluded' : 'unsupported_sessions';
+  }
+  if (isSessionExcluded(config, session)) {
+    return 'excluded_sessions';
+  }
+  const rules = session.provider === 'codex' ? config.exclude.instructions.filter(record =>
+    record.id.startsWith(`codex:${session.sid}:n`)) : [];
+  if (!hasValidLocalKey(config) || rules.some(record => record.key_fingerprint !== config.key_fingerprint)) {
+    return session.provider === 'codex' ? 'withheld_sessions' : 'excluded_sessions';
+  }
+  const key = `${config.machine_id}:${session.provider}:${session.sid}`;
+  if (!safeId(key) || (checkSchema
+    && !snapshotPolicy.validateSession(buildSnapshotSession(config, session, key, [])).ok)) {
+    return 'records_unverified';
+  }
+  return null;
+}
+
+function matchesRequestedSession(target, session) {
+  if (!target) {
+    return true;
+  }
+  const [provider, sid] = target.kind === 'session'
+    ? [target.provider, target.sessionId] : target.instrId.split(':');
+  return session.provider === provider && session.sid === sid;
+}
+
+function retainScannedDetails(groups, details, provider, file, windowSince, readerOptions, requestedTarget) {
+  const key = isIdentityComponent(file.sessionId) ? `${provider}:${file.sessionId}` : `${provider}:file:${file.file}`;
+  const group = groups.get(key);
+  if (group.files.size > 1 && isIdentityComponent(group.sessionId)) {
+    for (const groupedFile of group.files.values()) {
+      discardSessionDetails(groupedFile, details);
+    }
+    return;
+  }
+  if (!file.session) {
+    return;
+  }
+  const last = Date.parse(file.session.lastAt);
+  if (last < windowSince || last > +readerOptions.now || file.snapshotExclusion !== null
+    || !matchesRequestedSession(requestedTarget, file.session)) {
+    discardSessionDetails(file, details);
+    return;
+  }
+  details.set(`${provider}:${file.session.sid}`, file);
+  if (details.size > snapshotPolicy.SNAPSHOT_LIMITS.sessions) {
+    const ranked = [...details.values()].sort(compareSessionFiles);
+    discardSessionDetails(ranked[ranked.length - 1], details);
+  }
+}
+
+// Spec §1.4: grouping can invalidate an earlier candidate; refill only final selected identities.
+function restoreSelectedDetails(files, details, config, coverage, windowSince, readerOptions, requestedTarget) {
+  const selected = new Set(files);
+  for (const file of details.values()) {
+    if (!selected.has(file)) {
+      discardSessionDetails(file, details);
+    }
+  }
+  const sessions = [];
+  for (const file of files) {
+    if (file.detailsDiscarded) {
+      const provider = file.session.provider;
+      const counters = Object.fromEntries(snapshotPolicy.COVERAGE_KEYS[provider].map(key => [key, 0]));
+      const restored = summarizeTranscriptFile(provider, file.source, counters, windowSince, config, requestedTarget,
+        { readerOptions });
+      if (!restored?.session || restored.session.sid !== file.session.sid
+        || restored.session.lastAt !== file.session.lastAt || restored.session.firstAt !== file.session.firstAt
+        || (!requestedTarget && snapshotSessionExclusion(readerOptions, config, restored.session) !== null)) {
+        coverage[provider].files_failed++;
+        continue;
+      }
+      file.session = restored.session;
+      file.detailsDiscarded = false;
+      details.set(`${provider}:${file.session.sid}`, file);
+    }
+    sessions.push(file.session);
+  }
+  return sessions;
+}
+
+function scanSessions(readerOptions, config, requestedTarget = null) {
   const coverage = {
     claude: Object.fromEntries(snapshotPolicy.COVERAGE_KEYS.claude.map(coverageKey => [coverageKey, 0])),
     codex: Object.fromEntries(snapshotPolicy.COVERAGE_KEYS.codex.map(coverageKey => [coverageKey, 0])),
     orca: { state: 'unavailable', code: 'orca_unavailable' }
   };
   const groups = new Map();
+  const scanContext = { readerOptions, groups };
+  const details = new Map();
+  const windowSince = +readerOptions.now - 14 * 86400000;
+  let scanIndex = 0;
   const budget = { entries: 0, files: 0 };
   const roots = [
     ['claude', path.join(readerOptions.homeDir, '.claude', 'projects')],
@@ -826,10 +1197,24 @@ function scanSessions(readerOptions, config) {
   ];
   for (const [provider, root] of roots) {
     for (const file of listFiles(root, coverage[provider], budget)) {
-      groupTranscriptFiles(groups, provider, file);
+      const summary = summarizeTranscriptFile(provider, file, coverage[provider],
+        windowSince, config, requestedTarget, scanContext);
+      if (summary) {
+        if (summary.session) {
+          summary.snapshotExclusion = requestedTarget ? null
+            : snapshotSessionExclusion(readerOptions, config, summary.session);
+          summary.cwdHash = typeof summary.session.cwd === 'string'
+            ? crypto.createHash('sha256').update(summary.session.cwd).digest('hex') : null;
+        }
+        summary.scanIndex = scanIndex++;
+        summary.source = { file: retainString(file.file, 4096), root: retainString(root, 4096),
+          stats: { dev: file.stats.dev, ino: file.stats.ino } };
+        groupTranscriptFiles(groups, provider, summary);
+        retainScannedDetails(groups, details, provider, summary, windowSince, readerOptions, requestedTarget);
+      }
     }
   }
-  const parsedSessions = [];
+  const parsedFiles = [];
   for (const group of groups.values()) {
     const providerCoverage = coverage[group.provider];
     const multiFile = isIdentityComponent(group.sessionId) && group.files.size > 1;
@@ -837,13 +1222,27 @@ function scanSessions(readerOptions, config) {
       providerCoverage.multi_file_withheld++;
     }
     for (const file of group.files.values()) {
-      const session = parseIndependentTranscript(group, file, providerCoverage, multiFile);
+      if (file.outsideWindow) {
+        if (!multiFile && group.provider === 'claude') {
+          providerCoverage.files_skipped++;
+        }
+        if (!multiFile && group.provider === 'codex' && config.invalidContentRuleSessions?.has(group.sessionId)) {
+          providerCoverage.withheld_sessions++;
+        }
+        continue;
+      }
+      if (!multiFile && file.skipIfSingle && group.provider === 'claude') {
+        providerCoverage.files_skipped++;
+      }
+      const session = multiFile ? null : file.session;
       if (session) {
-        parsedSessions.push(session);
+        parsedFiles.push(file);
       }
     }
   }
-  const selectedSessions = parsedSessions.filter(session => {
+  const linkCandidates = [];
+  const selectedFiles = parsedFiles.filter(file => {
+    const session = file.session;
     if (session.provider === 'codex' && config.invalidContentRuleSessions?.has(session.sid)) {
       coverage.codex.withheld_sessions++;
       return false;
@@ -853,15 +1252,35 @@ function scanSessions(readerOptions, config) {
     if (!inWindow && session.provider === 'claude') {
       coverage.claude.files_skipped++;
     }
-    return inWindow;
-  });
-  for (const session of selectedSessions) {
-    for (const instruction of session.items) {
-      instruction.fp = computeInstructionFingerprint(config, instruction);
-      instruction.ref = computeInstructionRef(config, instruction);
+    if (!inWindow) {
+      return false;
     }
+    // Spec §2.2: excluded sessions still prevent a false unique pane match, without retaining text or paths.
+    if (!requestedTarget && file.cwdHash) {
+      const { provider, sid, firstAt, lastAt } = session;
+      linkCandidates.push({ file, session: { provider, sid, firstAt, lastAt,
+        cwd: null, link_text: null, cwdHash: file.cwdHash } });
+    }
+    if (file.snapshotExclusion !== null) {
+      if (file.snapshotExclusion !== 'cwd_unavailable') {
+        coverage[session.provider][file.snapshotExclusion]++;
+      }
+      return false;
+    }
+    return matchesRequestedSession(requestedTarget, session);
+  });
+  if (selectedFiles.length > snapshotPolicy.SNAPSHOT_LIMITS.sessions) {
+    selectedFiles.sort(compareSessionFiles);
+    for (const file of selectedFiles.slice(snapshotPolicy.SNAPSHOT_LIMITS.sessions)) {
+      coverage[file.session.provider].records_unverified++;
+    }
+    selectedFiles.length = snapshotPolicy.SNAPSHOT_LIMITS.sessions;
   }
-  return { all: selectedSessions, coverage };
+  const all = restoreSelectedDetails(selectedFiles, details, config, coverage, windowSince, readerOptions,
+    requestedTarget);
+  const selected = new Set(selectedFiles);
+  return { all, coverage, linkCandidates: linkCandidates.filter(entry => !selected.has(entry.file))
+    .map(entry => entry.session) };
 }
 
 function isSessionExcluded(config, parsedSession) {
@@ -894,7 +1313,7 @@ function buildSnapshotSession(config, parsedSession, key, kept) {
     repo_label: parsedSession.cwd ? snapshotPolicy.finalizeLabel(path.basename(parsedSession.cwd)).value : null,
     git_branch: typeof parsedSession.branch === 'string' ? snapshotPolicy.finalizeLabel(parsedSession.branch)
       .value : null,
-    cli_version: 'unverified',
+    cli_version: retainString('unverified', 32),
     format_unverified: true,
     first_record_at: parsedSession.firstAt,
     last_record_at: parsedSession.lastAt,
@@ -913,17 +1332,18 @@ function buildSnapshotSession(config, parsedSession, key, kept) {
 }
 
 function buildSnapshotInstruction(instruction, key, index) {
-  const finalizedText = snapshotPolicy.finalizeText(instruction.text);
+  const display = instruction.redacted === undefined
+    ? finalizeInstructionText(instruction.text) : instruction;
   return {
     id: instruction.id,
     session_key: key,
-    seq: index + 1,
+    seq: instruction.original_seq ?? index + 1,
     ts: instruction.ts,
     kind: instruction.kind,
-    text: finalizedText.value,
-    text_missing: !instruction.text,
-    truncated: instruction.text.length > 2000,
-    redacted: finalizedText.redacted,
+    text: display.text,
+    text_missing: display.text_missing,
+    truncated: display.truncated,
+    redacted: display.redacted,
     attachments: instruction.attachments,
     unknown_blocks: instruction.unknown_blocks || 0,
     ref: instruction.ref
@@ -976,10 +1396,12 @@ function projectSnapshotInstructions(kept, key, remainingCount, providerCoverage
 
 function runSnapshot(inputOptions) {
   const readerOptions = validateReaderOptions(inputOptions);
-  const config = readConfig(readerOptions) || loadConfig(readerOptions);
+  const config = readerOptions.machineLabel === undefined
+    ? readConfig(readerOptions) || loadConfig(readerOptions) : loadConfig(readerOptions);
   const {
     all,
-    coverage
+    coverage,
+    linkCandidates
   } = scanSessions(readerOptions, config);
   const sessions = [];
   const instructions = [];
@@ -990,28 +1412,9 @@ function runSnapshot(inputOptions) {
       providerCoverage.records_unverified++;
       continue;
     }
-    if (parsedSession.run_mode === 'exec' && !readerOptions.includeExec) {
-      providerCoverage.exec_sessions_excluded++;
-      continue;
-    }
-    if (parsedSession.run_mode === 'subagent' || parsedSession.run_mode === 'unsupported') {
-      providerCoverage[parsedSession.run_mode === 'subagent' ? 'subagent_excluded' : 'unsupported_sessions']++;
-      continue;
-    }
-    if (isSessionExcluded(config, parsedSession)) {
-      providerCoverage.excluded_sessions++;
-      continue;
-    }
-    // Spec §2/§4 and host R6: content deletion and key withholding are scoped by provider and session.
-    const rules = parsedSession.provider === 'codex' ? config.exclude.instructions.filter(record =>
-      record.id.startsWith(`codex:${parsedSession.sid}:n`)) : [];
-    if (!hasValidLocalKey(config) || rules.some(record => record.key_fingerprint !== config.key_fingerprint)) {
-      if (parsedSession.provider === 'codex') {
-        providerCoverage.withheld_sessions++;
-      } else {
-        providerCoverage.excluded_sessions++;
-      }
-      continue;
+    providerCoverage.deleted_instructions += parsedSession.discardedDeleted;
+    if (parsedSession.provider === 'codex') {
+      providerCoverage.content_rule_excluded += parsedSession.discardedContent;
     }
     const kept = parsedSession.items.filter(instruction => {
       if (!isInstructionExcluded(config, instruction)) {
@@ -1039,12 +1442,40 @@ function runSnapshot(inputOptions) {
     parsedSession.output = session;
     instructions.push(...projectedInstructions);
   }
-  const orca = readOrca(readerOptions, config, all, coverage, outputBudget);
+  const orca = readOrca(readerOptions, config, [...all, ...linkCandidates], coverage, outputBudget);
   const result = buildSnapshotEnvelope(readerOptions, config, coverage, sessions, instructions, orca);
   if (!snapshotPolicy.validateSnapshot(result).ok) {
     fail('internal_error');
   }
   return result;
+}
+
+// Spec §2.2 / §2.3: project successful CLI envelopes; retain bare-array compatibility.
+function parseOrcaResponse(response, collection) {
+  if (Array.isArray(response)) {
+    return { items: response, truncated: false };
+  }
+  if (!isRecordObject(response) || response.ok !== true || !isRecordObject(response.result)
+    || !Array.isArray(response.result[collection])) {
+    return null;
+  }
+  return { items: response.result[collection], truncated: response.result.truncated === true };
+}
+
+// Spec §2.1: Orca also uses epoch milliseconds; transcript TIME rules stay separate.
+function toOrcaIsoTimestamp(value) {
+  if (typeof value !== 'number') {
+    return toIsoTimestamp(value);
+  }
+  const date = new Date(value);
+  return Number.isFinite(value) && Number.isFinite(+date) ? toIsoTimestamp(date.toISOString()) : null;
+}
+
+function orcaTerminalPaneKey(terminal) {
+  if (typeof terminal.tabId === 'string' && typeof terminal.leafId === 'string') {
+    return `${terminal.tabId}:${terminal.leafId}`;
+  }
+  return terminal.tabId === undefined && terminal.leafId === undefined ? terminal.paneKey : null;
 }
 
 function readOrca(readerOptions, config, all, coverage, outputBudget) {
@@ -1053,17 +1484,17 @@ function readOrca(readerOptions, config, all, coverage, outputBudget) {
     terminals: []
   };
   const run = readerOptions.runOrca || defaultRunOrca;
-  let worktrees;
-  let terminals;
+  let worktreeResponseData;
+  let terminalResponseData;
   try {
     const worktreeResponse = run(['worktree', 'ps', '--json']);
     const terminalResponse = run(['terminal', 'list', '--json']);
     if (typeof worktreeResponse !== 'string' || typeof terminalResponse !== 'string') {
       return out;
     }
-    worktrees = JSON.parse(worktreeResponse);
-    terminals = JSON.parse(terminalResponse);
-    if (!Array.isArray(worktrees) || !Array.isArray(terminals)) {
+    worktreeResponseData = parseOrcaResponse(JSON.parse(worktreeResponse), 'worktrees');
+    terminalResponseData = parseOrcaResponse(JSON.parse(terminalResponse), 'terminals');
+    if (!worktreeResponseData || !terminalResponseData) {
       return out;
     }
   } catch {
@@ -1073,7 +1504,10 @@ function readOrca(readerOptions, config, all, coverage, outputBudget) {
     state: 'ok',
     code: null
   };
-  if (worktrees.length > snapshotPolicy.SNAPSHOT_LIMITS.worktrees
+  const worktrees = worktreeResponseData.items;
+  const terminals = terminalResponseData.items;
+  if (worktreeResponseData.truncated || terminalResponseData.truncated
+    || worktrees.length > snapshotPolicy.SNAPSHOT_LIMITS.worktrees
     || terminals.length > snapshotPolicy.SNAPSHOT_LIMITS.terminals) {
     markOrcaPartial(coverage.orca);
   }
@@ -1084,6 +1518,15 @@ function readOrca(readerOptions, config, all, coverage, outputBudget) {
   const edges = buildOrcaLinkCandidates(all, agents);
   applyOrcaLinks(all, edges);
   parseOrcaTerminals(terminals, edges, ids, out, coverage.orca, outputBudget);
+  // Spec §2.2: partial inventories cannot prove uniqueness, including failures during projection.
+  if (coverage.orca.state !== 'ok') {
+    for (const session of all) {
+      if (session.output) {
+        session.output.orca_link.confirmed = false;
+        session.output.orca_link.terminal_handle = null;
+      }
+    }
+  }
   return out;
 }
 
@@ -1123,12 +1566,13 @@ function parseOrcaWorktrees(worktrees, config, out, orcaCoverage, outputBudget) 
       markOrcaPartial(orcaCoverage);
       continue;
     }
-    const when = toIsoTimestamp(worktree.lastActivityAt);
+    const when = toOrcaIsoTimestamp(worktree.lastActivityAt);
     if (!when) {
       markOrcaPartial(orcaCoverage);
       continue;
     }
-    const liveTerminals = worktree.liveTerminals === undefined ? 0 : worktree.liveTerminals;
+    const liveTerminals = worktree.liveTerminalCount === undefined
+      ? (worktree.liveTerminals === undefined ? 0 : worktree.liveTerminals) : worktree.liveTerminalCount;
     if (!snapshotPolicy.isSafeInteger(liveTerminals)) {
       markOrcaPartial(orcaCoverage);
       continue;
@@ -1144,7 +1588,9 @@ function parseOrcaWorktrees(worktrees, config, out, orcaCoverage, outputBudget) 
         markOrcaPartial(orcaCoverage);
         continue;
       }
-      if (!safeId(agent.paneKey) || !(toIsoTimestamp(agent.stateStartedAt) || toIsoTimestamp(agent.updatedAt))) {
+      const stateStartedAt = toOrcaIsoTimestamp(agent.stateStartedAt);
+      const updatedAt = toOrcaIsoTimestamp(agent.updatedAt);
+      if (!safeId(agent.paneKey) || !(stateStartedAt || updatedAt)) {
         markOrcaPartial(orcaCoverage);
         continue;
       }
@@ -1152,8 +1598,8 @@ function parseOrcaWorktrees(worktrees, config, out, orcaCoverage, outputBudget) 
         pane_key: agent.paneKey,
         state: mapOrcaEnum('agent_state', agent.state),
         agent_type: mapOrcaEnum('agent_type', agent.agentType),
-        state_started_at: toIsoTimestamp(agent.stateStartedAt) || toIsoTimestamp(agent.updatedAt),
-        updated_at: toIsoTimestamp(agent.updatedAt) || toIsoTimestamp(agent.stateStartedAt),
+        state_started_at: stateStartedAt || updatedAt,
+        updated_at: updatedAt || stateStartedAt,
         interrupted: agent.interrupted === true
       };
       if (!snapshotPolicy.validateOrcaAgent(projectedAgent).ok) {
@@ -1163,9 +1609,10 @@ function parseOrcaWorktrees(worktrees, config, out, orcaCoverage, outputBudget) 
       exportedAgents.push(projectedAgent);
       localAgents.push({
         pane: agent.paneKey,
-        prompt: typeof agent.prompt === 'string' ? normalizeLinkText(agent.prompt) : '',
+        prompt: summarizeLinkText(typeof agent.prompt === 'string' ? agent.prompt : ''),
         cwd: rawPath,
-        time: Date.parse(toIsoTimestamp(agent.stateStartedAt) || toIsoTimestamp(agent.updatedAt))
+        cwdHash: crypto.createHash('sha256').update(rawPath).digest('hex'),
+        time: Date.parse(stateStartedAt || updatedAt)
       });
     }
     const projectedWorktree = {
@@ -1199,17 +1646,20 @@ function parseOrcaWorktrees(worktrees, config, out, orcaCoverage, outputBudget) 
 function buildOrcaLinkCandidates(all, agents) {
   const edges = [];
   for (const parsedSession of all) {
-    const last = parsedSession.items[parsedSession.items.length - 1];
+    const text = parsedSession.link_text;
     for (const agent of agents) {
-      if (parsedSession.cwd !== agent.cwd) {
+      const sameCwd = parsedSession.cwdHash ? parsedSession.cwdHash === agent.cwdHash
+        : parsedSession.cwd !== null && parsedSession.cwd === agent.cwd;
+      if (!sameCwd) {
         continue;
       }
-      const text = last ? normalizeLinkText(last.text) : '';
       let evidence = 'cwd_only';
-      if (text && agent.prompt && text === agent.prompt && text.length >= 8) {
+      const complete = text && text.length <= 4096 && agent.prompt.length <= 4096;
+      if (complete && text.hash === agent.prompt.hash && text.length >= 8) {
         evidence = 'prompt_exact';
-      } else if (text && agent.prompt && (text.startsWith(agent.prompt) || agent.prompt.startsWith(text))
-        && Math.min(text.length, agent.prompt.length) >= 24) {
+      } else if (complete && Math.min(text.length, agent.prompt.length) >= 24
+        && text.prefix.slice(0, Math.min(text.length, agent.prompt.length, 4096))
+          === agent.prompt.prefix.slice(0, Math.min(text.length, agent.prompt.length, 4096))) {
         evidence = 'prompt_prefix';
       }
       const inTime = agent.time >= Date.parse(parsedSession.firstAt) && agent.time <= Date.parse(parsedSession
@@ -1252,16 +1702,17 @@ function parseOrcaTerminals(terminals, edges, ids, out, orcaCoverage, outputBudg
       markOrcaPartial(orcaCoverage);
       continue;
     }
-    if (!safeId(terminal.handle) || !ids.has(terminal.worktreeId) || !toIsoTimestamp(terminal.lastOutputAt)) {
+    if (!safeId(terminal.handle) || !ids.has(terminal.worktreeId) || !toOrcaIsoTimestamp(terminal.lastOutputAt)) {
       markOrcaPartial(orcaCoverage);
       continue;
     }
-    const related = edges.filter(edge => edge.agent.pane === terminal.paneKey);
+    const paneKey = orcaTerminalPaneKey(terminal);
+    const related = edges.filter(edge => edge.agent.pane === paneKey);
     const projectedTerminal = {
       handle: terminal.handle,
       worktree_id: ids.get(terminal.worktreeId),
       agent_identity: mapOrcaEnum('agent_type', terminal.agentIdentity),
-      last_output_at: toIsoTimestamp(terminal.lastOutputAt),
+      last_output_at: toOrcaIsoTimestamp(terminal.lastOutputAt),
       connected: terminal.connected === true
     };
     if (!snapshotPolicy.validateOrcaTerminal(projectedTerminal).ok
@@ -1271,7 +1722,7 @@ function parseOrcaTerminals(terminals, edges, ids, out, orcaCoverage, outputBudg
     }
     out.terminals.push(projectedTerminal);
     for (const edge of related) {
-      if (edge.session.output?.orca_link.pane_key === terminal.paneKey) {
+      if (edge.session.output?.orca_link.pane_key === paneKey) {
         edge.session.output.orca_link.terminal_handle = terminal.handle;
       }
     }
@@ -1332,7 +1783,7 @@ function resolveTarget(readerOptions, config, checkRef) {
   }
   const {
     all
-  } = scanSessions(readerOptions, config);
+  } = scanSessions(readerOptions, config, readerOptions.target);
   const entry = readerOptions.target;
   let target;
   let timestamp = null;
@@ -1353,8 +1804,7 @@ function resolveTarget(readerOptions, config, checkRef) {
     target = instruction.id;
     timestamp = instruction.ts;
     preview = instructionPreview(instruction.text);
-    count = /:n\d+$/.test(instruction.id) ? parsedSession.items.filter(otherInstruction => otherInstruction
-      .fp === instruction.fp).length : 1;
+    count = /:n\d+$/.test(instruction.id) ? instruction.equiv_count : 1;
     contentFingerprint = instruction.fp;
     rule = {
       id: instruction.id,
@@ -1370,10 +1820,8 @@ function resolveTarget(readerOptions, config, checkRef) {
       fail('target_not_found');
     }
     target = `session:${entry.provider}:${entry.sessionId}`;
-    count = parsedSession.items.length;
-    contentFingerprint = computeHmac(config.local_key, snapshotPolicy.canonicalEncode(
-      ['palantir.exclude-session/1', parsedSession.items.map(instruction => [instruction.id, instruction.fp,
-      instruction.ts])]));
+    count = parsedSession.instructionCount;
+    contentFingerprint = parsedSession.sessionFingerprint;
   }
   const token = computeConfirmationToken(readerOptions, config, contentFingerprint, timestamp);
   return {

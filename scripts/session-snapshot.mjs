@@ -41,7 +41,7 @@ function parseArguments(argv, env) {
       if (values[item]) invalidInput();
       values[item] = true;
     } else if (['--host', '--remote-node', '--now', '--out-dir', '--orca-bin',
-      '--instruction', '--session'].includes(item)) {
+      '--instruction', '--session', '--label'].includes(item)) {
       if (Object.hasOwn(values, item) || !args.length) invalidInput();
       values[item] = args.shift();
     } else invalidInput();
@@ -59,13 +59,16 @@ function parseArguments(argv, env) {
   if (values['--now'] !== undefined && !/^\d{4}-\d{2}-\d{2}(?:T.+)?$/.test(values['--now'])) invalidInput();
   const now = values['--now'] === undefined ? new Date() : new Date(values['--now']);
   if (!Number.isFinite(+now) || !/^\d{4}-/.test(now.toISOString())) invalidInput();
+  const label = values['--label'];
+  if (label !== undefined && (!/^[A-Za-z0-9._-]{1,32}$/.test(label) || label.startsWith('-'))) invalidInput();
   const request = { schema: 'palantir.snapshot-request/1', op: 'snapshot', now: now.toISOString(),
     include_exec: values['--include-exec'] === true, orca_bin: values['--orca-bin'] ?? 'orca' };
   const outDir = values['--out-dir'] || env.PALANTIR_OBSERVE_SNAPSHOT_DIR;
   if (operation === 'snapshot') {
     if (!outDir || values['--instruction'] !== undefined || values['--session'] !== undefined) invalidInput();
+    if (label !== undefined) request.machine_label = label;
   } else {
-    if (values['--out-dir'] !== undefined || values['--include-exec']) invalidInput();
+    if (values['--out-dir'] !== undefined || values['--include-exec'] || label !== undefined) invalidInput();
     const instruction = values['--instruction'];
     const session = values['--session'];
     if ((instruction === undefined) === (session === undefined)) invalidInput();

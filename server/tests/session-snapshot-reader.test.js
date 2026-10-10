@@ -137,24 +137,29 @@ function registerInstructionExclusion(testFixture, instruction) {
   }).counts.registered, 1);
   return preview;
 }
-function orcaRunner(worktrees, terminals) {
-  return args => JSON.stringify(args[0] === 'worktree' ? worktrees : terminals);
+function orcaResponse(collection, items, extra = {}) {
+  return { id: 'synthetic-response', ok: true,
+    result: { [collection]: items, totalCount: items.length, truncated: false, ...extra }, _meta: {} };
 }
-function orcaWorktree(prompt, pane = 'p', extra = {}) {
+function orcaRunner(worktrees, terminals) {
+  return args => JSON.stringify(args[0] === 'worktree'
+    ? orcaResponse('worktrees', worktrees) : orcaResponse('terminals', terminals));
+}
+function orcaWorktree(prompt, pane = 'p:leaf', extra = {}) {
   return {
     worktreeId: 'w',
     path: '/sensitive/repo',
     branch: 'main',
     status: 'active',
-    lastActivityAt: RECORD_TIMESTAMP,
-    liveTerminals: 1,
+    lastActivityAt: Date.parse(RECORD_TIMESTAMP),
+    liveTerminalCount: 1,
     agents: [{
       paneKey: pane,
       prompt,
       state: 'running',
       agentType: 'claude',
-      stateStartedAt: RECORD_TIMESTAMP,
-      updatedAt: RECORD_TIMESTAMP,
+      stateStartedAt: Date.parse(RECORD_TIMESTAMP),
+      updatedAt: Date.parse(RECORD_TIMESTAMP),
       ...extra
     }]
   };
@@ -163,10 +168,11 @@ function orcaTerminal(extra = {}) {
   return {
     handle: 'h',
     worktreeId: 'w',
-    paneKey: 'p',
+    tabId: 'p',
+    leafId: 'leaf',
     agentIdentity: 'claude',
     title: 'safe terminal title',
-    lastOutputAt: RECORD_TIMESTAMP,
+    lastOutputAt: Date.parse(RECORD_TIMESTAMP),
     connected: true,
     ...extra
   };
@@ -191,10 +197,10 @@ function installUnknownCwdTitleFixture(testFixture) {
   testFixture.file('claude', 'safe', [claudeUserRecord('abcdefgh', { sessionId: 'T' })]);
   testFixture.options.runOrca = orcaRunner([
     { ...orcaWorktree('WITHHELD_TEXT'), worktreeId: 'unknown', path: '/repo' },
-    orcaWorktree('abcdefgh', 'safe-pane')
+    orcaWorktree('abcdefgh', 'safe-pane:leaf')
   ], [
     orcaTerminal({ worktreeId: 'unknown', handle: 'unknown', title: 'WITHHELD_TEXT' }),
-    orcaTerminal({ paneKey: 'safe-pane', title: 'safe title before withholding' })
+    orcaTerminal({ tabId: 'safe-pane', title: 'safe title before withholding' })
   ]);
 }
 
@@ -273,8 +279,9 @@ test('Claude ordered decision table explicitly protects rows 4,6,7, queue and ti
   const snapshot = snapshotReader.runSnapshot(testFixture.options);
   assert.equal(snapshot.instructions.length, 7);
   assert.deepEqual(snapshot.instructions.map(instruction => instruction.text), [
-    'normal', '/good arg', '<command-name>/not-absent</command-name>',
-    'echo safe', 'pasted safe', 'queued safe', ''
+    'normal', '<command-name>/good</command-name><command-args>arg</command-args>',
+    '<command-name>/not-absent</command-name>',
+    '<bash-input>echo safe</bash-input>', '<pasted>pasted safe</pasted>', 'queued safe', ''
   ]);
   assert.equal(snapshot.instructions[2].kind, 'human');
   assert.equal(snapshot.instructions[6].attachments, 1);
@@ -468,31 +475,32 @@ test('recursive allowlist and every exported string slot is sanitized', testCont
     timestamp: RECORD_TIMESTAMP,
     aiTitle: SECRET_SENTINEL
   }]);
-  testFixture.options.runOrca = args => JSON.stringify(args[0] === 'worktree' ? [{
+  testFixture.options.runOrca = orcaRunner([{
     worktreeId: 'w::/private/' + SECRET_SENTINEL,
     path: '/private/' + SECRET_SENTINEL,
     repoLabel: SECRET_SENTINEL,
     branch: SECRET_SENTINEL,
     status: 'active',
-    lastActivityAt: RECORD_TIMESTAMP,
-    liveTerminals: 1,
+    lastActivityAt: Date.parse(RECORD_TIMESTAMP),
+    liveTerminalCount: 1,
     agents: [{
-      paneKey: 'p',
+      paneKey: 'p:leaf',
       state: 'running',
       agentType: 'claude',
-      stateStartedAt: RECORD_TIMESTAMP,
-      updatedAt: RECORD_TIMESTAMP,
+      stateStartedAt: Date.parse(RECORD_TIMESTAMP),
+      updatedAt: Date.parse(RECORD_TIMESTAMP),
       prompt: 'preserved safe ' + SECRET_SENTINEL,
       displayName: SECRET_SENTINEL,
       toolInput: SECRET_SENTINEL
     }]
-  }] : [{
+  }], [{
     handle: 'h',
     worktreeId: 'w::/private/' + SECRET_SENTINEL,
-    paneKey: 'p',
+    tabId: 'p',
+    leafId: 'leaf',
     agentIdentity: 'claude',
     title: SECRET_SENTINEL,
-    lastOutputAt: RECORD_TIMESTAMP,
+    lastOutputAt: Date.parse(RECORD_TIMESTAMP),
     connected: true,
     preview: SECRET_SENTINEL
   }]);
@@ -505,6 +513,7 @@ test('recursive allowlist and every exported string slot is sanitized', testCont
   });
   assert.equal(snapshot.instructions[0].text, 'preserved safe [REDACTED]');
   assert.equal(snapshot.sessions[0].orca_link.confirmed, true);
+  assert.equal(snapshot.sessions[0].orca_link.evidence, 'prompt_exact');
   assert.equal(JSON.stringify(snapshot).includes(SECRET_SENTINEL), false);
   assert.equal(JSON.stringify(snapshot).includes('/private/'), false);
   const paths = [['machine'], ['coverage', 'orca'], ['sessions', 0], ['instructions', 0], ['orca', 'worktrees',
@@ -820,8 +829,8 @@ test('Orca exact 8/prefix 24 boundaries, normalization, time window and both dir
   testFixture.file('claude', 'a', [claudeUserRecord('abcdefgh')]);
   for (const [when, want] of [['2026-10-08T02:10:00.000Z', true], ['2026-10-08T02:10:00.001Z', false],
     ['2026-10-08T01:59:59.999Z', false]]) {
-    testFixture.options.runOrca = orcaRunner([orcaWorktree('abcdefgh', 'p', {
-      stateStartedAt: when
+    testFixture.options.runOrca = orcaRunner([orcaWorktree('abcdefgh', 'p:leaf', {
+      stateStartedAt: Date.parse(when)
     })], [orcaTerminal()]);
     assert.equal(snapshotReader.runSnapshot(testFixture.options).sessions[0].orca_link.confirmed, want);
   }
@@ -836,7 +845,7 @@ test('Orca exact 8/prefix 24 boundaries, normalization, time window and both dir
   const worktree = orcaWorktree('abcdefgh');
   worktree.agents.push({
     ...worktree.agents[0],
-    paneKey: 'second'
+    paneKey: 'second:leaf'
   });
   testFixture.options.runOrca = orcaRunner([worktree], [orcaTerminal()]);
   snapshot = snapshotReader.runSnapshot(testFixture.options);
@@ -1044,7 +1053,7 @@ test("reader uses exactly the two injected Orca calls, performs no process spawn
   testFixture.file('claude', 'a', [claudeUserRecord('abcdefgh')]);
   testFixture.options.runOrca = args => {
     calls.push(args);
-    return JSON.stringify(args[0] === 'worktree' ? [orcaWorktree('abcdefgh')] : [orcaTerminal()]);
+    return orcaRunner([orcaWorktree('abcdefgh')], [orcaTerminal()])(args);
   };
   const child = require('node:child_process');
   const saved = {};
@@ -1249,13 +1258,13 @@ test('review 2 excluded old and missing transcripts cannot reexport Orca termina
     worktreeId: 'old-worktree',
     path: '/old/repo'
   };
-  oldWorktree.agents[0].paneKey = 'old-pane';
+  oldWorktree.agents[0].paneKey = 'old-pane:leaf';
   testFixture.options.runOrca = orcaRunner(
     [orcaWorktree('abcdefgh'), oldWorktree],
     [orcaTerminal(), orcaTerminal({
       handle: 'old-terminal',
       worktreeId: 'old-worktree',
-      paneKey: 'old-pane',
+      tabId: 'old-pane',
       title: 'excluded old text'
     })]
   );
@@ -1522,11 +1531,11 @@ test('R2 4 withheld multi-file sessions omit terminal titles at every file cwd',
   testFixture.options.runOrca = orcaRunner([
     { ...orcaWorktree('A'), worktreeId: 'public', path: '/work/public' },
     { ...orcaWorktree('B'), worktreeId: 'private', path: '/work/private' },
-    orcaWorktree('abcdefgh', 'safe-pane')
+    orcaWorktree('abcdefgh', 'safe-pane:leaf')
   ], [
     orcaTerminal({ worktreeId: 'public', handle: 'public', title: 'A original title' }),
     orcaTerminal({ worktreeId: 'private', handle: 'private', title: 'B original title' }),
-    orcaTerminal({ paneKey: 'safe-pane', title: 'safe preserved title' })
+    orcaTerminal({ tabId: 'safe-pane', title: 'safe preserved title' })
   ]);
   const snapshot = snapshotReader.runSnapshot(testFixture.options);
   assert.equal(snapshot.instructions.length, 1);
@@ -1665,7 +1674,7 @@ for (const direction of ['real-prefix', 'alias-prefix']) {
     })]);
     fixture.options.runOrca = orcaRunner([
       { ...orcaWorktree('excluded'), path: targetCwd },
-      { ...orcaWorktree('preserved', 'safe-pane'), worktreeId: 'safe-tree', path: boundaryCwd }
+      { ...orcaWorktree('preserved', 'safe-pane:leaf'), worktreeId: 'safe-tree', path: boundaryCwd }
     ], [orcaTerminal(), orcaTerminal({ handle: 'safe-handle', worktreeId: 'safe-tree' })]);
     const before = snapshotReader.runSnapshot(fixture.options);
     assert.equal(before.instructions.length, 3);
@@ -1827,7 +1836,7 @@ test('R7 Orca INT overflow rejects only that worktree and reports partial covera
   fixture.file('claude', 'safe', [claudeUserRecord('preserved')]);
   fixture.options.runOrca = orcaRunner([
     { ...orcaWorktree('preserved'), worktreeId: 'safe' },
-    { ...orcaWorktree('bad'), worktreeId: 'bad', liveTerminals: 1000000001 }
+    { ...orcaWorktree('bad'), worktreeId: 'bad', liveTerminalCount: 1000000001 }
   ], [orcaTerminal({ worktreeId: 'safe' }), orcaTerminal({ handle: 'bad', worktreeId: 'bad' })]);
   const snapshot = snapshotReader.runSnapshot(fixture.options);
   assert.equal(snapshot.instructions.length, 1);
@@ -1898,7 +1907,7 @@ test('R7 seeded 200 mixed transcript and Orca inputs preserve all four normal in
     fixture.file('codex', 'affected', codexRecords);
     fixture.file('codex', 'normal', [codexSessionMeta({ id: 'normalcodex' }), codexMessage('D'), codexMessage('F')]);
     const badWorktree = { ...orcaWorktree('bad'), worktreeId: 'bad' };
-    const worktreeField = ['liveTerminals', 'lastActivityAt', 'worktreeId', 'path'][nextRandom() % 4];
+    const worktreeField = ['liveTerminalCount', 'lastActivityAt', 'worktreeId', 'path'][nextRandom() % 4];
     badWorktree[worktreeField] = randomValue();
     const badAgent = { ...orcaWorktree('bad').agents[0], paneKey: randomValue(), updatedAt: randomValue() };
     badWorktree.agents.push(badAgent);
@@ -2160,4 +2169,1927 @@ test('R9 files with only absent timestamps count user candidates without TIME wi
   assert.equal(snapshot.coverage.claude.invalid_time_withheld, 0);
   assert.equal(snapshot.coverage.codex.invalid_time_withheld, 0);
   assert.equal(snapshotPolicy.validateSnapshot(snapshot).ok, true);
+});
+
+const OLD_RECORD_TIMESTAMP = '2026-09-01T02:00:00.000Z';
+
+function setTranscriptMtime(file, timestamp) {
+  const time = new Date(timestamp);
+  fs.utimesSync(file, time, time);
+}
+
+function installMemoryEquivalenceFixture(testContext) {
+  const fixture = createFixture(testContext);
+  const oldClaude = fixture.file('claude', 'a-old', [
+    claudeUserRecord('old Claude', { sessionId: 'old', timestamp: OLD_RECORD_TIMESTAMP })
+  ]);
+  const oldClaudeMulti = fixture.file('claude', 'b-multi-old', [
+    claudeUserRecord('old ambiguous Claude', { sessionId: 'multi', timestamp: OLD_RECORD_TIMESTAMP })
+  ]);
+  fixture.file('claude', 'c-multi-new', [claudeUserRecord('new ambiguous Claude', { sessionId: 'multi' })]);
+  fixture.file('claude', 'd-keep', [
+    claudeUserRecord('first Claude', { sessionId: 'keep', uuid: 'first', timestamp: OLD_RECORD_TIMESTAMP }),
+    claudeUserRecord('deleted Claude', { sessionId: 'keep', uuid: 'deleted' }),
+    claudeUserRecord('last Claude', { sessionId: 'keep', uuid: 'last' }),
+    claudeUserRecord('unknown Claude', { sessionId: 'keep', uuid: 'unknown', origin: undefined }),
+    { type: 'queue-operation', timestamp: RECORD_TIMESTAMP, operation: 'enqueued' },
+    { type: 'queue-operation', timestamp: RECORD_TIMESTAMP, operation: 'dequeued' },
+    { type: 'queue-operation', timestamp: RECORD_TIMESTAMP, operation: 'removed' },
+    { type: 'ai-title', timestamp: RECORD_TIMESTAMP, aiTitle: 'fixture title' },
+    null
+  ]);
+  fixture.file('claude', 'e-excluded', [claudeUserRecord('excluded Claude', { sessionId: 'excluded' })]);
+  const oldCodex = fixture.file('codex', 'a-old', [
+    { ...codexSessionMeta({ id: 'old' }), timestamp: OLD_RECORD_TIMESTAMP },
+    { ...codexMessage('old Codex'), timestamp: OLD_RECORD_TIMESTAMP }
+  ]);
+  const oldCodexMulti = fixture.file('codex', 'b-multi-old', [
+    { ...codexSessionMeta({ id: 'multi' }), timestamp: OLD_RECORD_TIMESTAMP },
+    { ...codexMessage('old ambiguous Codex'), timestamp: OLD_RECORD_TIMESTAMP }
+  ]);
+  fixture.file('codex', 'c-multi-new', [codexSessionMeta({ id: 'multi' }), codexMessage('new ambiguous Codex')]);
+  fixture.file('codex', 'd-keep', [
+    codexSessionMeta({ id: 'keep' }),
+    codexMessage('deleted Codex'),
+    codexMessage('kept Codex', { id: 'kept' }),
+    codexMessage('<environment_context>injected'),
+    codexMessage('<unknown>unknown'),
+    { type: 'compacted', timestamp: RECORD_TIMESTAMP, payload: { replacement_history: [codexMessage('copy')] } }
+  ]);
+  fixture.file('codex', 'e-exec', [codexSessionMeta({ id: 'exec', source: 'exec' }), codexMessage('exec')]);
+  fixture.file('codex', 'f-excluded', [codexSessionMeta({ id: 'excluded' }), codexMessage('excluded Codex')]);
+  for (const file of [oldClaude, oldClaudeMulti, oldCodex, oldCodexMulti]) {
+    setTranscriptMtime(file, OLD_RECORD_TIMESTAMP);
+  }
+  snapshotReader.loadConfig(fixture.options);
+  const config = fixture.config();
+  config.machine_id = 'fixture-machine';
+  config.path_salt = 'fixture-salt';
+  config.local_key = 'a'.repeat(64);
+  config.key_fingerprint = crypto.createHash('sha256').update(config.local_key).digest('hex');
+  config.exclude.sessions = ['claude:excluded', 'codex:excluded'];
+  const structure = [['text', 'deleted Codex'], ['attachments', 0]];
+  const encoded = snapshotPolicy.canonicalEncode(['palantir.instruction-fingerprint/1', structure]);
+  config.exclude.instructions = [
+    { id: 'claude:keep:udeleted' },
+    {
+      id: 'codex:keep:n1',
+      fingerprint: crypto.createHmac('sha256', config.local_key).update(encoded).digest('hex'),
+      key_fingerprint: config.key_fingerprint
+    }
+  ];
+  fixture.save(config);
+  return fixture;
+}
+
+test('PR1c fixed pre-change bytes preserve window, whole sessions, exclusions and coverage', testContext => {
+  const fixture = installMemoryEquivalenceFixture(testContext);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.sessions.length, 2);
+  assert.deepEqual(snapshot.sessions.map(session => `${session.provider}:${session.session_id}`), [
+    'claude:keep', 'codex:keep'
+  ]);
+  assert.deepEqual(snapshot.instructions.map(instruction => instruction.text), [
+    'first Claude', 'last Claude', 'kept Codex'
+  ]);
+  assert.deepEqual(snapshot.coverage, {
+    claude: {
+      files_scanned: 5, files_skipped: 1, files_failed: 0, records_unknown: 1, records_unverified: 1,
+      excluded_sessions: 1, deleted_instructions: 1, queued_enqueued: 1, queued_dequeued: 1, queued_removed: 1,
+      multi_file_withheld: 1, mixed_session_withheld: 0, invalid_time_withheld: 0
+    },
+    codex: {
+      files_scanned: 6, files_failed: 0, exec_sessions_excluded: 1, subagent_excluded: 0,
+      unsupported_sessions: 0, records_unknown: 1, records_unverified: 0, withheld_sessions: 0,
+      content_rule_excluded: 1, excluded_sessions: 1, deleted_instructions: 1,
+      multi_file_withheld: 1, mixed_session_withheld: 0, invalid_time_withheld: 0
+    },
+    orca: { state: 'unavailable', code: 'orca_unavailable' }
+  });
+  // Spec §1.4 / §3: freeze the complete serialized pre-change output, including order and refs.
+  const digest = crypto.createHash('sha256').update(JSON.stringify(snapshot)).digest('hex');
+  assert.equal(digest, 'feea4682e9e7a23f8342acdec8c1aca5979a691394d838baa14e1fbca4a6c569');
+});
+
+function trackTranscriptReads(testContext, file) {
+  const originalOpen = fs.openSync;
+  const originalClose = fs.closeSync;
+  const originalRead = fs.readSync;
+  const originalReadFile = fs.readFileSync;
+  const descriptors = new Set();
+  const totals = { bytes: 0, fullReads: 0 };
+  testContext.mock.method(fs, 'openSync', function trackOpen(filePath, ...args) {
+    const descriptor = originalOpen(filePath, ...args);
+    if (filePath === file) {
+      descriptors.add(descriptor);
+    }
+    return descriptor;
+  });
+  testContext.mock.method(fs, 'closeSync', function trackClose(descriptor) {
+    descriptors.delete(descriptor);
+    return originalClose(descriptor);
+  });
+  testContext.mock.method(fs, 'readSync', function trackRead(descriptor, ...args) {
+    const count = originalRead(descriptor, ...args);
+    if (descriptors.has(descriptor)) {
+      totals.bytes += count;
+      if (args[1] === 0 && args[3] === 0
+        && (args[0].length > 64 * 1024 || args[0].length === fs.fstatSync(descriptor).size + 1)) {
+        totals.fullReads++;
+      }
+    }
+    return count;
+  });
+  testContext.mock.method(fs, 'readFileSync', function trackReadFile(filePath, ...args) {
+    const data = originalReadFile(filePath, ...args);
+    if (filePath === file || descriptors.has(filePath)) {
+      totals.bytes += Buffer.byteLength(data);
+      totals.fullReads++;
+    }
+    return data;
+  });
+  return totals;
+}
+
+for (const provider of ['claude', 'codex']) {
+  test(`PR1c ${provider} old files read at most 128KB; recent and future mtimes read fully`, testContext => {
+    const fixture = createFixture(testContext);
+    const rows = provider === 'claude' ? [
+      claudeUserRecord('old instruction', { timestamp: OLD_RECORD_TIMESTAMP })
+    ] : [
+      { ...codexSessionMeta(), timestamp: OLD_RECORD_TIMESTAMP },
+      { ...codexMessage('old instruction'), timestamp: OLD_RECORD_TIMESTAMP }
+    ];
+    const file = fixture.file(provider, 'large', [
+      ...rows,
+      { type: 'assistant', timestamp: OLD_RECORD_TIMESTAMP, padding: 'x'.repeat(4 * 1024 * 1024) },
+      { type: 'assistant', timestamp: OLD_RECORD_TIMESTAMP }
+    ]);
+    const size = fs.statSync(file).size;
+    assert.ok(size > 4 * 1024 * 1024);
+    const totals = trackTranscriptReads(testContext, file);
+    const boundary = +SNAPSHOT_TIME - 14 * 86400000;
+    setTranscriptMtime(file, new Date(boundary - 1));
+    const old = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(old.sessions.length, 0);
+    assert.ok(totals.bytes > 0);
+    assert.ok(totals.bytes <= 128 * 1024);
+    assert.equal(totals.fullReads, 0);
+    assert.equal(old.coverage[provider].files_scanned, 1);
+    if (provider === 'claude') {
+      assert.equal(old.coverage.claude.files_skipped, 1);
+    }
+    for (const mtime of [new Date(boundary), SNAPSHOT_TIME, new Date(+SNAPSHOT_TIME + 86400000)]) {
+      setTranscriptMtime(file, mtime);
+      totals.bytes = 0;
+      totals.fullReads = 0;
+      const recent = snapshotReader.runSnapshot(fixture.options);
+      assert.equal(recent.sessions.length, 0);
+      assert.equal(totals.bytes, size);
+      assert.equal(totals.fullReads, 1);
+      assert.deepEqual(recent, old);
+    }
+  });
+
+  test(`PR1c ${provider} old identity participates in whole-session multi-file withholding`, testContext => {
+    const fixture = createFixture(testContext);
+    const rows = provider === 'claude' ? [
+      claudeUserRecord('old', { timestamp: OLD_RECORD_TIMESTAMP })
+    ] : [
+      { ...codexSessionMeta(), timestamp: OLD_RECORD_TIMESTAMP },
+      { ...codexMessage('old'), timestamp: OLD_RECORD_TIMESTAMP }
+    ];
+    const oldFile = fixture.file(provider, 'a-old', rows);
+    setTranscriptMtime(oldFile, OLD_RECORD_TIMESTAMP);
+    const recentFile = fixture.file(provider, 'b-recent', provider === 'claude'
+      ? [claudeUserRecord('recent')] : [codexSessionMeta(), codexMessage('recent')]);
+    const withheld = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(withheld.coverage[provider].files_scanned, 2);
+    assert.equal(withheld.coverage[provider].multi_file_withheld, 1);
+    assert.equal(withheld.sessions.length, 0);
+    assert.equal(withheld.instructions.length, 0);
+    if (provider === 'claude') {
+      assert.equal(withheld.coverage.claude.files_skipped, 0);
+    }
+    fs.unlinkSync(recentFile);
+    const oldOnly = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(oldOnly.coverage[provider].multi_file_withheld, 0);
+    fs.unlinkSync(oldFile);
+    fixture.file(provider, 'recent-only', provider === 'claude'
+      ? [claudeUserRecord('recent')] : [codexSessionMeta(), codexMessage('recent')]);
+    const recentOnly = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(recentOnly.sessions.length, 1);
+    assert.equal(recentOnly.instructions[0].text, 'recent');
+  });
+}
+
+function loadReaderWithInternals() {
+  const Module = require('node:module');
+  const filename = require.resolve('../../scripts/lib/sessionSnapshotReader.cjs');
+  const loaded = new Module(filename, module);
+  loaded.filename = filename;
+  const source = fs.readFileSync(filename, 'utf8');
+  loaded._compile(source + '\nmodule.exports.testInternals = '
+    + '{ listFiles, summarizeTranscriptFile, groupTranscriptFiles, parseFile, '
+    + 'computeInstructionFingerprint, computeInstructionRef, buildSnapshotInstruction, scanSessions };', filename);
+  return loaded.exports.testInternals;
+}
+
+function assertNoOriginalRecords(value) {
+  if (!value || typeof value !== 'object') {
+    return;
+  }
+  if (value instanceof Map) {
+    for (const entry of value.values()) {
+      assertNoOriginalRecords(entry);
+    }
+    return;
+  }
+  assert.equal(Object.hasOwn(value, 'records'), false);
+  for (const entry of Object.values(value)) {
+    assertNoOriginalRecords(entry);
+  }
+}
+
+test('PR1c metadata and grouped parse results retain no original record arrays or assistant payloads', testContext => {
+  const fixture = createFixture(testContext);
+  const rawSentinel = 'RAW_ASSISTANT_PAYLOAD_' + 'z'.repeat(1024 * 1024);
+  for (let index = 0; index < 4; index++) {
+    fixture.file('claude', `file-${index}`, [
+      claudeUserRecord(`instruction ${index}`, { sessionId: `session-${index}` }),
+      { type: 'assistant', timestamp: RECORD_TIMESTAMP, message: { content: rawSentinel } }
+    ]);
+  }
+  const internals = loadReaderWithInternals();
+  const coverage = Object.fromEntries(snapshotPolicy.COVERAGE_KEYS.claude.map(key => [key, 0]));
+  const files = internals.listFiles(path.join(fixture.options.homeDir, '.claude/projects'), coverage,
+    { entries: 0, files: 0 });
+  assert.equal(files.length, 4);
+  assert.equal(coverage.files_scanned, 0);
+  const groups = new Map();
+  for (const file of files) {
+    assertNoOriginalRecords(file);
+    assert.equal(file.stats.isFile(), true);
+    const summary = internals.summarizeTranscriptFile('claude', file, coverage,
+      +SNAPSHOT_TIME - 14 * 86400000);
+    assert.equal(summary.session.items.length, 1);
+    internals.groupTranscriptFiles(groups, 'claude', summary);
+    assertNoOriginalRecords(groups);
+    for (const group of groups.values()) {
+      for (const stored of group.files.values()) {
+        assert.equal(JSON.stringify(stored).includes('RAW_ASSISTANT_PAYLOAD_'), false);
+      }
+    }
+  }
+  assert.equal(groups.size, 4);
+  assert.equal(coverage.files_scanned, 4);
+  assert.equal(coverage.records_unverified, 0);
+});
+
+for (const provider of ['claude', 'codex']) {
+  test(`PR1c ${provider} identity prefix uses complete records and the original identity precedence`, testContext => {
+    const fixture = createFixture(testContext);
+    const internals = loadReaderWithInternals();
+    const identity = provider === 'claude'
+      ? claudeUserRecord('old', { timestamp: OLD_RECORD_TIMESTAMP })
+      : { ...codexSessionMeta(), timestamp: OLD_RECORD_TIMESTAMP };
+    const file = fixture.file(provider, 'old', [null, { type: 'assistant' }, identity]);
+    setTranscriptMtime(file, OLD_RECORD_TIMESTAMP);
+    const coverage = Object.fromEntries(snapshotPolicy.COVERAGE_KEYS[provider].map(key => [key, 0]));
+    function summarizeOldFile() {
+      return internals.summarizeTranscriptFile(provider, { file, stats: fs.lstatSync(file) }, coverage,
+        +SNAPSHOT_TIME - 14 * 86400000);
+    }
+    const originalRead = fs.readSync;
+    testContext.mock.method(fs, 'readSync', function readShortChunk(descriptor, buffer, offset, length, position) {
+      return originalRead(descriptor, buffer, offset, Math.min(length, 17), position);
+    });
+    const short = summarizeOldFile();
+    assert.equal(short.sessionId, 's');
+    assert.equal(short.outsideWindow, true);
+    assert.equal(Object.hasOwn(short, 'session'), false);
+    // Spec §1.4: an unfinished prefix record needs the bounded full-file identity fallback.
+    fs.writeFileSync(file, JSON.stringify({ type: 'assistant', padding: 'x'.repeat(64 * 1024) })
+      + '\n' + JSON.stringify(identity));
+    setTranscriptMtime(file, OLD_RECORD_TIMESTAMP);
+    assert.equal(summarizeOldFile().sessionId, 's');
+    if (provider === 'codex') {
+      fs.writeFileSync(file, [
+        JSON.stringify(codexSessionMeta({ id: 'invalid/id' })), JSON.stringify(identity)
+      ].join('\n'));
+      setTranscriptMtime(file, OLD_RECORD_TIMESTAMP);
+      assert.equal(summarizeOldFile().sessionId, 'invalid/id');
+    }
+    assert.equal(coverage.files_failed, 0);
+    assert.equal(coverage.records_unknown, 0);
+    assert.equal(coverage.records_unverified, 0);
+  });
+}
+
+test('PR1c deferred reads still reject changed inodes and symlink replacements before reading', testContext => {
+  const fixture = createFixture(testContext);
+  const file = fixture.file('claude', 'original', [claudeUserRecord('original')]);
+  const internals = loadReaderWithInternals();
+  const coverage = Object.fromEntries(snapshotPolicy.COVERAGE_KEYS.claude.map(key => [key, 0]));
+  const metadata = internals.listFiles(path.dirname(file), coverage, { entries: 0, files: 0 });
+  assert.equal(metadata.length, 1);
+  const renamed = file + '.renamed';
+  fs.renameSync(file, renamed);
+  fs.writeFileSync(file, JSON.stringify(claudeUserRecord('replacement')));
+  const totals = trackTranscriptReads(testContext, file);
+  const boundary = +SNAPSHOT_TIME - 14 * 86400000;
+  assert.equal(internals.summarizeTranscriptFile('claude', metadata[0], coverage, boundary), null);
+  fs.unlinkSync(file);
+  fs.symlinkSync(renamed, file);
+  assert.equal(internals.summarizeTranscriptFile('claude', metadata[0], coverage, boundary), null);
+  assert.equal(coverage.files_failed, 2);
+  assert.equal(coverage.files_scanned, 0);
+  assert.equal(totals.bytes, 0);
+});
+
+for (const provider of ['claude', 'codex']) {
+  test(`PR1c C ${provider} old files recover late identities without parsing content coverage`, testContext => {
+    const fixture = createFixture(testContext);
+    const anonymous = Array.from({ length: 1100 }, function anonymousRecord() {
+      return { type: 'assistant', timestamp: OLD_RECORD_TIMESTAMP, padding: 'x'.repeat(80) };
+    });
+    const identity = provider === 'claude'
+      ? claudeUserRecord('unknown old', { timestamp: OLD_RECORD_TIMESTAMP, origin: undefined })
+      : { ...codexSessionMeta(), timestamp: OLD_RECORD_TIMESTAMP };
+    const old = fixture.file(provider, 'a-old', [...anonymous, identity]);
+    setTranscriptMtime(old, OLD_RECORD_TIMESTAMP);
+    assert.ok(fs.statSync(old).size > 64 * 1024);
+    fixture.file(provider, 'b-new', provider === 'claude'
+      ? [claudeUserRecord('main')] : [codexSessionMeta(), codexMessage('main')]);
+    const totals = trackTranscriptReads(testContext, old);
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(snapshot.coverage[provider].multi_file_withheld, 1);
+    assert.equal(snapshot.sessions.length, 0);
+    assert.equal(snapshot.instructions.length, 0);
+    assert.equal(totals.fullReads, 1);
+    assert.equal(totals.bytes, 128 * 1024 + fs.statSync(old).size);
+    assert.equal(snapshot.coverage[provider].records_unknown, 0);
+    assert.equal(snapshot.coverage[provider].records_unverified, 0);
+  });
+}
+
+test('PR1c C old unknown records do not contribute observed content coverage', testContext => {
+  const fixture = createFixture(testContext);
+  const old = fixture.file('claude', 'old', [
+    claudeUserRecord('unknown', { timestamp: OLD_RECORD_TIMESTAMP, origin: undefined })
+  ]);
+  setTranscriptMtime(old, SNAPSHOT_TIME);
+  assert.equal(snapshotReader.runSnapshot(fixture.options).coverage.claude.records_unknown, 1);
+  setTranscriptMtime(old, OLD_RECORD_TIMESTAMP);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.coverage.claude.files_scanned, 1);
+  assert.equal(snapshot.coverage.claude.files_skipped, 1);
+  assert.equal(snapshot.coverage.claude.records_unknown, 0);
+});
+
+for (const old of [false, true]) {
+  test(`PR1c A pure Claude subagent files are skipped with old=${old}`, testContext => {
+    const fixture = createFixture(testContext);
+    fixture.file('claude', 'project/s', [claudeUserRecord('main one'), claudeUserRecord('main two', { uuid: 'v' })]);
+    const timestamp = old ? OLD_RECORD_TIMESTAMP : RECORD_TIMESTAMP;
+    const sidechain = fixture.file('claude', 'project/s/subagents/agent-x', [
+      claudeUserRecord('subagent', { isSidechain: true, agentId: 'x', timestamp }),
+      { type: 'assistant', isSidechain: true, sessionId: 's', timestamp }
+    ]);
+    if (old) setTranscriptMtime(sidechain, OLD_RECORD_TIMESTAMP);
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(snapshot.coverage.claude.files_scanned, 2);
+    assert.equal(snapshot.coverage.claude.files_skipped, 1);
+    assert.equal(snapshot.coverage.claude.multi_file_withheld, 0);
+    assert.equal(snapshot.sessions.length, 1);
+    assert.equal(snapshot.sessions[0].instruction_count, 2);
+    assert.deepEqual(snapshot.instructions.map(instruction => instruction.text), ['main one', 'main two']);
+  });
+}
+
+for (const scenario of ['mixed', 'outside-directory', 'similar-directory', 'non-boolean']) {
+  test(`PR1c A ${scenario} Claude files still participate in grouping`, testContext => {
+    const fixture = createFixture(testContext);
+    fixture.file('claude', 'project/s', [claudeUserRecord('main')]);
+    const folder = scenario === 'outside-directory' ? 'other'
+      : scenario === 'similar-directory' ? 'subagents-extra' : 'subagents';
+    const rows = [claudeUserRecord('sidechain', { isSidechain: scenario === 'non-boolean' ? 'true' : true })];
+    if (scenario === 'mixed') rows.push({ type: 'assistant', sessionId: 's', timestamp: RECORD_TIMESTAMP });
+    fixture.file('claude', `project/s/${folder}/agent-x`, rows);
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(snapshot.coverage.claude.multi_file_withheld, 1);
+    assert.equal(snapshot.coverage.claude.files_skipped, 0);
+    assert.equal(snapshot.sessions.length, 0);
+  });
+}
+
+function trackConfigMutations(testContext, configDir) {
+  const totals = { operations: 0 };
+  for (const name of ['writeFileSync', 'renameSync', 'mkdirSync', 'unlinkSync', 'openSync']) {
+    const original = fs[name];
+    testContext.mock.method(fs, name, function countConfigMutation(target, ...args) {
+      const writing = name !== 'openSync'
+        || (args[0] & (fs.constants.O_WRONLY | fs.constants.O_RDWR)) !== 0;
+      if (writing && typeof target === 'string' && target.startsWith(configDir)) totals.operations++;
+      return original(target, ...args);
+    });
+  }
+  return totals;
+}
+
+test('PR1c B reader labels initialize once and update only the label; no-op snapshots write zero', testContext => {
+  const fixture = createFixture(testContext);
+  fixture.file('claude', 'main', [claudeUserRecord('main')]);
+  const options = { ...fixture.options, machineLabel: 'Mac' };
+  const totals = trackConfigMutations(testContext, fixture.options.configDir);
+  assert.equal(snapshotReader.runSnapshot(options).machine.label, 'Mac');
+  assert.ok(totals.operations > 0);
+  const before = fixture.config();
+  totals.operations = 0;
+  assert.equal(snapshotReader.runSnapshot({ ...options, machineLabel: 'codev2' }).machine.label, 'codev2');
+  assert.ok(totals.operations > 0);
+  const updated = fixture.config();
+  updated.machine_label = before.machine_label;
+  assert.equal(JSON.stringify(updated), JSON.stringify(before));
+  for (const labelOptions of [{ ...options, machineLabel: 'codev2' }, fixture.options]) {
+    totals.operations = 0;
+    const bytes = fs.readFileSync(path.join(fixture.options.configDir, 'observe.json'));
+    assert.equal(snapshotReader.runSnapshot(labelOptions).machine.label, 'codev2');
+    assert.equal(totals.operations, 0);
+    assert.deepEqual(fs.readFileSync(path.join(fixture.options.configDir, 'observe.json')), bytes);
+  }
+});
+
+test('PR1c B label updates reread latest config under lock and preserve concurrent exclusion changes', testContext => {
+  const fixture = createFixture(testContext);
+  snapshotReader.loadConfig(fixture.options);
+  const latest = fixture.config();
+  latest.path_gen = 3;
+  latest.exclude.sessions.push('claude:other');
+  const originalOpen = fs.openSync;
+  let locks = 0;
+  testContext.mock.method(fs, 'openSync', function updateBeforeLock(file, ...args) {
+    if (file === path.join(fixture.options.configDir, 'observe.json.lock')) {
+      locks++;
+      fixture.save(latest);
+    }
+    return originalOpen(file, ...args);
+  });
+  const snapshot = snapshotReader.runSnapshot({ ...fixture.options, machineLabel: 'codev2' });
+  assert.equal(locks, 1);
+  assert.equal(snapshot.machine.label, 'codev2');
+  const updated = fixture.config();
+  updated.machine_label = latest.machine_label;
+  assert.equal(JSON.stringify(updated), JSON.stringify(latest));
+});
+
+test('PR1c B label updates respect busy locks and never repair unavailable keys', testContext => {
+  const fixture = createFixture(testContext);
+  snapshotReader.loadConfig(fixture.options);
+  const options = { ...fixture.options, machineLabel: 'codev2' };
+  const file = path.join(fixture.options.configDir, 'observe.json');
+  fs.writeFileSync(file + '.lock', '');
+  const before = fs.readFileSync(file);
+  assertReaderError(() => snapshotReader.runSnapshot(options), 'config_busy');
+  assert.deepEqual(fs.readFileSync(file), before);
+  fs.unlinkSync(file + '.lock');
+  const config = fixture.config();
+  delete config.local_key;
+  fixture.save(config);
+  const broken = fs.readFileSync(file);
+  const totals = trackConfigMutations(testContext, fixture.options.configDir);
+  assertReaderError(() => snapshotReader.runSnapshot(options), 'key_unavailable');
+  assert.equal(totals.operations, 0);
+  assert.deepEqual(fs.readFileSync(file), broken);
+});
+
+for (const missing of ['file', 'key']) {
+  test(`PR1c B label update refuses a missing ${missing} discovered after acquiring the lock`, testContext => {
+    const fixture = createFixture(testContext);
+    snapshotReader.loadConfig(fixture.options);
+    const file = path.join(fixture.options.configDir, 'observe.json');
+    const changed = fixture.config();
+    delete changed.local_key;
+    const originalOpen = fs.openSync;
+    let locks = 0;
+    testContext.mock.method(fs, 'openSync', function removeConfigBeforeLock(target, ...args) {
+      if (target === file + '.lock') {
+        locks++;
+        if (missing === 'file') fs.unlinkSync(file);
+        else fixture.save(changed);
+      }
+      return originalOpen(target, ...args);
+    });
+    assertReaderError(() => snapshotReader.runSnapshot({ ...fixture.options, machineLabel: 'codev2' }),
+      'key_unavailable');
+    assert.equal(locks, 1);
+    assert.equal(fs.existsSync(file + '.lock'), false);
+    if (missing === 'file') assert.equal(fs.existsSync(file), false);
+    else assert.equal(JSON.stringify(fixture.config()), JSON.stringify(changed));
+  });
+}
+
+const ORCA_TEXT_SENTINEL = 'ORCA_PRIVATE_TEXT_SENTINEL';
+
+function installActualOrcaFixture(testContext) {
+  const fixture = createFixture(testContext);
+  fixture.file('claude', 'main', [claudeUserRecord('abcdefgh')]);
+  const worktree = {
+    ...orcaWorktree('abcdefgh', 'synthetic-tab:synthetic-leaf'),
+    worktreeId: 'synthetic-tree::/sensitive/repo', liveTerminalCount: 3,
+    displayName: ORCA_TEXT_SENTINEL, comment: ORCA_TEXT_SENTINEL, preview: ORCA_TEXT_SENTINEL,
+    title: ORCA_TEXT_SENTINEL, prompt: ORCA_TEXT_SENTINEL, taskTitle: ORCA_TEXT_SENTINEL
+  };
+  Object.assign(worktree.agents[0], {
+    updatedAt: Date.parse(RECORD_TIMESTAMP) + 123,
+    displayName: ORCA_TEXT_SENTINEL, taskTitle: ORCA_TEXT_SENTINEL, title: ORCA_TEXT_SENTINEL,
+    preview: ORCA_TEXT_SENTINEL, lastAssistantMessage: ORCA_TEXT_SENTINEL,
+    toolName: ORCA_TEXT_SENTINEL, toolInput: { content: ORCA_TEXT_SENTINEL }
+  });
+  const other = { ...orcaWorktree(ORCA_TEXT_SENTINEL, 'other-tab:other-leaf'),
+    worktreeId: 'other-tree::/other/repo', path: '/other/repo' };
+  const terminal = orcaTerminal({ worktreeId: worktree.worktreeId,
+    tabId: 'synthetic-tab', leafId: 'synthetic-leaf', handle: 'term_synthetic',
+    title: ORCA_TEXT_SENTINEL, preview: ORCA_TEXT_SENTINEL, displayName: ORCA_TEXT_SENTINEL,
+    comment: ORCA_TEXT_SENTINEL, lastAssistantMessage: ORCA_TEXT_SENTINEL,
+    prompt: ORCA_TEXT_SENTINEL, taskTitle: ORCA_TEXT_SENTINEL, toolInput: ORCA_TEXT_SENTINEL });
+  const responses = {
+    worktree: orcaResponse('worktrees', [worktree, other]),
+    terminal: orcaResponse('terminals', [terminal, orcaTerminal({ worktreeId: other.worktreeId,
+      tabId: 'other-tab', leafId: 'other-leaf', handle: 'term_other' })])
+  };
+  responses.worktree.result.hostScope = { private: ORCA_TEXT_SENTINEL };
+  responses.terminal.result.topologyRevisions = { private: ORCA_TEXT_SENTINEL };
+  responses.worktree._meta = { private: ORCA_TEXT_SENTINEL };
+  fixture.options.runOrca = args => JSON.stringify(responses[args[0]]);
+  return { fixture, responses };
+}
+
+function assertActualOrcaSnapshot(snapshot) {
+  assert.deepEqual(snapshot.coverage.orca, { state: 'ok', code: null });
+  assert.equal(snapshot.orca.worktrees.length, 2);
+  assert.equal(snapshot.orca.terminals.length, 2);
+  const worktree = snapshot.orca.worktrees[0];
+  assert.equal(worktree.live_terminals, 3);
+  assert.equal(worktree.last_activity_at, RECORD_TIMESTAMP);
+  assert.equal(worktree.agents[0].state_started_at, RECORD_TIMESTAMP);
+  assert.equal(worktree.agents[0].updated_at, '2026-10-08T02:00:00.123Z');
+  assert.equal(snapshot.orca.terminals[0].last_output_at, RECORD_TIMESTAMP);
+  assert.deepEqual(snapshot.sessions[0].orca_link, {
+    evidence: 'prompt_exact', confirmed: true,
+    pane_key: 'synthetic-tab:synthetic-leaf', terminal_handle: 'term_synthetic'
+  });
+  assert.deepEqual(Object.keys(worktree).sort(), [
+    'agents', 'branch', 'last_activity_at', 'live_terminals', 'path_id', 'repo_label', 'status', 'worktree_id'
+  ]);
+  assert.deepEqual(Object.keys(worktree.agents[0]).sort(), [
+    'agent_type', 'interrupted', 'pane_key', 'state', 'state_started_at', 'updated_at'
+  ]);
+  assert.deepEqual(Object.keys(snapshot.orca.terminals[0]).sort(), [
+    'agent_identity', 'connected', 'handle', 'last_output_at', 'worktree_id'
+  ]);
+  assert.equal(JSON.stringify(snapshot).includes(ORCA_TEXT_SENTINEL), false);
+}
+
+test('PR1c D actual Orca envelopes project numeric times, counts, topology links and exact allowlists', testContext => {
+  const { fixture } = installActualOrcaFixture(testContext);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assertActualOrcaSnapshot(snapshot);
+  assert.equal(snapshotPolicy.validateSnapshot(snapshot).ok, true);
+  assert.equal(JSON.stringify(snapshot.orca).includes('/sensitive/repo'), false);
+});
+
+test('PR1c D failed or malformed envelopes from either Orca command remain unavailable', testContext => {
+  const { fixture, responses } = installActualOrcaFixture(testContext);
+  assertActualOrcaSnapshot(snapshotReader.runSnapshot(fixture.options));
+  for (const command of ['worktree', 'terminal']) {
+    const original = responses[command];
+    const collection = command === 'worktree' ? 'worktrees' : 'terminals';
+    for (const invalid of [
+      { ...original, ok: false }, { ...original, ok: 'true' }, { result: original.result },
+      { ...original, result: null }, { ...original, result: [] },
+      { ...original, result: { [collection]: {} } }, { ...original, result: {} },
+      { ...original, result: { [collection]: null } }
+    ]) {
+      responses[command] = invalid;
+      const snapshot = snapshotReader.runSnapshot(fixture.options);
+      assert.deepEqual(snapshot.coverage.orca, { state: 'unavailable', code: 'orca_unavailable' });
+      assert.deepEqual(snapshot.orca, { worktrees: [], terminals: [] });
+      assert.equal(JSON.stringify(snapshot).includes(ORCA_TEXT_SENTINEL), false);
+    }
+    responses[command] = original;
+  }
+});
+
+test('PR1c D truncation of either collection preserves projected items and marks partial', testContext => {
+  const { fixture, responses } = installActualOrcaFixture(testContext);
+  assertActualOrcaSnapshot(snapshotReader.runSnapshot(fixture.options));
+  for (const command of ['worktree', 'terminal']) {
+    responses[command].result.truncated = true;
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.deepEqual(snapshot.coverage.orca, { state: 'partial', code: 'orca_unavailable' });
+    assert.equal(snapshot.orca.worktrees.length, 2);
+    assert.equal(snapshot.orca.terminals.length, 2);
+    assert.equal(snapshot.sessions[0].orca_link.terminal_handle, null);
+    assert.equal(snapshot.sessions[0].orca_link.confirmed, false);
+    assert.equal(snapshot.sessions[0].orca_link.evidence, 'prompt_exact');
+    assert.equal(JSON.stringify(snapshot).includes(ORCA_TEXT_SENTINEL), false);
+    responses[command].result.truncated = false;
+  }
+});
+
+test('PR1c D terminal topology requires two strings and takes precedence over a legacy pane key', testContext => {
+  const { fixture, responses } = installActualOrcaFixture(testContext);
+  assertActualOrcaSnapshot(snapshotReader.runSnapshot(fixture.options));
+  const terminal = responses.terminal.result.terminals[0];
+  terminal.paneKey = 'synthetic-tab:synthetic-leaf';
+  for (const [tabId, leafId] of [
+    [null, 'synthetic-leaf'], ['synthetic-tab', 42], [undefined, 'synthetic-leaf'],
+    ['synthetic-tab', undefined], ['another-tab', 'synthetic-leaf']
+  ]) {
+    terminal.tabId = tabId;
+    terminal.leafId = leafId;
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(snapshot.coverage.orca.state, 'ok');
+    assert.equal(snapshot.sessions[0].orca_link.terminal_handle, null);
+  }
+  terminal.tabId = 'synthetic-tab';
+  terminal.leafId = 'synthetic-leaf';
+  terminal.paneKey = 'wrong:legacy';
+  assert.equal(snapshotReader.runSnapshot(fixture.options).sessions[0].orca_link.terminal_handle, 'term_synthetic');
+});
+
+test('PR1c D numeric Orca TIME bounds stay enforced and numeric transcript timestamps stay invalid', testContext => {
+  const { fixture, responses } = installActualOrcaFixture(testContext);
+  assertActualOrcaSnapshot(snapshotReader.runSnapshot(fixture.options));
+  const worktree = responses.worktree.result.worktrees[0];
+  for (const invalidTime of [NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER, 253402300800000]) {
+    worktree.lastActivityAt = invalidTime;
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(snapshot.coverage.orca.state, 'partial');
+    assert.equal(snapshot.orca.worktrees.length, 1);
+    assert.equal(snapshot.orca.terminals.length, 1);
+  }
+  worktree.lastActivityAt = Date.parse(RECORD_TIMESTAMP);
+  fixture.file('claude', 'numeric', [claudeUserRecord('NUMERIC_TRANSCRIPT_MUST_NOT_EXPORT', {
+    sessionId: 'numeric', timestamp: Date.parse(RECORD_TIMESTAMP)
+  })]);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assertActualOrcaSnapshot(snapshot);
+  assert.equal(snapshot.coverage.claude.invalid_time_withheld, 1);
+  assert.equal(snapshot.sessions.length, 1);
+  assert.equal(JSON.stringify(snapshot).includes('NUMERIC_TRANSCRIPT_MUST_NOT_EXPORT'), false);
+});
+
+test('PR1c D bare arrays and legacy Orca field names retain their previous projections', testContext => {
+  const fixture = createFixture(testContext);
+  fixture.file('claude', 'main', [claudeUserRecord('abcdefgh')]);
+  const worktree = orcaWorktree('abcdefgh', 'legacy-pane');
+  delete worktree.liveTerminalCount;
+  worktree.liveTerminals = 7;
+  worktree.lastActivityAt = RECORD_TIMESTAMP;
+  worktree.agents[0].stateStartedAt = RECORD_TIMESTAMP;
+  worktree.agents[0].updatedAt = RECORD_TIMESTAMP;
+  const terminal = orcaTerminal({ paneKey: 'legacy-pane', lastOutputAt: RECORD_TIMESTAMP });
+  delete terminal.tabId;
+  delete terminal.leafId;
+  fixture.options.runOrca = args => JSON.stringify(args[0] === 'worktree' ? [worktree] : [terminal]);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.coverage.orca.state, 'ok');
+  assert.equal(snapshot.orca.worktrees[0].live_terminals, 7);
+  assert.equal(snapshot.sessions[0].orca_link.terminal_handle, 'h');
+});
+
+// Spec §1.1: title selection follows file order, independently of instruction timestamps.
+test('PR1c E timestamp-less AI titles use the last string in file order', testContext => {
+  const fixture = createFixture(testContext);
+  fixture.file('claude', 'titles', [
+    { type: 'ai-title', aiTitle: 'earlier title', sessionId: 's' },
+    claudeUserRecord('instruction'),
+    { type: 'ai-title', aiTitle: 'last title', sessionId: 's' },
+    { type: 'ai-title', aiTitle: 42, sessionId: 's' },
+    { type: 'ai-title', aiTitle: { text: 'invalid title' }, sessionId: 's' }
+  ]);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.sessions.length, 1);
+  assert.equal(snapshot.instructions.length, 1);
+  assert.equal(snapshot.sessions[0].ai_title, 'last title');
+});
+
+test('PR1c E timestamp-less AI titles retain the 200-character sanitized fixed point', testContext => {
+  const fixture = createFixture(testContext);
+  const title = `Research ${SECRET_SENTINEL} ` + 'x'.repeat(300);
+  fixture.file('claude', 'secret-title', [
+    claudeUserRecord('instruction'),
+    { type: 'ai-title', aiTitle: title, sessionId: 's' }
+  ]);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  const displayed = snapshot.sessions[0].ai_title;
+  assert.equal(typeof displayed, 'string');
+  assert.equal(displayed.length, 200);
+  assert.equal(displayed.startsWith('Research [REDACTED] '), true);
+  assert.equal(JSON.stringify(snapshot).includes(SECRET_SENTINEL), false);
+  assert.equal(snapshotPolicy.finalizeText(displayed, 200).value, displayed);
+});
+
+test('PR1c E absent or nonstring AI titles remain null', testContext => {
+  const fixture = createFixture(testContext);
+  fixture.file('claude', 'absent', [claudeUserRecord('no title', { sessionId: 'absent' })]);
+  fixture.file('claude', 'invalid', [
+    claudeUserRecord('invalid title', { sessionId: 'invalid' }),
+    { type: 'ai-title', aiTitle: 42, sessionId: 'invalid' }
+  ]);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.sessions.length, 2);
+  assert.deepEqual(snapshot.sessions.map(session => session.ai_title), [null, null]);
+});
+
+test('PR1c E slash display preserves sanitized raw command wrappers', testContext => {
+  const fixture = createFixture(testContext);
+  const cases = [
+    '<command-message>deep-research</command-message>',
+    '<command-name>deep-research</command-name><command-message>ignored</command-message>'
+      + '<command-args></command-args>',
+    '<command-message>ignored</command-message><command-args>scripts/lib</command-args>'
+      + '<command-name>///review</command-name>',
+    '<command-name>/review</command-name><command-args>scripts/lib</command-args>'
+      + '<command-message>ignored</command-message>',
+    '<command-message>review</command-message><command-args>scripts/lib</command-args>',
+    `<command-message>review</command-message><command-args>${SECRET_SENTINEL}</command-args>`
+  ];
+  fixture.file('claude', 'slash', cases.map((text, index) => claudeUserRecord(text, {
+    uuid: `slash-${index}`, origin: undefined
+  })));
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.sessions.length, 1);
+  assert.equal(snapshot.instructions.length, cases.length);
+  assert.deepEqual(snapshot.instructions.map(item => item.kind), cases.map(() => 'slash'));
+  assert.deepEqual(snapshot.instructions.map(item => item.text),
+    cases.map(text => snapshotPolicy.finalizeText(text).value));
+  assert.equal(snapshot.instructions.at(-1).redacted, true);
+  assert.equal(JSON.stringify(snapshot).includes(SECRET_SENTINEL), false);
+  for (const item of snapshot.instructions) {
+    assert.equal(snapshotPolicy.finalizeText(item.text).value, item.text);
+  }
+});
+
+test('PR1c E already-classified slash display preserves every tag order and tagless text', () => {
+  const { buildSnapshotInstruction } = loadReaderWithInternals();
+  const tags = ['<command-name>/review</command-name>', '<command-message>ignored</command-message>',
+    '<command-args>scripts/lib</command-args>'];
+  const orders = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+  const instruction = { id: 'claude:s:uone', ts: RECORD_TIMESTAMP, kind: 'slash', attachments: 0,
+    ref: '0'.repeat(16) };
+  for (const order of orders) {
+    const text = order.map(index => tags[index]).join('\n');
+    const displayed = buildSnapshotInstruction({ ...instruction, text }, 'session-key', 0);
+    assert.equal(displayed.kind, 'slash');
+    assert.equal(displayed.text, text);
+  }
+  const text = '/legacy scripts/lib';
+  assert.equal(buildSnapshotInstruction({ ...instruction, text }, 'session-key', 0).text, text);
+});
+
+// Spec §2/§3: full raw slash text defines content identity; UUID exclusions remain stable.
+test('PR1c E slash raw fingerprints and refs retain UUID exclusion behavior', testContext => {
+  const fixture = createFixture(testContext);
+  const texts = [
+    '<command-message>deep-research</command-message><command-name>/deep-research</command-name>'
+      + '<command-args></command-args>',
+    '<command-message>review</command-message><command-args>scripts/lib</command-args>'
+      + '<command-name>///review</command-name>',
+    `<command-message>review</command-message><command-args>${SECRET_SENTINEL}</command-args>`
+  ];
+  const records = texts.map((text, index) => claudeUserRecord(text, { uuid: `slash-${index}`, origin: undefined }));
+  fixture.file('claude', 'identity', records);
+  const config = snapshotReader.loadConfig(fixture.options);
+  config.machine_id = 'fixture-machine';
+  config.local_key = 'b'.repeat(64);
+  config.key_fingerprint = crypto.createHash('sha256').update(config.local_key).digest('hex');
+  fixture.save(config);
+  const internals = loadReaderWithInternals();
+  const coverage = Object.fromEntries(snapshotPolicy.COVERAGE_KEYS.claude.map(key => [key, 0]));
+  const parsed = internals.parseFile('claude', records, coverage, config);
+  assert.equal(parsed.items.length, 3);
+  const fingerprints = [
+    '94eb5f2b817a556ad742fa3d2d2b0bea12e96ac35d01ff0b2dd7d55667a37094',
+    '0740567e608dcb3f9cc3eb84f04774273bb27a7ff2973537a39c491aa51286cb',
+    '28a5f010bef82768ce706cc6857c5548d475b9d3c4c819d9464a1c9fed046c15'
+  ];
+  const refs = ['014a92d7966c8433', '228dfccb7b62036c', '2380af646df14750'];
+  for (const [index, instruction] of parsed.items.entries()) {
+    assert.equal(Object.hasOwn(instruction, 'structure'), false);
+    assert.equal(instruction.fp, fingerprints[index]);
+    assert.equal(instruction.ref, refs[index]);
+  }
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.instructions.length, 3);
+  assert.deepEqual(snapshot.instructions.map(item => item.ref), refs);
+  assert.deepEqual(snapshot.instructions.map(item => item.text),
+    texts.map(text => snapshotPolicy.finalizeText(text).value));
+  const target = { kind: 'instruction', instrId: 'claude:s:uslash-1', ref: refs[1] };
+  const preview = snapshotReader.excludeQuery({ ...fixture.options, target });
+  assert.equal(preview.preview, snapshotPolicy.finalizeText(texts[1], 200).value);
+  const result = snapshotReader.excludeCommit({ ...fixture.options, target, token: preview.token });
+  assert.equal(result.counts.registered, 1);
+  const excluded = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(excluded.instructions.length, 2);
+  assert.deepEqual(excluded.instructions.map(item => item.ref), [refs[0], refs[2]]);
+});
+
+// Spec §1.1/§2: raw display preserves human classification and content identity.
+test('PR1c correction 1 human command wrappers preserve legacy fingerprint ref and deletion identity', testContext => {
+  const fixture = createFixture(testContext);
+  const text = ' \n<command-message>ignored</command-message><command-name>///review</command-name>'
+    + '\n<command-args>scripts/lib</command-args>\t';
+  const record = claudeUserRecord(text, { uuid: 'human-wrapper' });
+  fixture.file('claude', 'human-wrapper', [record]);
+  const config = snapshotReader.loadConfig(fixture.options);
+  config.machine_id = 'fixture-machine';
+  config.local_key = 'b'.repeat(64);
+  config.key_fingerprint = crypto.createHash('sha256').update(config.local_key).digest('hex');
+  fixture.save(config);
+  const internals = loadReaderWithInternals();
+  const coverage = Object.fromEntries(snapshotPolicy.COVERAGE_KEYS.claude.map(key => [key, 0]));
+  const parsed = internals.parseFile('claude', [record], coverage, config);
+  assert.equal(parsed.items.length, 1);
+  const instruction = parsed.items[0];
+  assert.equal(instruction.kind, 'human');
+  assert.equal(instruction.text, snapshotPolicy.finalizeText(text).value);
+  assert.equal(Object.hasOwn(instruction, 'structure'), false);
+  assert.equal(instruction.fp, '09ba6cf30247bdc65057edb2e3df860bc83976aa2f092014760f724bf1be8f14');
+  const ref = '230bb5cd26e1217d';
+  assert.equal(instruction.ref, ref);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.instructions.length, 1);
+  assert.equal(snapshot.instructions[0].id, 'claude:s:uhuman-wrapper');
+  assert.equal(snapshot.instructions[0].kind, 'human');
+  assert.equal(snapshot.instructions[0].ref, ref);
+  assert.equal(snapshot.instructions[0].text, snapshotPolicy.finalizeText(text).value);
+  const target = { kind: 'instruction', instrId: 'claude:s:uhuman-wrapper', ref };
+  const preview = snapshotReader.excludeQuery({ ...fixture.options, target });
+  assert.equal(snapshotReader.excludeCommit({ ...fixture.options, target, token: preview.token }).counts.registered, 1);
+  assert.equal(snapshotReader.runSnapshot(fixture.options).instructions.length, 0);
+});
+
+test('PR1c correction 1 human raw wrapper text preserves every order and sanitizes command arguments', testContext => {
+  const fixture = createFixture(testContext);
+  const tags = ['<command-name>/review</command-name>', '<command-message>ignored</command-message>',
+    '<command-args>scripts/lib</command-args>'];
+  const orders = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+  const records = orders.map((order, index) => claudeUserRecord(
+    ' \n' + order.map(tagIndex => tags[tagIndex]).join('\n') + ' \t', { uuid: `human-${index}` }));
+  records.push(claudeUserRecord(
+    `<command-message>review</command-message><command-args>${SECRET_SENTINEL}</command-args>`,
+    { uuid: 'human-secret' }));
+  fixture.file('claude', 'orders', records);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.instructions.length, 7);
+  assert.deepEqual(snapshot.instructions.map(item => item.kind), records.map(() => 'human'));
+  assert.deepEqual(snapshot.instructions.map(item => item.text),
+    records.map(record => snapshotPolicy.finalizeText(record.message.content).value));
+  assert.equal(snapshot.instructions.at(-1).redacted, true);
+  assert.equal(JSON.stringify(snapshot).includes(SECRET_SENTINEL), false);
+  for (const item of snapshot.instructions) {
+    assert.equal(snapshotPolicy.finalizeText(item.text).value, item.text);
+  }
+});
+
+test('PR1c correction 1 outside text remains in human and slash displays', testContext => {
+  const fixture = createFixture(testContext);
+  const wrapper = '<command-message>review</command-message><command-name>/review</command-name>'
+    + '<command-args>scripts/lib</command-args>';
+  const cases = [
+    [wrapper + ' Please also check tests.', 'human'],
+    ['Please also check tests. ' + wrapper, 'human'],
+    ['<command-message>review</command-message> Please also check tests.'
+      + '<command-name>/review</command-name><command-args>scripts/lib</command-args>', 'human'],
+    [wrapper + '<other>extra</other>', 'human'],
+    [wrapper + '<command-args>unfinished', 'human'],
+    [wrapper + ' Please also check tests.', 'slash'],
+    ['<command-message>review</command-message> Please also check tests.'
+      + '<command-name>/review</command-name><command-args>scripts/lib</command-args>', 'slash']
+  ];
+  fixture.file('claude', 'outside', cases.map(([text, kind], index) => claudeUserRecord(text, {
+    uuid: `outside-${index}`, origin: kind === 'human' ? { kind: 'human' } : undefined
+  })));
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.instructions.length, cases.length);
+  assert.deepEqual(snapshot.instructions.map(item => item.kind), cases.map(([, kind]) => kind));
+  assert.deepEqual(snapshot.instructions.map(item => item.text),
+    cases.map(([text]) => snapshotPolicy.finalizeText(text).value));
+});
+
+for (const kind of ['slash', 'human']) {
+  test(`PR1c R1 raw wrappers preserve original sanitization context for ${kind}`, testContext => {
+    const fixture = createFixture(testContext);
+    const origin = kind === 'human' ? { kind: 'human' } : undefined;
+    const normal = '<command-name>/review</command-name><command-args>scripts/lib</command-args>';
+    const attack = '<command-name>/review</command-name><command-args>password="LEAK_ME</command-args>'
+      + '<command-message>"</command-message>';
+    fixture.file('claude', 'wrappers', [
+      claudeUserRecord(normal, { uuid: 'normal', origin }),
+      claudeUserRecord(attack, { uuid: 'attack', origin })
+    ]);
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(snapshot.instructions.length, 2);
+    assert.equal(snapshot.instructions[0].text, normal);
+    assert.equal(snapshot.instructions[0].kind, kind);
+    assert.equal(snapshotPolicy.finalizeText(attack).redacted, true);
+    assert.equal(JSON.stringify(snapshot).includes('LEAK_ME'), false);
+    assert.equal(snapshot.instructions[1].text, snapshotPolicy.finalizeText(attack).value);
+    assert.equal(snapshot.instructions[1].kind, kind);
+    assert.equal(snapshot.instructions[1].redacted, true);
+  });
+}
+
+test('PR1c R1 old subagent prefix cannot prove all records are sidechain', testContext => {
+  const fixture = createFixture(testContext);
+  const prefix = Array.from({ length: 800 }, function sidechainRecord() {
+    return { type: 'assistant', sessionId: 's', isSidechain: true, timestamp: OLD_RECORD_TIMESTAMP,
+      padding: 'x'.repeat(80) };
+  });
+  const old = fixture.file('claude', 'project/s/subagents/agent-mixed', [
+    ...prefix, claudeUserRecord('old main', { timestamp: OLD_RECORD_TIMESTAMP })
+  ]);
+  assert.ok(Buffer.byteLength(prefix.map(record => JSON.stringify(record)).join('\n')) > 64 * 1024);
+  setTranscriptMtime(old, OLD_RECORD_TIMESTAMP);
+  fixture.file('claude', 'recent', [claudeUserRecord('recent main')]);
+  const totals = trackTranscriptReads(testContext, old);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.coverage.claude.multi_file_withheld, 1);
+  assert.equal(snapshot.coverage.claude.files_skipped, 0);
+  assert.equal(snapshot.sessions.length, 0);
+  assert.equal(snapshot.instructions.length, 0);
+  assert.equal(totals.fullReads, 1);
+  assert.equal(snapshot.coverage.claude.records_unknown, 0);
+});
+
+for (const provider of ['claude', 'codex']) {
+  test(`PR1c R1 ${provider} preserved old mtime cannot change snapshot refs or exclusion tokens`, testContext => {
+    const fixture = createFixture(testContext);
+    const rows = provider === 'claude' ? [claudeUserRecord('recent instruction')]
+      : [codexSessionMeta(), codexMessage('recent instruction')];
+    const file = fixture.file(provider, 'recent', rows);
+    const before = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(before.instructions.length, 1);
+    const target = instructionTarget(before.instructions[0]);
+    const preview = snapshotReader.excludeQuery({ ...fixture.options, target });
+    setTranscriptMtime(file, OLD_RECORD_TIMESTAMP);
+    const after = snapshotReader.runSnapshot(fixture.options);
+    assert.deepEqual(after, before);
+    const rechecked = snapshotReader.excludeQuery({ ...fixture.options, target });
+    assert.deepEqual(rechecked, preview);
+    const committed = snapshotReader.excludeCommit({ ...fixture.options, target, token: preview.token });
+    assert.equal(committed.code, 'ok');
+    assert.equal(committed.counts.registered, 1);
+    assert.equal(snapshotReader.runSnapshot(fixture.options).instructions.length, 0);
+  });
+}
+
+test('PR1c R1 missing tail timestamp reads fully while old tail timestamps keep identity-only coverage',
+  testContext => {
+  const fixture = createFixture(testContext);
+  const recent = fixture.file('claude', 'a-recent', [
+    claudeUserRecord('recent instruction'),
+    { type: 'assistant', padding: 'x'.repeat(128 * 1024) }
+  ]);
+  setTranscriptMtime(recent, OLD_RECORD_TIMESTAMP);
+  const totals = trackTranscriptReads(testContext, recent);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.instructions.length, 1);
+  assert.equal(snapshot.instructions[0].text, 'recent instruction');
+  assert.equal(totals.fullReads, 1);
+  fs.unlinkSync(recent);
+  const old = fixture.file('claude', 'b-old', [
+    claudeUserRecord('unknown old', { origin: undefined, timestamp: OLD_RECORD_TIMESTAMP }),
+    { type: 'assistant', timestamp: OLD_RECORD_TIMESTAMP, padding: 'x'.repeat(128 * 1024) },
+    { type: 'assistant', timestamp: OLD_RECORD_TIMESTAMP }
+  ]);
+  setTranscriptMtime(old, OLD_RECORD_TIMESTAMP);
+  const oldTotals = trackTranscriptReads(testContext, old);
+  const outside = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(outside.instructions.length, 0);
+  assert.equal(outside.coverage.claude.records_unknown, 0);
+  assert.equal(outside.coverage.claude.records_unverified, 0);
+  assert.equal(oldTotals.fullReads, 0);
+  assert.equal(oldTotals.bytes, 128 * 1024);
+});
+
+function countStoredStringCharacters(value) {
+  if (typeof value === 'string') {
+    return value.length;
+  }
+  if (!value || typeof value !== 'object') {
+    return 0;
+  }
+  return Object.values(value).reduce((sum, entry) => sum + countStoredStringCharacters(entry), 0);
+}
+
+test('PR1c R1 large instructions retain bounded sanitized text and pre-change fingerprints and refs', testContext => {
+  const fixture = createFixture(testContext);
+  const body = 'LARGE_HUMAN_SENTINEL_' + 'x'.repeat(2 * 1024 * 1024) + '\npassword="PRIVATE_LARGE_VALUE"';
+  for (const provider of ['claude', 'codex']) {
+    for (let index = 0; index < 3; index++) {
+      fixture.file(provider, `large-${index}`, provider === 'claude' ? [
+        claudeUserRecord(body, { sessionId: `large-${index}`, uuid: 'large' })
+      ] : [codexSessionMeta({ id: `large-${index}` }), codexMessage(body)]);
+    }
+  }
+  const config = snapshotReader.loadConfig(fixture.options);
+  config.machine_id = 'fixture-machine';
+  config.local_key = 'b'.repeat(64);
+  config.key_fingerprint = crypto.createHash('sha256').update(config.local_key).digest('hex');
+  fixture.save(config);
+  const { scanSessions } = loadReaderWithInternals();
+  const scanned = scanSessions(fixture.options, config);
+  assert.equal(scanned.all.length, 6);
+  const items = scanned.all.flatMap(session => session.items);
+  assert.equal(items.length, 6);
+  const storedCharacters = countStoredStringCharacters(scanned);
+  testContext.diagnostic(`Retained ${storedCharacters} string characters for ${items.length} instructions`);
+  assert.ok(storedCharacters <= items.length * 2400 + scanned.all.length * (4096 + 64));
+  for (const session of scanned.all) {
+    const item = session.items[0];
+    assert.equal(item.text.length, 2000);
+    assert.equal(item.redacted, true);
+    assert.equal(item.truncated, true);
+    assert.equal(Object.hasOwn(item, 'structure'), false);
+    assert.equal(Object.hasOwn(item, 'displayText'), false);
+    assert.equal(snapshotPolicy.finalizeText(item.text).value, item.text);
+    assert.equal(item.fp, '32292a1c53fa996395405d287acf5850e86891f52b16df37fc2675c78803a1fc');
+    if (session.sid === 'large-0') {
+      assert.equal(item.ref, session.provider === 'claude' ? '4fac5f99c15c819c' : '5fb366e753bb839b');
+    }
+  }
+  assert.equal(JSON.stringify(scanned).includes('PRIVATE_LARGE_VALUE'), false);
+});
+
+test('PR1c R1 Orca evidence uses full raw instruction identity', testContext => {
+  const fixture = createFixture(testContext);
+  const cases = [
+    ['ordinary word '.repeat(250), 'ordinary word '.repeat(250), 'prompt_exact'],
+    ['review password="ORCA_PRIVATE_VALUE"', 'review password="ORCA_PRIVATE_VALUE"', 'prompt_exact'],
+    ['review password="ORCA_PRIVATE_VALUE"', 'review [REDACTED]', 'cwd_only']
+  ];
+  for (const [text, prompt, evidence] of cases) {
+    fixture.file('claude', 'link', [claudeUserRecord(text)]);
+    fixture.options.runOrca = orcaRunner([orcaWorktree(prompt)], [orcaTerminal()]);
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(snapshot.instructions.length, 1);
+    assert.equal(snapshot.sessions[0].orca_link.evidence, evidence);
+    assert.equal(snapshot.sessions[0].orca_link.confirmed, evidence === 'prompt_exact');
+    assert.equal(JSON.stringify(snapshot).includes('ORCA_PRIVATE_VALUE'), false);
+  }
+});
+
+test('PR1c R3 slash outside sentences change raw display refs and confirmation tokens', testContext => {
+  const fixture = createFixture(testContext);
+  const wrapper = '<command-name>/review</command-name><command-args>scripts/lib</command-args>';
+  fixture.file('claude', 'slash', [claudeUserRecord(wrapper + ' Outside sentence A.', { origin: undefined })]);
+  const before = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(before.instructions.length, 1);
+  assert.equal(before.instructions[0].kind, 'slash');
+  assert.equal(before.instructions[0].text, wrapper + ' Outside sentence A.');
+  const target = instructionTarget(before.instructions[0]);
+  const preview = snapshotReader.excludeQuery({ ...fixture.options, target });
+  fixture.file('claude', 'slash', [claudeUserRecord(wrapper + ' Outside sentence B.', { origin: undefined })]);
+  const after = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(after.instructions[0].text, wrapper + ' Outside sentence B.');
+  assert.notEqual(after.instructions[0].ref, before.instructions[0].ref);
+  assertReaderError(() => snapshotReader.excludeQuery({ ...fixture.options, target }), 'target_changed');
+  const result = snapshotReader.excludeCommit({ ...fixture.options, target, token: preview.token });
+  assert.equal(result.code, 'confirm_mismatch');
+  assert.equal(result.counts.registered, 0);
+});
+
+for (const provider of ['claude', 'codex']) {
+  test(`PR1c R2 ${provider} summary bounds metadata and drops oversized cwd before projection`, testContext => {
+    const fixture = createFixture(testContext);
+    const branch = 'feature/' + 'branch'.repeat(1000);
+    const cwd = '/' + 'directory/'.repeat(1000);
+    const body = 'ordinary instruction '.repeat(200);
+    const file = fixture.file(provider, 'bounds', provider === 'claude' ? [
+      claudeUserRecord(body, { cwd, gitBranch: branch }),
+      { type: 'ai-title', aiTitle: 'title '.repeat(100), sessionId: 's' }
+    ] : [codexSessionMeta({ cwd, git: { branch } }), codexMessage(body)]);
+    const config = snapshotReader.loadConfig(fixture.options);
+    const { scanSessions, parseFile } = loadReaderWithInternals();
+    const scanned = scanSessions(fixture.options, config);
+    assert.equal(scanned.all.length, 0);
+    assert.equal(scanned.coverage[provider].records_unverified, 1);
+    const counters = Object.fromEntries(snapshotPolicy.COVERAGE_KEYS[provider].map(key => [key, 0]));
+    const records = fs.readFileSync(file, 'utf8').split('\n').map(line => JSON.parse(line));
+    const session = parseFile(provider, records, counters, config);
+    assert.equal(session.cwd, null);
+    assert.equal(session.branch, snapshotPolicy.finalizeLabel(branch).value);
+    assert.equal(session.branch.length, 64);
+    assert.equal(session.items[0].text.length, 2000);
+    if (provider === 'claude') {
+      assert.equal(session.title.length, 200);
+    }
+    const originalOpaquePath = snapshotPolicy.opaquePath;
+    testContext.mock.method(snapshotPolicy, 'opaquePath', function rejectOversizedPath(salt, generation, rawPath) {
+      assert.notEqual(rawPath, cwd);
+      assert.notEqual(rawPath, null);
+      return originalOpaquePath(salt, generation, rawPath);
+    });
+    fixture.options.runOrca = orcaRunner([orcaWorktree(body)], [orcaTerminal()]);
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(snapshot.sessions.length, 0);
+    assert.equal(snapshot.instructions.length, 0);
+    assert.equal(snapshot.coverage[provider].records_unverified, 1);
+    fs.unlinkSync(file);
+    fixture.file(provider, 'boundary', provider === 'claude' ? [
+      claudeUserRecord('valid cwd', { cwd: '/' + 'x'.repeat(4095) })
+    ] : [codexSessionMeta({ cwd: '/' + 'x'.repeat(4095) }), codexMessage('valid cwd')]);
+    assert.equal(snapshotReader.runSnapshot(fixture.options).instructions.length, 1);
+  });
+}
+
+function runSmallHeapSnapshot(fixture, scenario) {
+  const { spawnSync } = require('node:child_process');
+  const source = [
+    "const assert = require('node:assert/strict');",
+    'const reader = require(process.argv[1]);',
+    'const options = JSON.parse(process.argv[2]);',
+    'options.now = new Date(options.now);',
+    'options.runOrca = function unavailableOrca() { return null; };',
+    'const snapshot = reader.runSnapshot(options);',
+    'const expected = process.argv[3] === "text" ? 33 : 1;',
+    'assert.equal(snapshot.sessions.length, expected);',
+    'assert.equal(snapshot.instructions.length, expected);',
+    'assert.equal(snapshot.coverage.claude.files_scanned, 33);',
+    'assert.equal(snapshot.coverage.claude.files_failed, 0);',
+    'assert.equal(snapshot.coverage.claude.files_skipped, 0);',
+    'assert.equal(snapshot.coverage.claude.records_unverified, expected === 1 ? 32 : 0);',
+    'assert.ok(snapshot.instructions.some(item => item.text === "control survives"));',
+    'process.stdout.write(JSON.stringify({sessions: expected, heap: process.memoryUsage().heapUsed}));'
+  ].join('\n');
+  return spawnSync(process.execPath, ['--max-old-space-size=64', '-e', source,
+    require.resolve('../../scripts/lib/sessionSnapshotReader.cjs'), JSON.stringify(fixture.options), scenario], {
+    encoding: 'utf8', timeout: 90000, maxBuffer: 64 * 1024, cwd: fixture.root,
+    env: { ...process.env, HOME: fixture.options.homeDir }
+  });
+}
+
+for (const scenario of ['text', 'metadata']) {
+  test(`PR1c R2 detached ${scenario} strings survive a 64MB child heap`, { timeout: 120000 }, testContext => {
+    const fixture = createFixture(testContext);
+    const body = 'ordinary instruction '.repeat(100000);
+    const metadata = 'directory/'.repeat(220000);
+    assert.ok(body.length >= 2 * 1024 * 1024);
+    assert.ok(metadata.length >= 2 * 1024 * 1024);
+    for (let index = 0; index < 32; index++) {
+      fixture.file('claude', `large-${index}`, [claudeUserRecord(body, {
+        sessionId: `large-${index}`,
+        cwd: scenario === 'metadata' ? '/' + metadata : '/sensitive/repo',
+        gitBranch: scenario === 'metadata' ? metadata : 'main'
+      })]);
+    }
+    fixture.file('claude', 'control', [claudeUserRecord('control survives', { sessionId: 'control' })]);
+    const child = runSmallHeapSnapshot(fixture, scenario);
+    const oom = /heap out of memory|Reached heap limit|Allocation failed/.test(child.stderr || '');
+    testContext.diagnostic(`${scenario} child: status=${child.status}, signal=${child.signal}, oom=${oom}`);
+    assert.equal(child.error, undefined);
+    assert.equal(child.status, 0, child.stderr.slice(-1000));
+    assert.equal(child.signal, null);
+    const result = JSON.parse(child.stdout);
+    assert.equal(result.sessions, scenario === 'text' ? 33 : 1);
+  });
+}
+
+function writeHeapRunner(fixture) {
+  const runnerPath = path.join(fixture.root, 'heap-runner.cjs');
+  const source = [
+    "const assert = require('node:assert/strict');",
+    'const reader = require(process.argv[2]);',
+    'const options = JSON.parse(process.argv[3]);',
+    'options.now = new Date(options.now);',
+    'options.runOrca = function unavailableOrca() { return null; };',
+    'const snapshot = reader.runSnapshot(options);',
+    'assert.equal(snapshot.sessions.length, 9);',
+    'assert.equal(snapshot.instructions.length, 9);',
+    'assert.equal(snapshot.coverage.claude.files_scanned, 33);',
+    'assert.equal(snapshot.coverage.claude.files_failed, 0);',
+    'assert.equal(snapshot.coverage.claude.files_skipped, 0);',
+    'assert.equal(snapshot.coverage.claude.records_unverified, 24);',
+    'assert.equal(snapshot.instructions.filter(item => item.text.length === 2000 && item.truncated).length, 8);',
+    'assert.ok(snapshot.instructions.some(item => item.text === "control survives"));',
+    'process.stdout.write(JSON.stringify({sessions: snapshot.sessions.length}) + "\\n");'
+  ].join('\n');
+  fs.writeFileSync(runnerPath, source);
+  return runnerPath;
+}
+
+test('PR1c R2 temporary runner retains bounded strings under a 64MB heap', { timeout: 120000 }, testContext => {
+  const { spawnSync } = require('node:child_process');
+  const fixture = createFixture(testContext);
+  const body = 'ordinary instruction '.repeat(100000);
+  const metadata = 'directory/'.repeat(220000);
+  assert.ok(body.length >= 2 * 1024 * 1024);
+  assert.ok(metadata.length >= 2 * 1024 * 1024);
+  for (let index = 0; index < 32; index++) {
+    fixture.file('claude', `large-${index}`, [claudeUserRecord(body, {
+      sessionId: `large-${index}`,
+      cwd: index < 24 ? '/' + metadata : '/sensitive/repo',
+      gitBranch: metadata
+    })]);
+  }
+  fixture.file('claude', 'control', [claudeUserRecord('control survives', { sessionId: 'control' })]);
+  const runnerPath = writeHeapRunner(fixture);
+  const child = spawnSync(process.execPath, ['--max-old-space-size=64', runnerPath,
+    require.resolve('../../scripts/lib/sessionSnapshotReader.cjs'), JSON.stringify(fixture.options)], {
+    encoding: 'utf8', timeout: 90000, maxBuffer: 64 * 1024, cwd: fixture.root,
+    env: { ...process.env, HOME: fixture.options.homeDir }
+  });
+  testContext.diagnostic(`file runner: status=${child.status}, signal=${child.signal}, `
+    + `sessions=${child.stdout.trim()}`);
+  assert.equal(child.error, undefined);
+  assert.equal(child.status, 0, child.stderr.slice(-1000));
+  assert.equal(child.signal, null);
+  assert.deepEqual(JSON.parse(child.stdout), { sessions: 9 });
+});
+
+test('PR1c R2 partial Orca inventories cannot confirm links or assign terminal handles', testContext => {
+  const fixture = createFixture(testContext);
+  fixture.file('claude', 'main', [claudeUserRecord('abcdefgh')]);
+  const worktree = orcaWorktree('abcdefgh');
+  const terminal = orcaTerminal();
+  const responses = { worktree: orcaResponse('worktrees', [worktree]),
+    terminal: orcaResponse('terminals', [terminal]) };
+  fixture.options.runOrca = args => JSON.stringify(responses[args[0]]);
+  const complete = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(complete.coverage.orca.state, 'ok');
+  assert.equal(complete.sessions[0].orca_link.confirmed, true);
+  assert.equal(complete.sessions[0].orca_link.terminal_handle, 'h');
+  const competing = { ...worktree.agents[0], paneKey: 'other:leaf' };
+  worktree.agents.push(competing);
+  assert.equal(snapshotReader.runSnapshot(fixture.options).sessions[0].orca_link.evidence, 'ambiguous');
+  worktree.agents.pop();
+  for (const command of ['worktree', 'terminal']) {
+    responses[command].result.truncated = true;
+    const partial = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(partial.coverage.orca.state, 'partial');
+    assert.equal(partial.sessions[0].orca_link.evidence, 'prompt_exact');
+    assert.equal(partial.sessions[0].orca_link.confirmed, false);
+    assert.equal(partial.sessions[0].orca_link.terminal_handle, null);
+    responses[command].result.truncated = false;
+  }
+  responses.terminal.result.terminals.push({ handle: 'invalid' });
+  const latePartial = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(latePartial.coverage.orca.state, 'partial');
+  assert.equal(latePartial.sessions[0].orca_link.confirmed, false);
+  assert.equal(latePartial.sessions[0].orca_link.terminal_handle, null);
+  responses.terminal.result.terminals.pop();
+  responses.worktree.result.worktrees.push(...Array.from({ length: snapshotPolicy.SNAPSHOT_LIMITS.worktrees },
+    function unrelatedWorktree(_, index) {
+      return { ...worktree, worktreeId: `other-${index}`, path: '/other/repo', agents: [] };
+    }));
+  const capped = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(capped.coverage.orca.state, 'partial');
+  assert.equal(capped.sessions[0].orca_link.confirmed, false);
+  assert.equal(capped.sessions[0].orca_link.terminal_handle, null);
+});
+
+test('PR1c R3 slash raw context changes refs and invalidates exclusion confirmations', testContext => {
+  const fixture = createFixture(testContext);
+  const wrapper = '<command-name>/review</command-name>';
+  const beforeText = wrapper + ' password="<command-args>LEAK_ME</command-args>"';
+  const afterText = wrapper + ' memo="<command-args>LEAK_ME</command-args>"';
+  fixture.file('claude', 'slash', [claudeUserRecord(beforeText, { origin: undefined })]);
+  const before = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(before.instructions.length, 1);
+  assert.equal(before.instructions[0].kind, 'slash');
+  assert.equal(JSON.stringify(before).includes('LEAK_ME'), false);
+  const target = instructionTarget(before.instructions[0]);
+  const preview = snapshotReader.excludeQuery({ ...fixture.options, target });
+  fixture.file('claude', 'slash', [claudeUserRecord(afterText, { origin: undefined })]);
+  const after = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(after.instructions.length, 1);
+  assert.notEqual(after.instructions[0].ref, before.instructions[0].ref);
+  assert.equal(after.instructions[0].id, before.instructions[0].id);
+  assertReaderError(() => snapshotReader.excludeQuery({ ...fixture.options, target }), 'target_changed');
+  const configBefore = fs.readFileSync(path.join(fixture.options.configDir, 'observe.json'));
+  const committed = snapshotReader.excludeCommit({ ...fixture.options, target, token: preview.token });
+  assert.equal(committed.code, 'confirm_mismatch');
+  assert.equal(committed.counts.registered, 0);
+  assert.deepEqual(fs.readFileSync(path.join(fixture.options.configDir, 'observe.json')), configBefore);
+  assert.equal(before.instructions[0].text, snapshotPolicy.finalizeText(beforeText).value);
+  assert.equal(after.instructions[0].text, snapshotPolicy.finalizeText(afterText).value);
+});
+
+test('PR1c R3 long slash arguments keep the sanitized raw prefix and report truncation', testContext => {
+  const fixture = createFixture(testContext);
+  const text = '<command-name>/review</command-name><command-args>LONG_ARGS_' + 'x'.repeat(2100)
+    + ' password="LONG_PRIVATE_VALUE"</command-args>';
+  fixture.file('claude', 'long-slash', [claudeUserRecord(text, { origin: undefined })]);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.instructions.length, 1);
+  const instruction = snapshot.instructions[0];
+  assert.equal(instruction.kind, 'slash');
+  assert.equal(instruction.text, snapshotPolicy.finalizeText(text).value);
+  assert.equal(instruction.text.includes('LONG_ARGS_'), true);
+  assert.equal(instruction.text.length, 2000);
+  assert.equal(instruction.truncated, true);
+  assert.equal(instruction.redacted, true);
+  assert.equal(JSON.stringify(snapshot).includes('LONG_PRIVATE_VALUE'), false);
+  assert.equal(snapshotPolicy.finalizeText(instruction.text).value, instruction.text);
+});
+
+test('PR1c R3 Orca compares the full raw instruction instead of its 2000-character display', testContext => {
+  const fixture = createFixture(testContext);
+  fixture.file('claude', 'long-link', [claudeUserRecord('ordinary instruction')]);
+  fixture.options.runOrca = orcaRunner([orcaWorktree('ordinary instruction')], [orcaTerminal()]);
+  assert.equal(snapshotReader.runSnapshot(fixture.options).sessions[0].orca_link.confirmed, true);
+  const text = 'ordinary '.repeat(300);
+  fixture.file('claude', 'long-link', [claudeUserRecord(text)]);
+  fixture.options.runOrca = orcaRunner([orcaWorktree(text.slice(0, 2000))], [orcaTerminal()]);
+  const prefix = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(prefix.instructions.length, 1);
+  assert.equal(prefix.sessions[0].orca_link.evidence, 'prompt_prefix');
+  assert.equal(prefix.sessions[0].orca_link.confirmed, false);
+  fixture.options.runOrca = orcaRunner([orcaWorktree(text)], [orcaTerminal()]);
+  const exact = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(exact.sessions[0].orca_link.evidence, 'prompt_exact');
+  assert.equal(exact.sessions[0].orca_link.confirmed, true);
+});
+
+test('PR1c R3 raw link summaries retain only the last chronological instruction and a 4096-character prefix',
+  testContext => {
+  const fixture = createFixture(testContext);
+  const text = 'Cafe\u0301\t' + 'ordinary  word\n'.repeat(600) + 'last raw suffix';
+  const normalized = text.normalize('NFC').replace(/\s+/g, ' ').trim();
+  const earlier = '2026-10-08T01:00:00.000Z';
+  const { scanSessions } = loadReaderWithInternals();
+  for (const provider of ['claude', 'codex']) {
+    const file = fixture.file(provider, 'last-link', provider === 'claude' ? [
+      claudeUserRecord(text, { uuid: 'later' }),
+      claudeUserRecord('earlier instruction', { uuid: 'earlier', timestamp: earlier })
+    ] : [codexSessionMeta(), codexMessage(text, { id: 'later' }),
+      { ...codexMessage('earlier instruction', { id: 'earlier' }), timestamp: earlier }]);
+    const config = snapshotReader.loadConfig(fixture.options);
+    const scanned = scanSessions(fixture.options, config);
+    assert.equal(scanned.all.length, 1);
+    const parsed = scanned.all[0];
+    assert.equal(parsed.items.length, 2);
+    assert.deepEqual(Object.keys(parsed.link_text).sort(), ['hash', 'length', 'prefix']);
+    assert.equal(parsed.link_text.hash, crypto.createHash('sha256').update(normalized).digest('hex'));
+    assert.equal(parsed.link_text.length, normalized.length);
+    assert.equal(parsed.link_text.prefix, normalized.slice(0, 4096));
+    assert.equal(parsed.link_text.prefix.length, 4096);
+    assert.equal(parsed.items.some(item => Object.hasOwn(item, 'link_text')), false);
+    assert.ok(countStoredStringCharacters(scanned) < 8000);
+    fixture.options.runOrca = orcaRunner([orcaWorktree(normalized)], [orcaTerminal()]);
+    const exact = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(exact.sessions[0].orca_link.evidence, 'cwd_only');
+    assert.equal(exact.sessions[0].orca_link.confirmed, false);
+    fixture.options.runOrca = orcaRunner([orcaWorktree(normalized + ' different suffix')], [orcaTerminal()]);
+    const prefix = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(prefix.sessions[0].orca_link.evidence, 'cwd_only');
+    assert.equal(prefix.sessions[0].orca_link.confirmed, false);
+    assert.equal(JSON.stringify(exact).includes('last raw suffix'), false);
+    assert.equal(JSON.stringify(exact).includes('link_text'), false);
+    fs.unlinkSync(file);
+  }
+});
+
+test('PR1c R4 every Claude wrapper preserves raw sanitization and content identity', testContext => {
+  const fixture = createFixture(testContext);
+  const { parseFile } = loadReaderWithInternals();
+  const config = snapshotReader.loadConfig(fixture.options);
+  const ignored = ['task-notification', 'local-command-stdout', 'local-command-caveat', 'bash-stdout', 'bash-stderr'];
+  for (const tag of ['bash-input', 'pasted', 'command-name', 'command-message', 'command-args', ...ignored]) {
+    const text = `<${tag}>password="LEAK_ME</${tag}>"`;
+    fixture.file('claude', 'wrapper', [claudeUserRecord(text)]);
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(JSON.stringify(snapshot).includes('LEAK_ME'), false, tag);
+    if (ignored.includes(tag)) {
+      assert.equal(snapshot.instructions.length, 0, tag);
+      continue;
+    }
+    assert.equal(snapshot.instructions.length, 1, tag);
+    assert.equal(snapshot.instructions[0].text, snapshotPolicy.finalizeText(text).value, tag);
+    const coverage = Object.fromEntries(snapshotPolicy.COVERAGE_KEYS.claude.map(key => [key, 0]));
+    const first = parseFile('claude', [claudeUserRecord(text)], coverage, config).items[0];
+    const changed = parseFile('claude', [claudeUserRecord(text + ' outside sentence')], coverage, config).items[0];
+    assert.notEqual(first.ref, changed.ref, tag);
+    assert.notEqual(first.fp, changed.fp, tag);
+  }
+  const text = '<bash-input>password="LEAK_ME</bash-input>"';
+  fixture.file('claude', 'wrapper', [claudeUserRecord('', { message: {
+    content: [{ type: 'text', text }, { type: 'text', text: 'outside block' }]
+  } })]);
+  const joined = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(joined.instructions[0].text, snapshotPolicy.finalizeText(text + '\n\noutside block').value);
+  assert.equal(JSON.stringify(joined).includes('LEAK_ME'), false);
+});
+
+test('PR1c R4 subagent omission requires the exact projects-relative path and matching sid', testContext => {
+  const fixture = createFixture(testContext);
+  fixture.file('claude', 'p/s', [claudeUserRecord('main')]);
+  const sidechain = [claudeUserRecord('sidechain', { isSidechain: true })];
+  const valid = fixture.file('claude', 'p/s/subagents/agent-x', sidechain);
+  const initial = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(initial.instructions.length, 1);
+  assert.equal(initial.coverage.claude.files_skipped, 1);
+  assert.equal(initial.coverage.claude.multi_file_withheld, 0);
+  fs.unlinkSync(valid);
+  for (const name of ['p/subagents/archive', 'p/different/subagents/agent-x', 'p/s/subagents/archive',
+    'p/s/subagents/nested/agent-x']) {
+    const file = fixture.file('claude', name, sidechain);
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(snapshot.coverage.claude.files_skipped, 0, name);
+    assert.equal(snapshot.coverage.claude.multi_file_withheld, 1, name);
+    assert.equal(snapshot.sessions.length, 0, name);
+    fs.unlinkSync(file);
+  }
+  fixture.options.homeDir = path.join(fixture.options.homeDir, 'subagents');
+  const projects = path.join(fixture.options.homeDir, '.claude/projects');
+  fs.mkdirSync(projects, { recursive: true });
+  fs.writeFileSync(path.join(projects, 'main.jsonl'), JSON.stringify(claudeUserRecord('main')));
+  fs.writeFileSync(path.join(projects, 'side.jsonl'), JSON.stringify(sidechain[0]));
+  const homeSegment = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(homeSegment.coverage.claude.files_skipped, 0);
+  assert.equal(homeSegment.coverage.claude.multi_file_withheld, 1);
+  assert.equal(homeSegment.sessions.length, 0);
+});
+
+for (const old of [false, true]) {
+  test(`PR1c R5 inode growth after the first body read stops at limit plus one with old=${old}`, testContext => {
+    const fixture = createFixture(testContext);
+    const file = fixture.file('claude', 'growing', old ? [
+      { type: 'assistant', timestamp: OLD_RECORD_TIMESTAMP, padding: 'x'.repeat(70 * 1024) },
+      claudeUserRecord('old', { timestamp: OLD_RECORD_TIMESTAMP })
+    ] : [claudeUserRecord('recent')]);
+    if (old) setTranscriptMtime(file, OLD_RECORD_TIMESTAMP);
+    const originalOpen = fs.openSync;
+    const originalFstat = fs.fstatSync;
+    const originalReadFile = fs.readFileSync;
+    const originalRead = fs.readSync;
+    const originalClose = fs.closeSync;
+    const descriptors = new Set();
+    let statsRead = 0;
+    let statsAtGrowth = 0;
+    let grew = false;
+    let unboundedReads = 0;
+    let bytes = 0;
+    testContext.mock.method(fs, 'openSync', function trackGrowingFile(filePath, ...args) {
+      const descriptor = originalOpen(filePath, ...args);
+      if (filePath === file) descriptors.add(descriptor);
+      return descriptor;
+    });
+    testContext.mock.method(fs, 'fstatSync', function countStatsBeforeGrowth(descriptor, ...args) {
+      const stats = originalFstat(descriptor, ...args);
+      if (descriptors.has(descriptor)) statsRead++;
+      return stats;
+    });
+    testContext.mock.method(fs, 'readFileSync', function countUnboundedRead(descriptor, ...args) {
+      if (descriptors.has(descriptor)) unboundedReads++;
+      return originalReadFile(descriptor, ...args);
+    });
+    testContext.mock.method(fs, 'readSync', function countBoundedRead(descriptor, ...args) {
+      const count = originalRead(descriptor, ...args);
+      if (descriptors.has(descriptor) && statsRead >= 2) {
+        bytes += count;
+        if (!grew && count > 0) {
+          statsAtGrowth = statsRead;
+          grew = true;
+          fs.appendFileSync(file, Buffer.alloc(snapshotReader.MAX_FILE_BYTES + 1024, 32));
+        }
+      }
+      return count;
+    });
+    testContext.mock.method(fs, 'closeSync', function trackClosingFile(descriptor) {
+      descriptors.delete(descriptor);
+      return originalClose(descriptor);
+    });
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(grew, true);
+    assert.equal(statsAtGrowth, 2);
+    assert.equal(unboundedReads, 0);
+    assert.ok(bytes > 0);
+    assert.ok(bytes <= snapshotReader.MAX_FILE_BYTES + 1);
+    assert.equal(bytes, snapshotReader.MAX_FILE_BYTES + 1);
+    assert.equal(snapshot.coverage.claude.files_failed, 1);
+    assert.equal(snapshot.sessions.length, 0);
+    assert.equal(descriptors.size, 0);
+  });
+}
+
+test('PR1c R4 detail bounds keep first and recent instructions with original seq refs and session tokens',
+  testContext => {
+  const fixture = createFixture(testContext);
+  const rows = Array.from({ length: 220 }, function instructionRow(_, index) {
+    return claudeUserRecord(`instruction ${index}`, { uuid: `u${index}` });
+  });
+  fixture.file('claude', 'bounded', rows);
+  const before = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(before.instructions.length, 201);
+  assert.deepEqual(before.instructions.map(item => item.seq),
+    [1, ...Array.from({ length: 200 }, (_, i) => i + 21)]);
+  assert.equal(before.instructions[0].id, 'claude:s:uu0');
+  assert.equal(before.instructions[1].id, 'claude:s:uu20');
+  assert.equal(before.instructions.at(-1).id, 'claude:s:uu219');
+  assert.equal(before.coverage.claude.records_unverified, 19);
+  const target = { kind: 'session', provider: 'claude', sessionId: 's' };
+  const preview = snapshotReader.excludeQuery({ ...fixture.options, target });
+  assert.equal(preview.equiv_count, 220);
+  rows[10].message.content = 'changed discarded instruction';
+  fixture.file('claude', 'bounded', rows);
+  const after = snapshotReader.runSnapshot(fixture.options);
+  assert.deepEqual(after.instructions, before.instructions);
+  assert.equal(snapshotReader.excludeCommit({ ...fixture.options, target, token: preview.token }).code,
+    'confirm_mismatch');
+});
+
+for (const old of [false, true]) {
+  test(`PR1c R5 subagent omission checks every record session identity with old=${old}`, testContext => {
+    const fixture = createFixture(testContext);
+    fixture.file('claude', 'p/s', [claudeUserRecord('main')]);
+    const timestamp = old ? OLD_RECORD_TIMESTAMP : RECORD_TIMESTAMP;
+    const rows = [claudeUserRecord('sidechain', { isSidechain: true, timestamp })];
+    const file = fixture.file('claude', 'p/s/subagents/agent-x', rows);
+    if (old) setTranscriptMtime(file, OLD_RECORD_TIMESTAMP);
+    const initial = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(initial.sessions.length, 1);
+    assert.equal(initial.instructions[0].text, 'main');
+    assert.equal(initial.coverage.claude.files_skipped, 1);
+    rows.push(claudeUserRecord('other sidechain', { sessionId: 'other', isSidechain: true,
+      timestamp, uuid: 'other', padding: 'x'.repeat(70 * 1024) }));
+    rows.push(claudeUserRecord('tail sidechain', { isSidechain: true, timestamp, uuid: 'tail' }));
+    fixture.file('claude', 'p/s/subagents/agent-x', rows);
+    if (old) setTranscriptMtime(file, OLD_RECORD_TIMESTAMP);
+    const reads = trackTranscriptReads(testContext, file);
+    const snapshot = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(snapshot.sessions.length, 0);
+    assert.equal(snapshot.instructions.length, 0);
+    assert.equal(snapshot.coverage.claude.multi_file_withheld, 1);
+    assert.equal(snapshot.coverage.claude.mixed_session_withheld, old ? 0 : 1);
+    assert.equal(snapshot.coverage.claude.files_skipped, 0);
+    assert.ok(reads.bytes > 64 * 1024);
+  });
+}
+
+for (const provider of ['claude', 'codex']) {
+  test(`PR1c R5 ${provider} deletion lookup finds instructions displaced by the snapshot cap`, testContext => {
+    const fixture = createFixture(testContext);
+    const rows = Array.from({ length: 201 }, function deletionRow(_, index) {
+      return provider === 'claude'
+        ? claudeUserRecord(`instruction ${index}`, { uuid: `u${index}` }) : codexMessage(`instruction ${index}`);
+    });
+    function saveRows() {
+      fixture.file(provider, 'bounded', provider === 'claude' ? rows : [codexSessionMeta(), ...rows]);
+    }
+    saveRows();
+    const before = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(before.instructions.length, 201);
+    const target = instructionTarget(before.instructions[1]);
+    const preview = snapshotReader.excludeQuery({ ...fixture.options, target });
+    assert.equal(preview.target, provider === 'claude' ? 'claude:s:uu1' : 'codex:s:n2');
+    assert.equal(preview.preview, 'instruction 1');
+    assert.equal(preview.equiv_count, 1);
+    rows.push(provider === 'claude' ? claudeUserRecord('new instruction', { uuid: 'new' })
+      : codexMessage('new instruction'));
+    saveRows();
+    const capped = snapshotReader.runSnapshot(fixture.options);
+    assert.equal(capped.instructions.length, 201);
+    assert.equal(capped.instructions.some(item => item.id === target.instrId), false);
+    assert.equal(capped.coverage[provider].records_unverified, 1);
+    const repeated = snapshotReader.excludeQuery({ ...fixture.options, target });
+    assert.equal(repeated.target, preview.target);
+    assert.equal(repeated.preview, preview.preview);
+    assert.equal(repeated.token, preview.token);
+    assert.equal(snapshotReader.excludeCommit({ ...fixture.options, target, token: preview.token }).code, 'ok');
+    assert.equal(snapshotReader.runSnapshot(fixture.options).coverage[provider].deleted_instructions, 1);
+    if (provider === 'claude') rows[1].message.content = 'changed second instruction';
+    else rows[1].payload.content[0].text = 'changed second instruction';
+    saveRows();
+    const configBefore = fs.readFileSync(path.join(fixture.options.configDir, 'observe.json'));
+    assertReaderError(() => snapshotReader.excludeQuery({ ...fixture.options, target }), 'target_changed');
+    const rejected = snapshotReader.excludeCommit({ ...fixture.options, target, token: preview.token });
+    assert.equal(rejected.code, 'confirm_mismatch');
+    assert.equal(rejected.counts.registered, 0);
+    assert.deepEqual(fs.readFileSync(path.join(fixture.options.configDir, 'observe.json')), configBefore);
+  });
+}
+
+function writeManyInstructionRunner(fixture) {
+  const runner = path.join(fixture.root, 'many-instructions.cjs');
+  fs.writeFileSync(runner, [
+    "const assert = require('node:assert/strict');",
+    'const reader = require(process.argv[2]);',
+    'const options = JSON.parse(process.argv[3]);',
+    'options.now = new Date(options.now);',
+    'options.runOrca = function unavailableOrca() { return null; };',
+    'const snapshot = reader.runSnapshot(options);',
+    'assert.equal(snapshot.sessions.length, 300);',
+    'assert.equal(snapshot.sessions[0].session_id, "stress-319");',
+    'assert.equal(snapshot.sessions.at(-1).session_id, "stress-20");',
+    'assert.ok(snapshot.sessions.every(session => session.instruction_count <= 201));',
+    'const latest = snapshot.instructions.filter(item => item.session_key === snapshot.sessions[0].key);',
+    'assert.equal(latest.length, 201);',
+    'assert.equal(latest[0].seq, 1);',
+    'assert.equal(latest[1].seq, 201);',
+    'assert.equal(latest.at(-1).seq, 400);',
+    'assert.equal(snapshot.coverage.claude.files_scanned, 320);',
+    'assert.equal(snapshot.coverage.claude.files_failed, 0);',
+    'process.stdout.write(JSON.stringify({sessions: snapshot.sessions.length,',
+    '  latest: snapshot.sessions[0].session_id}));'
+  ].join('\n'));
+  return runner;
+}
+
+test('PR1c R4 hundreds of sessions with hundreds of instructions survive a 64MB child heap',
+  { timeout: 120000 }, testContext => {
+  const { spawnSync } = require('node:child_process');
+  const fixture = createFixture(testContext);
+  const body = 'ordinary safe message '.repeat(10);
+  assert.ok(body.length >= 200);
+  for (let index = 0; index < 320; index++) {
+    const timestamp = new Date(+SNAPSHOT_TIME - (320 - index) * 1000).toISOString();
+    fixture.file('claude', `stress-${String(index).padStart(3, '0')}`, Array.from({ length: 400 },
+      function stressInstruction(_, item) {
+        return claudeUserRecord(body + item, { sessionId: `stress-${index}`, uuid: `u${item}`, timestamp });
+      }));
+  }
+  const child = spawnSync(process.execPath, ['--max-old-space-size=64', writeManyInstructionRunner(fixture),
+    require.resolve('../../scripts/lib/sessionSnapshotReader.cjs'), JSON.stringify(fixture.options)], {
+    encoding: 'utf8', timeout: 90000, maxBuffer: 64 * 1024, cwd: fixture.root,
+    env: { ...process.env, HOME: fixture.options.homeDir }
+  });
+  testContext.diagnostic(`many instructions: status=${child.status}, signal=${child.signal}, `
+    + `oom=${/heap out of memory|Reached heap limit|Allocation failed/.test(child.stderr || '')}`);
+  assert.equal(child.error, undefined);
+  assert.equal(child.status, 0, child.stderr.slice(-1000));
+  assert.equal(child.signal, null);
+  assert.deepEqual(JSON.parse(child.stdout), { sessions: 300, latest: 'stress-319' });
+});
+
+test('PR1c R4 late duplicate files restore displaced sessions without duplicate coverage', testContext => {
+  const fixture = createFixture(testContext);
+  let first;
+  for (let index = 0; index < 301; index++) {
+    const timestamp = new Date(+SNAPSHOT_TIME - (301 - index) * 1000).toISOString();
+    const file = fixture.file('claude', `a-${String(index).padStart(3, '0')}`, [
+      claudeUserRecord(`instruction ${index}`, { sessionId: `s${index}`, timestamp })
+    ]);
+    if (index === 0) first = file;
+  }
+  fixture.file('claude', 'z-duplicate', [claudeUserRecord('duplicate', { sessionId: 's300' })]);
+  const reads = trackTranscriptReads(testContext, first);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.sessions.length, 300);
+  assert.equal(snapshot.instructions.length, 300);
+  assert.deepEqual(snapshot.sessions.map(session => session.session_id),
+    Array.from({ length: 300 }, (_, index) => `s${index}`));
+  assert.equal(snapshot.coverage.claude.files_scanned, 302);
+  assert.equal(snapshot.coverage.claude.files_failed, 0);
+  assert.equal(snapshot.coverage.claude.multi_file_withheld, 1);
+  assert.equal(snapshot.coverage.claude.records_unverified, 0);
+  assert.equal(reads.fullReads, 2);
+});
+
+test('PR1c R4 capped Codex content exclusions count every identical original instruction', testContext => {
+  const fixture = createFixture(testContext);
+  fixture.file('codex', 'bounded', [codexSessionMeta(), ...Array.from({ length: 220 },
+    function repeatedInstruction() { return codexMessage('same original instruction'); })]);
+  const before = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(before.instructions.length, 201);
+  assert.equal(before.instructions[0].id, 'codex:s:n1');
+  assert.equal(before.instructions[1].id, 'codex:s:n21');
+  const target = instructionTarget(before.instructions[0]);
+  const preview = snapshotReader.excludeQuery({ ...fixture.options, target });
+  assert.equal(preview.equiv_count, 220);
+  assert.equal(snapshotReader.excludeCommit({ ...fixture.options, target, token: preview.token }).code, 'ok');
+  const excluded = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(excluded.instructions.length, 0);
+  assert.equal(excluded.coverage.codex.deleted_instructions, 220);
+  assert.equal(excluded.coverage.codex.content_rule_excluded, 220);
+  assert.equal(excluded.coverage.codex.records_unverified, 19);
+});
+
+function writeInteractiveCandidates(fixture, count) {
+  for (let index = 0; index < count; index++) {
+    const sid = `interactive-${index}`;
+    const timestamp = new Date(+SNAPSHOT_TIME - (1000 - index) * 1000).toISOString();
+    fixture.file('claude', `interactive-${String(index).padStart(3, '0')}`, [
+      claudeUserRecord(`instruction ${index}`, { sessionId: sid, timestamp })
+    ]);
+  }
+}
+
+test('candidate cap excludes 350 exec sessions before retaining five interactive sessions', testContext => {
+  const fixture = createFixture(testContext);
+  writeInteractiveCandidates(fixture, 5);
+  for (let index = 0; index < 350; index++) {
+    const timestamp = new Date(+SNAPSHOT_TIME - 1000).toISOString();
+    fixture.file('codex', `exec-${String(index).padStart(3, '0')}`, [
+      { ...codexSessionMeta({ id: `exec-${index}`, source: 'exec' }), timestamp },
+      { ...codexMessage('exec instruction'), timestamp }
+    ]);
+  }
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.deepEqual(snapshot.sessions.map(session => session.session_id),
+    Array.from({ length: 5 }, (_, index) => `interactive-${index}`));
+  assert.deepEqual(snapshot.instructions.map(instruction => instruction.text),
+    Array.from({ length: 5 }, (_, index) => `instruction ${index}`));
+  assert.equal(snapshot.coverage.codex.exec_sessions_excluded, 350);
+  assert.equal(snapshot.coverage.codex.records_unverified, 0);
+  assert.equal(snapshot.coverage.claude.records_unverified, 0);
+  const included = snapshotReader.runSnapshot({ ...fixture.options, includeExec: true });
+  assert.equal(included.sessions.length, 300);
+  assert.ok(included.sessions.every(session => session.run_mode === 'exec'));
+  assert.equal(included.coverage.codex.exec_sessions_excluded, 0);
+  assert.equal(included.coverage.codex.records_unverified, 50);
+  assert.equal(included.coverage.claude.records_unverified, 5);
+});
+
+test('candidate cap selects exactly the newest 300 of 310 interactive sessions', testContext => {
+  const fixture = createFixture(testContext);
+  writeInteractiveCandidates(fixture, 310);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.deepEqual(snapshot.sessions.map(session => session.session_id),
+    Array.from({ length: 300 }, (_, index) => `interactive-${309 - index}`));
+  assert.equal(snapshot.instructions.length, 300);
+  assert.equal(snapshot.coverage.claude.records_unverified, 10);
+  assert.equal(snapshot.coverage.claude.files_scanned, 310);
+});
+
+test('candidate cap counts multi-file sessions as withheld without consuming candidate slots', testContext => {
+  const fixture = createFixture(testContext);
+  writeInteractiveCandidates(fixture, 5);
+  for (let index = 0; index < 350; index++) {
+    const timestamp = new Date(+SNAPSHOT_TIME - 1000).toISOString();
+    for (const suffix of ['a', 'b']) {
+      fixture.file('claude', `multi-${String(index).padStart(3, '0')}-${suffix}`, [
+        claudeUserRecord('withheld instruction', { sessionId: `multi-${index}`, uuid: suffix, timestamp })
+      ]);
+    }
+  }
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.deepEqual(snapshot.sessions.map(session => session.session_id),
+    Array.from({ length: 5 }, (_, index) => `interactive-${index}`));
+  assert.equal(snapshot.coverage.claude.multi_file_withheld, 350);
+  assert.equal(snapshot.coverage.claude.records_unverified, 0);
+});
+
+test('candidate cap applies session rules, unsupported modes and key withholding before ranking', testContext => {
+  const fixture = createFixture(testContext);
+  writeInteractiveCandidates(fixture, 5);
+  snapshotReader.loadConfig(fixture.options);
+  const config = fixture.config();
+  for (let index = 0; index < 70; index++) {
+    const sid = `excluded-${index}`;
+    const timestamp = new Date(+SNAPSHOT_TIME - 1000).toISOString();
+    fixture.file('claude', sid, [claudeUserRecord('excluded instruction', { sessionId: sid, timestamp })]);
+    config.exclude.sessions.push(`claude:${sid}`);
+    for (const mode of ['exec', 'subagent', 'unsupported', 'withheld']) {
+      const id = `${mode}-${index}`;
+      const source = { exec: 'exec', subagent: { subagent: 'review' }, unsupported: 'voice', withheld: 'cli' };
+      fixture.file('codex', id, [{ ...codexSessionMeta({ id, source: source[mode] }), timestamp },
+        { ...codexMessage('excluded'), timestamp }]);
+      if (mode === 'withheld') {
+        config.exclude.instructions.push({ id: `codex:${id}:n1`, fingerprint: '1'.repeat(64),
+          key_fingerprint: '0'.repeat(64) });
+      }
+    }
+  }
+  fixture.save(config);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.deepEqual(snapshot.sessions.map(session => session.session_id),
+    Array.from({ length: 5 }, (_, index) => `interactive-${index}`));
+  assert.equal(snapshot.coverage.claude.excluded_sessions, 70);
+  assert.equal(snapshot.coverage.codex.exec_sessions_excluded, 70);
+  assert.equal(snapshot.coverage.codex.subagent_excluded, 70);
+  assert.equal(snapshot.coverage.codex.unsupported_sessions, 70);
+  assert.equal(snapshot.coverage.codex.withheld_sessions, 70);
+  assert.equal(snapshot.coverage.claude.records_unverified, 0);
+  assert.equal(snapshot.coverage.codex.records_unverified, 0);
+});
+
+test('candidate cap preserves querying and repeat commits for already excluded sessions', testContext => {
+  const fixture = createFixture(testContext);
+  writeInteractiveCandidates(fixture, 1);
+  for (let index = 0; index < 350; index++) {
+    const timestamp = new Date(+SNAPSHOT_TIME - 1000).toISOString();
+    fixture.file('codex', `exec-${index}`, [{ ...codexSessionMeta({ id: `exec-${index}`, source: 'exec' }),
+      timestamp }, { ...codexMessage('exec instruction'), timestamp }]);
+  }
+  const target = { kind: 'session', provider: 'claude', sessionId: 'interactive-0' };
+  snapshotReader.loadConfig(fixture.options);
+  const preview = snapshotReader.excludeQuery({ ...fixture.options, target });
+  assert.equal(preview.equiv_count, 1);
+  assert.equal(snapshotReader.excludeCommit({ ...fixture.options, target, token: preview.token }).counts.registered, 1);
+  assert.equal(snapshotReader.runSnapshot(fixture.options).sessions.length, 0);
+  assert.equal(snapshotReader.excludeQuery({ ...fixture.options, target }).token, preview.token);
+  assert.equal(snapshotReader.excludeCommit({ ...fixture.options, target, token: preview.token }).counts.registered, 0);
+});
+
+test('candidate cap keeps excluded sessions as text-free Orca ambiguity blockers', testContext => {
+  const fixture = createFixture(testContext);
+  const text = 'same safe interactive instruction';
+  fixture.file('claude', 'a', [claudeUserRecord(text)]);
+  fixture.file('claude', 'b', [claudeUserRecord(text, { sessionId: 'excluded' })]);
+  fixture.options.runOrca = orcaRunner([orcaWorktree(text)], [orcaTerminal()]);
+  assert.ok(snapshotReader.runSnapshot(fixture.options).sessions.every(session =>
+    session.orca_link.evidence === 'ambiguous'));
+  const config = fixture.config();
+  config.exclude.sessions.push('claude:excluded');
+  fixture.save(config);
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.sessions.length, 1);
+  assert.equal(snapshot.sessions[0].session_id, 's');
+  assert.equal(snapshot.sessions[0].orca_link.evidence, 'ambiguous');
+  assert.equal(snapshot.sessions[0].orca_link.confirmed, false);
+  assert.equal(snapshot.coverage.claude.excluded_sessions, 1);
+  const { all, linkCandidates } = loadReaderWithInternals().scanSessions(fixture.options, config);
+  assert.equal(all.length, 1);
+  assert.equal(linkCandidates.length, 1);
+  assert.equal(linkCandidates[0].sid, 'excluded');
+  assert.equal(linkCandidates[0].cwd, null);
+  assert.match(linkCandidates[0].cwdHash, /^[a-f0-9]{64}$/);
+  assert.equal(Object.hasOwn(linkCandidates[0], 'items'), false);
+  assert.equal(linkCandidates[0].link_text, null);
+});
+
+test('PR1c R6 excluded exec bodies never reach finalizeText while included bodies do', testContext => {
+  const fixture = createFixture(testContext);
+  const body = 'ordinary safe instruction '.repeat(10000);
+  fixture.file('codex', 'exec', [codexSessionMeta({ source: 'exec' }), codexMessage(body)]);
+  const calls = [];
+  const finalize = snapshotPolicy.finalizeText;
+  testContext.mock.method(snapshotPolicy, 'finalizeText', function countFinalization(text, ...args) {
+    calls.push(text);
+    return finalize(text, ...args);
+  });
+  const included = snapshotReader.runSnapshot({ ...fixture.options, includeExec: true });
+  assert.equal(included.instructions.length, 1);
+  assert.equal(calls.filter(text => text === body).length, 1);
+  calls.length = 0;
+  const excluded = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(excluded.sessions.length, 0);
+  assert.equal(excluded.coverage.codex.exec_sessions_excluded, 1);
+  assert.equal(calls.length, 0);
+  fixture.file('codex', 'exec', [codexSessionMeta(), codexMessage(body)]);
+  const interactive = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(interactive.instructions.length, 1);
+  assert.equal(calls.filter(text => text === body).length, 1);
+  assert.equal(interactive.instructions[0].text.length, 2000);
+});
+
+test('PR1c R6 instruction retention is decided before sanitization without changing refs', testContext => {
+  const fixture = createFixture(testContext);
+  const config = snapshotReader.loadConfig(fixture.options);
+  const { parseFile } = loadReaderWithInternals();
+  const body = 'discarded ordinary instruction '.repeat(10000);
+  const records = Array.from({ length: 220 }, function retainedRow(_, index) {
+    return claudeUserRecord(index === 1 ? body : `instruction ${index}`, { uuid: `u${index}` });
+  });
+  const calls = [];
+  const finalize = snapshotPolicy.finalizeText;
+  testContext.mock.method(snapshotPolicy, 'finalizeText', function countFinalization(text, ...args) {
+    calls.push(text);
+    return finalize(text, ...args);
+  });
+  function counters() {
+    return Object.fromEntries(snapshotPolicy.COVERAGE_KEYS.claude.map(key => [key, 0]));
+  }
+  const complete = parseFile('claude', records, counters(), config, true);
+  assert.equal(complete.items.length, 220);
+  assert.equal(calls.filter(text => text === body).length, 1);
+  calls.length = 0;
+  const coverage = counters();
+  const bounded = parseFile('claude', records, coverage, config);
+  assert.equal(bounded.items.length, 201);
+  assert.equal(calls.filter(text => text === body).length, 0);
+  assert.equal(calls.length, 201);
+  assert.equal(coverage.records_unverified, 19);
+  assert.equal(bounded.sessionFingerprint, complete.sessionFingerprint);
+  for (const item of bounded.items) {
+    const original = complete.items.find(candidate => candidate.id === item.id);
+    assert.equal(item.ref, original.ref);
+    assert.equal(item.fp, original.fp);
+    assert.equal(item.text, original.text);
+  }
+});
+
+test('PR1c R6 Orca exact and prefix evidence require two complete local text summaries', testContext => {
+  const fixture = createFixture(testContext);
+  function link(text, prompt) {
+    fixture.file('claude', 'link', [claudeUserRecord(text)]);
+    fixture.options.runOrca = orcaRunner([orcaWorktree(prompt)], [orcaTerminal()]);
+    return snapshotReader.runSnapshot(fixture.options).sessions[0].orca_link;
+  }
+  const short = 'ordinary safe instruction with a real prefix';
+  assert.equal(link(short, short + ' suffix').evidence, 'prompt_prefix');
+  assert.equal(link(short, short).confirmed, true);
+  const long = 'x'.repeat(4096);
+  for (const [text, prompt] of [[long + 'A', long + 'B'], [long + 'A', long + 'A'],
+    [long, long + 'A'], [long + 'A', long]]) {
+    const result = link(text, prompt);
+    assert.equal(result.evidence, 'cwd_only');
+    assert.equal(result.confirmed, false);
+  }
+  assert.equal(link(long, long).evidence, 'prompt_exact');
 });

@@ -123,12 +123,24 @@ test('executor timeout terminates inherited-pipe descendants', { timeout: 15000 
 test('large remote snapshot flushes its complete envelope before launcher exit', async t => {
   const f = fixture(t);
   const m = await api;
-  const count = 400;
+  const sessionCount = 2;
+  const instructionsPerSession = 200;
+  const count = sessionCount * instructionsPerSession;
   const filename = path.join(f.home, '.claude/projects/s.jsonl');
   const template = JSON.parse(fs.readFileSync(filename, 'utf8'));
-  const rows = Array.from({ length: count }, (_, index) => ({ ...template, uuid: 'u' + index,
-    message: { content: 'Synthetic instruction ' + index + ': ' + 'a '.repeat(850) } }));
-  fs.writeFileSync(filename, rows.map(JSON.stringify).join('\n') + '\n');
+  fs.unlinkSync(filename);
+  const rows = [];
+  for (let session = 0; session < sessionCount; session++) {
+    const sessionId = 'flush-' + session;
+    const sessionRows = Array.from({ length: instructionsPerSession }, (_, offset) => {
+      const index = session * instructionsPerSession + offset;
+      return { ...template, sessionId, uuid: 'u' + index,
+        message: { content: 'Synthetic instruction ' + index + ': ' + 'a '.repeat(850) } };
+    });
+    rows.push(...sessionRows);
+    fs.writeFileSync(path.join(path.dirname(filename), sessionId + '.jsonl'),
+      sessionRows.map(JSON.stringify).join('\n') + '\n');
+  }
   const bundle = m.buildBundle({ request: f.request });
   const result = await m.runExecutor({ target: f.target, bundle,
     sshBin: f.env.PALANTIR_OBSERVE_SSH_BIN, env: f.env });
@@ -137,7 +149,9 @@ test('large remote snapshot flushes its complete envelope before launcher exit',
   const received = m.receiveEnvelope(result, { expectedKinds: ['snapshot'],
     expectedReaderBuild: bundle.readerBuild });
   assert.equal(received.ok, true, received.reason);
-  assert.equal(received.envelope.sessions.length, 1);
+  assert.equal(received.envelope.sessions.length, sessionCount);
+  assert.ok(received.envelope.sessions.every(session => session.instruction_count === instructionsPerSession));
+  assert.equal(received.envelope.coverage.claude.records_unverified, 0);
   assert.equal(received.envelope.instructions.length, count);
   assert.deepEqual(received.envelope.instructions.map(item => item.text), rows.map(row => row.message.content));
 });
@@ -577,4 +591,70 @@ test('simulated old major without globalThis rejects before compiling modern rea
   assert.equal(result.stderrBytes, 0);
   assert.deepEqual(JSON.parse(result.stdout), { schema: 'palantir.snapshot-status/1', machine_id: 'unknown',
     reader_build: bundle.readerBuild, code: 'node_unsupported', counts: {} });
+});
+
+test('PR1c B labels initialize and update config once; repeated and absent labels write nothing', async t => {
+  const f = fixture(t);
+  const log = path.join(f.root, 'label-writes.log');
+  f.env.FAKE_SSH_PRELOAD = path.resolve(__dirname, 'fixtures/session-snapshot/write-probe.cjs');
+  f.env.WRITE_PROBE_LOG = log;
+  delete f.env.FAKE_ORCA_SPAWN_LOG;
+  const initial = await execute(f, { ...f.request, machine_label: 'Mac' });
+  exactSnapshot(initial.envelope);
+  assert.equal(initial.envelope.machine.label, 'Mac');
+  const before = JSON.parse(fs.readFileSync(f.config, 'utf8'));
+  fs.writeFileSync(log, '');
+  const updated = await execute(f, { ...f.request, machine_label: 'codev2' });
+  assert.equal(updated.envelope.machine.label, 'codev2');
+  const after = JSON.parse(fs.readFileSync(f.config, 'utf8'));
+  assert.equal(after.machine_label, 'codev2');
+  after.machine_label = before.machine_label;
+  assert.equal(JSON.stringify(after), JSON.stringify(before));
+  const writes = fs.readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(writes.filter(value => value === f.config).length, 1);
+  assert.ok(writes.includes(f.config + '.lock'));
+  const bytes = fs.readFileSync(f.config);
+  for (const request of [{ ...f.request, machine_label: 'codev2' }, f.request]) {
+    fs.writeFileSync(log, '');
+    const same = await execute(f, request);
+    assert.equal(same.envelope.machine.label, 'codev2');
+    assert.equal(fs.readFileSync(log, 'utf8'), '');
+    assert.deepEqual(fs.readFileSync(f.config), bytes);
+  }
+});
+
+test('PR1c B direct invalid labels and labels on exclusion requests are rejected before reader execution', async t => {
+  const f = fixture(t);
+  const valid = await execute(f, { ...f.request, machine_label: 'codev2' });
+  assert.equal(valid.envelope.machine.label, 'codev2');
+  const before = fs.readFileSync(f.config);
+  const probe = { 'scripts/lib/sessionSnapshotReader.cjs': "throw new Error('READER_SHOULD_NOT_RUN');" };
+  for (const label of ['a b', '-x', 'x'.repeat(33), '', null, 42]) {
+    const result = await execute(f, { ...f.request, machine_label: label }, {}, probe);
+    assert.equal(result.envelope.code, 'request_invalid');
+    assert.deepEqual(fs.readFileSync(f.config), before);
+  }
+  for (const op of ['exclude_query', 'exclude_commit']) {
+    const request = { ...f.request, op, machine_label: 'codev2',
+      target: { kind: 'session', provider: 'claude', sessionId: 's' } };
+    if (op === 'exclude_commit') request.token = '0'.repeat(64);
+    const result = await execute(f, request, {}, probe);
+    assert.equal(result.envelope.code, 'request_invalid');
+  }
+});
+
+test('PR1c D fake Orca executes actual envelopes through the bundle and projects topology links', async t => {
+  const f = fixture(t);
+  const { envelope } = await execute(f);
+  exactSnapshot(envelope);
+  assert.deepEqual(envelope.coverage.orca, { state: 'ok', code: null });
+  assert.equal(envelope.orca.worktrees.length, 1);
+  assert.equal(envelope.orca.terminals.length, 1);
+  assert.equal(envelope.orca.worktrees[0].live_terminals, 1);
+  assert.equal(envelope.orca.worktrees[0].last_activity_at, '2026-10-08T02:00:00.000Z');
+  assert.equal(envelope.orca.terminals[0].last_output_at, '2026-10-08T02:00:00.000Z');
+  assert.equal(envelope.sessions[0].orca_link.confirmed, true);
+  assert.equal(envelope.sessions[0].orca_link.pane_key, 'fixture-tab:fixture-leaf');
+  assert.equal(envelope.sessions[0].orca_link.terminal_handle, 'term_fixture');
+  assert.equal(JSON.stringify(envelope).includes('FAKE_ORCA_PRIVATE_TEXT'), false);
 });
