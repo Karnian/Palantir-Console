@@ -9,6 +9,7 @@ export function displayInstructionText(text) {
   for (const match of trimmed.matchAll(tags)) {
     if (trimmed.slice(end, match.index).trim()) return text;
     if (Object.hasOwn(values, match[1])) return text;
+    if (match[2].includes('<command-')) return text;
     values[match[1]] = match[2];
     end = match.index + match[0].length;
   }
@@ -28,6 +29,8 @@ const lexical = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 const epoch = value => Date.parse(value) || 0;
 const firstLine = instruction => instruction?.text_missing
   ? null : displayInstructionText(instruction?.text)?.split(/\r?\n/u).find(line => line.trim() !== '') || null;
+const instructionTransformed = instruction => !instruction?.text_missing
+  && displayInstructionText(instruction?.text) !== instruction?.text;
 const displayKey = text => String(text || '').normalize('NFC').trim().replace(/\s+/gu, ' ');
 
 // Spec §6: compare display lines without changing their rendered text.
@@ -64,6 +67,9 @@ export function snapshotCards(snapshot) {
     return {
       ...session, machine: snapshot.machine, instructions, recent, first,
       ai_title: aiTitle, title, titleSource: aiTitle ? 'ai' : 'first',
+      titleTransformed: aiTitle ? title !== aiTitle : instructionTransformed(titleInstruction),
+      recentTransformed: instructionTransformed(instructions.at(-1)),
+      firstTransformed: session.first_instruction === 'recoverable' && instructionTransformed(instructions[0]),
       ...cardLineVisibility(title, recent, first),
       recentAt: instructions.at(-1)?.ts || null,
       recentMissing: !!instructions.at(-1)?.text_missing,

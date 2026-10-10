@@ -87,6 +87,20 @@ test('command display preserves mismatched messages and every repeated tag witho
   for (const text of cases) assert.equal(displayInstructionText(` \n${text}\t `), ` \n${text}\t `);
 });
 
+test('command display preserves nested or incomplete command tags inside values', async () => {
+  const { displayInstructionText } = await logic;
+  const cases = [
+    '<command-name>review</command-name><command-args>A<command-args>B</command-args>',
+    commandText('review', 'A<command-name>nested</command-name>B'),
+    commandText('review', 'A<command-message>nested</command-message>B'),
+    commandText('review', 'A<command-'),
+    commandText('review<command-unknown>'),
+    '<command-name>review<command-unknown></command-name>'
+      + '<command-message>review<command-unknown></command-message>',
+  ];
+  for (const text of cases) assert.equal(displayInstructionText(text), text);
+});
+
 test('card display unwraps before selecting lines and deduplicates display strings while search stays raw', async t => {
   const { snapshotCards, rankCards } = await logic;
   const { alpha } = fixtures(t);
@@ -218,6 +232,47 @@ test('DOM search highlights original lines without matching a synthesized comman
     assert.equal(match.querySelectorAll('mark').length, 1);
     assert.equal(match.querySelector('mark').textContent, query);
     assert.equal(root.querySelector('.work-title').textContent, mismatched);
+  }
+});
+
+test('DOM highlights original matches before verifying converted card and timeline rows have no marks', async t => {
+  const { alpha } = fixtures(t);
+  const env = boardEnv(t), root = env.document.getElementById('root');
+  const wrapped = commandText('review', 'x');
+  const query = '/review x';
+  const cases = [
+    { ai: 'AI title', first: query, recent: wrapped, converted: '.work-recent' },
+    { ai: wrapped, first: wrapped, recent: `${query} last`, converted: '.work-title' },
+    { ai: 'AI title', first: wrapped, recent: `${query} last`, converted: '.work-first' },
+    { ai: null, first: wrapped, recent: `${query} last`, converted: '.work-title' },
+  ];
+  for (const variant of cases) {
+    const snapshot = structuredClone(alpha);
+    snapshot.sessions = snapshot.sessions.slice(0, 1);
+    snapshot.sessions[0].ai_title = variant.ai;
+    snapshot.instructions = snapshot.instructions.slice(0, 2);
+    snapshot.instructions[0].text = variant.first;
+    snapshot.instructions[1].text = variant.recent;
+    env.context.apiFetch = async url => url.endsWith('/snapshots')
+      ? { snapshots: [{ machine_id: 'alpha' }] } : snapshot;
+    env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
+    const input = root.querySelector('#work-query');
+    input.value = query; input.dispatchEvent(new env.window.Event('input', { bubbles: true }));
+    await flushEffects();
+    root.querySelector('.work-card button').click(); await flushEffects();
+    assert.equal(root.querySelectorAll('.work-card').length, 1);
+    assert.equal(root.querySelector('.work-match mark').textContent, query);
+    const timeline = root.querySelectorAll('.work-instruction');
+    const originalIndex = variant.first === wrapped ? 0 : 1;
+    assert.equal(timeline[originalIndex].querySelector('mark').textContent, query);
+    if (variant.recent !== wrapped) assert.equal(root.querySelector('.work-recent mark').textContent, query);
+    const converted = root.querySelector(variant.converted);
+    assert.equal(converted.textContent, query);
+    assert.equal(converted.querySelectorAll('mark').length, 0);
+    const convertedTimeline = timeline[1 - originalIndex];
+    assert.equal(convertedTimeline.textContent, query);
+    assert.equal(convertedTimeline.querySelectorAll('mark').length, 0);
+    env.render(null, root);
   }
 });
 
