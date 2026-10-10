@@ -7,10 +7,28 @@ const { execFileSync } = require('node:child_process');
 const snapshotPolicy = require('../../server/services/observeSnapshotPolicy.js');
 const MAX_FILES = 10000;
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
-const STREAM_LIMITS = { lineBytes: 8 * 1024 * 1024, fileBytes: 256 * 1024 * 1024, identities: 100000 };
+const STREAM_LIMITS = { lineBytes: 8 * 1024 * 1024, fileBytes: 256 * 1024 * 1024, identities: 100000, smallFileBytes: MAX_FILE_BYTES };
 function streamLimit() { const error = new Error('stream_limit'); error.streamLimit = true; throw error; }
 function checkMetadata(size) { if (size > STREAM_LIMITS.identities) streamLimit(); }
-function* transcriptRecords(fd) {
+// Spec §1.4: observations survive any later read/limit failure; paths stay local as hashes.
+function observeTranscriptIdentity(record, observation) {
+  const sid = observation.provider === 'claude' ? record.sessionId
+    : record.type === 'session_meta' ? record.payload?.id : undefined;
+  if (isIdentityComponent(sid)) observation.sessionIds.add(sid);
+  const cwd = observation.provider === 'claude' ? record.cwd : record.payload?.cwd;
+  if (typeof cwd === 'string' && cwd !== observation.lastCwd) {
+    observation.cwdHashes.add(crypto.createHash('sha256').update(cwd).digest('hex'));
+    observation.lastCwd = cwd;
+  }
+  if (observation.limited) checkMetadata(observation.sessionIds.size + observation.cwdHashes.size);
+}
+function* transcriptRecords(fd, observation) {
+  const limited = observation?.limited !== false;
+  function consume(line) {
+    const record = parseTranscriptRecord(line);
+    if (observation) observeTranscriptIdentity(record, observation);
+    return record;
+  }
   const chunk = Buffer.allocUnsafe(256 * 1024);
   let offset = 0, pending = [], pendingBytes = 0;
   while (true) {
@@ -21,24 +39,24 @@ function* transcriptRecords(fd) {
     let start = 0, end;
     while ((end = chunk.indexOf(10, start)) >= 0 && end < count) {
       const bytes = pendingBytes + end - start;
-      if (bytes > STREAM_LIMITS.lineBytes) streamLimit();
+      if (limited && bytes > STREAM_LIMITS.lineBytes) streamLimit();
       const line = pendingBytes ? Buffer.concat([...pending, chunk.subarray(start, end)], bytes).toString('utf8')
         : chunk.toString('utf8', start, end);
       pending = []; pendingBytes = 0; start = end + 1;
-      if (line.trim()) yield parseTranscriptRecord(line);
+      if (line.trim()) yield consume(line);
     }
     const bytes = count - start;
-    if (pendingBytes + bytes > STREAM_LIMITS.lineBytes) streamLimit();
+    if (limited && pendingBytes + bytes > STREAM_LIMITS.lineBytes) streamLimit();
     if (bytes) { pending.push(Buffer.from(chunk.subarray(start, count))); pendingBytes += bytes; }
   }
   if (pendingBytes) {
     const line = Buffer.concat(pending, pendingBytes).toString('utf8');
-    if (line.trim()) yield parseTranscriptRecord(line);
+    if (line.trim()) yield consume(line);
   }
 }
-function transcriptSource(fd, provider, validateOnly = false) {
+function transcriptSource(fd, provider, validateOnly = false, observation) {
   const headers = [];
-  const source = { streaming: true, find(predicate) { return headers.find(predicate); } };
+  const source = { streaming: true, limited: observation?.limited !== false, find(predicate) { return headers.find(predicate); } };
   const analysis = { byUuid: new Map(), firstTime: null, lastTime: null, duplicates: 0, invalidTime: 0,
     mixed: false, queuedDuplicate: false, sidechainOnly: true, singleSession: true, count: 0 };
   const seen = new Set(), users = new Set(), queued = new Set(), sessions = new Set();
@@ -76,7 +94,7 @@ function transcriptSource(fd, provider, validateOnly = false) {
       ? { parentUuid: typeof record.parentUuid === 'string' || record.parentUuid === null ? record.parentUuid : false } : {});
     const user = provider === 'claude' ? record.type === 'user'
       : record.type === 'response_item' && record.payload?.type === 'message' && record.payload.role === 'user';
-    const attachment = provider === 'claude' && record.type === 'attachment' && record.attachment?.type === 'queued_command';
+    const attachment = provider === 'claude' && isHumanQueuedInstruction(record);
     const identity = provider === 'claude' ? record.uuid : record.payload?.id;
     if ((user || attachment) && isIdentityComponent(identity)) {
       if (seen.has(identity)) analysis.duplicates++;
@@ -87,7 +105,7 @@ function transcriptSource(fd, provider, validateOnly = false) {
       if (typeof id === 'string') users.add(id);
     if (attachment) for (const id of [record.uuid, record.attachment.source_uuid, record.attachment.delivery_id])
       if (typeof id === 'string') queued.add(id);
-    checkMetadata(analysis.byUuid.size + seen.size + users.size + queued.size + sessions.size);
+    if (source.limited) checkMetadata(analysis.byUuid.size + seen.size + users.size + queued.size + sessions.size);
   }
   function finish() {
     analysis.mixed = sessions.size > 1;
@@ -99,7 +117,7 @@ function transcriptSource(fd, provider, validateOnly = false) {
   // Most transcripts establish their identity and a timestamp in the first record.
   // A bounded lookahead leaves late metadata on the complete validation path.
   let lookahead = 0;
-  for (const record of transcriptRecords(fd)) {
+  for (const record of transcriptRecords(fd, observation)) {
     observe(record);
     if (analysis.firstTime && isIdentityComponent(transcriptSessionId(provider, source))) break;
     if (++lookahead >= 16) break;
@@ -115,12 +133,12 @@ function transcriptSource(fd, provider, validateOnly = false) {
     analysis.firstTime = seedTime;
   }
   source[Symbol.iterator] = function* () {
-    for (const record of transcriptRecords(fd)) { observe(record); yield record; }
+    for (const record of transcriptRecords(fd, observation)) { observe(record); yield record; }
     finish();
   };
   if (!ready) {
     for (const record of source) {}
-    source[Symbol.iterator] = () => transcriptRecords(fd);
+    source[Symbol.iterator] = () => transcriptRecords(fd, observation);
   }
   return source;
 }
@@ -459,6 +477,13 @@ function retainString(value, max) {
 }
 
 // Spec §1.1: first matching row wins; output and origin conflicts precede slash/shell wrappers.
+function isHumanQueuedInstruction(record) {
+  if (record.type !== 'attachment' || record.attachment?.type !== 'queued_command'
+    || !isIdentityComponent(record.uuid) || !toIsoTimestamp(record.timestamp)) return false;
+  const classification = classifyClaudeRecord(record);
+  return classification?.kind === 'human';
+}
+
 function classifyClaudeRecord(record) {
   const queued = record.type === 'attachment' && record.attachment?.type === 'queued_command';
   if (queued) {
@@ -656,7 +681,7 @@ function parseFile(provider, records, providerCoverage, config = {}, retainAllIn
     if (ts && (!lastTime || ts > lastTime)) lastTime = ts;
     if (record.uuid) {
       byUuid.set(record.uuid, Object.hasOwn(record, 'parentUuid') ? { parentUuid: record.parentUuid } : {});
-      checkMetadata(byUuid.size);
+      if (records.limited !== false) checkMetadata(byUuid.size);
     }
   }
   if (!firstTime) {
@@ -729,14 +754,9 @@ function parseFile(provider, records, providerCoverage, config = {}, retainAllIn
         continue;
       }
       if (record.type === 'queue-operation') {
-        const coverageKey = 'queued_' + ({
-          enqueue: 'enqueued',
-          dequeue: 'dequeued',
-          remove: 'removed'
-        }[record.operation] || record.operation);
-        if (Object.hasOwn(providerCoverage, coverageKey)) {
-          providerCoverage[coverageKey]++;
-        }
+        const coverageKey = { enqueue: 'queued_enqueued', dequeue: 'queued_dequeued', remove: 'queued_removed' };
+        if (typeof record.operation === 'string' && Object.hasOwn(coverageKey, record.operation))
+          providerCoverage[coverageKey[record.operation]]++;
         continue;
       }
       if (record.type === 'ai-title') {
@@ -775,7 +795,7 @@ function parseFile(provider, records, providerCoverage, config = {}, retainAllIn
         position,
         structure: [['text', normalizeDeletionText(classification.text)], ['attachments', classification.attachments]]
       }, linkState));
-      checkMetadata(items.length);
+      if (records.limited !== false) checkMetadata(items.length);
       if (records.streaming) {
         const item = items[items.length - 1];
         retainedText.set(item, item.text);
@@ -834,7 +854,7 @@ function parseFile(provider, records, providerCoverage, config = {}, retainAllIn
         position,
         structure: [...classification.structure, ['attachments', classification.attachments]]
       }, linkState));
-      checkMetadata(items.length);
+      if (records.limited !== false) checkMetadata(items.length);
       if (records.streaming) {
         const item = items[items.length - 1];
         retainedText.set(item, item.text);
@@ -950,7 +970,7 @@ function finalizeRetainedInstruction(instruction) {
   return { ...instruction, ...finalizeInstructionText(instruction.text) };
 }
 
-// Spec §2.2: retain only a digest, length and bounded local prefix of normalized raw text.
+// Spec §2.2: compare producer forms using UTF-16 digests, lengths and bounded local prefixes.
 function orcaWhitespace(c) {
   return c === 32 || c >= 9 && c <= 13 || c === 160 || c === 5760 || c >= 8192 && c <= 8202
     || [8232, 8233, 8239, 8287, 12288, 65279].includes(c);
@@ -988,10 +1008,10 @@ function orcaPromptForm(raw) {
 function summarizeLinkText(rawText, agent = false) {
   const form = agent ? { value: rawText, truncated: false } : orcaPromptForm(rawText);
   if (!form) return null;
-  return { hash: crypto.createHash('sha256').update(form.value).digest('hex'),
+  return { hash: crypto.createHash('sha256').update(Buffer.from(form.value, 'utf16le')).digest('hex'),
     length: form.value.length, truncated: form.truncated,
     ...(agent ? { prefix_hashes: Array.from({ length: Math.min(form.value.length, 200) - Math.min(form.value.length, 23) },
-      (_, index) => crypto.createHash('sha256').update(form.value.slice(0, index + 24)).digest('hex')) } : {}) };
+      (_, index) => crypto.createHash('sha256').update(Buffer.from(form.value.slice(0, index + 24), 'utf16le')).digest('hex')) } : {}) };
 }
 
 // Spec §1.4/§2/§3: compute identity before discarding unbounded text and block structure.
@@ -1045,6 +1065,10 @@ function transcriptSessionId(provider, records) {
 // Host R2 decision: group file identities only; metadata and messages never cross file boundaries.
 function groupTranscriptFiles(groups, provider, file) {
   const sessionId = file.sessionId;
+  if (file.sessionIds?.length > 1) {
+    for (const sid of file.sessionIds) groupTranscriptFiles(groups, provider, { ...file, sessionId: sid, sessionIds: null });
+    return;
+  }
   const key = isIdentityComponent(sessionId) ? `${provider}:${sessionId}` : `${provider}:file:${file.file}`;
   let group = groups.get(key);
   if (!group) {
@@ -1061,7 +1085,7 @@ function countDuplicateRecordIdentities(provider, records) {
   let duplicates = 0;
   for (const record of records) {
     let identity;
-    if (provider === 'claude' && (record.type === 'user' || record.type === 'attachment' && record.attachment?.type === 'queued_command')) {
+    if (provider === 'claude' && (record.type === 'user' || isHumanQueuedInstruction(record))) {
       identity = record.uuid;
     } else if (provider === 'codex' && record.type === 'response_item'
       && record.payload?.type === 'message' && record.payload.role === 'user') {
@@ -1124,7 +1148,7 @@ function parseIndependentTranscript(provider, records, providerCoverage, config,
         record.message?.source_uuid, record.message?.delivery_id]) if (typeof id === 'string') userIds.add(id);
       checkMetadata(userIds.size);
     }
-    for (const record of records) if (record.type === 'attachment' && record.attachment?.type === 'queued_command'
+    for (const record of records) if (isHumanQueuedInstruction(record)
       && [record.uuid, record.attachment.source_uuid, record.attachment.delivery_id].some(id => userIds.has(id))) queuedDuplicate = true;
     if (queuedDuplicate) providerCoverage.queued_duplicate_withheld++;
   }
@@ -1167,8 +1191,9 @@ function parseTranscriptIdentityRecord(line) {
   return { __invalid: true };
 }
 
-function inspectTranscriptIdentity(provider, data) {
+function inspectTranscriptIdentity(provider, data, observation) {
   const records = data.split('\n').filter(value => value.trim()).map(parseTranscriptIdentityRecord);
+  if (observation) for (const record of records) observeTranscriptIdentity(record, observation);
   const sessionId = transcriptSessionId(provider, records);
   const cwd = records.find(record => typeof record.cwd === 'string' || typeof record.payload?.cwd === 'string');
   const rawCwd = cwd?.cwd || cwd?.payload?.cwd;
@@ -1177,7 +1202,7 @@ function inspectTranscriptIdentity(provider, data) {
 }
 
 // Spec §1.4: use complete prefix records; unresolved identities fall back to one bounded full read.
-function readTranscriptIdentity(provider, fileDescriptor, fileSize, verifySidechain) {
+function readTranscriptIdentity(provider, fileDescriptor, fileSize, verifySidechain, observation) {
   const prefix = Buffer.alloc(Math.min(fileSize, IDENTITY_PREFIX_BYTES));
   let bytesRead = 0;
   while (bytesRead < prefix.length) {
@@ -1190,7 +1215,7 @@ function readTranscriptIdentity(provider, fileDescriptor, fileSize, verifySidech
   const data = prefix.subarray(0, bytesRead);
   const completeFile = bytesRead < prefix.length || fileSize <= bytesRead;
   const completeEnd = completeFile ? bytesRead : data.lastIndexOf(10) + 1;
-  const identity = inspectTranscriptIdentity(provider, data.subarray(0, completeEnd).toString('utf8'));
+  const identity = inspectTranscriptIdentity(provider, data.subarray(0, completeEnd).toString('utf8'), observation);
   // A complete top-level header can precede an overlong message in the first line.
   // Accept only syntactically complete fields; quoted or nested commas are never boundaries.
   if (!isIdentityComponent(identity.sessionId) && !completeFile) {
@@ -1210,7 +1235,7 @@ function readTranscriptIdentity(provider, fileDescriptor, fileSize, verifySidech
       else if (character === ',' && depth === 1) boundary = index;
     }
     if (boundary > 0) {
-      const header = inspectTranscriptIdentity(provider, prefixText.slice(0, boundary) + '}');
+      const header = inspectTranscriptIdentity(provider, prefixText.slice(0, boundary) + '}', observation);
       if (isIdentityComponent(header.sessionId)) {
         identity.sessionId = header.sessionId;
         identity.cwdHash = header.cwdHash;
@@ -1221,7 +1246,7 @@ function readTranscriptIdentity(provider, fileDescriptor, fileSize, verifySidech
   }
   if (!completeFile && (!isIdentityComponent(identity.sessionId) || verifySidechain && identity.sidechainOnly)) {
     let sessionId, cwdHash = null, singleSession = true, sidechainOnly = true, count = 0;
-    for (const record of transcriptRecords(fileDescriptor)) {
+    for (const record of transcriptRecords(fileDescriptor, observation)) {
       count++;
       const cwd = provider === 'claude' ? record.cwd : record.payload?.cwd;
       if (!cwdHash && typeof cwd === 'string') cwdHash = crypto.createHash('sha256').update(cwd).digest('hex');
@@ -1292,6 +1317,7 @@ function summarizeTranscriptFile(provider, file, providerCoverage, windowSince, 
     && /^[A-Za-z0-9_-]+$/.test(parts[4]) && parts[5] === 'journal.jsonl';
   let fileDescriptor;
   let identity = {};
+  const observation = { provider, sessionIds: new Set(), cwdHashes: new Set(), limited: true };
   try {
     fileDescriptor = fs.openSync(file.file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
     const openedStats = fs.fstatSync(fileDescriptor);
@@ -1299,17 +1325,18 @@ function summarizeTranscriptFile(provider, file, providerCoverage, windowSince, 
       throw Error();
     }
     fs.fstatSync(fileDescriptor);
+    observation.limited = openedStats.size > STREAM_LIMITS.smallFileBytes;
     if (workflowJournal) {
       let journalOnly = true;
-      for (const record of transcriptRecords(fileDescriptor)) {
-        if (Object.hasOwn(record, 'sessionId') || !['launched', 'started', 'result'].includes(record.type)) journalOnly = false;
+      for (const record of transcriptRecords(fileDescriptor, observation)) {
+        if (Object.hasOwn(record, 'sessionId') || !['launched', 'started', 'result'].includes(record.type)) { journalOnly = false; break; }
       }
       if (journalOnly) { providerCoverage.files_scanned++; providerCoverage.files_skipped++; return null; }
     }
     const outsideWindow = isTranscriptOutsideWindow(openedStats, fileDescriptor, windowSince);
     if (outsideWindow || requestedTarget) {
       identity = readTranscriptIdentity(provider, fileDescriptor, openedStats.size,
-        subagentSid !== null);
+        subagentSid !== null, observation);
 
       if (subagentSid !== null && subagentSid === identity.sessionId && identity.sidechainOnly
         && identity.singleSession) {
@@ -1324,8 +1351,8 @@ function summarizeTranscriptFile(provider, file, providerCoverage, windowSince, 
           sessionId: identity.sessionId?.length <= 64 ? retainString(identity.sessionId, 64) : null, outsideWindow };
       }
     }
-    identity = readTranscriptIdentity(provider, fileDescriptor, openedStats.size, false);
-    const records = transcriptSource(fileDescriptor, provider, subagentSid !== null);
+    identity = readTranscriptIdentity(provider, fileDescriptor, openedStats.size, false, observation);
+    const records = transcriptSource(fileDescriptor, provider, subagentSid !== null, observation);
     providerCoverage.files_scanned++;
     const sessionId = transcriptSessionId(provider, records);
     const sidechainOnly = !records.lazy && records.analysis.sidechainOnly && records.analysis.singleSession;
@@ -1343,13 +1370,18 @@ function summarizeTranscriptFile(provider, file, providerCoverage, windowSince, 
     return { file: retainedFile, firstAt: records.analysis.firstTime, lastAt: records.analysis.lastTime,
       blocked: !parsed?.session && (records.analysis.invalidTime > 0 || records.analysis.duplicates > 0
         || records.analysis.mixed || records.analysis.queuedDuplicate),
-      cwdHash: identity.cwdHash, sessionId: sessionId?.length <= 64 ? retainString(sessionId, 64) : null, ...parsed };
+      cwdHash: identity.cwdHash || observation.cwdHashes.values().next().value || null,
+      cwdHashes: [...observation.cwdHashes], sessionIds: records.analysis.mixed ? [...observation.sessionIds] : null,
+      sessionId: sessionId?.length <= 64 ? retainString(sessionId, 64) : null, ...parsed };
   } catch (error) {
     providerCoverage.files_failed++;
     if (error.streamLimit) providerCoverage.large_file_withheld++;
-    if (error.streamLimit || isIdentityComponent(identity.sessionId)) return {
-      file: retainedFile, sessionId: identity.sessionId || subagentSid,
-      blocked: true, cwdHash: identity.cwdHash || null
+    if (observation.sessionIds.size > 1) providerCoverage.mixed_session_withheld++;
+    if (error.streamLimit || observation.sessionIds.size || isIdentityComponent(identity.sessionId)) return {
+      file: retainedFile, sessionId: observation.sessionIds.values().next().value || identity.sessionId || subagentSid,
+      sessionIds: [...observation.sessionIds], blocked: true,
+      cwdHash: observation.cwdHashes.values().next().value || identity.cwdHash || null,
+      cwdHashes: [...observation.cwdHashes]
     };
     return null;
   } finally {
@@ -1530,14 +1562,24 @@ function scanSessions(readerOptions, config, requestedTarget = null) {
     }
   }
   const linkCandidates = [];
+  const blockedFiles = new Set();
   for (const group of groups.values()) for (const file of group.files.values()) {
-    if ((file.blocked || group.files.size > 1) && !file.outsideWindow && file.cwdHash)
-      linkCandidates.push({ file, session: { provider: group.provider, cwdHash: file.cwdHash,
-        cwd: null, link_text: null, blocked: true, firstAt: file.session?.firstAt || file.firstAt,
-        lastAt: file.session?.lastAt || file.lastAt } });
+    if ((file.blocked || group.files.size > 1) && !file.outsideWindow && file.cwdHash && !blockedFiles.has(file.file)) {
+      blockedFiles.add(file.file);
+      for (const cwdHash of file.cwdHashes?.length ? file.cwdHashes : [file.cwdHash])
+        linkCandidates.push({ file, session: { provider: group.provider, cwdHash,
+          cwd: null, link_text: null, blocked: true, firstAt: file.session?.firstAt || file.firstAt,
+          lastAt: file.session?.lastAt || file.lastAt } });
+    }
   }
   const selectedFiles = parsedFiles.filter(file => {
     const session = file.session;
+    // Spec §2.2: excluded sessions still prevent a false unique pane match, without retaining text or paths.
+    if (!requestedTarget && file.cwdHash) {
+      const { provider, sid, firstAt, lastAt } = session;
+      linkCandidates.push({ file, session: { provider, sid, firstAt, lastAt,
+        cwd: null, link_text: session.link_text, cwdHash: file.cwdHash } });
+    }
     if (session.provider === 'codex' && config.invalidContentRuleSessions?.has(session.sid)) {
       coverage.codex.withheld_sessions++;
       return false;
@@ -1549,12 +1591,6 @@ function scanSessions(readerOptions, config, requestedTarget = null) {
     }
     if (!inWindow) {
       return false;
-    }
-    // Spec §2.2: excluded sessions still prevent a false unique pane match, without retaining text or paths.
-    if (!requestedTarget && file.cwdHash) {
-      const { provider, sid, firstAt, lastAt } = session;
-      linkCandidates.push({ file, session: { provider, sid, firstAt, lastAt,
-        cwd: null, link_text: session.link_text, cwdHash: file.cwdHash } });
     }
     if (file.snapshotExclusion !== null) {
       if (file.snapshotExclusion !== 'cwd_unavailable') {
