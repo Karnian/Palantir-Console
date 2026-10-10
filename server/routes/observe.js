@@ -3,7 +3,7 @@
 const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
 const { AppError, ForbiddenError } = require('../utils/errors');
-const { ID_RE } = require('../services/observeSnapshotPolicy');
+const { isSafeId } = require('../services/observeSnapshotPolicy');
 const snapshotStore = require('../services/observeSnapshotStore');
 
 const ERROR_STATUS = Object.freeze({
@@ -45,7 +45,7 @@ function createObserveRouter({ state, store = snapshotStore }) {
   router.get('/snapshots/:machineId', asyncHandler(function snapshotDetail(req, res) {
     if (req.auth?.method !== 'cookie') throw new ForbiddenError('cookie auth required');
     if (req.method !== 'GET') throw new AppError('route_not_found', 404);
-    if (!ID_RE.test(req.params.machineId)) throw new AppError('invalid_machine_id', 400);
+    if (!isSafeId(req.params.machineId)) throw new AppError('invalid_machine_id', 400);
     return res.json(requireResult(store.readSnapshot(state, req.params.machineId)).snapshot);
   }));
   router.use(function observeFallback(req, res, next) {

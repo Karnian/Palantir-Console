@@ -1112,7 +1112,7 @@ function createApp(options = {}) {
     ? process.env.PALANTIR_OBSERVE_SNAPSHOT_DIR
     : options.observeSnapshotDir;
   const observeState = sealObserveState({ dir: observeDir, authToken });
-  if (!observeState.on) console.warn(observeState.code);
+  if (observeDir && !observeState.on) console.warn(observeState.code);
   const actorTokenOptions = {
     actorTokenSource: options.actorTokenSource,
     agentProcessIsolation: options.agentProcessIsolation,

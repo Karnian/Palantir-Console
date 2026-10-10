@@ -131,7 +131,8 @@ test('store: boot sealing covers valid, unset, tokenless, symlink, permissions a
   const on = sealObserveState({ dir: fx.dir, authToken: TOKEN });
   assert.deepEqual(on, { on: true, code: null, root: fx.dir });
   assert.equal(Object.isFrozen(on), true);
-  assert.deepEqual(sealObserveState({ dir: path.join(fx.dir, '..', 'snapshots'), authToken: TOKEN }), on);
+  assert.equal(sealObserveState({ dir: `${fx.dir}/../snapshots`, authToken: TOKEN }).code,
+    'observe_root_invalid');
   const symlink = path.join(fx.root, 'link');
   fs.symlinkSync(fx.dir, symlink);
   const cases = [
@@ -318,7 +319,7 @@ test('endpoint: malformed IDs, missing files, JSON and policy violations have fi
     for (const name of ['realpathSync', 'readdirSync', 'lstatSync', 'openSync', 'fstatSync', 'readSync']) {
       assert.ok(spy.calls[name] > 0, name);
     }
-    const invalidIds = ['bad.dot', 'a'.repeat(129), '%2Fetc%2Fpasswd', '%00', '%20', '%GG'];
+    const invalidIds = ['bad.dot', 'a'.repeat(129), '%2Fetc%2Fpasswd', '%00', '%20', '%GG', SECRET];
     const cases = invalidIds.map(function invalidId(id) {
       return [`${LIST}/${id}`, 400, 'invalid_machine_id'];
     });
@@ -666,4 +667,189 @@ test('store: fixed status table covers every public read failure', () => {
     identity_mismatch: 422, too_large: 413, total_limit: 413, parse_error: 422, policy_violation: 422,
     observe_root_changed: 503, read_error: 503, route_not_found: 404,
   });
+});
+
+test('store: R1 secret-shaped IDs are omitted and refused without file access', (t) => {
+  const fx = fixture(t);
+  const state = sealObserveState({ dir: fx.dir, authToken: TOKEN });
+  assert.equal(listSnapshots(state).snapshots[0].machine_id, 'alpha');
+  assert.deepEqual(readSnapshot(state, 'alpha').snapshot, fx.snapshot);
+  fs.writeFileSync(path.join(fx.dir, `${SECRET}.json`), '{');
+  const entries = listSnapshots(state).snapshots;
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].machine_id, 'alpha');
+  assert.equal(JSON.stringify(entries).includes(SECRET), false);
+  const spy = spyFs(['lstatSync', 'openSync', 'readSync']);
+  try {
+    assert.deepEqual(readSnapshot(state, 'alpha').snapshot, fx.snapshot);
+    for (const count of Object.values(spy.calls)) assert.ok(count > 0);
+    spy.reset();
+    assert.equal(readSnapshot(state, SECRET).reason, 'invalid_machine_id');
+    for (const count of Object.values(spy.calls)) assert.equal(count, 0);
+  } finally {
+    spy.restore();
+  }
+});
+
+test('store: R1 writerless FIFO replacement ends within five seconds', (t) => {
+  const fx = fixture(t);
+  const state = sealObserveState({ dir: fx.dir, authToken: TOKEN });
+  assert.deepEqual(readSnapshot(state, 'alpha').snapshot, fx.snapshot);
+  const source = `
+    const fs = require('node:fs');
+    const { spawnSync } = require('node:child_process');
+    const store = require(process.argv[1]);
+    const root = process.argv[2];
+    const filename = root + '/alpha.json';
+    const state = store.sealObserveState({ dir: root, authToken: 'fixture' });
+    const lstat = fs.lstatSync;
+    const open = fs.openSync;
+    fs.lstatSync = function swapFifo(name) {
+      const stat = lstat(name);
+      if (name === filename) {
+        fs.renameSync(filename, root + '/backup');
+        const fifo = spawnSync('/usr/bin/mkfifo', [filename]);
+        if (fifo.status !== 0) throw new Error('fixture mkfifo failed');
+      }
+      return stat;
+    };
+    fs.openSync = function recordOpen(name, flags, ...args) {
+      if (name === filename) console.log(JSON.stringify({ flags }));
+      return open(name, flags, ...args);
+    };
+    console.log(JSON.stringify(store.readSnapshot(state, 'alpha')));
+  `;
+  const child = spawnSync(process.execPath, ['-e', source,
+    require.resolve('../services/observeSnapshotStore'), fx.dir], {
+    encoding: 'utf8', timeout: 5000, killSignal: 'SIGKILL',
+  });
+  assert.equal(child.error?.code, undefined, 'FIFO read exceeded five seconds');
+  assert.equal(child.status, 0, child.stderr);
+  const [opened, result] = child.stdout.trim().split('\n').map(function parseLine(line) { return JSON.parse(line); });
+  assert.equal(result.reason, 'not_regular');
+  assert.ok((opened.flags & fs.constants.O_NONBLOCK) !== 0);
+  assert.equal(fs.lstatSync(fx.filename).isFIFO(), true);
+});
+
+test('store: R1 file count cap rejects the whole list before opening files', (t) => {
+  const fx = fixture(t);
+  const state = sealObserveState({ dir: fx.dir, authToken: TOKEN });
+  fs.writeFileSync(path.join(fx.dir, 'empty.json'), '');
+  const store = createObserveSnapshotStore({ fileCount: 2 });
+  assert.equal(store.listSnapshots(state).snapshots.length, 2);
+  fs.writeFileSync(path.join(fx.dir, 'extra.json'), '');
+  const spy = spyFs(['lstatSync', 'openSync', 'readSync']);
+  try {
+    assert.equal(listSnapshots(state).snapshots[0].machine_id, 'alpha');
+    for (const count of Object.values(spy.calls)) assert.ok(count > 0);
+    spy.reset();
+    assert.equal(store.listSnapshots(state).reason, 'total_limit');
+    for (const count of Object.values(spy.calls)) assert.equal(count, 0);
+  } finally {
+    spy.restore();
+  }
+  assert.equal(STORE_LIMITS.fileCount, 256);
+  assert.throws(function increasedCount() { createObserveSnapshotStore({ fileCount: 257 }); }, /invalid observe limit/);
+});
+
+test('store: R1 exact names are required even when file operations ignore case', (t) => {
+  const fx = fixture(t);
+  const state = sealObserveState({ dir: fx.dir, authToken: TOKEN });
+  let physicalName = fx.filename;
+  const lstat = fs.lstatSync;
+  const open = fs.openSync;
+  let fileCalls = 0;
+  function caseInsensitiveName(name) {
+    if (typeof name === 'string' && name.toLowerCase() === fx.filename.toLowerCase()) {
+      fileCalls++;
+      return physicalName;
+    }
+    return name;
+  }
+  try {
+    fs.lstatSync = function insensitiveLstat(name, ...args) { return lstat(caseInsensitiveName(name), ...args); };
+    fs.openSync = function insensitiveOpen(name, ...args) { return open(caseInsensitiveName(name), ...args); };
+    assert.deepEqual(readSnapshot(state, 'alpha').snapshot, fx.snapshot);
+    assert.ok(fileCalls > 0);
+    fileCalls = 0;
+    assert.equal(readSnapshot(state, 'ALPHA').reason, 'not_found');
+    assert.equal(fileCalls, 0);
+    physicalName = path.join(fx.dir, 'alpha.JSON');
+    fs.renameSync(fx.filename, physicalName);
+    assert.equal(readSnapshot(state, 'alpha').reason, 'not_found');
+    assert.equal(fileCalls, 0);
+    assert.deepEqual(listSnapshots(state).snapshots, []);
+  } finally {
+    fs.lstatSync = lstat;
+    fs.openSync = open;
+  }
+});
+
+test('store: R1 only unchanged canonical absolute root settings can be sealed on', (t) => {
+  const fx = fixture(t);
+  assert.equal(sealObserveState({ dir: fx.dir, authToken: TOKEN }).on, true);
+  const relative = path.relative(process.cwd(), fx.dir);
+  assert.equal(path.isAbsolute(relative), false);
+  for (const dir of [relative, `${fx.dir}/`, `${fx.dir}/.`, `${fx.dir}/../snapshots`]) {
+    assert.deepEqual(sealObserveState({ dir, authToken: TOKEN }),
+      { on: false, code: 'observe_root_invalid', root: null });
+  }
+});
+
+test('boot: R1 unset observe is silent and configured failures warn once with only a code', (t) => {
+  const fx = fixture(t);
+  const warn = console.warn;
+  const warnings = [];
+  try {
+    console.warn = function captureWarning(...args) { warnings.push(args); };
+    console.warn('probe');
+    assert.equal(warnings.length, 1);
+    warnings.length = 0;
+    makeApp(fx, { observeSnapshotDir: null });
+    assert.deepEqual(warnings, []);
+    makeApp(fx, { observeSnapshotDir: `${fx.dir}/missing` });
+    assert.deepEqual(warnings, [['observe_root_invalid']]);
+    assert.equal(JSON.stringify(warnings).includes(fx.root), false);
+  } finally {
+    console.warn = warn;
+  }
+});
+
+test('endpoint: R1 safe IDs, file count boundary and exact filename status are enforced', async (t) => {
+  const fx = fixture(t);
+  const app = makeApp(fx, { observeSnapshotStore: createObserveSnapshotStore({ fileCount: 2 }) });
+  assert.equal((await cookieGet(app)).status, 200);
+  assert.equal((await cookieGet(app, LIST)).body.snapshots[0].machine_id, 'alpha');
+  fs.writeFileSync(path.join(fx.dir, `${SECRET}.json`), '{');
+  const listed = await cookieGet(app, LIST);
+  assert.equal(listed.body.snapshots.length, 1);
+  assert.equal(JSON.stringify(listed.body).includes(SECRET), false);
+  assertError(await cookieGet(app, `${LIST}/${SECRET}`), 400, 'invalid_machine_id');
+  assertError(await cookieGet(app, `${LIST}/ALPHA`), 404, 'not_found');
+  fs.renameSync(fx.filename, path.join(fx.dir, 'alpha.JSON'));
+  assertError(await cookieGet(app), 404, 'not_found');
+  fs.unlinkSync(path.join(fx.dir, 'alpha.JSON'));
+  writeSnapshot(fx);
+  fs.writeFileSync(path.join(fx.dir, 'empty.json'), '');
+  const boundary = await cookieGet(app, LIST);
+  assert.equal(boundary.status, 200);
+  assert.equal(boundary.body.snapshots.length, 2);
+  fs.writeFileSync(path.join(fx.dir, 'extra.json'), '');
+  assertError(await cookieGet(app, LIST), 413, 'total_limit');
+  assert.equal((await cookieGet(app)).status, 200);
+  const originalOpen = fs.openSync;
+  try {
+    fs.openSync = function boundedFifoOpen(filename, flags, ...args) {
+      if (filename === fx.filename) assert.ok((flags & fs.constants.O_NONBLOCK) !== 0);
+      return originalOpen(filename, flags, ...args);
+    };
+    const result = await raceAfterLstat(fx, function replaceWithFifo() {
+      fs.renameSync(fx.filename, path.join(fx.root, 'fifo-backup'));
+      const fifo = spawnSync('/usr/bin/mkfifo', [fx.filename], { encoding: 'utf8' });
+      assert.equal(fifo.status, 0, fifo.stderr);
+    }, function requestFifo() { return cookieGet(app); });
+    assertError(result, 422, 'not_regular');
+  } finally {
+    fs.openSync = originalOpen;
+  }
 });

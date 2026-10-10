@@ -2,9 +2,9 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { ID_RE, SNAPSHOT_LIMITS, COVERAGE_KEYS, validateSnapshot } = require('./observeSnapshotPolicy');
+const { isSafeId, SNAPSHOT_LIMITS, COVERAGE_KEYS, validateSnapshot } = require('./observeSnapshotPolicy');
 
-const STORE_LIMITS = Object.freeze({ fileBytes: SNAPSHOT_LIMITS.bytes, totalBytes: 64 * 1024 * 1024 });
+const STORE_LIMITS = Object.freeze({ fileBytes: SNAPSHOT_LIMITS.bytes, totalBytes: 64 * 1024 * 1024, fileCount: 256 });
 const FILE_RE = /^[A-Za-z0-9:_-]{1,128}\.json$/;
 
 function offState(code) {
@@ -16,8 +16,8 @@ function sealObserveState({ dir, authToken, uid = process.getuid?.() }) {
   if (!dir) return offState('observe_dir_unset');
   if (!authToken) return offState('observe_auth_off');
   try {
-    const root = path.resolve(dir);
-    if (fs.realpathSync(root) !== root) return offState('observe_root_invalid');
+    if (!path.isAbsolute(dir) || fs.realpathSync(dir) !== dir) return offState('observe_root_invalid');
+    const root = dir;
     const stat = fs.statSync(root);
     if (!stat.isDirectory()) return offState('observe_root_invalid');
     if (uid === undefined || stat.uid !== uid) return offState('observe_root_owner');
@@ -69,10 +69,10 @@ function readFileSnapshot(root, machineId, limits, remaining) {
     const before = fs.lstatSync(filename);
     if (before.isSymbolicLink()) return failure('symlink');
     if (!before.isFile()) return failure('not_regular');
-    fd = fs.openSync(filename, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    fd = fs.openSync(filename, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
     const opened = fs.fstatSync(fd);
-    if (before.dev !== opened.dev || before.ino !== opened.ino) return failure('identity_mismatch');
     if (!opened.isFile()) return failure('not_regular');
+    if (before.dev !== opened.dev || before.ino !== opened.ino) return failure('identity_mismatch');
     if (opened.size > limits.fileBytes) return failure('too_large');
     if (opened.size > remaining) return failure('total_limit');
     const content = readBounded(fd, Math.min(limits.fileBytes, remaining), budget);
@@ -105,17 +105,26 @@ function coverageSummary(coverage) {
   }));
 }
 
-function listSnapshots(state, limits = STORE_LIMITS) {
-  const rootCheck = checkRoot(state);
-  if (!rootCheck.ok) return rootCheck;
-  let names;
+function snapshotName(name) {
+  return FILE_RE.test(name) && isSafeId(name.slice(0, -5));
+}
+
+// Spec §5.3: share exact, policy-safe names across list and detail on every filesystem.
+function readSnapshotNames(root) {
   try {
-    names = fs.readdirSync(state.root).filter(function snapshotName(name) {
-      return FILE_RE.test(name) && ID_RE.test(name.slice(0, -5));
-    }).map(function machineName(name) { return name.slice(0, -5); }).sort();
+    return { ok: true, names: fs.readdirSync(root).filter(snapshotName).sort() };
   } catch {
     return failure('read_error');
   }
+}
+
+function listSnapshots(state, limits = STORE_LIMITS) {
+  const rootCheck = checkRoot(state);
+  if (!rootCheck.ok) return rootCheck;
+  const entries = readSnapshotNames(state.root);
+  if (!entries.ok) return entries;
+  if (entries.names.length > limits.fileCount) return failure('total_limit');
+  const names = entries.names.map(function machineName(name) { return name.slice(0, -5); });
   let remaining = limits.totalBytes;
   const snapshots = names.map(function snapshotMetadata(machineId) {
     const result = readFileSnapshot(state.root, machineId, limits, remaining);
@@ -135,18 +144,23 @@ function listSnapshots(state, limits = STORE_LIMITS) {
 function readSnapshot(state, machineId, limits = STORE_LIMITS) {
   const rootCheck = checkRoot(state);
   if (!rootCheck.ok) return rootCheck;
-  if (typeof machineId !== 'string' || !ID_RE.test(machineId)) return failure('invalid_machine_id');
+  if (!isSafeId(machineId)) return failure('invalid_machine_id');
+  const entries = readSnapshotNames(state.root);
+  if (!entries.ok) return entries;
+  if (!entries.names.includes(`${machineId}.json`)) return failure('not_found');
   return readFileSnapshot(state.root, machineId, limits, limits.totalBytes);
 }
 
 // Smaller budgets keep limit tests practical; production caps cannot be raised.
-function createObserveSnapshotStore({ fileBytes = STORE_LIMITS.fileBytes, totalBytes = STORE_LIMITS.totalBytes } = {}) {
-  for (const [key, value] of Object.entries({ fileBytes, totalBytes })) {
+function createObserveSnapshotStore({
+  fileBytes = STORE_LIMITS.fileBytes, totalBytes = STORE_LIMITS.totalBytes, fileCount = STORE_LIMITS.fileCount,
+} = {}) {
+  for (const [key, value] of Object.entries({ fileBytes, totalBytes, fileCount })) {
     if (!Number.isSafeInteger(value) || value < 1 || value > STORE_LIMITS[key]) {
       throw new RangeError('invalid observe limit');
     }
   }
-  const limits = Object.freeze({ fileBytes, totalBytes });
+  const limits = Object.freeze({ fileBytes, totalBytes, fileCount });
   return {
     listSnapshots: function listWithLimits(state) { return listSnapshots(state, limits); },
     readSnapshot: function readWithLimits(state, machineId) { return readSnapshot(state, machineId, limits); },

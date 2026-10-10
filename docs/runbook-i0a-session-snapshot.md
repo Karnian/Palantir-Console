@@ -19,6 +19,7 @@ npm start
 ```
 
 디렉터리는 서버 사용자 소유여야 한다. 설정 경로는 symlink를 포함하지 않는 실제 절대경로를 쓴다.
+끝 슬래시나 `.`·`..`를 붙이지 않는다. 미설정 부팅은 무음이며 설정 후 검사 실패만 고정 코드로 경고한다.
 활성 상태는 부팅 때 한 번 봉인한다. 토큰·경로·권한을 바꾼 뒤에는 서버를 재시작한다.
 브라우저는 사람 토큰으로 로그인한다. endpoint는 cookie만 허용하고 bearer는 403이다.
 파일은 `<machine_id>.json` 하나씩 원자적으로 덮어쓰며 권한은 0600이다.
@@ -101,7 +102,7 @@ endpoint 오류는 고정 코드만 돌려준다.
 | 401 | `authentication_required` (observe 무인증) |
 | 403 | `cookie auth required`, `authentication_failed` |
 | 404 | `observe_off`, `not_found`, `route_not_found` (GET 외 메서드 포함) |
-| 413 | `too_large` (파일 16MB), `total_limit` (목록 읽기 합계 64MB) |
+| 413 | `too_large` (파일 16MB), `total_limit` (목록 읽기 합계 64MB 또는 대상 파일 256개 초과) |
 | 422 | `symlink`, `not_regular`, `identity_mismatch`, `parse_error`, `policy_violation` |
 | 503 | `observe_root_changed`, `read_error` |
 | 500 | `internal_error` |
