@@ -1,6 +1,6 @@
 # I0a — 여러 머신 세션 스냅샷 보드 (구현 brief)
 
-> **상태**: v11 — 사용자 spec 승인 (2026-10-08). 원격 실행은 ssh stdin 번들(§2.3, §4). **PR1a 구현 중 범위 축소 반영**(§11 v11): Orca 터미널 제목 비반출, cwd 접두사 제외 제거, 다중 파일·혼합 세션·시각 부적합 세션 보류. codex 설계검토 GO (R1~R10), PR1a 코드 적대리뷰 R10 GO.
+> **상태**: v11 — 사용자 spec 승인 (2026-10-08). 원격 실행은 ssh stdin 번들(§2.3, §4). **PR1a 구현 중 범위 축소 반영**(§11 v11): Orca 터미널 제목 비반출, cwd 접두사 제외 제거, 다중 파일·혼합 세션·시각 부적합 세션 보류. codex 설계검토 GO (R1~R10), PR1a 코드 적대리뷰 R10 GO. **PR1b**(번들·실행기·원격·exclude CLI): 위협 모델 명시(§2.3), launcher 가 만드는 오류 envelope 의 `machine_id` 는 `unknown`, exclude 도 `--now` 허용(§11 PR1b).
 > **상위 문서**: [`instruction-centric-direction-brief.md`](./instruction-centric-direction-brief.md) (LOCKED). 이 문서는 그중 §3.1 데이터 원칙, §5 사용성, §6 성공 기준, §7 I0/I0a 를 구현 수준으로 구체화한다.
 > 상위 문서가 "구현 brief 에서 정한다"고 넘긴 네 가지를 여기서 확정한다: 반출 도구, 허용 필드, 측정 절차, U0 수치.
 
@@ -132,7 +132,7 @@
   - 읽기 본체 `scripts/lib/sessionSnapshotReader.cjs` — parser, 연결, 제외 적용, 스냅샷 조립, `observe.json` 관리. **번들에 들어가는 쪽**이다.
   - 반출 정책은 공유 모듈 `server/services/observeSnapshotPolicy.js` 에 둔다. 서버도 같은 모듈로 재검증한다.
   - 살균은 `memorySanitize.redactSecrets` 를 require 해서 쓴다. 로직을 복제하지 않는다.
-  - npm 의존성이 없고 Node 18 이상에서 돈다. 시작할 때 Node major 를 검사하고, 미달이면 고정 코드 `node_unsupported` 로 끝낸다.
+  - npm 의존성이 없고 Node 18 이상에서 돈다. 시작할 때 Node major 를 검사하고, 미달이면 고정 코드 `node_unsupported` 로 끝낸다. 이 코드는 Node 14.18 이상에서 보장한다. 그보다 오래된 Node(`node:` 접두사 require 미지원)에서는 일반 실패로 끝나고, Mac 은 아무것도 기록하지 않는다.
   - **원격 머신에는 Node 만 있으면 된다.** repo checkout 도, 파일 설치도 필요 없다(§2.3). 원격에 남는 것은 `observe.json` 하나뿐이다.
 - **읽는 경로**: Claude·Codex transcript 디렉터리 두 종류만 허용한다(기본 `~/.claude/projects`, `~/.codex/sessions`). 다른 종류의 경로는 거부한다. 심볼릭 링크는 따라가지 않는다. 파일 수와 파일당 바이트에 상한을 둔다.
 - **머신 측 설정** `~/.config/palantir/observe.json` (0600):
@@ -208,7 +208,8 @@
 - **번들**: Mac 이 실행할 때마다 메모리에서 만든다. 커밋하지 않는다.
   - 대상은 **고정 manifest** 다: `memorySanitize.js`, `observeSnapshotPolicy.js`, `sessionSnapshotReader.cjs`, 번들 launcher.
   - 작은 모듈 레지스트리로 감싼다. **런타임 resolver** 는 manifest 안 상대경로와 내장 모듈 allowlist(`node:fs`, `node:path`, `node:os`, `node:crypto`, `node:child_process`)만 해석하고, 그 밖은 throw 한다.
-  - **정적 검사**: manifest 소스에 리터럴이 아닌 `require(`, `module.require`, `import(`, `process.binding` 이 있으면 번들 생성이 고정 코드로 실패한다.
+  - **정적 검사 (단어 규칙)**: 형태별 정규식이 아니라 단어로 판정한다. manifest 소스에 `import`, `binding`, `dlopen`, `getBuiltinModule`, `createRequire` 단어가 하나라도 있으면 번들 생성이 고정 코드로 실패한다. `require` 단어는 모든 출현이 `require('<manifest 또는 allowlist>')` 형태(사이 공백·주석 불허)이거나, 뒤에 영문자가 오는 산문(주석)이어야 한다. 앞에 `.` 이 오거나(`module.require`), 그 밖의 문자가 따라오면(별칭 대입·주석 끼우기 등) 실패한다. 런타임도 모듈 컴파일 전에 `process.getBuiltinModule` 을 없앤다.
+  - **위협 모델 (PR1b 확정)**: 정적 검사와 런타임 resolver 는 **검토된 manifest 코드가 실수로 import 를 넓히는 것**을 막는다. 악의적인 manifest 코드를 격리하지는 않는다(manifest 는 이 repo 의 코드다). 그 범위 안에서 다음을 둔다: 모듈은 전역 스코프에서 strict mode 로 지연 컴파일한다(`new Function`, 런타임 클로저·호출 스택 비노출). 실행 전에 전역 `require`·`module`·`exports` 를 지운다. 내장 allowlist 는 null-prototype 객체로 조회한다. prototype 변조 같은 적대적 코드 경로는 다루지 않는다.
   - `reader_build` 는 **출처 추적값**이다. 정의는 SHA-256(정규 인코딩 `["palantir.snapshot-bundle/1", [경로, 바이트 길이, 바이트]…]`, manifest 경로순)의 앞 16 hex 이고, 문법은 `^[0-9a-f]{16}$` 다. REQUEST 줄은 해시 입력에 포함하지 않는다. Mac 은 받은 응답의 `reader_build` 가 **자기가 보낸 번들의 값과 같은지** 확인한다.
 - **응답 프로토콜 — stdout 의 envelope 하나.**
   - 번들은 stdout 에 JSON envelope **하나만** 쓴다. 작업이 끝나고 완성·검증한 뒤에 한 번만 쓴다.
@@ -221,7 +222,7 @@
   - Mac 은 원격 stderr 를 **표시도 저장도 하지 않는다.** 바이트 수만 센다.
   - 남는 신뢰 전제: launcher 실행 전 Node 자체 출력과 원격 셸 시작 출력은 번들 코드와 환경에서만 나오며 transcript 데이터를 담지 않는다.
 - **Mac 수신**:
-  - 상한: stdout 16MB(초과하면 즉시 kill), 실행 시간 120초.
+  - 상한: stdout 16MB(초과하면 즉시 kill), 실행 시간 120초. kill 은 실행기의 **프로세스 그룹 전체**에 보내고 파이프를 닫는다. ssh 가 파이프를 물려받은 자손(ProxyCommand 등)을 남겨도 상한 안에 끝난다. 실행기는 별도 프로세스 그룹이라 Mac CLI 를 Ctrl-C 로 끊으면 실행기가 잠시 남을 수 있다. stdin 이 닫혀 있고 부모가 사라져 출력이 EPIPE 로 끝나며, 기록은 Mac 검증 뒤에만 일어나므로 파일 변화는 없다(수용).
   - 종료 코드가 0 이 아니거나, 상한을 넘거나, envelope 이 하나가 아니거나, 스키마·정책 검증(§5.5 와 같은 모듈, `finalize(x) === x`)에 실패하면 **아무것도 쓰지 않는다. 기존 파일도 보존한다.**
   - 스냅샷이면 `<machine_id>.json` 을 원자적으로 쓴다(§2 출력).
   - 상태 envelope 의 `code` 는 **정확한 코드 목록**에서, `counts` 는 키 목록·정수 범위에서 확인한 뒤 표시한다.
@@ -518,3 +519,13 @@
   - cwd 접두사 제외 제거 — **사용자 결정** (R1·R4·R5·R6 — cwd 는 레코드마다 바뀌는 값인데 세션 단위로 판정했다).
   - 다중 파일·혼합 세션·시각 부적합 세션은 병합·부분 필터 대신 **통째 보류 + coverage** (R2·R5·R7~R9 — 병합과 부분 필터가 신원·순번·증거 계산과 얽혔다).
   - 그 밖에 preview 는 전체 살균 뒤 첫 줄, 정책 슬롯은 생성 단계에서 미리 검증, Codex 내용 삭제 규칙은 provider·session 범위로 한정.
+- **PR1b (2026-10-10)**: codex 코드 적대리뷰. 구현 단계에서 확정한 것:
+  - 런타임 resolver 우회 2건(클로저의 `nativeRequire`, stdin 실행에서 노출되는 전역 `require`)을 재현 후 막았다. 모듈을 전역 스코프에서 strict 로 지연 컴파일한다. 이 덕분에 오래된 Node 에서도 문법 해석 전에 `node_unsupported` 를 낼 수 있다.
+  - 정적 검사·resolver 의 **위협 모델을 "실수로 인한 import 확장"으로 한정**했다(§2.3). prototype 변조·호출 스택 접근 같은 적대적 manifest 코드는 범위 밖이다. 리뷰가 같은 계열 우회를 반복해 찾는 것을 막기 위해서다.
+  - launcher 가 스스로 만드는 상태 envelope(`request_invalid`·`node_unsupported`·`internal_error`·reader 오류 변환)은 `machine_id` 를 `unknown` 으로 고정한다. 설정 파일을 다시 읽어 반출하면 정책 검사를 거치지 않은 값이 나갈 수 있었다.
+  - 실행기는 실행 파일을 **spawn 에 넘길 env 의 PATH 로** 절대경로까지 해석한 뒤, 그 경로로 가드 검사와 spawn 을 함께 한다.
+  - exclude 도 `--now` 를 받는다. 조회와 기록은 같은 now 를 쓴다.
+  - R2: `process.getBuiltinModule`·`createRequire` 로 import 를 넓히는 경로를 정적 검사와 런타임 양쪽에서 막았다. spawn 가드 음성 테스트는 실제 spawn 을 부르지 않는 기록 전용 스텁으로 바꿨다(가드를 지워도 fixture 밖 프로그램이 실행되지 않음). `node_unsupported` 보장 범위를 Node 14.18 이상으로 좁혔다.
+  - R3: 주석을 끼운 동적 import 가 정적 검사를 피했다 → 형태를 쫓지 않고 `import` 토큰 자체를 금지했다(manifest 에 이 단어가 없다). 테스트가 import 성공과 차단을 구분하도록, 쓰기 허용 목록이 잠금·정확한 tmp 형식만 받도록 좁혔다.
+  - R4: 같은 계열(주석을 끼운 `process.binding`·`dlopen`·`require`)이 다시 나왔다 → 정적 검사를 **형태 추적에서 단어 규칙으로** 바꿔 계열 전체를 닫았다(§2.3). 그 밖에 CLI timeout 뒤 기존 파일 보존, 큰 정상 envelope 의 flush 를 테스트로 고정했다.
+  - R5: 정적 검사 계열은 닫힘. timeout 때 ssh 자손이 파이프를 쥐면 끝나지 않던 문제 → 프로세스 그룹 kill + 파이프 닫기 + 2초 backstop. 로컬 실행기의 가드 호출을 호출 기록으로 검증.
