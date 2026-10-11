@@ -69,6 +69,7 @@ export function SessionRow({ card, query, now, onOpen }) {
   const recent = card.recent || (card.instructions.length ? W.missing : W.noInstruction);
   const orcaState = card.orca_link.confirmed && card.agent?.state !== 'unknown' && W.states[card.agent?.state];
   return html`<button class="ghost work-card session-row" type="button"
+    data-session-key=${card.key}
     aria-label=${`${card.machine.label} · ${title}`} onClick=${() => onOpen(card.key)}>
     <span class="work-title"><${Highlight} text=${title} query=${query} transformed=${card.titleTransformed} /></span>
     <span class="work-meta">${`${card.machine.label} · ${card.repo_label || W.repoUnknown} · `}
@@ -154,4 +155,3 @@ export function Coverage({ load }) {
       ${entry.machine_label || entry.machine_id || W.unnamedFailure} · ${W.machineFailure}</p>`)}
   </section>`;
 }
-

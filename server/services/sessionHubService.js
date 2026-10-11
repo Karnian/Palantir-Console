@@ -50,6 +50,7 @@ function createSessionHubService(options = {}) {
   ];
   const subscribers = new Set();
   let state = 'idle';
+  let version = 0;
   let generation = 0;
   let token = null;
   let disabled = null;
@@ -84,10 +85,11 @@ function createSessionHubService(options = {}) {
   const ownedPath = path.join(root, 'owned-sessions');
 
   function snapshot() {
-    return { state, generation, error, disabled, turnInProgress: !!turn,
+    return { state, version, generation, error, disabled, turnInProgress: !!turn,
       promptVersion: SESSION_HUB_PROMPT_VERSION, messages: messages.map(row => ({ ...row })) };
   }
   function publish() {
+    version++;
     const value = snapshot();
     for (const subscriber of subscribers) {
       try { subscriber(value); } catch { /* a disconnected subscriber cannot interrupt cleanup */ }
@@ -576,7 +578,10 @@ function createSessionHubService(options = {}) {
     if (clear) clearRequested = true;
     token = null;
     clearTimeout(mcpLossTimer); mcpLossTimer = null; mcpLossPending = false;
-    if (closePromise) return closePromise;
+    if (closePromise) {
+      if (shutdown) publish();
+      return closePromise;
+    }
     if (!permanent) state = 'closing';
     clearTimeout(timer); timer = null; turn = null;
     closePromise = (async () => {
@@ -595,11 +600,10 @@ function createSessionHubService(options = {}) {
       await transcriptCheck;
       await removeConfig();
       let result = { result: 'complete', remaining: 0 };
-      if (clearRequested) { messages = []; result = await clearFiles(); }
+      if (clearRequested) { messages = []; publish(); result = await clearFiles(); }
       if (!permanent) state = 'idle';
-      const finished = { ...snapshot(), ...result };
       publish();
-      return finished;
+      return { ...snapshot(), ...result };
     })().catch(err => {
       if (err.code !== 'reap_failed') {
         error ||= 'session_hub_cleanup_failed';

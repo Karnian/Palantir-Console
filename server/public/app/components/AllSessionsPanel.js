@@ -9,7 +9,8 @@ import { Dropdown } from './Dropdown.js';
 const html = htm.bind(h);
 const emptyPanelLoad = () => ({ entries: [], snapshots: [], failures: [], done: 0, total: 0, rev: null });
 
-export function AllSessionsPanel({ onData, selection, onSelectionChange, revisionMismatch = false }) {
+export function AllSessionsPanel({ onData, selection, onSelectionChange,
+  revisionMismatch = false, standalone = false }) {
   const [load, setLoad] = useState(emptyPanelLoad);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
@@ -20,6 +21,10 @@ export function AllSessionsPanel({ onData, selection, onSelectionChange, revisio
   const [localSelection, setLocalSelection] = useState(null);
   const [now, setNow] = useState(Date.now);
   const generation = useRef(0);
+  const panelRef = useRef(null);
+  const backRef = useRef(null);
+  const previousSelection = useRef(null);
+  const returnKey = useRef(null);
   const selected = selection === undefined ? localSelection : selection;
   const select = onSelectionChange || setLocalSelection;
   useEffect(() => {
@@ -30,7 +35,7 @@ export function AllSessionsPanel({ onData, selection, onSelectionChange, revisio
     loadSessionSnapshots(apiFetch, controller.signal, next => {
       if (!controller.signal.aborted && generation.current === current) {
         setLoad(next);
-        onData?.({ cards: next.rev ? next.snapshots.flatMap(snapshotCards) : [], rev: next.rev });
+        onData?.({ cards: next.snapshots.flatMap(snapshotCards), rev: next.rev });
       }
     }).catch(() => {
       if (!controller.signal.aborted && generation.current === current) {
@@ -49,7 +54,20 @@ export function AllSessionsPanel({ onData, selection, onSelectionChange, revisio
   const changed = selected?.rev && load.rev && selected.rev !== load.rev;
   const machines = load.entries.filter(entry => entry.machine_id)
     .map(entry => ({ value: entry.machine_id, label: entry.machine_label }));
-  return html`<section data-view="all-sessions" class="work-board all-sessions-panel" aria-label="모든 세션">
+  useEffect(() => {
+    if (selected?.key) {
+      if (previousSelection.current !== selected.key) backRef.current?.focus();
+      returnKey.current = selected.key;
+    } else if (returnKey.current) {
+      const row = Array.from(panelRef.current?.querySelectorAll('button.session-row') || [])
+        .find(node => node.dataset.sessionKey === returnKey.current);
+      if (row) { row.focus(); returnKey.current = null; }
+      else if (!loading) { panelRef.current?.querySelector('.work-search')?.focus(); returnKey.current = null; }
+    }
+    previousSelection.current = selected?.key || null;
+  }, [selected?.key, results, loading]);
+  return html`<section ref=${panelRef} data-view=${standalone ? 'work' : 'all-sessions'}
+    class="work-board all-sessions-panel ${standalone ? 'session-board-standalone' : ''}" aria-label="모든 세션">
     <header class="work-header">
       <div class="work-snapshot-times">${load.entries.filter(entry => entry.machine_id).map(entry => {
         const snapshot = load.snapshots.find(item => item.machine.id === entry.machine_id);
@@ -59,11 +77,15 @@ export function AllSessionsPanel({ onData, selection, onSelectionChange, revisio
       })}<span class="work-observation-note">${W.observationNote}</span></div>
       <button type="button" class="ghost" disabled=${loading}
         onClick=${() => setRevision(value => value + 1)}><span aria-hidden="true">↻</span> ${W.refresh}</button>
+      ${!loading && !load.rev && html`<p class="work-label" role="status">스냅샷 rev 미확정 · 확인 불가
+        <button type="button" class="ghost"
+          onClick=${() => setRevision(value => value + 1)}>다시 시도</button></p>`}
       ${(changed || revisionMismatch) && html`<p role="status" class="work-label">
         답변 뒤 갱신됨 · 현재 스냅샷을 표시합니다.</p>`}
     </header>
     <div class="work-body">
-      ${selected ? html`<button type="button" class="ghost" onClick=${() => select(null)}>← 모든 세션</button>`
+      ${selected ? html`<button ref=${backRef} type="button" class="ghost"
+        onClick=${() => select(null)}>← 모든 세션</button>`
         : html`<label class="work-label" for="work-query">${W.search}</label>
           <input id="work-query" class="work-search" type="search" value=${query}
             placeholder=${W.searchPlaceholder} aria-describedby="work-search-hint"
@@ -82,7 +104,9 @@ export function AllSessionsPanel({ onData, selection, onSelectionChange, revisio
         : `${W.results(results.length)} · ${query.trim() ? W.searchOrder : W.order}`}</p>
       ${error && html`<p role="alert">${W.error}</p>`}
       ${!loading && !error && !selected && results.length === 0 && html`<p>${cards.length ? W.noResults : W.empty}</p>`}
-      ${selected && !currentCard && !loading && html`<p>현재 스냅샷에 없는 세션</p>`}
+      ${selected && !currentCard && !loading && html`<p>${load.rev
+        ? '현재 스냅샷에 없는 세션'
+        : '세션 확인 불가 · 스냅샷을 다시 조회해 주세요.'}</p>`}
       <div class="work-grid ${selected ? 'session-timeline' : 'session-rows'}">
         ${selected ? currentCard && html`<${SessionCard} key=${`${currentCard.key}:timeline`}
           card=${currentCard} query=${query} now=${now} timeline=${true} />`

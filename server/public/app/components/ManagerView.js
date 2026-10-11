@@ -47,8 +47,22 @@ export function ManagerView({ manager, runs, tasks, projects, agents, agentsErro
   useEffect(() => {
     if (initialPanel) { setPanelTab(initialPanel); setMobilePane('panel'); }
   }, [initialPanel]);
+  useEffect(() => {
+    if (!sessionHubActive) return;
+    const syncPanel = () => {
+      const tab = location.hash === '#manager/all-sessions' ? 'all'
+        : location.hash === '#manager/palantir' ? 'palantir' : null;
+      if (tab) { setPanelTab(tab); setMobilePane('panel'); }
+    };
+    window.addEventListener('hashchange', syncPanel);
+    return () => window.removeEventListener('hashchange', syncPanel);
+  }, [sessionHubActive]);
+  const selectPanel = tab => {
+    setPanelTab(tab);
+    location.hash = tab === 'all' ? 'manager/all-sessions' : 'manager/palantir';
+  };
   const openSession = (key, rev) => {
-    setSelection({ key, rev }); setPanelTab('all'); setMobilePane('panel');
+    setSelection({ key, rev }); selectPanel('all'); setMobilePane('panel');
   };
   const selectConversation = target => {
     setConversationTarget(target);
@@ -85,9 +99,9 @@ export function ManagerView({ manager, runs, tasks, projects, agents, agentsErro
     <div class="session-hub-panel-side">
       <div class="session-hub-tabs" role="group" aria-label="세션 패널 선택">
         <button type="button" class="ghost" aria-pressed=${panelTab === 'all'}
-          onClick=${() => setPanelTab('all')}>모든 세션</button>
+          onClick=${() => selectPanel('all')}>모든 세션</button>
         <button type="button" class="ghost" aria-pressed=${panelTab === 'palantir'}
-          onClick=${() => setPanelTab('palantir')}>Palantir 작업</button>
+          onClick=${() => selectPanel('palantir')}>Palantir 작업</button>
       </div>
       <div class="session-hub-panel-content" hidden=${panelTab !== 'all'}>
         <${AllSessionsPanel} onData=${setPanelData} selection=${selection}

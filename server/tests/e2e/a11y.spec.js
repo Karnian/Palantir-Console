@@ -373,9 +373,11 @@ for (const theme of THEMES) {
       await check();
       await page.locator('button.session-evidence').click();
       await expect(page.locator('.work-event').first()).toBeVisible();
+      await expect(page.getByRole('button', { name: '← 모든 세션', exact: true })).toBeFocused();
       await check();
       await page.getByRole('button', { name: '← 모든 세션', exact: true }).click();
       await expect(page.locator('button.session-row')).toHaveCount(3);
+      await expect(page.locator('button.session-row').first()).toBeFocused();
       await expect(page.locator('.session-rows .work-label, .session-rows .work-card-footer')).toHaveCount(0);
       await check();
     });

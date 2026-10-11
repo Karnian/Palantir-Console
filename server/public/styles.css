@@ -8797,6 +8797,8 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 }
 .session-hub-manager .ghost, .session-hub-manager .primary { min-height: 30px; padding: 4px 10px; font-size: 13px; }
 .session-hub-note { color: var(--text-secondary); font-size: 13px; margin: 8px 12px; }
+.session-hub-messages .session-hub-note { margin: 0; }
+.nav-work-label { font-size: 13px; }
 .session-hub-messages { flex: 1; min-height: 0; overflow: auto; padding: 12px 16px; }
 .session-hub-empty { color: var(--text-secondary); font-size: 13px; line-height: 1.6; }
 .session-hub-input { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--border); }
@@ -8814,6 +8816,7 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 .session-evidence-note { color: var(--text-secondary); font-size: 12px; }
 .session-hub-segments { display: none; }
 .all-sessions-panel { width: 100%; min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.session-board-standalone { height: 100%; }
 .all-sessions-panel .work-header { padding: 8px 12px; gap: 8px; min-width: 0; }
 .all-sessions-panel .work-body { padding: 12px; gap: 8px; min-width: 0; }
 .all-sessions-panel .work-grid { display: flex; flex-direction: column; gap: 0; min-width: 0; }

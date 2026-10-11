@@ -230,9 +230,11 @@ export async function loadSessionSnapshots(request, signal, publish) {
       const emit = () => publish({ ...result, snapshots: [...result.snapshots], failures: [...result.failures] });
       emit();
       let changed = false;
+      let unconfirmed = false;
       const details = Promise.all(list.snapshots.map(async entry => {
         try {
           if (!entry.machine_id || !entry.sha256 || entry.error_code) {
+            if (entry.machine_id && !entry.error_code) unconfirmed = true;
             result.failures.push(entry); return;
           }
           const path = `/api/observe/snapshots/${encodeURIComponent(entry.machine_id)}`;
@@ -242,7 +244,7 @@ export async function loadSessionSnapshots(request, signal, publish) {
         } catch (error) {
           if (error.status === 409) { changed = true; controller.abort(); }
           else if (error.message === 'Not authenticated') throw error;
-          else if (!controller.signal.aborted) result.failures.push(entry);
+          else if (!controller.signal.aborted) { unconfirmed = true; result.failures.push(entry); }
         } finally { result.done++; }
       }));
       await Promise.race([details, new Promise(resolve => {
@@ -254,7 +256,7 @@ export async function loadSessionSnapshots(request, signal, publish) {
         if (attempt === 3) throw new Error('snapshot_changed');
         continue;
       }
-      result.rev = list.rev;
+      result.rev = unconfirmed ? null : list.rev;
       emit();
       return;
     } finally {

@@ -8,12 +8,13 @@ const html = htm.bind(h);
 
 export function SessionEvidence({ sessionKey, evidenceRev, panel, onOpenSession }) {
   const card = panel?.cards?.find(item => item.key === sessionKey);
-  if (!card) return html`<span class="session-evidence missing">현재 스냅샷에 없는 세션</span>`;
-  const changed = panel.rev && panel.rev !== evidenceRev;
-  const label = sessionEvidenceLabel(card);
+  if (!card && panel?.rev) return html`<span class="session-evidence missing">현재 스냅샷에 없는 세션</span>`;
+  const changed = panel?.rev && panel.rev !== evidenceRev;
+  const label = card ? sessionEvidenceLabel(card) : `세션 ${sessionKey.slice(-6)}`;
   return html`<button class="ghost session-evidence" type="button"
     onClick=${() => onOpenSession?.(sessionKey, evidenceRev)}>${label}
-    ${changed && html`<span class="session-evidence-note">답변 뒤 갱신됨</span>`}</button>`;
+    ${!panel?.rev ? html`<span class="session-evidence-note">확인 불가</span>`
+      : changed && html`<span class="session-evidence-note">답변 뒤 갱신됨</span>`}</button>`;
 }
 
 // Parse only sanitized DOM text. Attribute values never participate in evidence replacement.
@@ -114,26 +115,31 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch }) {
   const [state, setState] = useState(initialState);
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
+  const [localTransition, setLocalTransition] = useState('');
   const [error, setError] = useState('');
   const [clearNotice, setClearNotice] = useState('');
   const alive = useRef(false);
-  const version = useRef(0);
+  const version = useRef(-1);
   const controller = useRef(null);
   const messagesEnd = useRef(null);
   const pending = useRef(false);
   const composing = useRef(false);
+  const applySnapshot = value => {
+    if (!alive.current || !Number.isSafeInteger(value.version) || value.version <= version.current) return;
+    version.current = value.version;
+    setState(value);
+  };
   useEffect(() => {
     alive.current = true;
     controller.current = new AbortController();
     const source = new EventSource('/api/session-hub/chat/stream');
     const accept = event => {
-      try { version.current++; setState(JSON.parse(event.data)); }
+      try { applySnapshot(JSON.parse(event.data)); }
       catch { setError('대화를 읽지 못했습니다.'); }
     };
     source.addEventListener('snapshot', accept);
-    const started = version.current;
     apiFetch('/api/session-hub/chat/state', { signal: controller.current.signal, allowAppForbidden: true })
-      .then(value => { if (alive.current && version.current === started) setState(value); })
+      .then(applySnapshot)
       .catch(() => { if (alive.current) setError('대화를 읽지 못했습니다.'); });
     source.onopen = () => { setError(''); };
     source.onerror = () => { setError('연결이 끊겼습니다. 다시 연결 중입니다.'); };
@@ -145,14 +151,11 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch }) {
     pending.current = true;
     setBusy(true); setError('');
     const autoStart = name === 'message' && state.state === 'idle';
-    const beforeStart = version.current;
-    const previousState = state.state;
-    if (autoStart || name === 'start') setState(value => ({ ...value, state: 'starting', error: null }));
+    if (autoStart || name === 'start') setLocalTransition('starting');
     const request = async (operation, payload) => {
-      const before = version.current;
       const value = await apiFetch(`/api/session-hub/chat/${operation}`, { method: 'POST',
         body: JSON.stringify(payload || {}), signal: controller.current.signal, allowAppForbidden: true });
-      if (alive.current && version.current === before) setState(value);
+      applySnapshot(value);
       return value;
     };
     try {
@@ -172,10 +175,11 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch }) {
     } catch (err) {
       if (alive.current) {
         setError(sessionHubErrorText(err.data?.error || err.code || err.message));
-        if (version.current === beforeStart) setState(value => value.state === 'starting'
-          ? { ...value, state: previousState } : value);
       }
-    } finally { pending.current = false; if (alive.current) setBusy(false); }
+    } finally {
+      pending.current = false;
+      if (alive.current) { setBusy(false); setLocalTransition(''); }
+    }
   };
   const rendered = useMemo(() => {
     const evidence = [];
@@ -202,7 +206,8 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch }) {
     <header class="manager-chat-header">
       <div class="manager-panel-title">
       <span class="manager-status-badge ${state.turnInProgress ? 'running' : 'idle'}"
-        role="status">${state.turnInProgress ? '답변 중' : statusLabels[state.state] || '오류'}</span></div>
+        role="status">${state.turnInProgress ? '답변 중'
+          : statusLabels[localTransition || state.state] || '오류'}</span></div>
       <div class="manager-panel-actions">
         <button type="button" class="ghost" disabled=${disabled || running}
           onClick=${() => action('start')}>시작</button>
@@ -215,8 +220,8 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch }) {
     <p class="session-hub-note">서버 재시작 시 대화가 사라집니다.</p>
     ${error && html`<p class="session-hub-error" role="alert">${error}</p>`}
     ${state.error && html`<p class="session-hub-error" role="alert">${sessionHubErrorText(state.error)}</p>`}
-    ${clearNotice && html`<p role="status">${clearNotice}</p>`}
     <div class="manager-messages session-hub-messages" tabindex="0" role="log" aria-label="세션 비서 대화">
+      ${clearNotice && html`<p class="session-hub-note" role="status">${clearNotice}</p>`}
       ${!state.messages.length && html`<p class="session-hub-empty">
         여러 머신의 세션을 물어보세요 — '아까 orca 상위 레이어 얘기한 세션 어디야?'</p>`}
       ${rendered.messages.map((message, index) => message.role === 'tools' ? html`

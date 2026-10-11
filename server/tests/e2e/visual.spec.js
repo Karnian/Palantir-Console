@@ -550,12 +550,14 @@ for (const theme of THEMES) {
       });
       await page.locator('button.session-evidence').click();
       await expect(page.locator('.work-event').first()).toBeVisible();
+      await expect(page.getByRole('button', { name: '← 모든 세션', exact: true })).toBeFocused();
       await expectNoHorizontalOverflow(page);
       await expect(page).toHaveScreenshot(`session-hub-timeline-${theme}-${vp.name}.png`, {
         maxDiffPixels: 100, threshold: 0.2,
       });
       await page.getByRole('button', { name: '← 모든 세션', exact: true }).click();
       await expect(page.locator('button.session-row')).toHaveCount(3);
+      await expect(page.locator('button.session-row').first()).toBeFocused();
       await expect(page.locator('.session-rows .work-label, .session-rows .work-card-footer')).toHaveCount(0);
       await expectNoHorizontalOverflow(page);
       await expect(page).toHaveScreenshot(`session-hub-panel-${theme}-${vp.name}.png`, {

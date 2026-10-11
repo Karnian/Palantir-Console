@@ -11,6 +11,28 @@ const { SESSION_HUB_PROMPT } = require('../services/sessionHubPrompt');
 
 const code = expected => err => err.code === expected;
 
+test('state version increases across start, messages, stop and clear; replies match published snapshots', async t => {
+  const fx = serviceFixture(t), versions = [];
+  assert.equal(fx.service.state().version, 0);
+  fx.service.subscribe(value => versions.push(value.version));
+  const started = await fx.service.start();
+  assert.equal(started.version, fx.service.state().version);
+  assert.ok(started.version > 0);
+  fx.init();
+  const message = fx.service.message('버전 확인');
+  assert.ok(message.version > started.version);
+  assert.equal(message.messages.at(-1).text, '버전 확인');
+  const stopped = await fx.service.stop();
+  assert.ok(stopped.version > message.version);
+  assert.equal(stopped.version, fx.service.state().version);
+  const cleared = await fx.service.clear();
+  assert.ok(cleared.version > stopped.version);
+  assert.equal(cleared.version, fx.service.state().version);
+  assert.deepEqual(cleared.messages, []);
+  assert.equal(new Set(versions).size, versions.length);
+  assert.deepEqual(versions, [...versions].sort((a, b) => a - b));
+});
+
 test('fixed argv, guard immediately before spawn, minimal Claude env and disk-free hub token', async t => {
   const order = [];
   const fx = serviceFixture(t, { assertSpawnAllowed: value => order.push(value) });

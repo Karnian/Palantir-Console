@@ -34,6 +34,7 @@ import { ProjectsView } from './app/components/ProjectsView.js';
 import { AgentsView } from './app/components/AgentsView.js';
 import { SessionsView } from './app/components/SessionsView.js';
 import { ManagerView } from './app/components/ManagerView.js';
+import { AllSessionsPanel } from './app/components/AllSessionsPanel.js';
 import { NewTaskModal, ExecuteModal, TaskDetailPanel } from './app/components/TaskModals.js';
 import { SkillPacksView } from './app/components/SkillPacksView.js';
 import { PresetsView } from './app/components/PresetsView.js';
@@ -210,9 +211,9 @@ function Loading() {
 // ------------------------------------------------------------------------
 
 function App() {
-  const route = useRoute();
   const observe = useObserveEntry();
-  const navItems = getNavItems(observe.activation);
+  const route = useRoute(observe.sessionHubActive);
+  const navItems = getNavItems(observe.activation, observe.sessionHubActive);
   const { tasks, setTasks, loading: tasksLoading, reload: reloadTasks } = useTasks();
   const { runs, setRuns, loading: runsLoading, reload: reloadRuns } = useRuns();
   const { projects, loading: projectsLoading, reload: reloadProjects } = useProjects();
@@ -408,6 +409,7 @@ function App() {
     if (observe.loading && !location.hash) {
       return html`<div class="work-entry-loading" role="status">${WORK_BOARD_LABELS.pending}</div>`;
     }
+    if (route === 'work') return html`<${AllSessionsPanel} standalone=${true} />`;
     if (routeBase === 'manager') {
       const routeParts = route.split('/');
       const rawProjectId = routeParts[1] === 'operator' ? (routeParts.slice(2).join('/') || null) : null;
@@ -421,7 +423,8 @@ function App() {
         agents=${agents} agentsError=${agentsError} agentsLoading=${agentsLoading} reloadAgents=${reloadAgents}
         driftAudit=${driftAudit} onOpenDrift=${() => setShowDriftDrawer(true)}
         initialTarget=${managerInitialTarget} sessionHubActive=${observe.sessionHubActive}
-        initialPanel=${routeParts[1] === 'all-sessions' ? 'all' : undefined} />`;
+        initialPanel=${routeParts[1] === 'all-sessions' ? 'all'
+          : routeParts[1] === 'palantir' ? 'palantir' : undefined} />`;
     }
     if (routeBase === 'board') {
       if (tasksLoading) return html`<${Loading} />`;
