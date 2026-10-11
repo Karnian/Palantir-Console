@@ -34,6 +34,11 @@ function createAssistantStore(db, { maxMessages = 5000, now = () => new Date().t
       (id, thread_id, seq, turn_id, role, content, request_id, status, model_session_id, created_at) VALUES
       (@id, @thread_id, @seq, @turn_id, @role, @content,
         @request_id, @status, @model_session_id, @created_at)`).run(row);
+    if (extra.memory_proposal_id) {
+      db.prepare('UPDATE assistant_messages SET memory_proposal_id = ? WHERE id = ?')
+        .run(extra.memory_proposal_id, row.id);
+      row.memory_proposal_id = extra.memory_proposal_id;
+    }
     return row;
   }
   function prune(id) {

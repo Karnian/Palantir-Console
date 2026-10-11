@@ -23,6 +23,7 @@ function createSessionHubOffGate(active) {
 function brokerGet(req) {
   const raw = String(req.originalUrl || req.url).split('?')[0];
   // Express also accepts a trailing slash and case-insensitive route literals.
+  if (req.method === 'POST' && raw === '/api/session-hub/memory/proposals') return true;
   return req.method === 'GET'
     && (raw === '/api/session-hub/history/search'
       || /^\/api\/session-hub\/(?:sessions(?:\/[^/]+)?|search)\/?$/i.test(raw));

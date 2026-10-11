@@ -12,13 +12,14 @@ const readline = require('node:readline');
 const { TOOLS, dispatch, brokerGet } = require('../../scripts/session-hub-mcp.cjs');
 const call = (name, args) => ({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } });
 
-test('initialize protocol, four schemas, notification and unknown method', async () => {
+test('initialize protocol, six schemas, notification and unknown method', async () => {
   const result = await dispatch({ jsonrpc: '2.0', id: 7, method: 'initialize',
     params: { protocolVersion: 'client-version' } });
   assert.equal(result.result.protocolVersion, 'client-version');
   assert.deepEqual(result.result.capabilities, { tools: {} });
   assert.deepEqual(TOOLS.map(row => row.name),
-    ['list_sessions', 'search_instructions', 'search_assistant_history', 'get_session']);
+    ['list_sessions', 'search_instructions', 'search_assistant_history',
+      'propose_memory', 'propose_forget', 'get_session']);
   for (const tool of TOOLS) {
     assert.equal(tool.inputSchema.type, 'object'); assert.equal(tool.inputSchema.additionalProperties, false);
   }
@@ -96,7 +97,7 @@ test('stdio script handles newline requests, malformed JSON, initialized notific
     + JSON.stringify(call('list_sessions', { limit: 'bad' })) + '\n');
   assert.equal(await exited, 0);
   assert.equal(lines.length, 3); assert.equal(lines[0].error.code, -32700);
-  assert.equal(lines[1].result.tools.length, 4); assert.equal(lines[2].result.isError, true);
+  assert.equal(lines[1].result.tools.length, 6); assert.equal(lines[2].result.isError, true);
 });
 
 test('bootstrap tolerates fragments, starts MCP once in the verified process and strips every other env key', () => {
@@ -157,4 +158,46 @@ test('history schema denies thread IDs and wraps only the exact history GET', as
     env: { PALANTIR_SESSION_HUB_BASE_URL: 'http://localhost', PALANTIR_SESSION_HUB_TOKEN: 'fixture' },
   });
   assert.equal(result.result.content[0].text, '{"results":[]}');
+});
+
+test('memory schemas deny spoofing and overlimits; dispatch posts operation with no source', async t => {
+  let calls = 0;
+  for (const [name, args] of [
+    ['propose_memory', { content: 'safe', kind: 'fact', reason: 'why', source_thread_id: 'spoof' }],
+    ['propose_memory', { content: 'safe', kind: 'fact', reason: 'why', status: 'approved' }],
+    ['propose_memory', { content: 'a'.repeat(501), kind: 'fact', reason: 'why' }],
+    ['propose_memory', { content: 'safe', kind: 'unknown', reason: 'why' }],
+    ['propose_forget', { memory_id: '../unsafe', reason: 'why' }],
+    ['propose_forget', { memory_id: 'id', reason: 'a'.repeat(301) }],
+  ]) {
+    assert.equal((await dispatch(call(name, args), { get() { calls++; } })).result.isError, true);
+  }
+  assert.equal(calls, 0);
+  const seen = [];
+  t.mock.method(http, 'request', (url, options, callback) => {
+    const req = new EventEmitter();
+    req.setTimeout = () => {};
+    req.end = body => {
+      seen.push({ url, options, body: JSON.parse(body) });
+      const res = new PassThrough(); res.statusCode = 200;
+      queueMicrotask(() => { callback(res); res.end('{"status":"pending","id":"proposal"}'); });
+    };
+    return req;
+  });
+  const env = { PALANTIR_SESSION_HUB_BASE_URL: 'http://localhost', PALANTIR_SESSION_HUB_TOKEN: 'fixture' };
+  for (const [name, args] of [['propose_memory', { content: '😀'.repeat(500), kind: 'fact', reason: 'why' }],
+    ['propose_forget', { memory_id: 'id', reason: 'forget' }]]) {
+    const result = await dispatch(call(name, args), { env });
+    assert.equal(result.result.isError, false);
+    assert.equal(JSON.parse(result.result.content[0].text).status, 'pending');
+  }
+  assert.deepEqual(seen.map(row => row.body.operation), ['add', 'forget']);
+  for (const row of seen) {
+    assert.equal(row.options.method, 'POST');
+    assert.equal(row.url.pathname, '/api/session-hub/memory/proposals');
+    assert.equal(row.url.search, '');
+    assert.equal(row.options.headers.Authorization, 'Bearer fixture');
+    assert.equal(row.options.headers['Content-Length'], Buffer.byteLength(JSON.stringify(row.body)));
+    assert.equal(Object.hasOwn(row.body, 'source_thread_id'), false);
+  }
 });

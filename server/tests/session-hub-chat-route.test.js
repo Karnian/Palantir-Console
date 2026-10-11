@@ -410,3 +410,23 @@ test('shutdown after completed stop caches private state before closing the appl
   assert.ok(hub.state().messages.some(row => row.content === 'preserve after stop'));
   await hub.shutdown();
 });
+
+test('memory proposals and decisions publish only private SSE memory state and proposal tool_note', async t => {
+  const { app, hub } = integrated(t);
+  await hub.start(); await send(hub, '기억해줘');
+  const sse = stream(app, `${BASE}/stream`);
+  const proposal = await request(app).post('/api/session-hub/memory/proposals')
+    .set('Authorization', `Bearer ${hub.current()}`)
+    .send({ operation: 'add', content: '한글로 답하기', kind: 'preference', reason: '직접 요청' });
+  assert.equal(proposal.status, 200);
+  const frames = () => sse.frames.map(frame => JSON.parse(frame.split('data: ')[1]));
+  assert.ok(frames().some(frame => frame.memory.pending_count === 1 && frame.memory.revision === 0));
+  assert.ok(frames().at(-1).messages.some(row => row.memory_proposal_id === proposal.body.id));
+  const approved = await request(app).post(`/api/session-hub/memory/proposals/${proposal.body.id}/decision`)
+    .set('Cookie', COOKIE).set('Origin', 'http://localhost').send({ decision: 'approved',
+      revision: proposal.body.revision, content_hash: proposal.body.content_hash });
+  assert.equal(approved.status, 200);
+  assert.deepEqual(frames().at(-1).memory, { pending_count: 0, revision: 1 });
+  assert.deepEqual(app.services.eventBus.replayFrom(0), []);
+  sse.close();
+});
