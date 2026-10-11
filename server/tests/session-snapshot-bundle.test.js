@@ -40,6 +40,51 @@ test('remote and local bytes, fixed argv, hash, permissions and atomic replaceme
   assert.equal(fs.statSync(f.out).mode & 0o777, 0o700);
   assert.deepEqual(fs.readdirSync(f.out), [remote.envelope.machine.id + '.json']);
 });
+
+test('local and SSH executors inherit only when requested and never write process metadata', async t => {
+  const { spawn } = require('node:child_process');
+  for (const inherit of [false, true]) {
+    for (const kind of ['local', 'remote']) {
+      await t.test(`${kind}: ${inherit ? 'inherit' : 'detached'}`, async sub => {
+        const f = fixture(sub);
+        const env = { ...f.env };
+        delete env.PALANTIR_SNAPSHOT_EXECUTOR_GROUP;
+        if (inherit) env.PALANTIR_SNAPSHOT_EXECUTOR_GROUP = 'inherit';
+        const target = kind === 'local' ? { kind } : f.target;
+        let detached;
+        const value = await execute(f, f.request, { target, env, outDir: f.out,
+          spawnImpl(command, args, options) { detached = options.detached; return spawn(command, args, options); } });
+        assert.equal(detached, !inherit); assert.equal(value.result.exitCode, 0);
+        exactSnapshot(value.envelope);
+        assert.equal(fs.existsSync(f.out), false);
+      });
+    }
+  }
+});
+
+for (const reason of ['timeout', 'SIGTERM', 'SIGINT', 'stdout_limit']) {
+  test(`inherited executor ${reason} never signals a child PGID or its own group`, async t => {
+    const m = await api;
+    const child = new EventEmitter(); child.pid = 12345;
+    for (const name of ['stdin', 'stdout', 'stderr']) child[name] = new PassThrough();
+    child.stdin.resume();
+    t.after(() => { for (const name of ['stdin', 'stdout', 'stderr']) child[name].destroy(); });
+    const groupKill = t.mock.method(process, 'kill', () => { throw new Error('unexpected group signal'); });
+    const signals = [];
+    child.kill = signal => { signals.push(signal); setImmediate(() => child.emit('close', null, signal)); };
+    const result = await m.runExecutor({ target: { kind: 'local' }, bundle: '', timeoutMs: 20, maxStdoutBytes: 1,
+      env: { ...process.env, PALANTIR_SNAPSHOT_EXECUTOR_GROUP: 'inherit' },
+      spawnImpl(command, args, options) {
+        assert.equal(options.detached, false);
+        if (reason.startsWith('SIG')) setImmediate(() => process.emit(reason));
+        if (reason === 'stdout_limit') setImmediate(() => child.stdout.write('too much'));
+        return child;
+      } });
+    assert.equal(result.killedReason, reason.startsWith('SIG') ? 'cancelled' : reason);
+    assert.deepEqual(signals, ['SIGKILL']); assert.equal(groupKill.mock.callCount(), 0);
+  });
+}
+
 test('executor guard is looked up for each local and remote execution', async t => {
   const f = fixture(t);
   await api;
@@ -88,10 +133,11 @@ test('executor fallback and backstop settle killed streams', { timeout: 10000 },
           return child;
         } });
       assert.ok(performance.now() - started <= timeoutMs + 3000);
-      assert.deepEqual(result, { exitCode: null, signal: 'SIGKILL', stdout: Buffer.from('partial'),
-        stderrBytes: 9, killedReason: 'timeout' });
+      assert.deepEqual(result, { exitCode: null, signal: fallback ? 'reap_failed' : 'SIGKILL',
+        stdout: Buffer.from('partial'), stderrBytes: 9, killedReason: fallback ? 'reap_failed' : 'timeout' });
       assert.ok(['stdin', 'stdout', 'stderr'].every(name => child[name].destroyed));
-      assert.deepEqual(groupKill.mock.calls.map(call => call.arguments), fallback ? [[-12345, 'SIGKILL']] : []);
+      assert.deepEqual(groupKill.mock.calls.map(call => call.arguments),
+        fallback ? [[-12345, 'SIGKILL'], [-12345, 'SIGTERM']] : []);
       assert.deepEqual(signals, fallback ? ['SIGKILL'] : []);
       child.emit('close', 0, null);
       child.emit('error', new Error('late child error'));

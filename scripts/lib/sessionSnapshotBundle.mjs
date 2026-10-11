@@ -8,6 +8,7 @@ const require = createRequire(import.meta.url);
 const policy = require('../../server/services/observeSnapshotPolicy.js');
 const { computeReaderBuild } = require('./sessionSnapshotLauncher.cjs');
 const spawnGuard = require('../../server/utils/spawnGuard.js');
+const { reapProcessGroup } = require('../../server/utils/reapProcessGroup.js');
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 export const MANIFEST = Object.freeze([
   'scripts/lib/sessionSnapshotLauncher.cjs', 'scripts/lib/sessionSnapshotReader.cjs',
@@ -89,21 +90,47 @@ export function buildBundle({ request, sourceOverrides = {} }) {
 }
 export function runExecutor({ target, bundle, sshBin = 'ssh', env = process.env,
   maxStdoutBytes = 16 * 1024 * 1024, timeoutMs = 120000, spawnImpl = spawn }) {
+  const detached = env.PALANTIR_SNAPSHOT_EXECUTOR_GROUP !== 'inherit';
   const command = target.kind === 'local' ? process.execPath : resolveExecutable(sshBin, env);
   const args = target.kind === 'local' ? ['--no-warnings', '-']
     : ['-o', 'BatchMode=yes', '--', target.host, target.remoteNode || 'node', '--no-warnings', '-'];
   spawnGuard.assertSpawnAllowed({ command, source: 'session-snapshot:executor' });
   return new Promise((resolve, reject) => {
-    const child = spawnImpl(command, args, { shell: false, detached: true, env, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawnImpl(command, args, { shell: false, detached, env, stdio: ['pipe', 'pipe', 'pipe'] });
     const chunks = [];
     let bytes = 0;
     let stderrBytes = 0;
     let killedReason = null;
     let settled = false;
     let backstop;
+    let signalCleanup = null;
+    let finalCleanup = null;
+    const interrupted = () => {
+      if (signalCleanup || settled) return;
+      killedReason = 'cancelled';
+      if (finalCleanup) return;
+      clearTimeout(timer);
+      // In inherited mode the server owns the whole CLI group; the CLI must never signal its own group.
+      if (detached && child.pid) {
+        signalCleanup = reapProcessGroup(child.pid, { termMs: 0, reapMs: 4000 })
+          .then(() => finish(null, 'SIGTERM'), () => finish(null, 'reap_failed'));
+      } else { child.kill('SIGKILL'); finish(null, 'SIGTERM'); }
+    };
+    process.on('SIGTERM', interrupted); process.on('SIGINT', interrupted);
+    function removeSignals() {
+      process.removeListener('SIGTERM', interrupted); process.removeListener('SIGINT', interrupted);
+    }
     function finish(exitCode, signal) {
       if (settled) return;
+      if (detached && child.pid && !signalCleanup && !finalCleanup) {
+        clearTimeout(timer); clearTimeout(backstop);
+        finalCleanup = reapProcessGroup(child.pid, { termMs: 0, reapMs: 4000 }).then(
+          () => finish(exitCode, signal),
+          () => { killedReason = 'reap_failed'; finish(null, 'reap_failed'); });
+        return;
+      }
       settled = true;
+      removeSignals();
       clearTimeout(timer);
       clearTimeout(backstop);
       resolve({ exitCode, signal, stdout: Buffer.concat(chunks), stderrBytes, killedReason });
@@ -113,10 +140,10 @@ export function runExecutor({ target, bundle, sshBin = 'ssh', env = process.env,
       killedReason = reason;
       clearTimeout(timer);
       backstop = setTimeout(() => finish(null, 'SIGKILL'), 2000);
-      if (child.pid) {
+      if (detached && child.pid) {
         try { process.kill(-child.pid, 'SIGKILL'); }
         catch { child.kill('SIGKILL'); }
-      }
+      } else if (!detached) { child.kill('SIGKILL'); }
       for (const stream of [child.stdout, child.stderr, child.stdin]) stream.destroy();
     }
     const timer = setTimeout(() => kill('timeout'), timeoutMs);
@@ -129,11 +156,14 @@ export function runExecutor({ target, bundle, sshBin = 'ssh', env = process.env,
     child.on('error', error => {
       if (settled || killedReason) return;
       settled = true;
+      removeSignals();
       clearTimeout(timer);
       clearTimeout(backstop);
       reject(error);
     });
-    child.on('close', finish);
+    child.on('close', (exitCode, signal) => {
+      if (!signalCleanup) finish(exitCode, signal);
+    });
     child.stdin.on('error', function ignorePipeError() {});
     child.stdin.end(typeof bundle === 'string' ? bundle : bundle.code);
   });

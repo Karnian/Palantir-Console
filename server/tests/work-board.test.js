@@ -686,10 +686,19 @@ test('entry cleanup aborts probe and ignores late resolution', async t => {
   assert.equal(fx.states.length, 1); assert.deepEqual(fx.writes, []);
 });
 
-function boardEnv(t) {
+function boardEnv(t, snapshotRequest = async () => ({ enabled: false, targets: [], auto_interval_ms: 0 })) {
   const env = createPreactEnv();
+  let requestApi;
+  Object.defineProperty(env.context, 'apiFetch', { configurable: true,
+    get: () => (url, options) => url.startsWith('/api/session-hub/snapshots')
+      ? snapshotRequest(url, options) : requestApi(url, options),
+    set: value => { requestApi = value; },
+  });
   vm.runInContext(source.replace(/\bexport /g, ''), env.context);
   vm.runInContext('this.W = WORK_BOARD_LABELS;', env.context);
+  const hook = fs.readFileSync(path.join(__dirname, '../public/app/lib/hooks/useSnapshotRefresh.js'), 'utf8');
+  const { transformComponentSource } = require('./helpers/jsdom-preact');
+  vm.runInContext(transformComponentSource(hook), env.context);
   env.loadComponent('WorkBoardView');
   t.after(() => { env.render(null, env.document.getElementById('root')); env.cleanup(); });
   return env;
@@ -745,7 +754,7 @@ test('DOM cleanup aborts detail requests and removes data; recovery messages rem
   };
   const root = env.document.getElementById('root');
   env.render(env.h(env.context.WorkBoardView), root); await flushEffects();
-  assert.equal(root.querySelector('[role="status"]').textContent, '불러오는 중 (0/1)');
+  assert.equal(root.querySelector('.work-body [role="status"]').textContent, '불러오는 중 (0/1)');
   assert.equal(signal.aborted, false);
   env.render(null, root); assert.equal(signal.aborted, true);
   pending.resolve(alpha); await flushEffects(); assert.equal(root.textContent, '');
@@ -1180,6 +1189,130 @@ test('PR1d footer shows total before retention while unknown ratio keeps the exp
   env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
   assert.equal(root.querySelector('.work-card-footer span').textContent, env.context.W.instructions(401));
   assert.ok(root.textContent.includes(env.context.W.unknownRatio(1, 3)));
+});
+
+test('snapshot refresh button uses its cookie endpoint and reloads board data after completion', async t => {
+  const { alpha } = fixtures(t);
+  let status = { enabled: true, auto_interval_ms: 300000, targets: [{ name: 'mac', machine_id: 'alpha',
+    running: false, last_success_at: null, last_attempt_at: null, last_result: null, locked: false }] };
+  const posts = [];
+  const env = boardEnv(t, async (url, options) => {
+    if (url.endsWith('/refresh')) {
+      posts.push({ url, options });
+      status = { ...status, targets: [{ ...status.targets[0], running: true }] };
+    }
+    return status;
+  });
+  const polls = [];
+  const schedule = env.window.setTimeout.bind(env.window);
+  env.window.setTimeout = (fn, delay, ...args) => {
+    if (delay === 10000 || delay === 1000) { polls.push(fn); return schedule(() => {}, 60000); }
+    return schedule(fn, delay, ...args);
+  };
+  let loads = 0;
+  env.context.apiFetch = async url => {
+    if (url === '/api/observe/snapshots') {
+      loads++;
+      return { snapshots: [{ machine_id: 'alpha', machine_label: 'Mac' }] };
+    }
+    return alpha;
+  };
+  const root = env.document.getElementById('root');
+  env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
+  const button = [...root.querySelectorAll('button')].find(item => item.textContent === '새로 만들기');
+  assert.equal(button.disabled, false); button.click(); await flushEffects();
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].url, '/api/session-hub/snapshots/refresh');
+  assert.equal(posts[0].options.method, 'POST'); assert.equal(posts[0].options.body, '{}');
+  assert.equal(button.disabled, true); assert.match(root.textContent, /mac · 수집 중/);
+  status = { ...status, targets: [{ ...status.targets[0], running: false, last_result: { code: 'ok' },
+    last_success_at: '2026-10-11T14:00:00.000Z' }] };
+  await polls.shift()(); await flushEffects(); await flushEffects();
+  assert.match(root.textContent, /수집 완료/);
+  assert.ok(loads >= 2);
+});
+
+function snapshotHookHarness(t) {
+  const requests = [];
+  const env = boardEnv(t, (url, options) => {
+    const response = deferred(); requests.push({ url, options, ...response }); return response.promise;
+  });
+  const polls = [];
+  const schedule = env.window.setTimeout.bind(env.window);
+  env.window.setTimeout = (fn, delay, ...args) => {
+    if (delay === 10000 || delay === 1000) { polls.push(fn); return schedule(() => {}, 60000); }
+    return schedule(fn, delay, ...args);
+  };
+  let value; let completions = 0;
+  function Probe({ enabled }) {
+    value = env.context.useSnapshotRefresh({ enabled, onComplete: () => { completions++; } });
+    return env.h('span', null, value.status?.targets[0]?.running ? 'running' : 'idle');
+  }
+  const render = enabled => env.render(env.h(Probe, { enabled }), env.document.getElementById('root'));
+  const status = (running, success = null) => ({ enabled: true, targets: [{ name: 'mac', running,
+    last_success_at: success, last_result: success ? { code: 'ok' } : null }] });
+  const unmount = () => env.render(null, env.document.getElementById('root'));
+  return { requests, polls, render, unmount, status, value: () => value, completions: () => completions };
+}
+
+test('snapshot hook discards an older GET arriving after POST and an older POST arriving last', async t => {
+  const fx = snapshotHookHarness(t);
+  fx.render(true); await flushEffects();
+  const first = fx.value().refresh(); await flushEffects();
+  assert.equal(fx.requests[1].options.signal.aborted, false);
+  fx.requests[1].resolve(fx.status(true)); await first; await flushEffects();
+  fx.requests[0].resolve(fx.status(false, 'old-success')); await flushEffects();
+  assert.equal(fx.value().status.targets[0].running, true); assert.equal(fx.completions(), 0);
+  const older = fx.value().refresh();
+  const newer = fx.value().refresh(); await flushEffects();
+  fx.requests[3].resolve(fx.status(true)); await newer; await flushEffects();
+  assert.equal(fx.value().busy, true);
+  fx.requests[2].resolve(fx.status(false, 'stale-success')); await older; await flushEffects();
+  assert.equal(fx.value().status.targets[0].running, true); assert.equal(fx.completions(), 0);
+});
+
+test('snapshot hook aborts GET and POST on effect change and discards both previous-generation responses', async t => {
+  const fx = snapshotHookHarness(t);
+  fx.render(true); await flushEffects();
+  const oldPost = fx.value().refresh(); await flushEffects();
+  fx.render(false); await flushEffects();
+  assert.equal(fx.requests[0].options.signal.aborted, true);
+  assert.equal(fx.requests[1].options.signal.aborted, true);
+  fx.render(true); await flushEffects();
+  fx.requests[2].resolve(fx.status(true)); await flushEffects();
+  const newPost = fx.value().refresh(); await flushEffects();
+  fx.requests[1].resolve(fx.status(false, 'old-post')); await oldPost; await flushEffects();
+  fx.requests[0].resolve(fx.status(false, 'old-get')); await flushEffects();
+  assert.equal(fx.value().status.targets[0].running, true); assert.equal(fx.value().busy, true);
+  assert.equal(fx.value().error, false); assert.equal(fx.completions(), 0);
+  fx.requests[3].resolve(fx.status(false, 'new-success')); await newPost; await flushEffects();
+  assert.equal(fx.value().busy, false); assert.equal(fx.completions(), 1);
+});
+
+test('snapshot hook ignores stale errors and aborts POST when disabled', async t => {
+  const fx = snapshotHookHarness(t);
+  fx.render(true); await flushEffects();
+  const post = fx.value().refresh(); await flushEffects();
+  fx.requests[1].resolve(fx.status(false)); await post; await flushEffects();
+  fx.requests[0].reject(new Error('late-get')); await flushEffects();
+  assert.equal(fx.value().error, false);
+  const pending = fx.value().refresh(); await flushEffects();
+  fx.render(false); await flushEffects();
+  assert.equal(fx.requests[2].options.signal.aborted, true);
+  fx.requests[2].reject(new Error('late-post')); await pending; await flushEffects();
+  assert.equal(fx.value().error, false); assert.equal(fx.value().busy, false);
+});
+
+test('snapshot hook unmount aborts POST and retired poll callbacks cannot fetch again', async t => {
+  const fx = snapshotHookHarness(t);
+  fx.render(true); await flushEffects();
+  fx.requests[0].resolve(fx.status(true)); await flushEffects();
+  const pending = fx.value().refresh(); await flushEffects();
+  fx.unmount();
+  assert.equal(fx.requests[1].options.signal.aborted, true);
+  fx.requests[1].resolve(fx.status(false, 'late-success')); await pending;
+  await fx.polls.shift()();
+  assert.equal(fx.requests.length, 2); assert.equal(fx.completions(), 0);
 });
 
 test('PR-S v1 snapshots without status have unknown cards regardless of legacy Orca state', async t => {
