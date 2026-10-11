@@ -79,16 +79,21 @@ test('GET and SSE require cookie, accept absent/same-origin/none Fetch-Site, rej
 
 test('private SSE snapshots current messages once and subsequent changes, disconnect removes subscription', async t => {
   const { app, hub, process } = integrated(t);
+  const epoch = hub.state().epoch;
   await hub.start();
   hub.message('private');
   const sse = stream(app, `${BASE}/stream`);
   assert.equal(sse.frames.length, 1);
   assert.ok(sse.frames[0].includes('private'));
+  assert.equal(JSON.parse(sse.frames[0].split('data: ')[1]).epoch, epoch);
+  const fetched = await request(app).get(`${BASE}/state`).set('Cookie', COOKIE);
+  assert.equal(fetched.body.epoch, epoch);
   process.children[0].stdout.write(`${JSON.stringify({ type: 'assistant', message: {
     content: [{ type: 'text', text: 'answer' }],
   } })}\n`);
   assert.equal(sse.frames.length, 2);
   assert.ok(sse.frames[1].includes('answer'));
+  assert.equal(JSON.parse(sse.frames[1].split('data: ')[1]).epoch, epoch);
   assert.deepEqual(app.services.eventBus.replayFrom(0), []);
   sse.close();
   process.children[0].stdout.write('{"type":"result"}\n');
@@ -146,6 +151,8 @@ test('one hub turn is absent from DB, all public bus channels/replay, conversati
     const restarted = fx.createApp({ sessionHubServiceOptions: process.options,
       dbPath: path.join(fx.root, folder, 'db'), masterMemoryXprojectScanEnabled: false });
     assert.deepEqual(restarted.sessionHubService.state().messages, []);
+    assert.notEqual(restarted.sessionHubService.state().epoch, hub.state().epoch);
+    assert.equal(restarted.sessionHubService.state().version, 0);
   });
 
 test('app.shutdown closes hub synchronously and awaits preparation cleanup', async t => {

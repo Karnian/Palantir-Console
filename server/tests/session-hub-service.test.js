@@ -11,6 +11,45 @@ const { SESSION_HUB_PROMPT } = require('../services/sessionHubPrompt');
 
 const code = expected => err => err.code === expected;
 
+test('state epoch identifies the service lifetime and survives start, stop and clear', async t => {
+  const fx = serviceFixture(t), next = serviceFixture(t), snapshots = [];
+  const initial = fx.service.state();
+  assert.equal(typeof initial.epoch, 'string');
+  assert.match(initial.epoch, /^[0-9a-f]{32}$/);
+  assert.notEqual(initial.epoch, next.service.state().epoch);
+  assert.equal(next.service.state().version, 0);
+  fx.service.subscribe(value => snapshots.push(value));
+  snapshots.push(await fx.service.start());
+  fx.init();
+  snapshots.push(fx.service.message('수명 확인'));
+  snapshots.push(await fx.service.stop());
+  snapshots.push(await fx.service.clear());
+  snapshots.push(fx.service.state());
+  for (const snapshot of snapshots) assert.equal(snapshot.epoch, initial.epoch);
+});
+
+test('state version increases across start, messages, stop and clear; replies match published snapshots', async t => {
+  const fx = serviceFixture(t), versions = [];
+  assert.equal(fx.service.state().version, 0);
+  fx.service.subscribe(value => versions.push(value.version));
+  const started = await fx.service.start();
+  assert.equal(started.version, fx.service.state().version);
+  assert.ok(started.version > 0);
+  fx.init();
+  const message = fx.service.message('버전 확인');
+  assert.ok(message.version > started.version);
+  assert.equal(message.messages.at(-1).text, '버전 확인');
+  const stopped = await fx.service.stop();
+  assert.ok(stopped.version > message.version);
+  assert.equal(stopped.version, fx.service.state().version);
+  const cleared = await fx.service.clear();
+  assert.ok(cleared.version > stopped.version);
+  assert.equal(cleared.version, fx.service.state().version);
+  assert.deepEqual(cleared.messages, []);
+  assert.equal(new Set(versions).size, versions.length);
+  assert.deepEqual(versions, [...versions].sort((a, b) => a - b));
+});
+
 test('fixed argv, guard immediately before spawn, minimal Claude env and disk-free hub token', async t => {
   const order = [];
   const fx = serviceFixture(t, { assertSpawnAllowed: value => order.push(value) });
@@ -834,4 +873,47 @@ test('clear after reboot deletes old owned transcripts without resuming messages
   assert.equal(fs.existsSync(transcriptDir), false); assert.equal(fs.existsSync(cwd), false);
   assert.equal(fs.readFileSync(path.join(fx.root, 'owned-sessions'), 'utf8'), '');
   assert.equal(fx.calls.length, 1);
+});
+
+test('long TMPDIR falls back to a private short socket directory and cleans both directories', async t => {
+  const fx = serviceFixture(t);
+  const longTmp = path.join(fx.temp, '한글'.repeat(40));
+  fs.mkdirSync(longTmp, { mode: 0o700 });
+  const alternate = serviceFixture(t, { tmpDir: longTmp });
+  await alternate.service.start();
+  assert.equal(alternate.service.state().state, 'running');
+  const config = JSON.parse(fs.readFileSync(path.join(alternate.root, 'mcp.json'), 'utf8'));
+  const socket = config.mcpServers.session_hub.args.at(-1);
+  assert.ok(socket.startsWith('/tmp/phub-'), socket);
+  assert.ok(Buffer.byteLength(socket) <= 100);
+  const directory = path.dirname(socket);
+  const info = fs.lstatSync(directory);
+  assert.equal(info.isSymbolicLink(), false);
+  assert.equal(info.mode & 0o777, 0o700);
+  assert.deepEqual(fs.readdirSync(longTmp), []);
+  await alternate.service.stop();
+  assert.equal(fs.existsSync(directory), false);
+});
+
+test('socket fallback rejects a still-overlong path before listening or spawning', async t => {
+  const base = serviceFixture(t);
+  const longTmp = path.join(base.temp, 'x'.repeat(120));
+  fs.mkdirSync(longTmp, { mode: 0o700 });
+  let listened = false;
+  const fx = serviceFixture(t, { tmpDir: longTmp, fs: { ...fsp,
+    mkdtemp: prefix => fsp.mkdtemp(prefix === '/tmp/phub-' ? path.join(longTmp, 'phub-') : prefix),
+  }, net: { createServer() { listened = true; throw new Error('unexpected listen'); } } });
+  await assert.rejects(fx.service.start(), code('session_hub_socket_path_too_long'));
+  assert.equal(listened, false); assert.equal(fx.calls.length, 0);
+  assert.deepEqual(fs.readdirSync(longTmp), []);
+});
+
+test('socket directory symlink is refused before chmod or spawn without touching its target', async t => {
+  const base = serviceFixture(t), target = path.join(base.temp, 'target'), link = path.join(base.temp, 'link');
+  fs.mkdirSync(target, { mode: 0o755 });
+  fs.symlinkSync(target, link);
+  const fx = serviceFixture(t, { fs: { ...fsp, mkdtemp: async () => link } });
+  await assert.rejects(fx.service.start(), code('session_hub_unsafe_storage'));
+  assert.equal(fs.statSync(target).mode & 0o777, 0o755);
+  assert.equal(fx.calls.length, 0);
 });
