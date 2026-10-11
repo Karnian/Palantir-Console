@@ -74,7 +74,7 @@ test('real app preserves the off work board and navigation; active hub redirects
   let active = false;
   env.context.EventSource = class { addEventListener() {} close() {} };
   env.context.fetch = async url => response(url === '/api/health' ? { sessionHubActive: active }
-    : url.endsWith('/chat/state') ? { version: 0, state: 'idle', messages: [] }
+    : url.endsWith('/chat/state') ? { epoch: 'boot', version: 0, state: 'idle', messages: [] }
       : url.endsWith('/snapshots') ? { rev: REV, snapshots: [{ machine_id: 'alpha', sha256: 'a' }] }
         : url.includes('/snapshots/alpha') ? alpha : { nodes: [], queued: [] });
   loadAppShell(env);
@@ -93,13 +93,15 @@ test('real app preserves the off work board and navigation; active hub redirects
   const tab = label => Array.from(env.root.querySelectorAll('.session-hub-tabs button'))
     .find(node => node.textContent === label);
   tab('Palantir 작업').click(); await flushEffects();
-  assert.equal(env.window.location.hash, '#manager/palantir');
+  assert.equal(env.window.location.hash, '#manager/all-sessions');
   assert.equal(tab('Palantir 작업').getAttribute('aria-pressed'), 'true');
   assert.ok(env.root.querySelector('.manager-grid-side'));
-  env.window.location.hash = 'manager/all-sessions'; await flushEffects(); await flushEffects();
+  env.window.location.hash = 'work'; await flushEffects(); await flushEffects();
+  assert.equal(env.window.location.hash, '#manager/all-sessions');
   assert.equal(tab('모든 세션').getAttribute('aria-pressed'), 'true');
   tab('Palantir 작업').click(); await flushEffects();
-  env.window.location.hash = 'manager/all-sessions'; await flushEffects(); await flushEffects();
+  env.window.location.hash = 'work'; await flushEffects(); await flushEffects();
+  assert.equal(env.window.location.hash, '#manager/all-sessions');
   assert.equal(tab('모든 세션').getAttribute('aria-pressed'), 'true');
 });
 
@@ -134,10 +136,64 @@ test('detail 503 leaves rev unconfirmed, evidence clickable and retry available'
   assert.ok(!env.root.querySelector('button.session-evidence').textContent.includes('확인 불가'));
 });
 
+test('reconnected SSE replaces version 40 with a new epoch at version zero', async t => {
+  const env = setup(t);
+  let source;
+  const previous = { epoch: 'previous-boot', version: 40, state: 'running', turnInProgress: false,
+    messages: [{ role: 'assistant', text: '이전 서버 답변' }] };
+  const restarted = { epoch: 'next-boot', version: 0, state: 'idle', messages: [], turnInProgress: false };
+  env.context.EventSource = class {
+    constructor() { source = this; }
+    addEventListener(name, callback) { this.receive = callback; }
+    close() {}
+  };
+  env.context.fetch = async () => response(previous);
+  env.render(env.h(env.context.SessionHubChat), env.root); await flushEffects(); await flushEffects();
+  assert.equal(env.root.querySelector('.manager-status-badge').textContent, '조회 준비됨');
+  assert.ok(env.root.textContent.includes('이전 서버 답변'));
+  source.onerror(); await flushEffects();
+  source.onopen(); source.receive({ data: JSON.stringify(restarted) }); await flushEffects();
+  assert.equal(env.root.querySelector('.manager-status-badge').textContent, '중지됨');
+  assert.equal(env.root.querySelector('.manager-msg-assistant'), null);
+  source.receive({ data: JSON.stringify({ ...restarted, version: 2, state: 'running', messages: [
+    { role: 'assistant', text: '새 서버 답변' },
+  ] }) }); await flushEffects();
+  source.receive({ data: JSON.stringify(restarted) }); await flushEffects();
+  assert.equal(env.root.querySelector('.manager-status-badge').textContent, '조회 준비됨');
+  assert.ok(env.root.textContent.includes('새 서버 답변'));
+});
+
+test('real app panel clicks preserve the Operator conversation and hash', async t => {
+  const env = setup(t), { alpha } = fixture(t), conversations = [];
+  env.context.EventSource = class { addEventListener() {} close() {} };
+  env.context.fetch = async url => response(url === '/api/health' ? { sessionHubActive: true }
+    : url.endsWith('/chat/state') ? { epoch: 'boot', version: 0, state: 'idle', messages: [] }
+      : url.endsWith('/snapshots') ? { rev: REV, snapshots: [{ machine_id: 'alpha', sha256: 'a' }] }
+        : url.includes('/snapshots/alpha') ? alpha : { nodes: [], queued: [] });
+  loadAppShell(env);
+  env.context.useProjects = () => ({ projects: [{ id: 'p1', name: 'Project 1', pm_enabled: 1 }] });
+  env.context.useConversation = target => {
+    conversations.push(target); return { events: [], queuedMessages: [] };
+  };
+  env.window.location.hash = 'manager/operator/p1';
+  env.render(env.h(env.context.App), env.root); await flushEffects(); await flushEffects(); await flushEffects();
+  const tab = label => Array.from(env.root.querySelectorAll('.session-hub-tabs button'))
+    .find(node => node.textContent === label);
+  assert.ok(conversations.includes('operator:p1'));
+  for (const label of ['Palantir 작업', '모든 세션', 'Palantir 작업']) {
+    tab(label).click(); await flushEffects(); await flushEffects();
+    assert.equal(env.window.location.hash, '#manager/operator/p1');
+    assert.equal(env.root.querySelector('.session-hub-picker .dropdown-button').dataset.value, 'operator:p1');
+    assert.equal(env.root.querySelector('.session-hub-chat'), null);
+    assert.ok(env.root.querySelector('.manager-panel-title').textContent.includes('Project 1'));
+    assert.equal(conversations.at(-1), 'operator:p1');
+  }
+});
+
 test('late GET and stale SSE cannot undo newer POST state or messages', async t => {
   const env = setup(t), get = deferred(), calls = [];
   let source;
-  const idle = { version: 0, state: 'idle', messages: [], turnInProgress: false };
+  const idle = { epoch: 'boot', version: 0, state: 'idle', messages: [], turnInProgress: false };
   const running = { ...idle, version: 2, state: 'running' };
   const answered = { ...running, version: 4, messages: [{ role: 'user', text: '보존할 질문' }] };
   env.context.EventSource = class {
@@ -170,7 +226,7 @@ test('late GET and stale SSE cannot undo newer POST state or messages', async t 
 test('a start reply matching the SSE version clears only the local starting indicator', async t => {
   const env = setup(t), start = deferred();
   let source;
-  const idle = { version: 0, state: 'idle', messages: [], turnInProgress: false };
+  const idle = { epoch: 'boot', version: 0, state: 'idle', messages: [], turnInProgress: false };
   const running = { ...idle, version: 1, state: 'running' };
   env.context.EventSource = class {
     constructor() { source = this; }
@@ -215,7 +271,7 @@ test('evidence uses sanitized text only; malformed tokens, code and attributes s
 
 test('all chat actions share one fetch spy and dedicated SSE; incomplete clear shows remaining', async t => {
   const env = setup(t), calls = [], streams = [];
-  let snapshot = { version: 0, state: 'idle', generation: 0, messages: [], turnInProgress: false };
+  let snapshot = { epoch: 'boot', version: 0, state: 'idle', generation: 0, messages: [], turnInProgress: false };
   class Source {
     constructor(url) { this.url = url; streams.push(this); }
     addEventListener(name, callback) { assert.equal(name, 'snapshot'); this.receive = callback; }
@@ -336,7 +392,7 @@ test('inactive ManagerView preserves original DOM; active defaults to assistant 
   env.context.managerProfileAuthState = () => 'ok';
   env.context.operatorConversationId = id => `operator:${id}`;
   env.context.apiFetch = async url => url.includes('/chat/')
-    ? { version: 0, state: 'running', messages: [
+    ? { epoch: 'boot', version: 0, state: 'running', messages: [
       { role: 'assistant', text: `[[session:${alpha.sessions[0].key}@${NEXT}]]` },
     ] }
     : url.endsWith('/snapshots') ? { rev: REV, snapshots: [{ machine_id: 'alpha', sha256: 'a' }] } : alpha;
@@ -394,7 +450,6 @@ test('boot health feeds active flag to manager and the legacy route feeds panel 
   const app = fs.readFileSync(path.join(publicRoot, 'app.js'), 'utf8');
   assert.match(app, /sessionHubActive=\$\{observe.sessionHubActive\}/);
   assert.match(app, /initialPanel=\$\{routeParts\[1\] === 'all-sessions' \? 'all'/);
-  assert.match(app, /routeParts\[1\] === 'palantir' \? 'palantir' : undefined/);
   env.render(null, env.root);
   for (const call of calls) assert.equal(call.opts.signal.aborted, true);
 });
@@ -414,7 +469,7 @@ test('readable labels skip URL lines, follow AI/first/recent priority and cap ev
 test('chat shares Top bubbles, groups tool calls without JSON, maps errors and honors Enter/IME', async t => {
   const env = setup(t), calls = [], key = 'alpha:claude:abcdef';
   const card = { key, machine: { id: 'alpha', label: 'Mac' }, ai_title: '인증 검토' };
-  const snapshot = { version: 0, state: 'running', turnInProgress: false, messages: [
+  const snapshot = { epoch: 'boot', version: 0, state: 'running', turnInProgress: false, messages: [
     { role: 'user', text: '리뷰해' },
     { role: 'tool', name: 'mcp__session_hub__search_instructions', text: '{"q":"리뷰해","cursor":"SECRET"}' },
     { role: 'tool', name: 'mcp__session_hub__list_sessions', text: '{"machine":"alpha","provider":"codex"}' },
@@ -480,7 +535,7 @@ test('compact panel rows have three lines, searchable content and visibly named 
 
 test('idle questions start once before sending; start failures retain the question and never send', async t => {
   const env = setup(t), calls = [], starting = deferred();
-  const idle = { version: 0, state: 'idle', messages: [], turnInProgress: false };
+  const idle = { epoch: 'boot', version: 0, state: 'idle', messages: [], turnInProgress: false };
   const running = { ...idle, version: 1, state: 'running' };
   env.context.EventSource = class { addEventListener() {} close() {} };
   let failStart = false;
@@ -547,7 +602,8 @@ test('row metadata has exact separator spacing and omits unknown Orca while deta
 });
 
 test('automatic start never sends after a cancelled start or after the chat unmounts', async t => {
-  const env = setup(t), calls = [], idle = { version: 0, state: 'idle', messages: [], turnInProgress: false };
+  const env = setup(t), calls = [];
+  const idle = { epoch: 'boot', version: 0, state: 'idle', messages: [], turnInProgress: false };
   env.context.EventSource = class { addEventListener() {} close() {} };
   let pendingStart = deferred();
   env.context.fetch = async (url, opts) => {

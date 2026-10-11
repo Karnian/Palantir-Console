@@ -423,8 +423,7 @@ function App() {
         agents=${agents} agentsError=${agentsError} agentsLoading=${agentsLoading} reloadAgents=${reloadAgents}
         driftAudit=${driftAudit} onOpenDrift=${() => setShowDriftDrawer(true)}
         initialTarget=${managerInitialTarget} sessionHubActive=${observe.sessionHubActive}
-        initialPanel=${routeParts[1] === 'all-sessions' ? 'all'
-          : routeParts[1] === 'palantir' ? 'palantir' : undefined} />`;
+        initialPanel=${routeParts[1] === 'all-sessions' ? 'all' : undefined} />`;
     }
     if (routeBase === 'board') {
       if (tasksLoading) return html`<${Loading} />`;

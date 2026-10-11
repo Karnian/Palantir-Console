@@ -119,13 +119,17 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch }) {
   const [error, setError] = useState('');
   const [clearNotice, setClearNotice] = useState('');
   const alive = useRef(false);
+  const epoch = useRef(null);
   const version = useRef(-1);
   const controller = useRef(null);
   const messagesEnd = useRef(null);
   const pending = useRef(false);
   const composing = useRef(false);
   const applySnapshot = value => {
-    if (!alive.current || !Number.isSafeInteger(value.version) || value.version <= version.current) return;
+    if (!alive.current || typeof value.epoch !== 'string' || !value.epoch
+      || !Number.isSafeInteger(value.version)) return;
+    if (value.epoch === epoch.current && value.version <= version.current) return;
+    epoch.current = value.epoch;
     version.current = value.version;
     setState(value);
   };

@@ -11,6 +11,23 @@ const { SESSION_HUB_PROMPT } = require('../services/sessionHubPrompt');
 
 const code = expected => err => err.code === expected;
 
+test('state epoch identifies the service lifetime and survives start, stop and clear', async t => {
+  const fx = serviceFixture(t), next = serviceFixture(t), snapshots = [];
+  const initial = fx.service.state();
+  assert.equal(typeof initial.epoch, 'string');
+  assert.match(initial.epoch, /^[0-9a-f]{32}$/);
+  assert.notEqual(initial.epoch, next.service.state().epoch);
+  assert.equal(next.service.state().version, 0);
+  fx.service.subscribe(value => snapshots.push(value));
+  snapshots.push(await fx.service.start());
+  fx.init();
+  snapshots.push(fx.service.message('수명 확인'));
+  snapshots.push(await fx.service.stop());
+  snapshots.push(await fx.service.clear());
+  snapshots.push(fx.service.state());
+  for (const snapshot of snapshots) assert.equal(snapshot.epoch, initial.epoch);
+});
+
 test('state version increases across start, messages, stop and clear; replies match published snapshots', async t => {
   const fx = serviceFixture(t), versions = [];
   assert.equal(fx.service.state().version, 0);

@@ -49,6 +49,7 @@ function createSessionHubService(options = {}) {
     '/etc/claude-code/',
   ];
   const subscribers = new Set();
+  const epoch = crypto.randomBytes(16).toString('hex');
   let state = 'idle';
   let version = 0;
   let generation = 0;
@@ -85,7 +86,7 @@ function createSessionHubService(options = {}) {
   const ownedPath = path.join(root, 'owned-sessions');
 
   function snapshot() {
-    return { state, version, generation, error, disabled, turnInProgress: !!turn,
+    return { state, epoch, version, generation, error, disabled, turnInProgress: !!turn,
       promptVersion: SESSION_HUB_PROMPT_VERSION, messages: messages.map(row => ({ ...row })) };
   }
   function publish() {

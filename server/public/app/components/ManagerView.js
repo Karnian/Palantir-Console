@@ -50,17 +50,14 @@ export function ManagerView({ manager, runs, tasks, projects, agents, agentsErro
   useEffect(() => {
     if (!sessionHubActive) return;
     const syncPanel = () => {
-      const tab = location.hash === '#manager/all-sessions' ? 'all'
-        : location.hash === '#manager/palantir' ? 'palantir' : null;
-      if (tab) { setPanelTab(tab); setMobilePane('panel'); }
+      if (location.hash === '#work' || location.hash === '#manager/all-sessions') {
+        setPanelTab('all'); setMobilePane('panel');
+      }
     };
     window.addEventListener('hashchange', syncPanel);
     return () => window.removeEventListener('hashchange', syncPanel);
   }, [sessionHubActive]);
-  const selectPanel = tab => {
-    setPanelTab(tab);
-    location.hash = tab === 'all' ? 'manager/all-sessions' : 'manager/palantir';
-  };
+  const selectPanel = tab => setPanelTab(tab);
   const openSession = (key, rev) => {
     setSelection({ key, rev }); selectPanel('all'); setMobilePane('panel');
   };

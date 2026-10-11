@@ -20,7 +20,7 @@ async function mockSessionHub(page, { observe = true, clock = true, longText = f
     for (const instruction of alpha.instructions) instruction.text += ` ${'긴지시본문'.repeat(200)}`;
   }
   const key = alpha.sessions[0].key;
-  let state = { version: 1, state: 'running', generation: 1, turnInProgress: false, messages: [
+  let state = { epoch: 'visual-boot', version: 1, state: 'running', generation: 1, turnInProgress: false, messages: [
     { role: 'user', text: '지금 각 세션 뭐 하고 있어?' },
     { role: 'tool', name: 'mcp__session_hub__search_instructions', text: '{"q":"인증","cursor":"next"}' },
     { role: 'tool', name: 'mcp__session_hub__get_session', text: JSON.stringify({ key }) },
