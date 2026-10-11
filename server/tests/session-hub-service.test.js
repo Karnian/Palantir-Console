@@ -450,32 +450,146 @@ test('real fixture group with SIGTERM-ignoring descendant is reaped after parent
   assert.throws(() => process.kill(descendant, 0), err => err.code === 'ESRCH');
 });
 
-test('protected MCP bootstrap receives exactly two env keys and PGID mismatch fails closed', async t => {
+function credentialFixture(t, execFile) {
   const { fakeNet } = require('./helpers/session-hub-service-fixture.cjs');
   const { EventEmitter } = require('node:events');
   let server;
   const net = fakeNet();
   const create = net.createServer;
   net.createServer = handler => { server = create(handler); return server; };
-  const fx = serviceFixture(t, { net });
-  await fx.service.start();
-  function connect(pgid) {
+  const fx = serviceFixture(t, { net, execFile });
+  function connect(pid, pgid) {
     const socket = new EventEmitter();
     socket.setTimeout = () => {};
-    socket.destroy = () => {};
+    socket.destroy = () => { socket.destroyed = true; socket.emit('close'); };
     socket.end = value => { socket.payload = value; };
     server.connect(socket);
-    socket.emit('data', JSON.stringify({ pid: 42, pgid }) + '\n');
+    socket.emit('data', JSON.stringify({ pid, pgid }) + '\n');
     return socket;
   }
-  const valid = connect(fx.service.diagnostics().pgid);
+  return { ...fx, connect };
+}
+
+test('protected MCP checks PID with server ps, ignores claimed PGID and grants credentials once', async t => {
+  const lookups = [];
+  const fx = credentialFixture(t, (command, argv, opts, callback) => {
+    lookups.push({ command, argv }); callback(null, String(fx.service.diagnostics().pgid));
+  });
+  await fx.service.start();
+  const valid = fx.connect(42, 99);
+  await tick();
   assert.deepEqual(JSON.parse(valid.payload), { PALANTIR_SESSION_HUB_TOKEN: fx.service.current(),
     PALANTIR_SESSION_HUB_BASE_URL: 'http://127.0.0.1:3000' });
-  const invalid = connect(99);
+  assert.deepEqual(lookups, [{ command: '/bin/ps', argv: ['-o', 'pgid=', '-p', '42'] }]);
+  const invalid = fx.connect(42, fx.service.diagnostics().pgid);
+  await tick();
+  assert.equal(invalid.payload, undefined); assert.equal(invalid.destroyed, true);
+  assert.equal(lookups.length, 1); assert.ok(fx.service.current());
+});
+
+test('forged claimed PGID cannot pass a different real process group', async t => {
+  const fx = credentialFixture(t, (command, argv, opts, callback) => callback(null, '99'));
+  await fx.service.start();
+  const invalid = fx.connect(42, fx.service.diagnostics().pgid);
+  await tick();
   assert.equal(invalid.payload, undefined); assert.equal(fx.service.current(), null);
   await fx.service.close();
   assert.equal(fx.service.state().error, 'session_hub_unexpected_pgid');
 });
+
+test('invalid PID never invokes ps or receives credentials', async t => {
+  for (const pid of [0, -1, 1.5, '42', Number.MAX_SAFE_INTEGER + 1]) {
+    let lookups = 0;
+    const fx = credentialFixture(t, () => { lookups++; });
+    await fx.service.start();
+    const socket = fx.connect(pid, fx.service.diagnostics().pgid);
+    await tick();
+    assert.equal(socket.payload, undefined); assert.equal(lookups, 0);
+    assert.equal(socket.destroyed, true);
+    await fx.service.close();
+  }
+});
+
+test('concurrent and repeated hellos get one lookup and one credential delivery; later generation may connect',
+  async t => {
+    let resolveLookup;
+    let lookups = 0;
+    const fx = credentialFixture(t, (command, argv, opts, callback) => { lookups++; resolveLookup = callback; });
+    await fx.service.start();
+    const first = fx.connect(42, 0);
+    first.emit('data', '{"pid":42,"pgid":0}\n');
+    const second = fx.connect(43, 0);
+    await tick();
+    assert.equal(lookups, 1);
+    resolveLookup(null, String(fx.service.diagnostics().pgid));
+    await tick();
+    assert.ok(first.payload); assert.equal(second.payload, undefined); assert.equal(second.destroyed, true);
+    await fx.service.stop(); await fx.service.start();
+    const next = fx.connect(44, 0);
+    resolveLookup(null, String(fx.service.diagnostics().pgid));
+    await tick();
+    assert.ok(next.payload); assert.equal(lookups, 2);
+  });
+
+test('failed server PGID lookup refuses credentials and terminates the hub', async t => {
+  for (const output of ['', 'not-a-pgid', '-1']) {
+    const fx = credentialFixture(t, (command, argv, opts, callback) => callback(null, output));
+    await fx.service.start();
+    const socket = fx.connect(42, fx.service.diagnostics().pgid);
+    await tick();
+    await fx.service.close();
+    assert.equal(socket.payload, undefined);
+    assert.equal(fx.service.state().error, 'session_hub_unexpected_pgid');
+  }
+  const fx = credentialFixture(t, (command, argv, opts, callback) => callback(new Error('ps denied')));
+  await fx.service.start();
+  const socket = fx.connect(42, fx.service.diagnostics().pgid);
+  await tick(); await fx.service.close();
+  assert.equal(socket.payload, undefined);
+  assert.equal(fx.service.state().error, 'session_hub_unexpected_pgid');
+});
+
+test('close during server PGID lookup waits and revokes credentials before a new generation can start', async t => {
+  let resolveLookup;
+  const fx = credentialFixture(t, (command, argv, opts, callback) => { resolveLookup = callback; });
+  await fx.service.start();
+  const previousGroup = fx.service.diagnostics().pgid;
+  const socket = fx.connect(42, previousGroup);
+  const closing = fx.service.stop();
+  assert.equal(fx.service.current(), null);
+  await assert.rejects(fx.service.start(), code('session_hub_busy'));
+  resolveLookup(null, String(previousGroup));
+  await closing;
+  assert.equal(socket.payload, undefined);
+  assert.equal(fx.service.state().error, null);
+  await fx.service.start();
+  const next = fx.connect(43, previousGroup);
+  resolveLookup(null, String(fx.service.diagnostics().pgid));
+  await tick();
+  assert.ok(next.payload);
+});
+
+for (const ancestor of ['transcript', 'projects', '.claude']) {
+  test(`missing memory_paths rejects symlink ${ancestor} ancestor even with a regular owned transcript`, async t => {
+    const fx = serviceFixture(t);
+    await fx.service.start();
+    const { transcriptDir } = fx.service.diagnostics();
+    fs.mkdirSync(transcriptDir, { recursive: true });
+    fs.writeFileSync(path.join(transcriptDir, 'owned.jsonl'), 'keep');
+    const directory = ancestor === 'transcript' ? transcriptDir : ancestor === 'projects'
+      ? path.dirname(transcriptDir) : path.dirname(path.dirname(transcriptDir));
+    const moved = `${directory}-moved`;
+    fs.renameSync(directory, moved); fs.symlinkSync(moved, directory);
+    fx.event({ type: 'system', subtype: 'init', session_id: 'owned' });
+    fx.service.message('first'); fx.event({ type: 'result' });
+    await until(() => !fx.service.state().turnInProgress);
+    assert.equal(fx.service.state().error, 'session_hub_unexpected_paths');
+    await fx.service.close();
+    assert.equal(fx.service.current(), null);
+    assert.equal((await fx.service.clear()).result, 'incomplete');
+    assert.equal(fs.readFileSync(path.join(transcriptDir, 'owned.jsonl'), 'utf8'), 'keep');
+  });
+}
 
 test('synchronous subscribers can close during starting/closing without losing preparation or duplicating cleanup',
   async t => {

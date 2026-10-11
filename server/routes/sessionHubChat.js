@@ -35,10 +35,39 @@ function createSessionHubChatRouter({ service }) {
   router.get('/stream', (req, res) => {
     res.set({ 'Content-Type': 'text/event-stream', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
     res.flushHeaders();
-    const send = value => res.write(`event: snapshot\ndata: ${JSON.stringify(value)}\n\n`);
+    const maxBytes = 2 * 1024 * 1024;
+    let waiting = false;
+    let pending = null;
+    let timer = null;
+    let closed = false;
+    const cleanup = () => {
+      if (closed) return;
+      closed = true; pending = null; clearTimeout(timer);
+      unsubscribe(); res.removeListener('drain', drained);
+    };
+    const disconnect = () => { cleanup(); res.destroy(); };
+    const write = frame => {
+      if (closed) return;
+      if (res.writableLength + Buffer.byteLength(frame) > maxBytes) return disconnect();
+      if (waiting) { pending = frame; return; }
+      if (!res.write(frame)) {
+        waiting = true;
+        timer = setTimeout(disconnect, 30000);
+        timer.unref?.();
+      }
+    };
+    const send = value => write(`event: snapshot\ndata: ${JSON.stringify(value)}\n\n`);
+    const drained = () => {
+      if (closed) return;
+      waiting = false; clearTimeout(timer); timer = null;
+      const latest = pending; pending = null;
+      if (latest) write(latest);
+    };
     const unsubscribe = service.subscribe(send);
+    res.on('drain', drained);
+    res.on('close', cleanup);
+    res.on('error', disconnect);
     send(service.state());
-    res.on('close', unsubscribe);
   });
   router.use((req, res) => chatError(res, 'not_found', 404));
   router.use((err, req, res, next) => {

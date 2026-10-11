@@ -2349,7 +2349,12 @@ function createApp(options = {}) {
       // no-work path remains synchronous and preserves manager shutdown timing.
       _shutdownPromise = Promise.resolve(_sweepWorkersThenFinish());
     }
-    if (hubShutdown) _shutdownPromise = Promise.all([_shutdownPromise, hubShutdown]).then(() => undefined);
+    if (hubShutdown) {
+      _shutdownPromise = Promise.allSettled([_shutdownPromise, hubShutdown]).then(results => {
+        const failed = results.find(result => result.status === 'rejected');
+        if (failed) throw failed.reason;
+      });
+    }
     return _shutdownPromise;
   };
 

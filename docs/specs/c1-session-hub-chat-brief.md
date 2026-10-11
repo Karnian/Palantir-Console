@@ -29,6 +29,14 @@ C1 은 **채팅 에이전트가 Mac·codev2 의 모든 세션(Claude Code·Codex
 - 꺼져 있으면: broker·세션 비서 라우트는 404 `session_hub_off`(auth·body parsing 보다 앞, FS 접근·spawn 0), UI 는 기존과 동일. Top/Operator 프롬프트·manifest·`/api/agent-context`·runs·eventBus 는 **on/off 와 무관하게 바뀌지 않는다**.
 
 ### 1.2 broker 를 읽을 수 있는 주체
+- **위협 모델 결정**: 같은 UID 의 로컬 프로세스는 위협 모델 밖이다.
+  이들은 `~/.local/share/palantir/observe-snapshots` 파일을 직접 읽을 수 있어
+  broker 토큰 보호가 이들에 대한 반출 경계를 만들지 않는다.
+  socket 의 PID 자기신고는 peer 인증이 아니다. PGID 검증은 이중 방어다.
+  서버가 hello 의 양의 정수 pid 로 `ps -o pgid= -p <pid>` 를 실행한다.
+  실제 PGID 가 현재 claude PGID 와 같을 때만 자격을 전달한다.
+  hello 의 pgid 는 무시하고, 자격 전달은 세대당 1회만 허용한다.
+  전달 뒤 socket listener 를 닫고 후속 연결을 거부한다.
 - **현재 살아 있는 세션 비서 프로세스의 토큰**: 세션 비서 서비스가 프로세스를 띄울 때마다 32바이트 난수 토큰을 만들어 메모리에만 두고 MCP 서버 env 로 넘긴다. 프로세스가 끝나면(정상·비정상·대화 지우기) 즉시 폐기한다. 기존 manager capability 서비스(실행 증명·conversation/layer 검증)를 **쓰지 않는다**.
 - **hub 게이트**: `app.js` 에서 `/api/health`·`/api/auth`·body parser 를 장착하기 **전에** 좁은 미들웨어 하나를 둔다. 하는 일은 하나뿐 — `Authorization: Bearer <값>` 이 현재 hub 토큰과 같으면(상수 시간 비교) 요청이 broker GET 경로일 때만 `req.auth = {method:'bearer', actor:'session_hub'}` 를 표시하고 다음으로, 아니면 즉시 403. 값이 다르거나 헤더가 없거나 hub 토큰이 없으면 **아무것도 하지 않고** 그대로 넘긴다(기존 health/login/logout 무인증 계약, auth 비활성 모드, manager/worker/PM bearer, 잘못된 bearer 의 cookie fallback 금지 모두 불변). 기존 auth 미들웨어는 `req.auth.actor==='session_hub'` 가 이미 표시된 요청을 통과시킨다. broker off 게이트(404)는 hub 게이트보다도 앞이다.
 - 사람 cookie 도 broker 를 읽을 수 있다(디버깅·DoD 대조용, 화면은 쓰지 않음).
@@ -55,6 +63,8 @@ C1 은 **채팅 에이전트가 Mac·codev2 의 모든 세션(Claude Code·Codex
     `memory_paths` 가 없으면 첫 `result` 뒤
     `<그 디렉터리>/<session_id>.jsonl` 을 lstat 한다.
     regular file 이고 symlink 가 아니어야 transcript 위치 검증이 통과한다.
+    clear 와 같은 helper 로 projects 부터 transcript 까지 모든 조상 경로를 lstat 한다.
+    경로 구성요소가 symlink 이거나 디렉터리가 아니면 검증을 거부한다.
     부재·검증 실패 시 종료하고 같은 오류를 낸다.
     검증이 끝날 때까지 턴을 유지하며 다음 메시지는 409 `turn_in_progress` 로 거부한다.
     실측(claude 2.1.296): `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` 이면

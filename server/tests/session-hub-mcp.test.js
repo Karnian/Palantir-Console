@@ -98,10 +98,10 @@ test('stdio script handles newline requests, malformed JSON, initialized notific
   assert.equal(lines[1].result.tools.length, 3); assert.equal(lines[2].result.isError, true);
 });
 
-test('bootstrap tolerates fragmented delivery, spawns once and strips every other env key', () => {
+test('bootstrap tolerates fragments, starts MCP once in the verified process and strips every other env key', () => {
   const vm = require('node:vm');
   const sockets = [];
-  const spawned = [];
+  const started = [];
   const exited = [];
   const source = fs.readFileSync(path.resolve(__dirname, '../../scripts/session-hub-mcp-bootstrap.cjs'), 'utf8');
   const modules = {
@@ -110,30 +110,23 @@ test('bootstrap tolerates fragmented delivery, spawns once and strips every othe
       socket.write = value => { socket.sent = value; }; socket.end = value => { socket.sent = value; };
       sockets.push(socket); return socket;
     } },
-    'node:path': path,
-    'node:child_process': {
-      execFileSync: () => '500',
-      spawn(command, argv, options) {
-        spawned.push({ command, argv, options });
-        return Object.assign(new EventEmitter(), { pid: 600 });
-      },
-    },
+    './session-hub-mcp.cjs': { runStdio: options => started.push(options) },
   };
+  const env = { ANTHROPIC_API_KEY: 'claude-only', HOME: '/home', PALANTIR_TOKEN: 'human' };
   vm.runInNewContext(source, { require: name => modules[name], __dirname: '/fixture/scripts',
     process: { pid: 501, argv: ['node', 'bootstrap', '/protected/broker.sock'], execPath: process.execPath,
-      exit: value => exited.push(value) } });
+      env, exit: value => exited.push(value) } });
   sockets[0].emit('connect');
+  assert.deepEqual(JSON.parse(sockets[0].sent), { pid: 501 });
   const credentials = JSON.stringify({ PALANTIR_SESSION_HUB_TOKEN: 'secret',
     PALANTIR_SESSION_HUB_BASE_URL: 'http://127.0.0.1:3000', PALANTIR_TOKEN: 'must-drop' }) + '\n';
   sockets[0].emit('data', credentials.slice(0, 10));
-  assert.equal(spawned.length, 0);
+  assert.equal(started.length, 0);
   sockets[0].emit('data', credentials.slice(10));
   sockets[0].emit('data', credentials);
-  assert.equal(spawned.length, 1); assert.equal(exited.length, 0);
-  assert.deepEqual(JSON.parse(JSON.stringify(spawned[0].options.env)), { PALANTIR_SESSION_HUB_TOKEN: 'secret',
+  assert.equal(started.length, 1); assert.equal(exited.length, 0);
+  assert.deepEqual(JSON.parse(JSON.stringify(started[0].env)), { PALANTIR_SESSION_HUB_TOKEN: 'secret',
     PALANTIR_SESSION_HUB_BASE_URL: 'http://127.0.0.1:3000' });
-  assert.equal(spawned[0].options.stdio, 'inherit');
-  assert.equal(spawned[0].argv.some(value => value.includes('secret')), false);
-  sockets[1].emit('connect');
-  assert.deepEqual(JSON.parse(sockets[1].sent), { pid: 600, pgid: 500, kind: 'mcp' });
+  assert.deepEqual(env, JSON.parse(JSON.stringify(started[0].env)));
+  assert.equal(sockets.length, 1);
 });

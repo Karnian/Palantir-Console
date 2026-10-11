@@ -38,6 +38,7 @@ function createSessionHubService(options = {}) {
   const projects = options.transcriptRoot || path.join(home, '.claude/projects');
   const spawn = options.spawn || ((...args) => childProcess.spawn(...args));
   const kill = options.kill || ((...args) => process.kill(...args));
+  const execFile = options.execFile || childProcess.execFile;
   const guard = options.assertSpawnAllowed || assertSpawnAllowed;
   const resolveBinary = options.resolveBinary || resolveClaudeBinary;
   const auth = options.resolveAuth || (() => resolveClaudeAuth());
@@ -75,6 +76,7 @@ function createSessionHubService(options = {}) {
   let requiresTranscript = false;
   let transcriptVerified = false;
   let transcriptCheck = null;
+  let credentialCheck = null;
   let namespaceReady = false;
   const sockets = new Set();
   const configPath = path.join(root, 'mcp.json');
@@ -157,28 +159,52 @@ function createSessionHubService(options = {}) {
     socketDir = await io.mkdtemp(path.join(options.tmpDir || os.tmpdir(), 'hub-mcp-'));
     await io.chmod(socketDir, 0o700);
     const socketPath = path.join(socketDir, 'broker.sock');
+    let checking = false;
+    // Same-UID local processes are outside the threat model: they can read observe-snapshots directly.
+    // PGID lookup is defense in depth, not authentication of the socket peer or its self-reported PID.
     socketServer = (options.net || net).createServer(socket => {
+      if (!live(gen) || mcpReady || checking) return socket.destroy();
       sockets.add(socket);
       socket.on('close', () => sockets.delete(socket));
       socket.on('error', () => {});
       socket.setTimeout(5000, () => socket.destroy());
       let buffer = '';
+      let handled = false;
       socket.on('data', chunk => {
+        if (handled) return;
         buffer += chunk.toString('utf8');
         if (buffer.length > 4096) return socket.destroy();
         if (!buffer.includes('\n')) return;
+        handled = true;
         let hello;
         try { hello = JSON.parse(buffer.split('\n')[0]); } catch { return socket.destroy(); }
-        if (gen !== generation || state !== 'running' || !token) return socket.destroy();
-        if (hello.pgid !== pgid || !Number.isSafeInteger(hello.pid)) {
+        if (!live(gen) || !token || mcpReady || checking) return socket.destroy();
+        if (!Number.isSafeInteger(hello.pid) || hello.pid <= 0) {
           setError('session_hub_unexpected_pgid');
           void close().catch(() => {});
           return socket.destroy();
         }
-        mcpReady = true;
-        options.onMcpProcess?.(hello);
-        socket.end(`${JSON.stringify({ PALANTIR_SESSION_HUB_TOKEN: token,
-          PALANTIR_SESSION_HUB_BASE_URL: getBaseUrl() })}\n`);
+        checking = true;
+        credentialCheck = new Promise((resolve, reject) => {
+          execFile('/bin/ps', ['-o', 'pgid=', '-p', String(hello.pid)],
+            { encoding: 'utf8', timeout: 1000, maxBuffer: 1024 }, (err, stdout) => {
+              if (err) reject(err);
+              else resolve(String(stdout).trim());
+            });
+        }).then(actual => {
+          if (!live(gen) || !token || socket.destroyed || mcpReady) return socket.destroy();
+          if (!/^[1-9][0-9]*$/.test(actual) || Number(actual) !== pgid) {
+            throw fail('session_hub_unexpected_pgid', 503);
+          }
+          mcpReady = true;
+          options.onMcpProcess?.({ pid: hello.pid, pgid: Number(actual), kind: 'mcp' });
+          socket.end(`${JSON.stringify({ PALANTIR_SESSION_HUB_TOKEN: token,
+            PALANTIR_SESSION_HUB_BASE_URL: getBaseUrl() })}\n`);
+          socketServer.close(() => {});
+        }).catch(() => {
+          if (live(gen)) { setError('session_hub_unexpected_pgid'); void close().catch(() => {}); }
+          socket.destroy();
+        }).finally(() => { checking = false; });
       });
     });
     await new Promise((resolve, reject) => {
@@ -245,6 +271,7 @@ function createSessionHubService(options = {}) {
   function verifyTranscript(gen) {
     if (transcriptCheck) return;
     transcriptCheck = (async () => {
+      if (!await safeTranscriptDirectory()) throw fail('session_hub_unexpected_paths', 503);
       const info = await stat(path.join(transcriptDir, `${initSessionId}.jsonl`));
       if (!live(gen)) return;
       if (!info?.isFile() || info.isSymbolicLink()) throw fail('session_hub_unexpected_paths', 503);
@@ -300,6 +327,7 @@ function createSessionHubService(options = {}) {
     state = 'starting'; error = null; clearRequested = false;
     closePromise = null; writeQueue = Promise.resolve(); initSeen = false; mcpReady = false;
     initSessionId = null; requiresTranscript = false; transcriptVerified = false; transcriptCheck = null;
+    credentialCheck = null;
     const gen = ++generation;
     preparation = prepare(gen);
     startPromise = preparation.then(() => {
@@ -463,19 +491,21 @@ function createSessionHubService(options = {}) {
     if (!count) await io.rmdir(filename);
     return count;
   }
+  async function safeTranscriptDirectory() {
+    // Both result validation and clear reject symlinks in every component, including projects and its parents.
+    for (let parent = transcriptDir; ; parent = path.dirname(parent)) {
+      const info = await stat(parent);
+      if (info && (!info.isDirectory() || info.isSymbolicLink())) return false;
+      if (parent === path.dirname(parent)) return true;
+    }
+  }
   async function clearFiles() {
     // A clear before the first start also handles prior boots, without spawning.
     if (!namespaceReady) await namespace();
     await privateDir(root);
     const owned = new Set((await readPrivate(ownedPath)).split('\n').filter(Boolean));
     let remaining = 0;
-    // Refuse symlinks in every existing ancestor, including projects itself.
-    let safe = true;
-    for (let parent = transcriptDir; ; parent = path.dirname(parent)) {
-      const info = await stat(parent);
-      if (info && (!info.isDirectory() || info.isSymbolicLink())) safe = false;
-      if (parent === path.dirname(parent)) break;
-    }
+    const safe = await safeTranscriptDirectory();
     if (!safe) remaining = 1;
     const directory = safe ? await stat(transcriptDir) : null;
     const names = directory ? await io.readdir(transcriptDir) : [];
@@ -524,6 +554,7 @@ function createSessionHubService(options = {}) {
       stdoutHandler = null; child = null;
       await writeQueue.catch(() => {});
       await transcriptCheck;
+      await credentialCheck;
       await removeConfig();
       let result = { result: 'complete', remaining: 0 };
       if (clearRequested) { messages = []; result = await clearFiles(); }

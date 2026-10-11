@@ -92,16 +92,17 @@ async function dispatch(message, { env = process.env, get = brokerGet } = {}) {
   return response;
 }
 
-if (require.main === module) {
+function runStdio(options = {}) {
   const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
   let queue = Promise.resolve();
   input.on('line', line => {
     queue = queue.then(async () => {
       let response;
-      try { response = await dispatch(JSON.parse(line)); }
+      try { response = await dispatch(JSON.parse(line), options); }
       catch { response = { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } }; }
       if (response) process.stdout.write(`${JSON.stringify(response)}\n`);
     });
   });
 }
-module.exports = { TOOLS, valid, dispatch, brokerGet };
+if (require.main === module) runStdio();
+module.exports = { TOOLS, valid, dispatch, brokerGet, runStdio };

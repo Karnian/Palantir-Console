@@ -9,7 +9,7 @@ const path = require('node:path');
 const Database = require('better-sqlite3');
 const { Duplex } = require('node:stream');
 const { fixture, request, COOKIE, TOKEN } = require('./helpers/session-hub-fixture.cjs');
-const { serviceFixture, tick } = require('./helpers/session-hub-service-fixture.cjs');
+const { serviceFixture, tick, until } = require('./helpers/session-hub-service-fixture.cjs');
 const BASE = '/api/session-hub/chat';
 
 function integrated(t, overrides = {}) {
@@ -208,6 +208,96 @@ test('app.shutdown awaits group ESRCH before deleting MCP config', async t => {
   alive = false;
   await shutdown;
   assert.equal(fs.existsSync(path.join(process.root, 'mcp.json')), false);
+});
+
+test('hub reap_failed does not finish app.shutdown until other cleanup settles', async t => {
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  const { app, hub } = integrated(t, { kill() {}, termMs: 2, reapMs: 10 });
+  app.services.managerMessageQueueService.awaitDrain = () => held;
+  await hub.start();
+  const shutdown = app.shutdown();
+  let finished = false;
+  let failure;
+  shutdown.then(() => { finished = true; }, err => { finished = true; failure = err; });
+  try {
+    await until(() => hub.state().error === 'reap_failed');
+    await tick();
+    assert.equal(finished, false);
+    release();
+    await assert.rejects(shutdown, err => err.code === 'reap_failed');
+    assert.equal(failure.code, 'reap_failed');
+    assert.equal(app.services._rawDb.open, false);
+  } finally {
+    release(); await shutdown.catch(() => {});
+    // This test deliberately expects shutdown rejection; the fixture's finalizer may safely reuse it.
+    app.shutdown = () => shutdown.catch(() => {});
+  }
+});
+
+function pausedStream(t) {
+  const express = require('express');
+  const { createSessionHubChatRouter } = require('../routes/sessionHubChat');
+  let publish;
+  let paused = true;
+  let unblock;
+  let unsubscribed = false;
+  const chunks = [];
+  const socket = new Duplex({ read() {}, write(chunk, encoding, callback) {
+    chunks.push(chunk.toString());
+    if (paused) unblock = callback;
+    else callback();
+  } });
+  const req = new http.IncomingMessage(socket);
+  req.method = 'GET'; req.url = '/stream'; req.headers = { host: 'localhost' }; req.auth = { method: 'cookie' };
+  const res = new http.ServerResponse(req);
+  res.assignSocket(socket);
+  // Node's HTTP connection handler forwards socket drain to ServerResponse; no listen is needed here.
+  socket.on('drain', () => res.emit('drain'));
+  const app = express();
+  app.use(createSessionHubChatRouter({ service: { state: () => ({ messages: [] }), subscribe(fn) {
+    publish = fn; return () => { unsubscribed = true; };
+  } } }));
+  app.handle(req, res);
+  t.after(() => { res.destroy(); socket.destroy(); });
+  return { res, socket, chunks, publish: value => publish(value), unsubscribed: () => unsubscribed,
+    resume() { paused = false; unblock?.(); } };
+}
+
+test('SSE paused real ServerResponse bounds 31 updates and drains only the latest snapshot', async t => {
+  const sse = pausedStream(t);
+  for (let sequence = 1; sequence <= 31; sequence++) {
+    sse.publish({ sequence, messages: [{ text: 'x'.repeat(1000000) }] });
+  }
+  assert.ok(sse.res.writableLength <= 2 * 1024 * 1024);
+  sse.resume();
+  await until(() => sse.chunks.join('').includes('"sequence":31'));
+  assert.equal(sse.chunks.join('').includes('"sequence":15'), false);
+  assert.equal(sse.unsubscribed(), false);
+});
+
+test('SSE closes on an oversized pending snapshot and unsubscribes', async t => {
+  const sse = pausedStream(t);
+  sse.publish({ text: 'x'.repeat(3 * 1024 * 1024) });
+  await tick();
+  assert.equal(sse.res.destroyed, true);
+  assert.equal(sse.unsubscribed(), true);
+});
+
+test('SSE closes and unsubscribes after 30 seconds without drain', async t => {
+  const timers = [];
+  const original = global.setTimeout;
+  t.mock.method(global, 'setTimeout', (fn, delay, ...args) => {
+    if (delay === 30000) { timers.push(fn); return { unref() {} }; }
+    return original(fn, delay, ...args);
+  });
+  const sse = pausedStream(t);
+  sse.publish({ text: 'x'.repeat(1000000) });
+  assert.equal(timers.length, 1);
+  timers[0]();
+  await tick();
+  assert.equal(sse.res.destroyed, true);
+  assert.equal(sse.unsubscribed(), true);
 });
 
 test('live service token reaches broker only and close immediately retires it', async t => {
