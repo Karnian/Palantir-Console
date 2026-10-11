@@ -93,6 +93,7 @@ function createSessionHubService(options = {}) {
   let stdoutHandler = null;
   let writeQueue = Promise.resolve();
   let bootCleanup = null;
+  let bootCleanupFailure = null;
   let persistenceFailure = null;
   const enqueueLedger = fn => {
     const result = writeQueue.then(fn);
@@ -325,7 +326,7 @@ function createSessionHubService(options = {}) {
     return url.origin;
   }
   async function prepare(gen) {
-    await bootCleanup;
+    await ensureBootCleanup();
     if (managedSettingsPresent(managedPaths, options.managedFs || fs)) {
       disabled = 'session_hub_managed_settings';
       throw fail(disabled, 503);
@@ -438,10 +439,11 @@ function createSessionHubService(options = {}) {
   function start() {
     if (permanent) return Promise.reject(fail('session_hub_closed'));
     if (transitioning) return Promise.reject(fail('session_hub_busy'));
-    if (state !== 'idle' && state !== 'running') return Promise.reject(fail('session_hub_busy'));
+    const retryCleanup = state === 'error:cleanup_failed' && bootCleanupFailure && !persistenceFailure && !pgid;
+    if (state !== 'idle' && state !== 'running' && !retryCleanup) return Promise.reject(fail('session_hub_busy'));
     if (disabled) return Promise.reject(fail(disabled, 503));
     if (state === 'running') return Promise.resolve(snapshot());
-    if (state !== 'idle') return Promise.reject(fail('session_hub_busy'));
+    if (state !== 'idle' && !retryCleanup) return Promise.reject(fail('session_hub_busy'));
     state = 'starting'; error = null;
     boundThread = store.active(); contextFresh = true;
     mcpLossPending = false;
@@ -639,9 +641,32 @@ function createSessionHubService(options = {}) {
     }
   }
   function cleanupTranscripts(query = {}) {
-    return enqueueLedger(() => cleanupTranscriptsLocked(query));
+    return enqueueLedger(() => cleanupTranscriptsLocked(query)).then(result => {
+      if (query.processCleanup) {
+        if (bootCleanupFailure && (error === 'session_hub_cleanup_failed' || error === bootCleanupFailure.code)) {
+          error = null;
+        }
+        bootCleanupFailure = null;
+      }
+      return result;
+    }, err => {
+      if (query.processCleanup) bootCleanupFailure = err;
+      throw err;
+    });
   }
-  async function residual(filename, info) {
+  function ensureBootCleanup() {
+    if (!bootCleanup) {
+      bootCleanup = cleanupTranscripts({ processCleanup: true }).catch(err => {
+        // Only an in-flight or successful attempt is reusable. Filesystem failures can recover in this process.
+        bootCleanup = null;
+        if (!persistenceFailure) error = 'session_hub_cleanup_failed';
+        publish();
+        throw err;
+      });
+    }
+    return bootCleanup;
+  }
+  async function residual(filename, info, removeEmpty = false) {
     if (!info.isDirectory() || info.isSymbolicLink()) return 1;
     try {
       const names = await io.readdir(filename);
@@ -649,9 +674,9 @@ function createSessionHubService(options = {}) {
       for (const name of names) {
         const item = path.join(filename, name);
         const entry = await stat(item);
-        if (entry) count += await residual(item, entry);
+        if (entry) count += await residual(item, entry, removeEmpty);
       }
-      if (!count) await io.rmdir(filename);
+      if (!count && removeEmpty) await io.rmdir(filename);
       return count;
     } catch (err) { return err.code === 'ENOENT' ? 0 : 1; }
   }
@@ -659,9 +684,32 @@ function createSessionHubService(options = {}) {
     try { commitTurn('partial'); publish(); }
     catch (err) { storageFailed(err); void close().catch(() => {}); }
   }
+  async function countTranscripts(entries, safe, removeEmpty) {
+    const accounted = new Set();
+    let count = 0;
+    for (const entry of entries) {
+      const id = entry.split('\t')[0];
+      if (!safe || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) { count++; continue; }
+      const name = `${id}.jsonl`;
+      accounted.add(name);
+      try { if (await stat(path.join(transcriptDir, name))) count++; }
+      catch { count++; }
+    }
+    if (!safe) return Math.max(count, 1);
+    if (await stat(transcriptDir)) {
+      for (const name of await io.readdir(transcriptDir)) {
+        if (accounted.has(name)) continue;
+        const filename = path.join(transcriptDir, name);
+        const info = await stat(filename);
+        if (info) count += await residual(filename, info, removeEmpty);
+      }
+    }
+    return count;
+  }
   async function cleanupTranscriptsLocked({ threadId, processCleanup = false } = {}) {
     if (!namespaceReady && !await stat(root)) {
       if (processCleanup) for (const row of store.deletingThreads()) store.delete(row.id);
+      transcriptsRemaining = 0;
       return { result: 'complete', remaining: 0 };
     }
     if (!namespaceReady) await namespace();
@@ -693,21 +741,10 @@ function createSessionHubService(options = {}) {
       for (const row of store.deletingThreads()) {
         if (!pendingOwners.has(row.id)) store.delete(row.id);
       }
-      if (!safe) remaining = Math.max(remaining, 1);
-      else {
-        const accounted = new Set(retained.map(entry => `${entry.split('\t')[0]}.jsonl`));
-        const directory = await stat(transcriptDir);
-        if (directory) {
-          for (const name of await io.readdir(transcriptDir)) {
-            if (accounted.has(name)) continue;
-            const filename = path.join(transcriptDir, name);
-            const info = await stat(filename);
-            if (info) remaining += await residual(filename, info);
-          }
-        }
-      }
     }
-    transcriptsRemaining = processCleanup ? remaining : retained.length;
+    // DELETE's result covers only its owner; state always counts every residual without expanding that deletion.
+    transcriptsRemaining = await countTranscripts(retained, safe, processCleanup);
+    if (processCleanup) remaining = transcriptsRemaining;
     return { result: remaining ? 'incomplete' : 'complete', remaining };
   }
   function close({ shutdown = false } = {}) {
@@ -729,7 +766,7 @@ function createSessionHubService(options = {}) {
     closePromise = (async () => {
       // start's continuation checks state; delayed writes cannot resurrect files.
       await preparation?.catch(() => {});
-      await bootCleanup?.catch(err => storageFailed(err));
+      await bootCleanup?.catch(() => {});
       try { await reap(); }
       catch {
         error = 'reap_failed';
@@ -746,6 +783,7 @@ function createSessionHubService(options = {}) {
       let result = { result: 'incomplete', remaining: transcriptsRemaining };
       try {
         result = await cleanupTranscripts({ processCleanup: true });
+        bootCleanup = Promise.resolve(result);
       } catch (err) { cleanupFailure ||= err; }
       if (persistenceFailure || cleanupFailure) {
         if (persistenceFailure) throw fail('assistant_storage_failed', 503);
@@ -758,6 +796,10 @@ function createSessionHubService(options = {}) {
       closedComplete = permanent;
       return value;
     })().catch(err => {
+      if (bootCleanupFailure && !persistenceFailure && err.code !== 'reap_failed') {
+        bootCleanup = null;
+        closePromise = null;
+      }
       if (err.code !== 'reap_failed') {
         error ||= 'session_hub_cleanup_failed';
         if (!permanent) state = 'error:cleanup_failed';
@@ -773,8 +815,7 @@ function createSessionHubService(options = {}) {
     return close();
   }
   function shutdown() { return close({ shutdown: true }); }
-  bootCleanup = cleanupTranscripts({ processCleanup: true });
-  bootCleanup.catch(err => storageFailed(err));
+  ensureBootCleanup().catch(() => {});
   return { start, message, stop, close, shutdown, newThread, deleteThread,
     listThreads: () => store.list(), messages: (id, query) => store.messages(id, query),
     getMessage: (id, mid) => store.get(id, mid),

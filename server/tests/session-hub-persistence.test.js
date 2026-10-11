@@ -468,3 +468,121 @@ test('system prompt advertises exactly the allowed tools including history with 
   assert.equal(argv[argv.indexOf('--append-system-prompt') + 1], SESSION_HUB_PROMPT);
   assert.doesNotMatch(SESSION_HUB_PROMPT, /최근 대화 자료|기억 자료/);
 });
+
+for (const recovery of ['start', 'stop', 'newThread', 'start-after-failed-start', 'stop-after-failed-stop']) {
+  test(`boot residual read failure recovers through ${recovery} without restarting service`, async t => {
+    const fx = serviceFixture(t);
+    await fx.service.start(); await fx.service.stop();
+    const { transcriptDir } = fx.service.diagnostics();
+    fs.mkdirSync(path.join(transcriptDir, 'memory'), { recursive: true });
+    const memory = path.join(transcriptDir, 'memory/one.md');
+    fs.writeFileSync(memory, 'keep');
+    let denied = true;
+    let reads = 0;
+    const next = createSessionHubService({ ...fx.options, fs: { ...fsp, async readdir(filename, ...args) {
+      if (filename === transcriptDir) {
+        reads++;
+        if (denied) throw Object.assign(new Error('denied'), { code: 'EACCES' });
+      }
+      return fsp.readdir(filename, ...args);
+    } } });
+    t.after(() => next.shutdown().catch(() => {}));
+    await until(() => reads > 0); await tick();
+    const spawned = fx.calls.length;
+    if (recovery === 'start-after-failed-start') await assert.rejects(next.start());
+    if (recovery === 'stop-after-failed-stop') await assert.rejects(next.stop());
+    assert.equal(fx.calls.length, spawned);
+    denied = false;
+    const previousReads = reads;
+    if (recovery.startsWith('start')) await next.start();
+    else if (recovery.startsWith('stop')) await next.stop();
+    else await next.newThread();
+    assert.ok(reads > previousReads);
+    assert.equal(next.state().state, recovery.startsWith('start') ? 'running' : 'idle');
+    assert.equal(next.state().error, null);
+    assert.equal(next.diagnostics().storageErrorCode, null);
+    assert.equal(next.state().transcripts_remaining, 1);
+    assert.equal(fs.readFileSync(memory, 'utf8'), 'keep');
+    if (!recovery.startsWith('start')) await next.start();
+    await send(next, 'recovered', 'continue after filesystem recovery');
+    fx.event({ type: 'result' });
+    assert.equal(next.state().turnInProgress, false);
+    assert.equal((await next.stop()).remaining, 1);
+  });
+}
+
+for (const incomplete of [false, true]) {
+  test(`thread DELETE preserves global memory count while scoped cleanup is ${incomplete ? 'incomplete' : 'complete'}`,
+    async t => {
+      let denied = incomplete;
+      const fx = serviceFixture(t, { fs: { ...fsp, async unlink(filename) {
+        if (denied && filename.endsWith('/delete-owned.jsonl')) {
+          throw Object.assign(new Error('denied'), { code: 'EACCES' });
+        }
+        return fsp.unlink(filename);
+      } } });
+      await fx.service.start(); fx.init('delete-owned');
+      const old = fx.store.active();
+      transcript(fx, 'delete-owned');
+      const { transcriptDir } = fx.service.diagnostics();
+      fs.mkdirSync(path.join(transcriptDir, 'memory'), { recursive: true });
+      const memory = path.join(transcriptDir, 'memory/one.md'); fs.writeFileSync(memory, 'keep');
+      await fx.service.newThread();
+      const other = transcript(fx, 'active-owned');
+      fs.appendFileSync(path.join(fx.root, 'owned-sessions'), `active-owned\t${fx.store.active()}\n`);
+      fs.mkdirSync(path.join(transcriptDir, 'memory/empty'));
+      const published = [];
+      fx.service.subscribe(value => published.push(value));
+      const result = await fx.service.deleteThread(old);
+      assert.equal(result.remaining, incomplete ? 1 : 0);
+      assert.equal(result.result, incomplete ? 'incomplete' : 'complete');
+      assert.equal(fx.service.state().transcripts_remaining, incomplete ? 3 : 2);
+      assert.equal(published.at(-1).transcripts_remaining, incomplete ? 3 : 2);
+      assert.equal(fs.readFileSync(memory, 'utf8'), 'keep');
+      assert.equal(fs.existsSync(other), true);
+      assert.equal(fs.existsSync(path.join(transcriptDir, 'memory/empty')), true);
+      denied = false;
+    });
+}
+
+for (const unsafe of ['namespace-mode', 'ledger-mode', 'ledger-symlink']) {
+  test(`boot cleanup retries still reject ${unsafe} before spawning and recover after repair`, async t => {
+    const fx = serviceFixture(t);
+    await fx.service.start(); await fx.service.stop();
+    const { transcriptDir } = fx.service.diagnostics();
+    fs.mkdirSync(transcriptDir, { recursive: true });
+    let denied = true;
+    let reads = 0;
+    const next = createSessionHubService({ ...fx.options, fs: { ...fsp, async readdir(filename, ...args) {
+      if (filename === transcriptDir && denied) {
+        reads++;
+        throw Object.assign(new Error('denied'), { code: 'EACCES' });
+      }
+      return fsp.readdir(filename, ...args);
+    } } });
+    t.after(() => next.shutdown().catch(() => {}));
+    await until(() => reads > 0); await tick();
+    denied = false;
+    const ownedPath = path.join(fx.root, 'owned-sessions');
+    const moved = path.join(fx.temp, 'protected-ledger');
+    if (unsafe === 'namespace-mode') fs.chmodSync(fx.root, 0o755);
+    if (unsafe === 'ledger-mode') fs.chmodSync(ownedPath, 0o644);
+    if (unsafe === 'ledger-symlink') {
+      fs.renameSync(ownedPath, moved); fs.symlinkSync(moved, ownedPath);
+    }
+    const spawned = fx.calls.length;
+    try {
+      await assert.rejects(next.start(), { code: 'session_hub_unsafe_storage' });
+      assert.equal(fx.calls.length, spawned);
+      assert.equal(next.current(), null);
+    } finally {
+      if (unsafe === 'namespace-mode') fs.chmodSync(fx.root, 0o700);
+      if (unsafe === 'ledger-mode') fs.chmodSync(ownedPath, 0o600);
+      if (unsafe === 'ledger-symlink') { fs.unlinkSync(ownedPath); fs.renameSync(moved, ownedPath); }
+    }
+    await next.start();
+    assert.equal(next.state().state, 'running');
+    assert.equal(next.state().error, null);
+    assert.equal(next.diagnostics().storageErrorCode, null);
+  });
+}
