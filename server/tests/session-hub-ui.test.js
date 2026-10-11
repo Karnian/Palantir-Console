@@ -1575,41 +1575,76 @@ test('R2 active ManagerView accepts only manager targets from props and callback
   assert.ok(!calls.some(url => /^\/api\/conversations\/hub/.test(decodeURIComponent(url))));
 });
 
-for (const operation of ['add', 'edit']) for (const newer of ['new-form', 'content', 'kind']) test(
-  `R2 delayed memory ${operation} keeps newer ${newer} draft`, async t => {
-    const env = setup(t), delayed = deferred(), posts = [];
-    let item = { id: 'm1', content: '기존 기억', kind: 'fact', status: 'active', revision: 2 };
+// R3 replaces the editable pending-draft policy with a locked form.
+for (const operation of ['add', 'edit']) for (const outcome of ['success', 'failure', 'conflict']) test(
+  `R3 memory ${operation} locks the pending form and handles ${outcome}`, async t => {
+    const env = setup(t), delayed = deferred(), writes = [];
+    const memories = [{ id: 'existing', content: '기존 기억', kind: 'fact', status: 'active', revision: 2 }];
+    let nextId = 0;
     env.context.fetch = async (url, options = {}) => {
       assert.match(url, /^\/api\/session-hub\/memory/);
       if (options.method === 'POST' || options.method === 'PATCH') {
-        posts.push({ url, body: JSON.parse(options.body) });
-        if (posts.length === 1) await delayed.promise;
-        item = { ...item, ...JSON.parse(options.body), revision: item.revision + 1 }; return response(item);
+        const body = JSON.parse(options.body);
+        writes.push({ url, method: options.method, body });
+        if (writes.length === 1) {
+          await delayed.promise;
+          if (outcome !== 'success') return response({}, outcome === 'conflict' ? 409 : 500);
+        }
+        if (options.method === 'POST') {
+          // The real server creates a new row for every successful POST; it never upserts.
+          const item = { ...body, id: `created-${++nextId}`, status: 'active', revision: 1 };
+          memories.push(item); return response(item);
+        }
+        const item = memories.find(row => url.endsWith(`/${row.id}`));
+        assert.equal(body.revision, item.revision);
+        Object.assign(item, body, { revision: item.revision + 1 }); return response(item);
       }
-      return response({ memories: [item], proposals: [], pending_count: 0 });
+      return response({ memories, proposals: [], pending_count: 0 });
     };
     env.render(env.h(env.context.AssistantMemoryView), env.root); await flushEffects(); await flushEffects();
-    const click = async label => {
-      Array.from(env.root.querySelectorAll('button')).find(node => node.textContent.trim() === label).click();
-      await flushEffects();
-    };
-    const type = async text => {
-      const input = env.root.querySelector('textarea'); input.value = text;
-      input.dispatchEvent(new env.window.Event('input', { bubbles: true })); await flushEffects();
-    };
-    await click(operation === 'add' ? '기억 추가' : '수정'); await type('내용 A'); await click('저장');
-    if (newer === 'new-form') await click('기억 추가');
-    if (newer === 'kind') {
-      env.root.querySelector('[aria-label^="기억 종류,"]').click(); await flushEffects();
-      Array.from(env.root.querySelectorAll('[role="option"]')).find(node => node.textContent === '인물').click();
-      await flushEffects();
-    } else await type('내용 B');
+    const button = label => Array.from(env.root.querySelectorAll('button'))
+      .find(node => node.textContent.trim() === label);
+    const click = async label => { button(label).click(); await flushEffects(); };
+    await click(operation === 'add' ? '기억 추가' : '수정');
+    const input = env.root.querySelector('textarea');
+    input.value = '내용 A'; input.dispatchEvent(new env.window.Event('input', { bubbles: true })); await flushEffects();
+    env.root.querySelector('[aria-label^="기억 종류,"]').click(); await flushEffects();
+    env.root.querySelector('[role="option"][data-value="person"]').click(); await flushEffects();
+    await click('저장');
+    const form = env.root.querySelector('form'), kind = env.root.querySelector('[aria-label="기억 종류, 인물"]');
+    assert.equal(input.disabled, true, 'pending textarea must reject edits');
+    assert.equal(kind.disabled, true, 'pending kind must reject changes');
+    assert.equal(button('기억 추가').disabled, true, 'pending save must prevent a new form');
+    assert.equal(button('취소').disabled, true, 'pending form must stay bound to its request');
+    assert.equal(form.getAttribute('aria-busy'), 'true');
+    const save = form.querySelector('[type="submit"]');
+    assert.equal(save.disabled, true); assert.match(save.textContent, /저장 중/);
+    button('기억 추가').click(); button('취소').click(); kind.click(); save.click();
+    form.dispatchEvent(new env.window.Event('submit', { bubbles: true, cancelable: true }));
+    await flushEffects();
+    assert.equal(env.root.querySelector('textarea'), input);
+    assert.equal(input.value, '내용 A'); assert.equal(kind.dataset.value, 'person');
+    assert.equal(env.root.querySelector('[role="listbox"]'), null);
+    assert.equal(writes.length, 1); assert.equal(writes[0].body.content, '내용 A');
+    assert.equal(writes[0].body.kind, 'person');
     delayed.resolve(); await flushEffects(); await flushEffects();
-    const input = env.root.querySelector('textarea'); assert.ok(input, 'newer form must stay open');
-    assert.equal(input.value, newer === 'kind' ? '내용 A' : '내용 B');
-    if (newer === 'kind') assert.ok(env.root.querySelector('[aria-label="기억 종류, 인물"]'));
-    assert.equal(posts[0].body.content, '내용 A');
-    await click('저장'); assert.equal(env.root.querySelector('textarea'), null);
-    assert.equal(posts[1].body.content, newer === 'kind' ? '내용 A' : '내용 B');
-    if (operation === 'edit' && newer !== 'new-form') assert.equal(posts[1].body.revision, 3);
+    if (outcome !== 'success') {
+      assert.equal(env.root.querySelector('textarea'), input, 'failure must retain the same form');
+      assert.equal(input.value, '내용 A'); assert.equal(input.disabled, false);
+      assert.equal(kind.disabled, false); assert.equal(button('기억 추가').disabled, false);
+      assert.equal(button('취소').disabled, false); assert.equal(button('저장').disabled, false);
+      assert.equal(form.getAttribute('aria-busy'), 'false');
+      assert.ok(env.root.textContent.includes(outcome === 'conflict'
+        ? '기억이 바뀌었습니다. 다시 확인해 주세요.' : '기억을 저장하지 못했습니다.'));
+      assert.equal(memories.length, 1); assert.equal(memories[0].content, '기존 기억');
+      await click('저장'); await flushEffects();
+      assert.equal(writes.length, 2); assert.deepEqual(writes[1].body, writes[0].body);
+    }
+    assert.equal(env.root.querySelector('form'), null, 'success must close the form');
+    assert.equal(memories.length, operation === 'add' ? 2 : 1);
+    assert.equal(memories.filter(row => row.content === '내용 A').length, 1, 'exactly one successful memory');
+    await click('기억 추가');
+    assert.equal(env.root.querySelector('textarea').value, '', 'success must clear the next draft');
+    assert.ok(env.root.querySelector('[aria-label="기억 종류, 선호"]'));
+    assert.ok(writes.every(write => !/router|conversations/.test(write.url)));
   });

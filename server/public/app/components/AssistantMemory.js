@@ -1,5 +1,5 @@
 import { h } from '../../vendor/preact.module.js';
-import { useRef, useState } from '../../vendor/hooks.module.js';
+import { useState } from '../../vendor/hooks.module.js';
 import htm from '../../vendor/htm.module.js';
 import { useAssistantMemory } from '../lib/hooks/useAssistantMemory.js';
 import { Dropdown } from './Dropdown.js';
@@ -26,21 +26,12 @@ export function AssistantMemoryView() {
   const [content, setContent] = useState('');
   const [kind, setKind] = useState('preference');
   const [adding, setAdding] = useState(false);
-  const formGeneration = useRef(0);
-  const inputGeneration = useRef(0);
   const save = async event => {
     event.preventDefault();
-    const requestedForm = formGeneration.current, requestedInput = inputGeneration.current;
+    if (memory.busy) return;
     const success = await memory.mutate(editing ? `/${encodeURIComponent(editing.id)}` : '',
       editing ? 'PATCH' : 'POST', { content, kind, ...(editing ? { revision: editing.revision } : {}) }, '기억을 저장했습니다.');
-    if (!success || requestedForm !== formGeneration.current) return;
-    if (requestedInput !== inputGeneration.current) {
-      // This successful PATCH advanced our revision once; retain newer edits against that acknowledgement.
-      if (editing) setEditing(current => current?.id === editing.id && current.revision === editing.revision
-        ? { ...current, revision: editing.revision + 1 } : current);
-      return;
-    }
-    formGeneration.current++; inputGeneration.current++;
+    if (!success) return;
     setEditing(null); setAdding(false); setContent(''); setKind('preference');
   };
   return html`<section class="assistant-memory-content" aria-label="비서 기억">
@@ -50,8 +41,8 @@ export function AssistantMemoryView() {
           .map(([value, label]) => html`<button key=${value} class="ghost" type="button"
             aria-pressed=${status === value} onClick=${() => setStatus(value)}>${label}</button>`)}
       </div>
-      <button class="ghost" type="button" onClick=${() => {
-        formGeneration.current++;
+      <button class="ghost" type="button" disabled=${memory.busy} onClick=${() => {
+        if (memory.busy) return;
         setEditing(null); setAdding(true); setContent(''); setKind('preference');
       }}>기억 추가</button>
       <button class="ghost" type="button" onClick=${memory.reload}>새로고침</button>
@@ -59,17 +50,17 @@ export function AssistantMemoryView() {
     ${memory.notice && html`<p role="status">${memory.notice}</p>`}
     ${memory.error && html`<p role="alert">${memory.error}</p>`}
     ${memory.loading && html`<p role="status">기억 읽는 중</p>`}
-    ${(editing || adding) && html`<form onSubmit=${save}>
-      <label>기억 내용<textarea aria-label="비서 기억 내용" value=${content}
-        onInput=${event => { inputGeneration.current++; setContent(event.target.value); }} /></label>
-      <${Dropdown} ariaLabel="기억 종류" value=${kind} onChange=${value => {
-        inputGeneration.current++; setKind(value);
-      }}
-        options=${Object.entries(ASSISTANT_KINDS).map(([value, label]) => ({ value, label }))} />
+    ${(editing || adding) && html`<form onSubmit=${save} aria-busy=${memory.busy}>
+      <label>기억 내용<textarea aria-label="비서 기억 내용" value=${content} disabled=${memory.busy}
+        onInput=${event => { if (!memory.busy) setContent(event.target.value); }} /></label>
+      <${Dropdown} ariaLabel="기억 종류" value=${kind} disabled=${memory.busy}
+        onChange=${value => { if (!memory.busy) setKind(value); }}
+        options=${Object.entries(ASSISTANT_KINDS).map(([value, label]) => ({ value, label, disabled: memory.busy }))} />
       <button class="primary" type="submit" disabled=${memory.busy || !content.trim() || [...content].length > 500}>
-        저장</button>
-      <button class="ghost" type="button" onClick=${() => {
-        formGeneration.current++; setEditing(null); setAdding(false);
+        ${memory.busy ? '저장 중…' : '저장'}</button>
+      <button class="ghost" type="button" disabled=${memory.busy} onClick=${() => {
+        if (memory.busy) return;
+        setEditing(null); setAdding(false);
       }}>취소</button>
     </form>`}
     ${status === 'pending' ? memory.data.proposals.map(proposal => html`<${AssistantMemoryProposal}
@@ -79,7 +70,7 @@ export function AssistantMemoryView() {
           <span class="work-label">${ASSISTANT_KINDS[item.kind]}</span><p>${item.content}</p>
           ${status === 'active' && html`<footer>
             <button class="ghost" type="button" disabled=${memory.busy} onClick=${() => {
-              formGeneration.current++;
+              if (memory.busy) return;
               setAdding(false); setEditing(item); setContent(item.content); setKind(item.kind);
             }}>수정</button>
             <button class="ghost" type="button" disabled=${memory.busy} onClick=${() =>
