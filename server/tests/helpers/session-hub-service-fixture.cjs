@@ -7,6 +7,8 @@ const path = require('node:path');
 const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
 const { createSessionHubService } = require('../../services/sessionHubService');
+const Database = require('better-sqlite3');
+const { createAssistantStore } = require('../../services/assistantStore');
 const binary = path.resolve(__dirname, '../fixtures/bin/fake-claude-session-hub.js');
 
 function fakeNet() {
@@ -23,10 +25,13 @@ function serviceFixture(t, overrides = {}) {
   const home = path.join(temp, 'home');
   const root = path.join(home, '.palantir/session-hub');
   fs.mkdirSync(home, { mode: 0o700 });
+  const db = new Database(':memory:');
+  db.exec(fs.readFileSync(path.resolve(__dirname, '../../db/migrations/096_assistant_threads.sql'), 'utf8'));
+  const store = createAssistantStore(db);
   const calls = [];
   const signals = [];
   const children = [];
-  const options = { root, home, tmpDir: temp, managedPaths: [], net: fakeNet(), baseUrl: 'http://127.0.0.1:3000',
+  const options = { store, root, home, tmpDir: temp, managedPaths: [], net: fakeNet(), baseUrl: 'http://127.0.0.1:3000',
     env: { PATH: process.env.PATH, HOME: home, USER: 'fixture', LANG: 'en_US.UTF-8', TMPDIR: temp,
       PALANTIR_TOKEN: 'human', PALANTIR_PM_TOKEN: 'pm', PALANTIR_MANAGER_TOKEN: 'manager', SERVER_SECRET: 'secret' },
     resolveAuth: () => ({ env: { ANTHROPIC_API_KEY: 'auth', PALANTIR_TOKEN: 'smuggled' } }),
@@ -53,7 +58,7 @@ function serviceFixture(t, overrides = {}) {
     event({ type: 'system', subtype: 'init', session_id,
       memory_paths: { auto: `${service.diagnostics().transcriptDir}/memory/` } });
   }
-  return { service, temp, home, root, options, calls, signals, children, event, init };
+  return { service, db, store, temp, home, root, options, calls, signals, children, event, init };
 }
 const tick = () => new Promise(resolve => setImmediate(resolve));
 async function until(check, timeout = 1000) {
