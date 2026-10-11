@@ -29,6 +29,103 @@ const drain = async () => { await Promise.resolve(); await Promise.resolve(); };
 const commandText = (name, args = '') =>
   `<command-name>${name}</command-name><command-args>${args}</command-args>`;
 
+test('pasted display keeps distinct instruction content in title, first and recent lines', async t => {
+  const { displayInstructionText, snapshotCards, cardLineVisibility } = await logic;
+  const { alpha } = fixtures(t);
+  const session = alpha.sessions[0];
+  session.ai_title = null;
+  const rows = alpha.instructions.filter(row => row.session_key === session.key);
+  assert.equal(rows.length, 2);
+  rows[0].text = '<pasted_content id="first">인증 구현</pasted_content>';
+  rows[1].text = '<pasted_content id="recent">검색 구현</pasted_content>';
+  const card = snapshotCards(alpha).find(item => item.key === session.key);
+  assert.equal(card.title, '[붙여넣은 내용] 인증 구현');
+  assert.equal(card.first, '[붙여넣은 내용] 인증 구현');
+  assert.equal(card.recent, '[붙여넣은 내용] 검색 구현');
+  assert.equal(card.omitRecent, false);
+  assert.deepEqual(cardLineVisibility('별도 제목', card.recent, card.first),
+    { omitRecent: false, showFirst: true });
+  assert.notEqual(displayInstructionText(rows[0].text), displayInstructionText(rows[1].text));
+});
+
+test('pasted display uses a short inline marker for tags without content', async () => {
+  const { displayInstructionText } = await logic;
+  for (const text of ['<pasted_content id="empty">', '<pasted_content id="empty"></pasted_content>']) {
+    assert.equal(displayInstructionText(text), '[붙여넣은 내용]');
+  }
+});
+
+test('inline pasted display keeps trailing instructions in first and recent card lines', async t => {
+  const { snapshotCards } = await logic;
+  const { alpha } = fixtures(t);
+  const session = alpha.sessions[0];
+  session.ai_title = null;
+  const rows = alpha.instructions.filter(row => row.session_key === session.key);
+  rows[0].text = '참고 <pasted_content id="x">예제</pasted_content> 인증 구현';
+  rows[1].text = '참고 <pasted_content id="y">예제</pasted_content> 검색 구현';
+  const card = snapshotCards(alpha).find(item => item.key === session.key);
+  assert.equal(card.first, '참고 [붙여넣은 내용] 예제 인증 구현');
+  assert.equal(card.title, card.first);
+  assert.equal(card.recent, '참고 [붙여넣은 내용] 예제 검색 구현');
+  assert.equal(card.omitRecent, false);
+});
+
+test('inline pasted display separates same-line text by one space and keeps newline boundaries', async () => {
+  const { displayInstructionText } = await logic;
+  const block = '<pasted_content id="x">예제</pasted_content>';
+  assert.equal(displayInstructionText(block + '   인증 구현'), '[붙여넣은 내용] 예제 인증 구현');
+  assert.equal(displayInstructionText(block + '인증 구현'), '[붙여넣은 내용] 예제 인증 구현');
+  assert.equal(displayInstructionText(block + '\n인증 구현'), '[붙여넣은 내용] 예제\n인증 구현');
+});
+
+test('pasted display preserves Unicode line boundaries after closing tags', async () => {
+  const { displayInstructionText } = await logic;
+  const block = '<pasted_content id="x">예제</pasted_content>';
+  for (const separator of ['\u2028', '\u2029']) {
+    assert.equal(displayInstructionText(block + separator + '인증 구현'),
+      '[붙여넣은 내용] 예제\n인증 구현');
+    assert.equal(displayInstructionText(block + ' ' + separator + '\t검색 구현'),
+      '[붙여넣은 내용] 예제\n검색 구현');
+  }
+});
+
+test('multiline pasted display keeps both instructions visible in title, first and recent', async t => {
+  const { snapshotCards } = await logic;
+  const { alpha } = fixtures(t);
+  const session = alpha.sessions[0];
+  session.ai_title = null;
+  const rows = alpha.instructions.filter(row => row.session_key === session.key);
+  rows[0].text = '<pasted_content id="first">\n인증 구현\n</pasted_content>';
+  rows[1].text = '<pasted_content id="recent">\n검색 구현\n</pasted_content>';
+  const card = snapshotCards(alpha).find(item => item.key === session.key);
+  assert.equal(card.title, '[붙여넣은 내용] 인증 구현');
+  assert.equal(card.first, '[붙여넣은 내용] 인증 구현');
+  assert.equal(card.recent, '[붙여넣은 내용] 검색 구현');
+  assert.equal(card.omitRecent, false);
+});
+
+test('multiline pasted display separates consecutive blocks and surrounding ordinary text', async () => {
+  const { displayInstructionText } = await logic;
+  const first = '<pasted_content id="a">\n인증 구현\n</pasted_content>';
+  const recent = '<pasted_content id="b">\r\n검색 구현\r\n</pasted_content>';
+  assert.equal(displayInstructionText(first + '\n\n' + recent),
+    '[붙여넣은 내용] 인증 구현\n[붙여넣은 내용] 검색 구현');
+  assert.equal(displayInstructionText('앞 설명\n' + first + '\n뒤 설명'),
+    '앞 설명\n[붙여넣은 내용] 인증 구현\n뒤 설명');
+  assert.equal(displayInstructionText('앞 설명 ' + first + ' 뒤 설명'),
+    '앞 설명 [붙여넣은 내용] 인증 구현 뒤 설명');
+  assert.equal(displayInstructionText('<pasted_content id="x">\n첫 줄\n둘째 줄\n</pasted_content>\n끝'),
+    '[붙여넣은 내용] 첫 줄\n둘째 줄\n끝');
+});
+
+test('multiline pasted display collapses empty blocks to the marker alone', async () => {
+  const { displayInstructionText } = await logic;
+  for (const text of ['<pasted_content id="empty">\n \t\n</pasted_content>',
+    '<pasted_content id="empty">\n \t']) {
+    assert.equal(displayInstructionText(text), '[붙여넣은 내용]');
+  }
+});
+
 test('command display accepts one name and matching optional message in every order', async () => {
   const { displayInstructionText } = await logic;
   const tags = ['<command-message> \t///deep-research\n </command-message>',

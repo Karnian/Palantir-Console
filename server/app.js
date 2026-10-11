@@ -71,6 +71,9 @@ const { createRouterService } = require('./services/routerService');
 const { createRouterRouter } = require('./routes/router');
 const { createAuthRouter } = require('./routes/auth');
 const { sealObserveState } = require('./services/observeSnapshotStore');
+const { sessionHubActive: computeSessionHubActive } = require('./services/sessionHubActivation');
+const { createSessionHubOffGate, createSessionHubTokenGate, createSessionHubRouter,
+  sessionHubErrorHandler } = require('./routes/sessionHub');
 const { createObserveOffGate, createObserveRouter, observeErrorHandler } = require('./routes/observe');
 const { createSkillPackService } = require('./services/skillPackService');
 const { createRegistryService } = require('./services/registryService');
@@ -1114,6 +1117,12 @@ function createApp(options = {}) {
   const publicDir = path.join(__dirname, 'public');
   const observeState = sealObserveState({ dir: observeDir, authToken, publicDir });
   if (observeDir && !observeState.on) console.warn(observeState.code);
+  const sessionHubActive = options.sessionHubActive === undefined ? computeSessionHubActive({
+    observeState, authToken, managedPaths: options.sessionHubManagedPaths,
+    resolveBinary: options.sessionHubResolveClaudeBinary,
+  }) : options.sessionHubActive === true;
+  const sessionHubTokenProvider = options.sessionHubTokenProvider || { current: () => null };
+  app.sessionHubActive = sessionHubActive;
   const actorTokenOptions = {
     actorTokenSource: options.actorTokenSource,
     agentProcessIsolation: options.agentProcessIsolation,
@@ -1789,11 +1798,13 @@ function createApp(options = {}) {
 
   // Middleware
   // Spec §5.2: gate before auth and body parsing, even for malformed POST bodies.
+  app.use('/api/session-hub', createSessionHubOffGate(sessionHubActive));
+  app.use(createSessionHubTokenGate(sessionHubTokenProvider));
   app.use('/api/observe', createObserveOffGate(observeState));
   const parseJson = express.json({ limit: '2mb' });
   app.use(function parseNonObserveJson(req, res, next) {
     // Spec §5.3: observe authenticates before parsing bodies.
-    if (/^\/api\/observe(?:\/|$)/i.test(req.path)) return next();
+    if (/^\/api\/(?:observe|session-hub)(?:\/|$)/i.test(req.path)) return next();
     return parseJson(req, res, next);
   });
   app.use((req, res, next) => {
@@ -1833,6 +1844,7 @@ function createApp(options = {}) {
       gitSha: BOOT_INFO.gitSha,
       startedAt: BOOT_INFO.startedAt,
       bootId: BOOT_INFO.bootId,
+      sessionHubActive,
     });
   });
 
@@ -1883,6 +1895,11 @@ function createApp(options = {}) {
     },
   });
   app.use('/api', auth);
+  app.use('/api/session-hub', createSessionHubRouter({
+    state: observeState, store: options.observeSnapshotStore, provider: sessionHubTokenProvider,
+    clock: options.sessionHubClock,
+  }));
+  app.use('/api/session-hub', sessionHubErrorHandler);
   app.use('/api/observe', parseJson);
   app.use('/api/observe', createObserveRouter({ state: observeState, store: options.observeSnapshotStore }));
   app.use('/api/observe', observeErrorHandler);

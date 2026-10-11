@@ -8,6 +8,7 @@ const snapshotStore = require('../services/observeSnapshotStore');
 
 const ERROR_STATUS = Object.freeze({
   observe_off: 404,
+  snapshot_changed: 409,
   invalid_machine_id: 400,
   not_found: 404,
   not_regular: 422,
@@ -40,13 +41,19 @@ function createObserveRouter({ state, store = snapshotStore }) {
   router.get('/snapshots', asyncHandler(function snapshotList(req, res) {
     if (req.auth?.method !== 'cookie') throw new ForbiddenError('cookie auth required');
     if (req.method !== 'GET') throw new AppError('route_not_found', 404);
-    return res.json({ snapshots: requireResult(store.listSnapshots(state)).snapshots });
+    const entries = requireResult(store.readAllSnapshots(state)).snapshots;
+    return res.json({ snapshots: entries.map(entry => snapshotStore.snapshotMetadata(entry, true)),
+      rev: snapshotStore.snapshotRevision(entries) });
   }));
   router.get('/snapshots/:machineId', asyncHandler(function snapshotDetail(req, res) {
     if (req.auth?.method !== 'cookie') throw new ForbiddenError('cookie auth required');
     if (req.method !== 'GET') throw new AppError('route_not_found', 404);
     if (!isSafeId(req.params.machineId)) throw new AppError('invalid_machine_id', 400);
-    return res.json(requireResult(store.readSnapshot(state, req.params.machineId)).snapshot);
+    const result = requireResult(store.readSnapshotHashed(state, req.params.machineId));
+    if (req.query.sha256 !== undefined && req.query.sha256 !== result.sha256) {
+      throw new AppError('snapshot_changed', 409);
+    }
+    return res.json(result.snapshot);
   }));
   router.use(function observeFallback(req, res, next) {
     if (req.auth?.method !== 'cookie') return next(new ForbiddenError('cookie auth required'));

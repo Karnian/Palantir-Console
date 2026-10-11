@@ -74,7 +74,16 @@ function managerCapabilityRequestAllowed(req, grant = null) {
   const rawPath = String(req.originalUrl || req.url || '').split('?')[0];
   const method = String(req.method || 'GET').toUpperCase();
   if (method === 'GET') {
-    return /^\/api\/(?:runs(?:\/[^/]+(?:\/(?:events|output))?)?|tasks(?:\/[^/]+)?|projects(?:\/[^/]+\/(?:tasks|memory|skill-packs))?|agents|skill-packs|operator\/profiles|conversations\/[^/]+\/events)\/?$/.test(rawPath)
+    const events = /^\/api\/conversations\/([^/]+)\/events\/?$/.exec(rawPath);
+    if (events) {
+      let id;
+      try { id = decodeURIComponent(events[1]); } catch { return false; }
+      if (id === 'top' && grant?.layer !== 'top') return false;
+    }
+    const readPattern = new RegExp('^/api/(?:runs(?:/[^/]+(?:/(?:events|output))?)?'
+      + '|tasks(?:/[^/]+)?|projects(?:/[^/]+/(?:tasks|memory|skill-packs))?'
+      + '|agents|skill-packs|operator/profiles|conversations/[^/]+/events)/?$');
+    return readPattern.test(rawPath)
       || /^\/api\/agent-context\/?$/.test(rawPath)
       || (
         grant?.layer !== 'top'
@@ -158,6 +167,7 @@ function createAuthMiddleware({
     // is retained only for trusted external bearer automation. A human holding
     // PALANTIR_TOKEN can still present it as bearer intentionally; cookie auth
     // is the sole human-review authority. See routes/memory.js R4 + docs.
+    if (req.auth?.actor === 'session_hub') return next();
     if (!token) { req.auth = { method: 'none' }; return next(); } // auth disabled
 
     // Precedence: Bearer header is evaluated FIRST, and a present-but-

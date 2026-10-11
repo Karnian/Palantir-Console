@@ -130,6 +130,12 @@ function createConversationsRouter({ conversationService, runService }) {
     if (!parsed) {
       return res.status(400).json({ error: `invalid conversation id: ${id}` });
     }
+    const resolved = req.auth?.actor === 'manager' && req.auth.layer !== 'top'
+      ? conversationService.resolveConversation(id) : null;
+    if (req.auth?.actor === 'manager' && req.auth.layer !== 'top'
+      && (parsed.kind === 'top' || resolved?.kind === 'top' || resolved?.conversationId === 'top')) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
     const rawAfter = req.query.after ? Number(req.query.after) : undefined;
     const afterId = (rawAfter != null && !Number.isNaN(rawAfter)) ? rawAfter : undefined;
     const events = conversationService.getEvents(id, afterId);

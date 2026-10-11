@@ -12,7 +12,7 @@
 //   - injection-> REJECTED (content dropped; never promoted)
 // Plus length floor/ceiling. Deterministic, no external deps.
 
-const REDACTION_VERSION = 2;
+const REDACTION_VERSION = 3;
 const DEFAULT_MAX_LEN = 500;
 const HARD_MAX_LEN = 2000;   // absolute ceiling — caller maxLen is clamped to this
 const MIN_LEN = 8;
@@ -42,6 +42,7 @@ const SECRET_PATTERNS = [
   /\bBearer\s+[A-Za-z0-9\-._~+/]+=*/gi,                     // Bearer header
   // lowercase keyword assignment (api_key: v / token = v / password=v)
   new RegExp(`\\b(?:api[_-]?key|secret(?:[_-]?key)?|access[_-]?token|auth[_-]?token|token|password|passwd|pwd)\\b\\s*[:=]\\s*${VALUE}`, 'gi'),
+  new RegExp(`--(?:password|passwd|pwd)\\b\\s+(?!-)${VALUE}`, 'gi'), // Version 3 CLI password arguments
   // UPPER_SNAKE env-var names ending in a secret-ish word (AWS_SECRET_ACCESS_KEY=,
   // MY_SERVICE_TOKEN=, DB_PASSWORD=). Case-sensitive on purpose; lowercase is
   // covered above. API excluded (too many false-positive var names).
