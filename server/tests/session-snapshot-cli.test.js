@@ -33,7 +33,7 @@ async function initialize(f) {
   const result = await invoke(f, args(f));
   assert.equal(result.code, 0, result.errors());
   assert.equal(result.spawns(), 1);
-  const file = path.join(f.out, fs.readdirSync(f.out)[0]);
+  const file = path.join(f.out, fs.readdirSync(f.out).find(name => name.endsWith('.json')));
   const bytes = fs.readFileSync(file);
   const snapshot = JSON.parse(bytes);
   assert.equal(snapshot.sessions.length, 1);
@@ -86,7 +86,7 @@ test('CLI writes a snapshot and preserves exact existing bytes on every rejected
     assert.equal(result.code, 1, mode);
     assert.equal((result.output() + result.errors()).includes('UNTRUSTED_SENTINEL'), false);
     assert.deepEqual(fs.readFileSync(initial.file), initial.bytes);
-    assert.deepEqual(fs.readdirSync(f.out), [path.basename(initial.file)]);
+    assert.deepEqual(fs.readdirSync(f.out).filter(name => name.endsWith('.json')), [path.basename(initial.file)]);
     if (mode === 'hang') assert.equal(result.timeoutKills, 1);
   }
   const noisy = await invoke(f, args(f), '', { ...f.env, FAKE_ORCA_STDERR: 'ORCA_SENTINEL' });
@@ -164,7 +164,7 @@ test('CLI entrypoint propagates invalid input exit status and writes a real fixt
   const valid = spawnSync(process.execPath, [entrypoint, ...args(f)], { env: f.env, encoding: 'utf8' });
   assert.equal(valid.error, undefined);
   assert.equal(valid.status, 0, valid.stderr);
-  const files = fs.readdirSync(f.out);
+  const files = fs.readdirSync(f.out).filter(name => name.endsWith('.json'));
   assert.equal(files.length, 1);
   const snapshot = JSON.parse(fs.readFileSync(path.join(f.out, files[0])));
   assert.equal(snapshot.sessions.length, 1);
@@ -246,7 +246,8 @@ test('ordinal rewrite before query produces target_changed', async t => {
   write(['A', 'B', 'C']);
   const result = await invoke(f, args(f));
   assert.equal(result.code, 0);
-  const snapshot = JSON.parse(fs.readFileSync(path.join(f.out, fs.readdirSync(f.out)[0])));
+  const snapshotFile = fs.readdirSync(f.out).find(name => name.endsWith('.json'));
+  const snapshot = JSON.parse(fs.readFileSync(path.join(f.out, snapshotFile)));
   assert.deepEqual(snapshot.instructions.filter(item => item.id.startsWith('codex:')).map(item => item.text),
     ['A', 'B', 'C']);
   const instruction = snapshot.instructions.find(item => item.text === 'B');
@@ -294,7 +295,8 @@ test('terminal confirmation displays escaped preview and never displays ssh stde
   f.write('Synthetic \u001b[31m\u0001 instruction');
   const snapshotResult = await invoke(f, args(f));
   assert.equal(snapshotResult.code, 0);
-  const snapshot = JSON.parse(fs.readFileSync(path.join(f.out, fs.readdirSync(f.out)[0])));
+  const snapshotFile = fs.readdirSync(f.out).find(name => name.endsWith('.json'));
+  const snapshot = JSON.parse(fs.readFileSync(path.join(f.out, snapshotFile)));
   assert.equal(snapshot.instructions.length, 1);
   const item = snapshot.instructions[0];
   assert.equal(item.text, 'Synthetic \u001b[31m\u0001 instruction');
@@ -320,7 +322,8 @@ test('PR1c B CLI snapshot label persists locally and remotely and preserves othe
     assert.equal(result.code, 0, result.errors());
     assert.equal(result.spawns(), 1);
     const config = JSON.parse(fs.readFileSync(f.config, 'utf8'));
-    const snapshot = JSON.parse(fs.readFileSync(path.join(f.out, fs.readdirSync(f.out)[0]), 'utf8'));
+    const snapshotFile = fs.readdirSync(f.out).find(name => name.endsWith('.json'));
+    const snapshot = JSON.parse(fs.readFileSync(path.join(f.out, snapshotFile), 'utf8'));
     assert.equal(snapshot.machine.label, remote ? 'codev2' : 'Mac');
     assert.equal(config.machine_label, snapshot.machine.label);
     config.machine_label = before.machine_label;
@@ -349,3 +352,21 @@ test('PR1c B invalid labels and labels on exclude are rejected by Mac with zero 
   assert.equal(denied.calls.length, 0);
   assert.equal(fs.existsSync(good.file), true);
 });
+
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  test(`CLI ${signal} reaps its detached executor and descendant before returning`, async t => {
+    const f = fixture(t);
+    const good = await initialize(f);
+    const before = fs.readFileSync(good.file);
+    const probe = descendantProbe(t, f.root);
+    const env = { ...f.env, FAKE_SSH_MODE: 'hang_descendant', FAKE_SSH_DESCENDANT_PID: probe.pidFile };
+    const running = invoke(f, args(f), '', env);
+    await probe.readPid();
+    process.emit(signal);
+    const result = await running;
+    assert.equal(result.code, 1);
+    await probe.waitForExit();
+    assert.deepEqual(fs.readFileSync(good.file), before);
+    assert.equal(process.listenerCount(signal), 0);
+  });
+}

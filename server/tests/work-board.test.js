@@ -698,6 +698,12 @@ async function backToList(root) {
 
 function boardEnv(t) {
   const env = createPreactEnv();
+  let requestApi;
+  Object.defineProperty(env.context, 'apiFetch', { configurable: true,
+    get: () => (url, options) => url.startsWith('/api/session-hub/snapshots')
+      ? snapshotRequest(url, options) : requestApi(url, options),
+    set: value => { requestApi = value; },
+  });
   vm.runInContext(source.replace(/\bexport /g, ''), env.context);
   vm.runInContext('this.W = WORK_BOARD_LABELS;', env.context);
   env.loadComponent('Dropdown');
@@ -1077,7 +1083,8 @@ test('normal and search cards share title rules, omit duplicate rows and limit w
     assert.deepEqual(Array.from(card.querySelectorAll('.work-warning'), node => node.textContent.trim()),
       ['compact 이력', '판별 불명 1/3']);
     assert.equal(card.textContent.includes('형식 미검증'), false);
-    assert.equal(card.querySelectorAll('.work-orca').length, 0);
+    assert.equal(card.querySelectorAll('.work-orca').length, 1);
+    assert.ok(card.querySelector('.work-orca').textContent.includes('작업 중'));
     assert.equal(card.textContent.includes('스냅샷 시점 관측'), false);
     assert.equal(card.textContent.includes('Orca 연결 불명'), false);
     assert.equal(root.querySelectorAll('.work-observation-note').length, 1);
@@ -1193,7 +1200,8 @@ test('all composed separators have one space on each side; machine pill uses one
   assert.equal(pill.firstChild.childNodes.length, 1);
   assert.equal(pill.firstChild.firstChild.nodeType, env.window.Node.TEXT_NODE);
   assert.equal(root.querySelector('.work-recent-block .work-label').textContent, '최근 지시 · 1시간 전');
-  assert.equal(root.querySelector('.work-orca').textContent.trim(), 'Orca · 응답 대기');
+  assert.equal(root.querySelector('.work-orca span').textContent, '작업 중');
+  assert.ok(root.querySelector('.work-orca time').textContent.startsWith('근거 · '));
   root.querySelector('.work-card button').click(); await flushEffects();
   assert.equal(root.querySelectorAll('.work-event').length, 2);
   const walker = env.document.createTreeWalker(root, env.window.NodeFilter.SHOW_TEXT);
@@ -1213,4 +1221,139 @@ test('PR1d footer shows total before retention while unknown ratio keeps the exp
   env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
   assert.equal(root.querySelector('.work-card-footer span').textContent, env.context.W.instructions(401));
   assert.ok(root.textContent.includes(env.context.W.unknownRatio(1, 3)));
+});
+
+test('snapshot refresh button uses its cookie endpoint and reloads board data after completion', async t => {
+  const { alpha } = fixtures(t);
+  let status = { enabled: true, auto_interval_ms: 300000, targets: [{ name: 'mac', machine_id: 'alpha',
+    running: false, last_success_at: null, last_attempt_at: null, last_result: null, locked: false }] };
+  const posts = [];
+  const env = boardEnv(t, async (url, options) => {
+    if (url.endsWith('/refresh')) {
+      posts.push({ url, options });
+      status = { ...status, targets: [{ ...status.targets[0], running: true }] };
+    }
+    return status;
+  });
+  const polls = [];
+  const schedule = env.window.setTimeout.bind(env.window);
+  env.window.setTimeout = (fn, delay, ...args) => {
+    if (delay === 10000 || delay === 1000) { polls.push(fn); return schedule(() => {}, 60000); }
+    return schedule(fn, delay, ...args);
+  };
+  let loads = 0;
+  env.context.apiFetch = async url => {
+    if (url === '/api/observe/snapshots') {
+      loads++;
+      return { snapshots: [{ machine_id: 'alpha', machine_label: 'Mac' }] };
+    }
+    return alpha;
+  };
+  const root = env.document.getElementById('root');
+  env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
+  const button = [...root.querySelectorAll('button')].find(item => item.textContent === '새로 만들기');
+  assert.equal(button.disabled, false); button.click(); await flushEffects();
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].url, '/api/session-hub/snapshots/refresh');
+  assert.equal(posts[0].options.method, 'POST'); assert.equal(posts[0].options.body, '{}');
+  assert.equal(button.disabled, true); assert.match(root.textContent, /mac · 수집 중/);
+  status = { ...status, targets: [{ ...status.targets[0], running: false, last_result: { code: 'ok' },
+    last_success_at: '2026-10-11T14:00:00.000Z' }] };
+  await polls.shift()(); await flushEffects(); await flushEffects();
+  assert.match(root.textContent, /수집 완료/);
+  assert.ok(loads >= 2);
+});
+
+function snapshotHookHarness(t) {
+  const requests = [];
+  const env = boardEnv(t, (url, options) => {
+    const response = deferred(); requests.push({ url, options, ...response }); return response.promise;
+  });
+  const polls = [];
+  const schedule = env.window.setTimeout.bind(env.window);
+  env.window.setTimeout = (fn, delay, ...args) => {
+    if (delay === 10000 || delay === 1000) { polls.push(fn); return schedule(() => {}, 60000); }
+    return schedule(fn, delay, ...args);
+  };
+  let value; let completions = 0;
+  function Probe({ enabled }) {
+    value = env.context.useSnapshotRefresh({ enabled, onComplete: () => { completions++; } });
+    return env.h('span', null, value.status?.targets[0]?.running ? 'running' : 'idle');
+  }
+  const render = enabled => env.render(env.h(Probe, { enabled }), env.document.getElementById('root'));
+  const status = (running, success = null) => ({ enabled: true, targets: [{ name: 'mac', running,
+    last_success_at: success, last_result: success ? { code: 'ok' } : null }] });
+  const unmount = () => env.render(null, env.document.getElementById('root'));
+  return { requests, polls, render, unmount, status, value: () => value, completions: () => completions };
+}
+
+test('snapshot hook discards an older GET arriving after POST and an older POST arriving last', async t => {
+  const fx = snapshotHookHarness(t);
+  fx.render(true); await flushEffects();
+  const first = fx.value().refresh(); await flushEffects();
+  assert.equal(fx.requests[1].options.signal.aborted, false);
+  fx.requests[1].resolve(fx.status(true)); await first; await flushEffects();
+  fx.requests[0].resolve(fx.status(false, 'old-success')); await flushEffects();
+  assert.equal(fx.value().status.targets[0].running, true); assert.equal(fx.completions(), 0);
+  const older = fx.value().refresh();
+  const newer = fx.value().refresh(); await flushEffects();
+  fx.requests[3].resolve(fx.status(true)); await newer; await flushEffects();
+  assert.equal(fx.value().busy, true);
+  fx.requests[2].resolve(fx.status(false, 'stale-success')); await older; await flushEffects();
+  assert.equal(fx.value().status.targets[0].running, true); assert.equal(fx.completions(), 0);
+});
+
+test('snapshot hook aborts GET and POST on effect change and discards both previous-generation responses', async t => {
+  const fx = snapshotHookHarness(t);
+  fx.render(true); await flushEffects();
+  const oldPost = fx.value().refresh(); await flushEffects();
+  fx.render(false); await flushEffects();
+  assert.equal(fx.requests[0].options.signal.aborted, true);
+  assert.equal(fx.requests[1].options.signal.aborted, true);
+  fx.render(true); await flushEffects();
+  fx.requests[2].resolve(fx.status(true)); await flushEffects();
+  const newPost = fx.value().refresh(); await flushEffects();
+  fx.requests[1].resolve(fx.status(false, 'old-post')); await oldPost; await flushEffects();
+  fx.requests[0].resolve(fx.status(false, 'old-get')); await flushEffects();
+  assert.equal(fx.value().status.targets[0].running, true); assert.equal(fx.value().busy, true);
+  assert.equal(fx.value().error, false); assert.equal(fx.completions(), 0);
+  fx.requests[3].resolve(fx.status(false, 'new-success')); await newPost; await flushEffects();
+  assert.equal(fx.value().busy, false); assert.equal(fx.completions(), 1);
+});
+
+test('snapshot hook ignores stale errors and aborts POST when disabled', async t => {
+  const fx = snapshotHookHarness(t);
+  fx.render(true); await flushEffects();
+  const post = fx.value().refresh(); await flushEffects();
+  fx.requests[1].resolve(fx.status(false)); await post; await flushEffects();
+  fx.requests[0].reject(new Error('late-get')); await flushEffects();
+  assert.equal(fx.value().error, false);
+  const pending = fx.value().refresh(); await flushEffects();
+  fx.render(false); await flushEffects();
+  assert.equal(fx.requests[2].options.signal.aborted, true);
+  fx.requests[2].reject(new Error('late-post')); await pending; await flushEffects();
+  assert.equal(fx.value().error, false); assert.equal(fx.value().busy, false);
+});
+
+test('snapshot hook unmount aborts POST and retired poll callbacks cannot fetch again', async t => {
+  const fx = snapshotHookHarness(t);
+  fx.render(true); await flushEffects();
+  fx.requests[0].resolve(fx.status(true)); await flushEffects();
+  const pending = fx.value().refresh(); await flushEffects();
+  fx.unmount();
+  assert.equal(fx.requests[1].options.signal.aborted, true);
+  fx.requests[1].resolve(fx.status(false, 'late-success')); await pending;
+  await fx.polls.shift()();
+  assert.equal(fx.requests.length, 2); assert.equal(fx.completions(), 0);
+});
+
+test('PR-S v1 snapshots without status have unknown cards regardless of legacy Orca state', async t => {
+  const { snapshotCards } = await logic;
+  const { alpha } = fixtures(t);
+  alpha.policy_version = 1;
+  for (const session of alpha.sessions) delete session.status;
+  alpha.orca.worktrees[0].agents[0].state = 'completed';
+  const cards = snapshotCards(alpha);
+  for (const card of cards) assert.deepEqual(card.status,
+    { state: 'unknown', source: 'none', evidence_at: null, reason: null });
 });

@@ -632,3 +632,75 @@ test('revision sorts filenames and uses a length-prefixed canonical vector inclu
   assert.notEqual(store.snapshotRevision(entries.map(entry => entry.ok ? entry : { ...entry, reason: 'read_error' })),
     'cd73df58035fec99');
 });
+
+test('PR-S v1 read compatibility and v2 closed status slots survive all broker endpoints', async t => {
+  const fx = fixture(t);
+  const expected = { state: 'ended', source: 'transcript', evidence_at: fx.alpha.sessions[0].last_record_at,
+    reason: null };
+  fx.alpha.sessions[0].status = expected;
+  fx.write(fx.alpha);
+  const broker = createSessionHubBroker({ state: fx.state });
+  const key = fx.alpha.sessions[0].key;
+  for (const body of [await broker.list({}), await broker.search({ q: '인증' }), await broker.detail(key, {})]) {
+    const row = body.session || body.sessions.find(session => session.key === key);
+    assert.deepEqual(row.status, expected);
+    assert.deepEqual(Object.keys(row.status).sort(), ['evidence_at', 'reason', 'source', 'state']);
+    assertAllowlist(body);
+    for (const forbidden of ['last_agent_message', 'PRIVATE_ASSISTANT_SENTINEL', 'PRIVATE_COMPLETION_SENTINEL'])
+      assert.equal(Buffer.from(JSON.stringify(body)).includes(Buffer.from(forbidden)), false);
+  }
+  fx.alpha.policy_version = 1;
+  for (const session of fx.alpha.sessions) delete session.status;
+  fx.alpha.orca.worktrees[0].agents[0].state = 'completed';
+  assert.equal(validateSnapshot(fx.alpha).ok, true);
+  fx.write(fx.alpha);
+  assert.equal(store.readAllSnapshots(fx.state).snapshots[0].ok, true);
+  const unknown = { state: 'unknown', source: 'none', evidence_at: null, reason: null };
+  assert.deepEqual((await broker.list({})).sessions.find(session => session.key === key).status, unknown);
+  const legacyDetail = (await broker.detail(key, {})).session;
+  assert.deepEqual(legacyDetail.status, unknown);
+  assert.equal(legacyDetail.orca.state, 'unknown');
+});
+
+test('PR-S reader to broker byte search excludes assistant, tool and completion text', async t => {
+  const fx = fixture(t);
+  const directory = path.join(fx.homeDir, '.codex', 'sessions');
+  fs.mkdirSync(directory, { recursive: true });
+  const timestamp = '2026-10-10T02:00:00.000Z';
+  const rows = [
+    { type: 'session_meta', timestamp,
+      payload: { id: 'status', cwd: '/synthetic', source: 'cli', thread_source: 'user' } },
+    { type: 'event_msg', timestamp, payload: { type: 'task_started', turn_id: 'turn' } },
+    { type: 'response_item', timestamp,
+      payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'status fixture' }] } },
+    { type: 'response_item', timestamp, payload: { type: 'message', role: 'assistant',
+      content: [{ type: 'output_text', text: 'PRIVATE_ASSISTANT_SENTINEL' }] } },
+    { type: 'response_item', timestamp,
+      payload: { type: 'function_call_output', output: 'PRIVATE_TOOL_SENTINEL' } },
+    { type: 'event_msg', timestamp, payload: { type: 'task_complete', turn_id: 'turn',
+      last_agent_message: 'PRIVATE_COMPLETION_SENTINEL' } },
+  ];
+  fs.writeFileSync(path.join(directory, 'status.jsonl'), rows.map(JSON.stringify).join('\n'));
+  const snapshot = require('../../scripts/lib/sessionSnapshotReader.cjs').runSnapshot({
+    homeDir: fx.homeDir, configDir: path.join(fx.root, 'status-config'),
+    now: new Date('2026-10-10T03:00:00.000Z'), readerBuild: 'a'.repeat(16), runOrca: () => null
+  });
+  fx.write(snapshot);
+  const key = snapshot.sessions.find(session => session.session_id === 'status').key;
+  const broker = createSessionHubBroker({ state: fx.state });
+  const responses = [await broker.list({}), await broker.search({ q: 'status' }), await broker.detail(key, {})];
+  for (const response of responses) {
+    const row = response.session || response.sessions.find(session => session.key === key);
+    assert.equal(row.status.state, 'ended');
+    const raw = Buffer.from(JSON.stringify(response));
+    for (const forbidden of ['last_agent_message', 'PRIVATE_ASSISTANT_SENTINEL',
+      'PRIVATE_TOOL_SENTINEL', 'PRIVATE_COMPLETION_SENTINEL']) assert.equal(raw.includes(forbidden), false);
+  }
+});
+
+test('PR-S assistant prompt distinguishes response end from completion and names both times', () => {
+  const { SESSION_HUB_PROMPT, SESSION_HUB_PROMPT_VERSION } = require('../services/sessionHubPrompt');
+  assert.equal(SESSION_HUB_PROMPT_VERSION, 'c1-pa-pr-p-3');
+  for (const phrase of ['응답 끝남을 일 완료라고 말하지 않는다', 'status.evidence_at',
+    'meta.machines[].generated_at', 'unknown=알 수 없음']) assert.ok(SESSION_HUB_PROMPT.includes(phrase));
+});

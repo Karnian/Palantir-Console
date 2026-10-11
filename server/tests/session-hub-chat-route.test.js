@@ -10,12 +10,17 @@ const Database = require('better-sqlite3');
 const { Duplex } = require('node:stream');
 const { fixture, request, COOKIE, TOKEN } = require('./helpers/session-hub-fixture.cjs');
 const { serviceFixture, tick, until } = require('./helpers/session-hub-service-fixture.cjs');
+let requestNumber = 0;
+const send = (hub, text) => hub.message({ thread_id: hub.state().thread_id,
+  request_id: `test-${++requestNumber}`, text });
+
 const BASE = '/api/session-hub/chat';
 
 function integrated(t, overrides = {}) {
   const fx = fixture(t);
   const process = serviceFixture(t, overrides);
-  const app = fx.app({ sessionHubServiceOptions: process.options, masterMemoryXprojectScanEnabled: false });
+  const app = fx.app({ sessionHubServiceOptions: { ...process.options, store: undefined },
+    masterMemoryXprojectScanEnabled: false });
   return { ...fx, createApp: fx.app, process, app, hub: app.sessionHubService };
 }
 function stream(app, url, headers = {}) {
@@ -33,7 +38,7 @@ function stream(app, url, headers = {}) {
 
 test('POST origin matrix requires exact scheme/host/port and rejects Referer-only or bearer', async t => {
   const { app, process } = integrated(t);
-  for (const action of ['start', 'message', 'stop', 'clear']) {
+  for (const action of ['start', 'message', 'stop', 'threads']) {
     for (const headers of [{}, { Referer: 'http://localhost/' }, { Origin: 'null' },
       { Origin: 'https://localhost' }, { Origin: 'http://other' }, { Origin: 'http://localhost:80' },
       { Origin: 'http://localhost:3000' }, { Origin: 'http://localhost/' }]) {
@@ -50,10 +55,12 @@ test('POST origin matrix requires exact scheme/host/port and rejects Referer-onl
     .set('Origin', 'http://localhost')).status, 200);
   assert.equal(process.calls.length, 1);
   assert.equal((await request(app).post(`${BASE}/message`).set('Cookie', COOKIE)
-    .set('Origin', 'http://localhost').send({ text: 'hello' })).status, 200);
+    .set('Origin', 'http://localhost').send({ thread_id: app.sessionHubService.state().thread_id,
+      request_id: 'hello', text: 'hello' })).status, 200);
   assert.equal((await request(app).post(`${BASE}/message`).set('Cookie', COOKIE)
-    .set('Origin', 'http://localhost').send({ text: 'busy' })).status, 409);
-  for (const action of ['stop', 'clear']) {
+    .set('Origin', 'http://localhost').send({ thread_id: app.sessionHubService.state().thread_id,
+      request_id: 'busy', text: 'busy' })).status, 409);
+  for (const action of ['stop', 'threads']) {
     assert.equal((await request(app).post(`${BASE}/${action}`).set('Cookie', COOKIE)
       .set('Origin', 'http://localhost')).status, 200);
   }
@@ -81,7 +88,7 @@ test('private SSE snapshots current messages once and subsequent changes, discon
   const { app, hub, process } = integrated(t);
   const epoch = hub.state().epoch;
   await hub.start();
-  hub.message('private');
+  await send(hub, 'private');
   const sse = stream(app, `${BASE}/stream`);
   assert.equal(sse.frames.length, 1);
   assert.ok(sse.frames[0].includes('private'));
@@ -89,7 +96,7 @@ test('private SSE snapshots current messages once and subsequent changes, discon
   const fetched = await request(app).get(`${BASE}/state`).set('Cookie', COOKIE);
   assert.equal(fetched.body.epoch, epoch);
   process.children[0].stdout.write(`${JSON.stringify({ type: 'assistant', message: {
-    content: [{ type: 'text', text: 'answer' }],
+    content: [{ type: 'text', text: 'answer\n' }],
   } })}\n`);
   assert.equal(sse.frames.length, 2);
   assert.ok(sse.frames[1].includes('answer'));
@@ -119,7 +126,7 @@ test('off constructs no service, every chat endpoint fails before auth/body and 
   assert.equal(calls, 0);
 });
 
-test('one hub turn is absent from DB, all public bus channels/replay, conversations and router; restart is empty',
+test('hub history persists after restart while public runs, events, conversations and router stay isolated',
   async t => {
     const { app, hub, process, ...fx } = integrated(t);
     const folder = fs.readdirSync(fx.root).find(name => name.startsWith('app-'));
@@ -134,7 +141,7 @@ test('one hub turn is absent from DB, all public bus channels/replay, conversati
     process.children[0].stdout.write(`${JSON.stringify({ type: 'system', subtype: 'init',
       session_id: 'integration-owned', memory_paths: { auto: `${hub.diagnostics().transcriptDir}/memory/` },
     })}\n`);
-    hub.message('isolation-marker');
+    await send(hub, 'isolation-marker');
     process.children[0].stdout.write('{"type":"assistant","message":{"content":'
       + '[{"type":"text","text":"private answer"}]}}\n{"type":"result"}\n');
     assert.equal(count('runs'), runs); assert.equal(count('run_events'), events); assert.equal(emitted, 0);
@@ -148,9 +155,9 @@ test('one hub turn is absent from DB, all public bus channels/replay, conversati
       .send({ text: '@hub isolation-marker', currentConversationId: 'hub' });
     assert.equal(routed.status, 200); assert.notEqual(routed.body.target, 'hub');
     await app.shutdown();
-    const restarted = fx.createApp({ sessionHubServiceOptions: process.options,
+    const restarted = fx.createApp({ sessionHubServiceOptions: { ...process.options, store: undefined },
       dbPath: path.join(fx.root, folder, 'db'), masterMemoryXprojectScanEnabled: false });
-    assert.deepEqual(restarted.sessionHubService.state().messages, []);
+    assert.ok(restarted.sessionHubService.state().messages.some(row => row.content === 'isolation-marker'));
     assert.notEqual(restarted.sessionHubService.state().epoch, hub.state().epoch);
     assert.equal(restarted.sessionHubService.state().version, 0);
   });
@@ -342,7 +349,7 @@ test('MCP EOF revokes broker access immediately while final stdout remains accep
   const token = hub.current();
   const broker = () => request(app).get('/api/session-hub/sessions').set('Authorization', `Bearer ${token}`);
   assert.equal((await broker()).status, 200);
-  hub.message('final');
+  await send(hub, 'final');
   socket.emit('end');
   assert.equal(hub.current(), null);
   assert.equal(hub.state().state, 'running');
@@ -352,7 +359,7 @@ test('MCP EOF revokes broker access immediately while final stdout remains accep
   process.children[0].emit('exit', 0);
   await hub.close();
   assert.equal(hub.state().error, null);
-  assert.equal(hub.state().messages.some(row => row.text === 'preserved final answer'), true);
+  assert.equal(hub.state().messages.some(row => row.content === 'preserved final answer'), true);
 });
 
 test('SSE without a cookie is refused and malformed POST cannot bypass the Origin check', async t => {
@@ -364,4 +371,42 @@ test('SSE without a cookie is refused and malformed POST cannot bypass the Origi
   const authorized = await request(app).post(`${BASE}/start`).set('Cookie', COOKIE)
     .set('Origin', 'http://localhost').send('{bad');
   assert.equal(authorized.status, 400); assert.equal(process.calls.length, 0);
+});
+
+test('thread APIs are cookie-only, paginate full rows, require DELETE Origin and remove clear', async t => {
+  const { app, hub, process } = integrated(t);
+  const headers = call => call.set('Cookie', COOKIE).set('Origin', 'http://localhost');
+  await hub.start();
+  const old = hub.state().thread_id;
+  await send(hub, 'old-thread message');
+  process.children[0].stdout.write('{"type":"result"}\n');
+  assert.equal((await headers(request(app).post(`${BASE}/clear`))).status, 404);
+  const next = await headers(request(app).post(`${BASE}/threads`));
+  assert.equal(next.status, 200); assert.notEqual(next.body.thread_id, old);
+  const list = await request(app).get(`${BASE}/threads`).set('Cookie', COOKIE);
+  assert.equal(list.body.threads.length, 2);
+  assert.equal(list.body.threads.find(row => row.id === old).message_count, 2);
+  const page = await request(app).get(`${BASE}/threads/${old}/messages?limit=1`).set('Cookie', COOKIE);
+  assert.equal(page.status, 200); assert.equal(page.body.messages.length, 1);
+  const row = page.body.messages[0];
+  const full = await request(app).get(`${BASE}/threads/${old}/messages/${row.id}`).set('Cookie', COOKIE);
+  assert.equal(full.body.seq, row.seq); assert.equal(full.body.thread_id, old);
+  const before = await request(app).get(`${BASE}/threads/${old}/messages?before=${row.seq}`)
+    .set('Cookie', COOKIE);
+  assert.equal(before.body.messages[0].content, 'old-thread message');
+  assert.equal((await request(app).delete(`${BASE}/threads/${old}`).set('Cookie', COOKIE)).status, 403);
+  assert.equal((await headers(request(app).delete(`${BASE}/threads/${next.body.thread_id}`))).status, 409);
+  assert.equal((await headers(request(app).delete(`${BASE}/threads/${old}`))).status, 200);
+  assert.equal((await request(app).get(`${BASE}/threads/${old}/messages`).set('Cookie', COOKIE)).status, 404);
+});
+
+test('shutdown after completed stop caches private state before closing the application DB', async t => {
+  const { app, hub, process } = integrated(t);
+  await hub.start(); await send(hub, 'preserve after stop');
+  process.children[0].stdout.write('{"type":"result"}\n');
+  await hub.stop();
+  await app.shutdown();
+  assert.equal(hub.state().state, 'closed');
+  assert.ok(hub.state().messages.some(row => row.content === 'preserve after stop'));
+  await hub.shutdown();
 });

@@ -210,3 +210,58 @@ test('PR1d S1 provider link_blocked coverage accepts only integer zero or one', 
     snapshot.coverage[provider].link_blocked = 0;
   }
 });
+
+test('PR-S Orca relay mapping, legacy enums, interruption and evidence synthesis', () => {
+  const stamp = '2026-10-08T02:00:00.000Z';
+  for (const [input, expected] of Object.entries(snapshotPolicy.ORCA_STATUS_MAP)) {
+    const status = snapshotPolicy.orcaStatus({ state: input, state_started_at: stamp });
+    assert.equal(status.state, expected);
+    assert.equal(status.reason, input === 'blocked' ? 'orca_blocked' : null);
+    assert.equal(snapshotPolicy.isSafeEnum('agent_state', input), true);
+  }
+  for (const state of ['working', 'blocked', 'waiting', 'done', 'running', 'idle', 'surprise']) {
+    assert.equal(snapshotPolicy.orcaStatus({ state, interrupted: true }).state, 'interrupted');
+  }
+  for (const state of ['running', 'idle', 'busy', 'completed', 'error', 'stopped', 'surprise']) {
+    assert.equal(snapshotPolicy.orcaStatus({ state }).state, 'unknown');
+    assert.equal(snapshotPolicy.isSafeEnum('agent_state', state), false);
+  }
+  const transcript = { state: 'working', source: 'transcript', evidence_at: stamp, reason: null };
+  const orca = { state: 'ended', source: 'orca', evidence_at: stamp, reason: null };
+  for (const [time, source] of [[stamp, 'orca'], ['2026-10-08T02:01:00.000Z', 'orca'],
+    ['2026-10-08T01:59:00.000Z', 'transcript'], [null, 'transcript']]) {
+    const status = snapshotPolicy.composeStatus(transcript, { ...orca, evidence_at: time });
+    assert.equal(status.source, source);
+    assert.equal(status.reason, 'conflict');
+  }
+  assert.equal(snapshotPolicy.composeStatus({ ...transcript, evidence_at: null }, orca).source, 'orca');
+  assert.equal(snapshotPolicy.composeStatus(transcript, { ...orca, state: 'working' }).reason, null);
+  assert.deepEqual(snapshotPolicy.orcaStatus({ state: 'done', updated_at: stamp }),
+    { state: 'ended', source: 'orca', evidence_at: null, reason: null });
+});
+
+test('PR-S v2 requires closed status; v1 accepts absent status and old Orca enum values', t => {
+  const os = require('node:os'), path = require('node:path');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'snapshot-status-policy-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const snapshot = require('./helpers/work-board-fixture.cjs').createSnapshots(root).alpha;
+  assert.equal(snapshot.policy_version, 2);
+  const session = snapshot.sessions[0];
+  const status = session.status;
+  for (const invalid of [undefined, { ...status, state: 'done' }, { ...status, source: 'terminal' },
+    { ...status, reason: 'free text' }, { ...status, evidence_at: 'yesterday' },
+    { ...status, assistant: 'PRIVATE_ASSISTANT_SENTINEL' }]) {
+    session.status = invalid;
+    assert.equal(snapshotPolicy.validateSnapshot(snapshot).ok, false);
+  }
+  session.status = status;
+  assert.equal(snapshotPolicy.validateSnapshot(snapshot).ok, true);
+  snapshot.policy_version = 1;
+  for (const card of snapshot.sessions) delete card.status;
+  for (const state of ['idle', 'running', 'busy', 'completed', 'error', 'stopped']) {
+    snapshot.orca.worktrees[0].agents[0].state = state;
+    assert.equal(snapshotPolicy.validateSnapshot(snapshot).ok, true);
+  }
+  snapshot.policy_version = 0;
+  assert.equal(snapshotPolicy.validateSnapshot(snapshot).ok, false);
+});

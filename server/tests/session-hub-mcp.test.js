@@ -12,12 +12,13 @@ const readline = require('node:readline');
 const { TOOLS, dispatch, brokerGet } = require('../../scripts/session-hub-mcp.cjs');
 const call = (name, args) => ({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } });
 
-test('initialize protocol, three schemas, notification and unknown method', async () => {
+test('initialize protocol, four schemas, notification and unknown method', async () => {
   const result = await dispatch({ jsonrpc: '2.0', id: 7, method: 'initialize',
     params: { protocolVersion: 'client-version' } });
   assert.equal(result.result.protocolVersion, 'client-version');
   assert.deepEqual(result.result.capabilities, { tools: {} });
-  assert.deepEqual(TOOLS.map(row => row.name), ['list_sessions', 'search_instructions', 'get_session']);
+  assert.deepEqual(TOOLS.map(row => row.name),
+    ['list_sessions', 'search_instructions', 'search_assistant_history', 'get_session']);
   for (const tool of TOOLS) {
     assert.equal(tool.inputSchema.type, 'object'); assert.equal(tool.inputSchema.additionalProperties, false);
   }
@@ -95,7 +96,7 @@ test('stdio script handles newline requests, malformed JSON, initialized notific
     + JSON.stringify(call('list_sessions', { limit: 'bad' })) + '\n');
   assert.equal(await exited, 0);
   assert.equal(lines.length, 3); assert.equal(lines[0].error.code, -32700);
-  assert.equal(lines[1].result.tools.length, 3); assert.equal(lines[2].result.isError, true);
+  assert.equal(lines[1].result.tools.length, 4); assert.equal(lines[2].result.isError, true);
 });
 
 test('bootstrap tolerates fragments, starts MCP once in the verified process and strips every other env key', () => {
@@ -135,4 +136,25 @@ test('bootstrap tolerates fragments, starts MCP once in the verified process and
   assert.equal(sockets[0].ended, true);
   sockets[0].emit('end');
   assert.deepEqual(exited, [1]);
+});
+
+test('history schema denies thread IDs and wraps only the exact history GET', async t => {
+  let calls = 0;
+  for (const args of [{}, { q: '' }, { q: 'needle', thread_id: 'other' }, { q: 'needle', limit: 51 }]) {
+    const result = await dispatch(call('search_assistant_history', args), { get() { calls++; } });
+    assert.equal(result.result.isError, true);
+  }
+  assert.equal(calls, 0);
+  t.mock.method(http, 'get', (url, options, callback) => {
+    assert.equal(url.pathname, '/api/session-hub/history/search');
+    assert.equal(url.searchParams.get('q'), 'needle');
+    const req = new EventEmitter(); req.setTimeout = () => {};
+    const res = new PassThrough(); res.statusCode = 200;
+    queueMicrotask(() => { callback(res); res.end('{"results":[]}'); });
+    return req;
+  });
+  const result = await dispatch(call('search_assistant_history', { q: 'needle', limit: 50 }), {
+    env: { PALANTIR_SESSION_HUB_BASE_URL: 'http://localhost', PALANTIR_SESSION_HUB_TOKEN: 'fixture' },
+  });
+  assert.equal(result.result.content[0].text, '{"results":[]}');
 });

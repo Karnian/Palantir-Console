@@ -9,6 +9,10 @@ const childProcess = require('node:child_process');
 const { serviceFixture, tick, until } = require('./helpers/session-hub-service-fixture.cjs');
 const { SESSION_HUB_PROMPT } = require('../services/sessionHubPrompt');
 
+let requestNumber = 0;
+const send = (hub, text) => hub.message({ thread_id: hub.state().thread_id,
+  request_id: `test-${++requestNumber}`, text });
+
 const code = expected => err => err.code === expected;
 
 test('state epoch identifies the service lifetime and survives start, stop and clear', async t => {
@@ -21,9 +25,9 @@ test('state epoch identifies the service lifetime and survives start, stop and c
   fx.service.subscribe(value => snapshots.push(value));
   snapshots.push(await fx.service.start());
   fx.init();
-  snapshots.push(fx.service.message('수명 확인'));
+  snapshots.push(await send(fx.service, '수명 확인'));
   snapshots.push(await fx.service.stop());
-  snapshots.push(await fx.service.clear());
+  snapshots.push(await fx.service.stop());
   snapshots.push(fx.service.state());
   for (const snapshot of snapshots) assert.equal(snapshot.epoch, initial.epoch);
 });
@@ -36,16 +40,16 @@ test('state version increases across start, messages, stop and clear; replies ma
   assert.equal(started.version, fx.service.state().version);
   assert.ok(started.version > 0);
   fx.init();
-  const message = fx.service.message('버전 확인');
+  const message = await send(fx.service, '버전 확인');
   assert.ok(message.version > started.version);
-  assert.equal(message.messages.at(-1).text, '버전 확인');
+  assert.equal(message.user.content, '버전 확인');
   const stopped = await fx.service.stop();
   assert.ok(stopped.version > message.version);
   assert.equal(stopped.version, fx.service.state().version);
-  const cleared = await fx.service.clear();
+  const cleared = await fx.service.stop();
   assert.ok(cleared.version > stopped.version);
   assert.equal(cleared.version, fx.service.state().version);
-  assert.deepEqual(cleared.messages, []);
+  assert.ok(cleared.messages.some(row => row.content === '버전 확인'));
   assert.equal(new Set(versions).size, versions.length);
   assert.deepEqual(versions, [...versions].sort((a, b) => a - b));
 });
@@ -67,7 +71,8 @@ test('fixed argv, guard immediately before spawn, minimal Claude env and disk-fr
     '{"disableAllHooks":true}', '--disable-slash-commands', '--strict-mcp-config', '--mcp-config',
     path.join(fx.root, 'mcp.json'), '--allowedTools',
     ['mcp__session_hub__list_sessions', 'mcp__session_hub__search_instructions',
-      'mcp__session_hub__get_session'].join(','), '--permission-mode', 'default',
+      'mcp__session_hub__get_session', 'mcp__session_hub__search_assistant_history'].join(','),
+    '--permission-mode', 'default',
     '--append-system-prompt', SESSION_HUB_PROMPT]);
   assert.deepEqual(order, [{ command: call.command, source: 'session-hub' }, 'spawn']);
   assert.equal(call.options.detached, true);
@@ -124,7 +129,7 @@ test('unexpected init memory path revokes token, reaps group and records owned s
   assert.equal(fx.service.current(), null);
   await fx.service.close();
   assert.equal(fx.service.state().error, 'session_hub_unexpected_paths');
-  assert.equal(fs.readFileSync(path.join(fx.root, 'owned-sessions'), 'utf8'), 'bad-path\n');
+  assert.equal(fs.readFileSync(path.join(fx.root, 'owned-sessions'), 'utf8'), '');
   assert.equal(fx.signals[0][1], 'SIGTERM');
 });
 
@@ -139,7 +144,7 @@ for (const mode of ['--fixture-no-memory-paths', '--fixture-no-transcript']) {
     await until(() => events.some(event => event.subtype === 'init'));
     assert.equal(fx.service.state().error, null);
     assert.equal(fx.service.diagnostics().initSeen, true);
-    fx.service.message('first turn');
+    await send(fx.service, 'first turn');
     await until(() => events.some(event => event.type === 'result'));
     await until(() => !fx.service.state().turnInProgress);
     if (mode === '--fixture-no-transcript') {
@@ -153,11 +158,11 @@ for (const mode of ['--fixture-no-memory-paths', '--fixture-no-transcript']) {
       const filename = path.join(fx.service.diagnostics().transcriptDir, 'fixture-session.jsonl');
       assert.equal(fs.lstatSync(filename).isFile(), true);
       assert.equal(fx.service.diagnostics().transcriptVerified, true);
-      fx.service.message('second turn');
+      await send(fx.service, 'second turn');
       await until(() => events.filter(event => event.type === 'result').length === 2);
       await fx.service.stop();
     }
-    assert.equal(fs.readFileSync(path.join(fx.root, 'owned-sessions'), 'utf8'), 'fixture-session\n');
+    assert.equal(fs.readFileSync(path.join(fx.root, 'owned-sessions'), 'utf8'), '');
   });
 }
 
@@ -179,12 +184,12 @@ test('missing memory_paths holds the turn during transcript lstat and accepts ne
     const { transcriptDir } = fx.service.diagnostics();
     fs.mkdirSync(transcriptDir, { recursive: true });
     fs.writeFileSync(path.join(transcriptDir, 'owned.jsonl'), '{}\n');
-    fx.service.message('first'); fx.event({ type: 'result' });
+    await send(fx.service, 'first'); fx.event({ type: 'result' });
     await arrived;
     assert.equal(fx.service.state().turnInProgress, true);
-    assert.throws(() => fx.service.message('too early'), code('turn_in_progress'));
+    await assert.rejects(() => send(fx.service, 'too early'), code('turn_in_progress'));
     release(); await until(() => !fx.service.state().turnInProgress);
-    fx.service.message('next'); fx.event({ type: 'result' });
+    await send(fx.service, 'next'); fx.event({ type: 'result' });
     assert.equal(fx.service.state().turnInProgress, false);
     assert.equal(probes, 1);
   });
@@ -206,12 +211,12 @@ for (const kind of ['missing', 'directory', 'symlink', 'io-error']) {
       const target = path.join(fx.temp, 'other-session'); fs.writeFileSync(target, 'keep');
       fs.symlinkSync(target, filename);
     }
-    fx.service.message('first'); fx.event({ type: 'result' });
+    await send(fx.service, 'first'); fx.event({ type: 'result' });
     await until(() => fx.service.state().error === 'session_hub_unexpected_paths');
     await fx.service.close();
     assert.equal(fx.service.current(), null);
     assert.equal(fx.service.state().state, 'idle');
-    assert.throws(() => fx.service.message('next'), code('session_hub_not_running'));
+    await assert.rejects(() => send(fx.service, 'next'), code('session_hub_not_running'));
   });
 }
 
@@ -228,10 +233,10 @@ test('close waits for delayed transcript verification and its completion cannot 
     } } });
     await fx.service.start();
     fx.event({ type: 'system', subtype: 'init', session_id: 'owned' });
-    fx.service.message('first'); fx.event({ type: 'result' });
+    await send(fx.service, 'first'); fx.event({ type: 'result' });
     await arrived;
     let closed = false;
-    const closing = fx.service.clear();
+    const closing = fx.service.stop();
     closing.then(() => { closed = true; });
     await tick();
     assert.equal(closed, false);
@@ -240,7 +245,7 @@ test('close waits for delayed transcript verification and its completion cannot 
     release(); await closing;
     assert.equal(fx.service.state().error, null);
     await fx.service.start(); fx.init('next');
-    fx.service.message('new turn');
+    await send(fx.service, 'new turn');
     await tick();
     assert.equal(fx.service.state().turnInProgress, true);
     assert.equal(fx.service.state().error, null);
@@ -272,29 +277,25 @@ test('hook subtype disables every later start in this boot and ignores late outp
 test('single turn, timeout, text/tool/error messages and both conversation caps', async t => {
   const fx = serviceFixture(t, { turnTimeoutMs: 25 });
   await fx.service.start(); fx.init();
-  fx.service.message('first');
-  assert.throws(() => fx.service.message('second'), code('turn_in_progress'));
+  await send(fx.service, 'first');
+  await assert.rejects(() => send(fx.service, 'second'), code('turn_in_progress'));
   fx.event({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'list_sessions', input: { limit: 1 } },
     { type: 'text', text: 'answer' }] } });
   fx.event({ type: 'result' });
-  assert.deepEqual(fx.service.state().messages.map(row => row.role), ['user', 'tool', 'assistant']);
+  assert.deepEqual(fx.service.state().messages.map(row => row.role), ['user', 'assistant', 'tool_note']);
   for (let i = 0; i < 210; i++) {
-    fx.service.message(`message ${i}`); fx.event({ type: 'result' });
+    await send(fx.service, `message ${i}`); fx.event({ type: 'result' });
   }
-  assert.equal(fx.service.state().messages.length, 200);
-  assert.equal(fx.service.state().messages[0].text, 'message 10');
-  for (let i = 0; i < 3; i++) {
-    fx.service.message('한'.repeat(150000)); fx.event({ type: 'result' });
-  }
-  assert.ok(Buffer.byteLength(JSON.stringify(fx.service.state().messages)) <= 1024 * 1024);
-  fx.service.message('timeout');
+  assert.equal(fx.service.state().messages.length, 50);
+  assert.ok(Buffer.byteLength(JSON.stringify(fx.service.state().messages)) <= 256 * 1024);
+  await send(fx.service, 'timeout');
   await until(() => fx.service.state().state === 'idle');
   assert.equal(fx.service.state().error, 'session_hub_turn_timeout');
 });
 
 test('close same Promise, token revoked synchronously, shutdown permanent and stale generation harmless', async t => {
   const fx = serviceFixture(t, { turnTimeoutMs: 30 });
-  await fx.service.start(); fx.service.message('old');
+  await fx.service.start(); await send(fx.service, 'old');
   const old = fx.children[0];
   const first = fx.service.close();
   assert.equal(first, fx.service.close()); assert.equal(fx.service.current(), null);
@@ -308,7 +309,7 @@ test('close same Promise, token revoked synchronously, shutdown permanent and st
   const shutdown = fx.service.shutdown();
   assert.equal(fx.service.state().state, 'closed');
   await assert.rejects(fx.service.start(), code('session_hub_closed'));
-  assert.throws(() => fx.service.message('no'), code('session_hub_closed'));
+  await assert.rejects(() => send(fx.service, 'no'), code('session_hub_closed'));
   await shutdown;
   assert.equal(fx.service.state().state, 'closed');
 });
@@ -339,7 +340,7 @@ for (const delayAt of ['id', 'realpath', 'mcp.json']) {
     const fx = serviceFixture(t, { fs: io });
     const starting = fx.service.start();
     await arrived;
-    const clearing = fx.service.clear();
+    const clearing = fx.service.stop();
     assert.equal(fx.service.close(), clearing);
     await assert.rejects(fx.service.start(), code('session_hub_busy'));
     let cleared = false;
@@ -354,45 +355,6 @@ for (const delayAt of ['id', 'realpath', 'mcp.json']) {
   });
 }
 
-test('six transcript ownership fixtures: large owned deleted, four remain and ledger retains symlink ID', async t => {
-  const fx = serviceFixture(t);
-  await fx.service.start(); fx.init('large-owned'); await fx.service.stop();
-  const { cwd, transcriptDir } = fx.service.diagnostics();
-  fs.mkdirSync(transcriptDir, { recursive: true });
-  const write = (name, text) => fs.writeFileSync(path.join(transcriptDir, `${name}.jsonl`), text);
-  write('large-owned', 'x'.repeat(8 * 1024 * 1024 + 1));
-  write('matching', `${JSON.stringify({ cwd })}\n${JSON.stringify({ cwd })}\n`);
-  write('mixed', `${JSON.stringify({ cwd })}\n${JSON.stringify({ cwd: '/other' })}\n`);
-  write('no-cwd', '{"text":"not ours"}\n');
-  write('large-unowned', 'x'.repeat(8 * 1024 * 1024 + 1));
-  const target = path.join(fx.temp, 'protected'); fs.writeFileSync(target, 'keep');
-  fs.symlinkSync(target, path.join(transcriptDir, 'link-owned.jsonl'));
-  fs.appendFileSync(path.join(fx.root, 'owned-sessions'), 'link-owned\n');
-  const result = await fx.service.clear();
-  assert.equal(result.result, 'incomplete'); assert.equal(result.remaining, 4);
-  assert.deepEqual(fs.readdirSync(transcriptDir).sort(),
-    ['large-unowned.jsonl', 'link-owned.jsonl', 'mixed.jsonl', 'no-cwd.jsonl']);
-  assert.equal(fs.readFileSync(path.join(fx.root, 'owned-sessions'), 'utf8'), 'link-owned\n');
-  assert.equal(fs.readFileSync(target, 'utf8'), 'keep');
-  assert.equal(fs.existsSync(cwd), false);
-  for (const name of fs.readdirSync(transcriptDir)) fs.unlinkSync(path.join(transcriptDir, name));
-  assert.equal((await fx.service.clear()).result, 'complete');
-});
-
-test('memory files remain and transcript symlink is never followed', async t => {
-  const fx = serviceFixture(t);
-  await fx.service.start(); await fx.service.stop();
-  const { transcriptDir } = fx.service.diagnostics();
-  fs.mkdirSync(path.join(transcriptDir, 'memory'), { recursive: true });
-  fs.writeFileSync(path.join(transcriptDir, 'memory/one'), 'memory');
-  fs.writeFileSync(path.join(transcriptDir, 'memory/two'), 'memory');
-  assert.equal((await fx.service.clear()).remaining, 2);
-  const moved = `${transcriptDir}-moved`;
-  fs.renameSync(transcriptDir, moved); fs.symlinkSync(moved, transcriptDir);
-  assert.equal((await fx.service.clear()).result, 'incomplete');
-  assert.equal(fs.readFileSync(path.join(moved, 'memory/one'), 'utf8'), 'memory');
-});
-
 test('reap escalates after parent exit, then verifies ESRCH before deletion', async t => {
   let alive = true;
   const signals = [];
@@ -402,7 +364,7 @@ test('reap escalates after parent exit, then verifies ESRCH before deletion', as
     if (signal === 0 && !alive) throw Object.assign(new Error('gone'), { code: 'ESRCH' });
   } });
   await fx.service.start();
-  const closing = fx.service.clear();
+  const closing = fx.service.stop();
   fx.children[0].emit('exit', 0);
   assert.equal(fs.existsSync(path.join(fx.root, 'mcp.json')), true);
   await closing;
@@ -414,10 +376,10 @@ test('reap escalates after parent exit, then verifies ESRCH before deletion', as
 
 test('reap failure preserves PGID/config/messages and refuses idle/start', async t => {
   const fx = serviceFixture(t, { kill() {}, termMs: 2, reapMs: 10 });
-  await fx.service.start(); fx.service.message('preserve');
-  await assert.rejects(fx.service.clear(), code('reap_failed'));
+  await fx.service.start(); await send(fx.service, 'preserve');
+  await assert.rejects(fx.service.stop(), code('reap_failed'));
   assert.equal(fx.service.state().state, 'error:reap_failed');
-  assert.equal(fx.service.state().messages[0].text, 'preserve');
+  assert.equal(fx.service.state().messages[0].content, 'preserve');
   assert.ok(fx.service.diagnostics().pgid);
   assert.equal(fs.existsSync(path.join(fx.root, 'mcp.json')), true);
   await assert.rejects(fx.service.start(), code('session_hub_busy'));
@@ -438,7 +400,7 @@ test('zombie-only EPERM keeps files until event-loop reaping and an ESRCH group 
     }
   } });
   await fx.service.start();
-  await fx.service.clear();
+  await fx.service.stop();
   assert.ok(probes >= 2);
   assert.equal(fx.service.diagnostics().pgid, null);
   assert.equal(fs.existsSync(path.join(fx.root, 'mcp.json')), false);
@@ -450,11 +412,11 @@ test('persistent EPERM still escalates and fails without deleting files or decla
     signals.push(signal);
     throw Object.assign(new Error('permission denied'), { code: 'EPERM' });
   } });
-  await fx.service.start(); fx.service.message('preserve');
-  await assert.rejects(fx.service.clear(), code('reap_failed'));
+  await fx.service.start(); await send(fx.service, 'preserve');
+  await assert.rejects(fx.service.stop(), code('reap_failed'));
   assert.ok(signals.includes('SIGTERM')); assert.ok(signals.includes('SIGKILL'));
   assert.equal(fx.service.state().state, 'error:reap_failed');
-  assert.equal(fx.service.state().messages[0].text, 'preserve');
+  assert.equal(fx.service.state().messages[0].content, 'preserve');
   assert.ok(fx.service.diagnostics().pgid);
   assert.equal(fs.existsSync(path.join(fx.root, 'mcp.json')), true);
   await assert.rejects(fx.service.start(), code('session_hub_busy'));
@@ -484,7 +446,7 @@ test('real fixture group with SIGTERM-ignoring descendant is reaped after parent
   await until(() => fs.existsSync(childFile));
   const descendant = Number(fs.readFileSync(childFile));
   await new Promise(resolve => setTimeout(resolve, 100));
-  await fx.service.clear();
+  await fx.service.stop();
   assert.ok(signals.includes('SIGKILL'));
   assert.throws(() => process.kill(descendant, 0), err => err.code === 'ESRCH');
 });
@@ -589,7 +551,7 @@ test('failed server PGID lookup refuses credentials and terminates the hub', asy
   assert.equal(fx.service.state().error, 'session_hub_unexpected_pgid');
 });
 
-for (const action of ['stop', 'clear', 'shutdown']) {
+for (const action of ['stop', 'newThread', 'shutdown']) {
   test(`${action} settles with a hung PGID lookup and ignores its late result`, async t => {
     const lookups = [];
     const fx = credentialFixture(t, (command, argv, opts, callback) => { lookups.push({ opts, callback }); });
@@ -598,6 +560,7 @@ for (const action of ['stop', 'clear', 'shutdown']) {
     const socket = fx.connect(42, previousGroup);
     assert.equal(lookups[0].opts.timeout, 1000);
     const closing = fx.service[action]();
+    if (action === 'newThread') await tick();
     assert.equal(fx.service.current(), null);
     const completed = await Promise.race([closing.then(() => true),
       new Promise(resolve => setTimeout(() => resolve(false), 200))]);
@@ -638,7 +601,7 @@ for (const event of ['close', 'end', 'error']) {
     assert.equal(fx.service.state().error, null);
     assert.equal(fx.service.state().state, 'running');
     assert.equal(fx.service.current(), null);
-    assert.throws(() => fx.service.message('unavailable'), code('session_hub_not_running'));
+    await assert.rejects(() => send(fx.service, 'unavailable'), code('session_hub_not_running'));
     await until(() => fx.service.state().error === 'session_hub_mcp_lost', 3000);
     await fx.service.close();
     assert.equal(fx.service.state().state, 'idle');
@@ -650,7 +613,7 @@ for (const event of ['close', 'end', 'error']) {
     assert.equal(next.ended, undefined); assert.equal(next.timeout, 0);
     socket.emit('close'); // an old MCP disconnect cannot affect the new generation
     assert.equal(fx.service.state().error, null);
-    fx.service.message('new generation'); fx.event({ type: 'result' });
+    await send(fx.service, 'new generation'); fx.event({ type: 'result' });
     assert.equal(fx.service.state().state, 'running');
     await fx.service.stop();
     assert.equal(fx.service.state().error, null); // server-initiated disposal is not MCP loss
@@ -676,7 +639,7 @@ for (const exitCode of [0, 7]) {
     await fx.service.start(); fx.init();
     const socket = fx.connect(42, 0);
     await tick();
-    fx.service.message('last turn');
+    await send(fx.service, 'last turn');
     socket.emit('end'); socket.emit('close');
     assert.equal(fx.service.current(), null);
     assert.equal(fx.service.state().state, 'running');
@@ -687,13 +650,13 @@ for (const exitCode of [0, 7]) {
     fx.children[0].emit('exit', exitCode);
     await fx.service.close();
     assert.equal(fx.service.state().error, exitCode === 0 ? null : 'session_hub_process_exited');
-    assert.equal(fx.service.state().messages.some(row => row.text === 'last answer'), true);
+    assert.equal(fx.service.state().messages.some(row => row.content === 'last answer'), true);
     timers[0]();
     assert.equal(fx.service.state().error, exitCode === 0 ? null : 'session_hub_process_exited');
   });
 }
 
-for (const action of ['stop', 'clear', 'shutdown']) {
+for (const action of ['stop', 'newThread', 'shutdown']) {
   test(`${action} during MCP grace takes precedence over cancelled callbacks in a later generation`, async t => {
     const timers = captureMcpGrace(t);
     const fx = credentialFixture(t, (command, argv, opts, callback) => {
@@ -734,12 +697,12 @@ for (const ancestor of ['transcript', 'projects', '.claude']) {
     const moved = `${directory}-moved`;
     fs.renameSync(directory, moved); fs.symlinkSync(moved, directory);
     fx.event({ type: 'system', subtype: 'init', session_id: 'owned' });
-    fx.service.message('first'); fx.event({ type: 'result' });
+    await send(fx.service, 'first'); fx.event({ type: 'result' });
     await until(() => !fx.service.state().turnInProgress);
     assert.equal(fx.service.state().error, 'session_hub_unexpected_paths');
     await fx.service.close();
     assert.equal(fx.service.current(), null);
-    assert.equal((await fx.service.clear()).result, 'incomplete');
+    assert.equal((await fx.service.stop()).result, 'incomplete');
     assert.equal(fs.readFileSync(path.join(transcriptDir, 'owned.jsonl'), 'utf8'), 'keep');
   });
 }
@@ -750,7 +713,7 @@ test('synchronous subscribers can close during starting/closing without losing p
     let requested;
     let nested;
     const unsubscribe = fx.service.subscribe(value => {
-      if (value.state === 'starting') requested = fx.service.clear();
+      if (value.state === 'starting') requested = fx.service.stop();
       if (value.state === 'closing') nested = fx.service.close();
     });
     await fx.service.start();
@@ -769,8 +732,8 @@ test('even a cancelled previous generation timer callback cannot terminate the n
     return original(fn, delay, ...args);
   });
   const fx = serviceFixture(t, { turnTimeoutMs: 777 });
-  await fx.service.start(); fx.service.message('old'); await fx.service.stop();
-  await fx.service.start(); fx.service.message('new');
+  await fx.service.start(); await send(fx.service, 'old'); await fx.service.stop();
+  await fx.service.start(); await send(fx.service, 'new');
   const token = fx.service.current();
   callbacks[0]();
   assert.equal(fx.service.current(), token);
@@ -804,7 +767,7 @@ test('a subscriber stopping on user text cannot leave a new timer or write after
   const unsubscribe = fx.service.subscribe(value => {
     if (value.state === 'running' && value.messages.some(row => row.role === 'user')) void fx.service.stop();
   });
-  fx.service.message('close here');
+  await send(fx.service, 'close here');
   await fx.service.close();
   const messages = fx.service.state().messages;
   await new Promise(resolve => setTimeout(resolve, 25));
@@ -845,7 +808,7 @@ test('real fake CLI hook output closes and disables the service for this boot', 
     }, reapMs: 1500 });
   await fx.service.start();
   await until(() => fx.service.diagnostics().initSeen, 5000);
-  fx.service.message('hook');
+  await send(fx.service, 'hook');
   await until(() => fx.service.state().disabled === 'session_hub_hooks_detected', 5000);
   await fx.service.close();
   if (process.platform === 'darwin') assert.ok(probes.includes('EPERM'));
@@ -855,24 +818,6 @@ test('real fake CLI hook output closes and disables the service for this boot', 
   assert.equal(fx.service.state().disabled, 'session_hub_hooks_detected');
   assert.equal(fx.service.current(), null);
   await assert.rejects(fx.service.start(), code('session_hub_hooks_detected'));
-});
-
-test('clear after reboot deletes old owned transcripts without resuming messages or spawning', async t => {
-  const fx = serviceFixture(t);
-  await fx.service.start(); fx.init('previous-boot'); await fx.service.stop();
-  const { transcriptDir, cwd } = fx.service.diagnostics();
-  fs.mkdirSync(transcriptDir, { recursive: true });
-  fs.writeFileSync(path.join(transcriptDir, 'previous-boot.jsonl'), 'x'.repeat(8 * 1024 * 1024 + 1));
-  fs.writeFileSync(path.join(cwd, 'leftover'), 'old CLI file');
-  const { createSessionHubService } = require('../services/sessionHubService');
-  const next = createSessionHubService(fx.options);
-  t.after(() => next.shutdown());
-  assert.deepEqual(next.state().messages, []);
-  const result = await next.clear();
-  assert.equal(result.result, 'complete'); assert.equal(result.remaining, 0);
-  assert.equal(fs.existsSync(transcriptDir), false); assert.equal(fs.existsSync(cwd), false);
-  assert.equal(fs.readFileSync(path.join(fx.root, 'owned-sessions'), 'utf8'), '');
-  assert.equal(fx.calls.length, 1);
 });
 
 test('long TMPDIR falls back to a private short socket directory and cleans both directories', async t => {
@@ -916,4 +861,142 @@ test('socket directory symlink is refused before chmod or spawn without touching
   await assert.rejects(fx.service.start(), code('session_hub_unsafe_storage'));
   assert.equal(fs.statSync(target).mode & 0o777, 0o755);
   assert.equal(fx.calls.length, 0);
+});
+
+test('commit precedes stdin, request replay is stable, conflicts and inactive requests are 409', async t => {
+  const fx = serviceFixture(t);
+  await fx.service.start(); fx.init('commit');
+  const payload = { thread_id: fx.service.state().thread_id, request_id: 'retry', text: 'password=abcdef hello' };
+  let writes = 0;
+  const stdin = fx.children[0].stdin;
+  const original = stdin.write.bind(stdin);
+  stdin.write = data => {
+    writes++;
+    const rows = fx.store.messages(payload.thread_id);
+    assert.equal(rows.length, 2);
+    assert.equal(rows[0].content, '[REDACTED] hello');
+    assert.equal(rows[1].status, 'partial');
+    assert.equal(fx.db.inTransaction, false);
+    return original(data);
+  };
+  const first = await fx.service.message(payload);
+  const replay = await fx.service.message({ ...payload, text: 'password=changed hello' });
+  assert.equal(replay.user.id, first.user.id);
+  assert.equal(writes, 1);
+  await assert.rejects(fx.service.message({ ...payload, text: 'other' }), { code: 'request_conflict', status: 409 });
+  await assert.rejects(fx.service.newThread(), { code: 'turn_in_progress', status: 409 });
+  fx.event({ type: 'result' });
+  await fx.service.newThread();
+  await assert.rejects(fx.service.message({ ...payload, request_id: 'another' }),
+    { code: 'thread_not_active', status: 409 });
+});
+
+test('new conversation and message serialize; old output cannot write to the next thread', async t => {
+  const fx = serviceFixture(t);
+  await fx.service.start(); fx.init('old');
+  const oldThread = fx.service.state().thread_id;
+  const oldChild = fx.children[0];
+  const change = fx.service.newThread();
+  const sendOld = fx.service.message({ thread_id: oldThread, request_id: 'old-send', text: 'racing' });
+  await change;
+  await assert.rejects(sendOld, { code: 'thread_not_active' });
+  await fx.service.start(); fx.init('next');
+  oldChild.stdout.write('{"type":"assistant","message":{"content":[{"type":"text","text":"late"}]}}\n');
+  oldChild.emit('exit', 1);
+  assert.deepEqual(fx.service.state().messages, []);
+  assert.deepEqual(fx.store.messages(oldThread), []);
+  const sending = send(fx.service, 'accepted');
+  const changeDuringTurn = fx.service.newThread();
+  await sending;
+  await assert.rejects(changeDuringTurn, { code: 'turn_in_progress' });
+  fx.event({ type: 'result' });
+});
+
+test('usage sum and invalidateContext rotate before next stdin with restored context on same thread', async t => {
+  const fx = serviceFixture(t);
+  await fx.service.start(); fx.init('rotate-1');
+  const id = fx.service.state().thread_id;
+  await send(fx.service, 'previous turn');
+  fx.event({ type: 'assistant', message: { content: [{ type: 'text', text: 'remember this answer' }] } });
+  fx.event({ type: 'result', usage: { input_tokens: 1, cache_read_input_tokens: 60000,
+    cache_creation_input_tokens: 60000 } });
+  assert.equal(fx.calls.length, 1);
+  await send(fx.service, 'next turn');
+  assert.equal(fx.calls.length, 2);
+  assert.equal(fx.service.state().thread_id, id);
+  const body = JSON.parse(fx.children[1].stdin.read().toString()).message.content;
+  assert.ok(body.includes('previous turn') && body.includes('remember this answer'));
+  assert.ok(body.endsWith('next turn'));
+  assert.equal(fx.store.messages(id).at(-2).content, 'next turn');
+  fx.init('rotate-2'); fx.event({ type: 'result' });
+  fx.service.invalidateContext();
+  await send(fx.service, 'after invalidate');
+  assert.equal(fx.calls.length, 3);
+  assert.equal(fx.store.messages(id).filter(row => row.content === '맥락을 새로 정리함').length, 2);
+  fx.init('rotate-3'); fx.event({ type: 'result' });
+});
+
+test('new instance on same DB recovers partial and injects history without resume', async t => {
+  const fx = serviceFixture(t);
+  const id = fx.store.active();
+  fx.store.reserve({ thread_id: id, request_id: 'crashed', text: 'persisted before crash' });
+  const { createSessionHubService } = require('../services/sessionHubService');
+  const next = createSessionHubService(fx.options);
+  t.after(() => next.shutdown());
+  assert.equal(next.state().messages[1].status, 'error');
+  assert.equal(next.state().messages[1].content, '서버 재시작으로 중단됨');
+  await next.start();
+  assert.equal(fx.calls[0].argv.includes('--resume'), false);
+  await send(next, 'fresh request');
+  const content = JSON.parse(fx.children[0].stdin.read().toString()).message.content;
+  assert.ok(content.includes('persisted before crash'));
+  assert.equal(next.state().thread_id, id);
+});
+
+test('thread deletion only removes its bound transcripts, retains symlinks for retry and legacy cleanup', async t => {
+  const fx = serviceFixture(t);
+  await fx.service.start();
+  const old = fx.service.state().thread_id;
+  fx.init('old-session');
+  const { transcriptDir } = fx.service.diagnostics();
+  fs.mkdirSync(transcriptDir, { recursive: true });
+  const oldFile = path.join(transcriptDir, 'old-session.jsonl');
+  fs.writeFileSync(oldFile, 'x'.repeat(8 * 1024 * 1024 + 1));
+  await fx.service.newThread();
+  assert.equal(fs.existsSync(oldFile), false);
+  const active = fx.service.state().thread_id;
+  fs.writeFileSync(oldFile, 'old');
+  const activeFile = path.join(transcriptDir, 'active-session.jsonl');
+  fs.writeFileSync(activeFile, 'active');
+  const protectedFile = path.join(fx.temp, 'protected'); fs.writeFileSync(protectedFile, 'keep');
+  fs.symlinkSync(protectedFile, path.join(transcriptDir, 'legacy.jsonl'));
+  fs.writeFileSync(path.join(fx.root, 'owned-sessions'),
+    `old-session\t${old}\nactive-session\t${active}\nlegacy\n`, { mode: 0o600 });
+  const deleted = await fx.service.deleteThread(old);
+  assert.equal(deleted.remaining, 0);
+  assert.equal(fs.existsSync(oldFile), false);
+  assert.equal(fs.readFileSync(activeFile, 'utf8'), 'active');
+  assert.equal(fs.readFileSync(protectedFile, 'utf8'), 'keep');
+  assert.equal(fx.service.state().transcripts_remaining, 2);
+  await assert.rejects(fx.service.deleteThread(active), { code: 'thread_active' });
+  fs.unlinkSync(path.join(transcriptDir, 'legacy.jsonl'));
+  await fx.service.start(); await fx.service.stop();
+  assert.equal(fs.existsSync(activeFile), false);
+  assert.equal(fx.service.state().transcripts_remaining, 0);
+});
+
+test('partial output commits within two seconds and final commit sanitizes without saving tool arguments', async t => {
+  const fx = serviceFixture(t);
+  await fx.service.start(); fx.init('partial');
+  const reserved = await send(fx.service, 'streaming turn');
+  fx.event({ type: 'assistant', message: { content: [{ type: 'text', text: 'first chunk\n' }] } });
+  fx.event({ type: 'assistant', message: { content: [{ type: 'text', text: 'password=secret-value\n' },
+    { type: 'tool_use', name: 'search_assistant_history', input: { q: 'sensitive-query' } }] } });
+  assert.equal(fx.store.get(reserved.user.thread_id, reserved.assistant.id).content, 'first chunk\n');
+  await until(() => fx.store.get(reserved.user.thread_id, reserved.assistant.id).content.includes('[REDACTED]'), 2500);
+  assert.equal(fx.store.get(reserved.user.thread_id, reserved.assistant.id).status, 'partial');
+  fx.event({ type: 'result' });
+  assert.equal(fx.store.get(reserved.user.thread_id, reserved.assistant.id).status, 'complete');
+  assert.equal(JSON.stringify(fx.store.messages(reserved.user.thread_id)).includes('secret-value'), false);
+  assert.equal(JSON.stringify(fx.store.messages(reserved.user.thread_id)).includes('sensitive-query'), false);
 });

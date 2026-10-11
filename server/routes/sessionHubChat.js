@@ -5,12 +5,10 @@ const express = require('express');
 function chatError(res, code, status = 403) {
   return res.status(status).json({ error: code, reason: code });
 }
-function createSessionHubChatRouter({ service }) {
-  const router = express.Router();
-  router.use((req, res, next) => {
+function requireSessionHubCookie(req, res, next) {
     res.set('Cache-Control', 'no-store');
     if (req.auth?.method !== 'cookie') return chatError(res, 'forbidden');
-    if (req.method === 'POST') {
+    if (req.method === 'POST' || req.method === 'DELETE') {
       const origin = req.headers.origin;
       const scheme = req.socket.encrypted ? 'https' : 'http';
       // Compare the serialized origin exactly. Neither proxy headers nor Referer grant access.
@@ -22,15 +20,28 @@ function createSessionHubChatRouter({ service }) {
       if (site !== undefined && site !== 'same-origin' && site !== 'none') return chatError(res, 'forbidden');
     } else return chatError(res, 'not_found', 404);
     return next();
-  });
+}
+
+function createSessionHubChatRouter({ service }) {
+  const router = express.Router();
+  router.use(requireSessionHubCookie);
   router.use(express.json({ limit: '1mb' }));
   const post = handler => async (req, res, next) => {
     try { res.json(await handler(req)); } catch (err) { next(err); }
   };
   router.post('/start', post(() => service.start()));
-  router.post('/message', post(req => service.message(req.body?.text)));
+  router.post('/message', post(req => service.message(req.body)));
   router.post('/stop', post(() => service.stop()));
-  router.post('/clear', post(() => service.clear()));
+  router.post('/threads', post(() => service.newThread()));
+  router.get('/threads', post(() => ({ threads: service.listThreads() })));
+  router.get('/threads/:id/messages', post(req => ({ thread_id: req.params.id,
+    messages: service.messages(req.params.id, {
+      before: req.query.before === undefined ? undefined : Number(req.query.before),
+      limit: req.query.limit === undefined ? 50 : Number(req.query.limit),
+    }),
+  })));
+  router.get('/threads/:id/messages/:mid', post(req => service.getMessage(req.params.id, req.params.mid)));
+  router.delete('/threads/:id', post(req => service.deleteThread(req.params.id)));
   router.get('/state', (req, res) => res.json(service.state()));
   router.get('/stream', (req, res) => {
     res.set({ 'Content-Type': 'text/event-stream', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
@@ -79,4 +90,4 @@ function createSessionHubChatRouter({ service }) {
   });
   return router;
 }
-module.exports = { createSessionHubChatRouter };
+module.exports = { createSessionHubChatRouter, requireSessionHubCookie };
