@@ -297,6 +297,48 @@ test('late GET and stale SSE cannot undo newer POST state or messages', async t 
   for (const call of calls) assert.match(call.url, /^\/api\/session-hub\/chat\//);
 });
 
+for (const success of [true, false]) {
+  test(`message completion after newer SSE ${success ? 'clears input once' : 'preserves failed input'}`, async t => {
+    const env = setup(t), post = deferred(), calls = [];
+    let source;
+    const running = { epoch: 'boot', version: 2, state: 'running', messages: [], turnInProgress: false };
+    const sent = { ...running, version: 3, turnInProgress: true,
+      messages: [{ role: 'user', text: '한 번만 보낼 질문' }] };
+    const answered = { ...sent, version: 5, turnInProgress: false,
+      messages: [...sent.messages, { role: 'assistant', text: '최신 답변' }] };
+    env.context.EventSource = class {
+      constructor() { source = this; }
+      addEventListener(name, callback) { this.receive = callback; }
+      close() {}
+    };
+    env.context.fetch = async (url, opts) => {
+      calls.push({ url, opts }); return url.endsWith('/message') ? post.promise : response(running);
+    };
+    env.render(env.h(env.context.SessionHubChat), env.root); await flushEffects(); await flushEffects();
+    const input = env.root.querySelector('textarea'), submit = env.root.querySelector('button[type="submit"]');
+    const enter = () => input.dispatchEvent(new env.window.KeyboardEvent('keydown', {
+      key: 'Enter', bubbles: true, cancelable: true,
+    }));
+    input.value = '한 번만 보낼 질문';
+    input.dispatchEvent(new env.window.Event('input', { bubbles: true })); await flushEffects();
+    enter(); await flushEffects();
+    assert.equal(input.disabled, true);
+    source.receive({ data: JSON.stringify(sent) }); await flushEffects();
+    source.receive({ data: JSON.stringify(answered) }); await flushEffects();
+    post.resolve(success ? response(sent) : response({ error: 'session_hub_failed' }, 503));
+    await flushEffects();
+    assert.equal(input.disabled, false);
+    assert.equal(input.value, success ? '' : '한 번만 보낼 질문');
+    assert.equal(env.root.querySelector('.manager-msg-assistant').textContent.trim(), '최신 답변');
+    assert.equal(env.root.querySelector('.manager-status-badge').textContent, '조회 준비됨');
+    assert.equal(submit.disabled, success);
+    if (success) { enter(); submit.click(); await flushEffects(); }
+    else assert.equal(env.root.querySelector('[role="alert"]').textContent,
+      '세션 비서 요청을 처리하지 못했습니다. 다시 시도해 주세요.');
+    assert.equal(calls.filter(call => call.url.endsWith('/message')).length, 1);
+  });
+}
+
 test('a start reply matching the SSE version clears only the local starting indicator', async t => {
   const env = setup(t), start = deferred();
   let source;

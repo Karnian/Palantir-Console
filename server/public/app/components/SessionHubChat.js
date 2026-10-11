@@ -170,21 +170,21 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch }) {
       const requestedAt = applied.current;
       const value = await apiFetch(`/api/session-hub/chat/${operation}`, { method: 'POST',
         body: JSON.stringify(payload || {}), signal: controller.current.signal, allowAppForbidden: true });
-      if (!applySnapshot(value, requestedAt)
-        && (value.epoch !== epoch.current || value.version !== version.current)) return null;
+      applySnapshot(value, requestedAt);
       return value;
     };
     try {
       if (autoStart) {
         const started = await request('start');
-        if (!started || !alive.current || controller.current.signal.aborted) return;
+        if (!alive.current || controller.current.signal.aborted
+          || started.epoch !== epoch.current || started.version !== version.current) return;
         if (started.state !== 'running' || started.disabled || started.turnInProgress) {
           setError(sessionHubErrorText(started.error || started.disabled || 'session_hub_not_running'));
           return;
         }
       }
       const value = await request(name, body);
-      if (!value || !alive.current) return;
+      if (!alive.current) return;
       if (name === 'message') setText('');
       if (name === 'clear') setClearNotice(value.result === 'incomplete'
         ? `대화는 지웠지만 파일 ${value.remaining}개가 남았습니다.` : '대화를 지웠습니다.');
