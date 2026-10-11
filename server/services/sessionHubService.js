@@ -144,9 +144,10 @@ function createSessionHubService(options = {}) {
     const scan = normalizeForScan(content);
     const unfinishedPem = /-----BEGIN[A-Z ]*PRIVATE KEY-----/.test(scan)
       && scan.lastIndexOf('-----BEGIN') > scan.lastIndexOf('-----END');
-    const unfinishedAssignment = /\b[\w-]*(?:key|token|secret|password|passwd|pwd)\s*[:=]\s*["'][^"']*$/i
+    const unfinishedAssignment = /\b[\w-]*(?:key|token|secret|password|passwd|pwd)\s*[:=]\s*(?:"[^"]*$|'[^']*$)/i
       .test(scan);
-    if (unfinishedPem || unfinishedAssignment) content = '[REDACTED]';
+    const unfinishedCli = /--(?:password|passwd|pwd)\b\s+(?:"[^"]*$|'[^']*$)/i.test(scan);
+    if (unfinishedPem || unfinishedAssignment || unfinishedCli) content = '[REDACTED]';
     if (status === 'partial') {
       const openPem = normalizeForScan(content).lastIndexOf('-----BEGIN');
       const endPem = normalizeForScan(content).lastIndexOf('-----END');
@@ -640,21 +641,29 @@ function createSessionHubService(options = {}) {
   function cleanupTranscripts(query = {}) {
     return enqueueLedger(() => cleanupTranscriptsLocked(query));
   }
-  async function retryDeletions() {
-    const pending = { result: 'complete', remaining: 0 };
-    for (const row of store.deletingThreads()) {
-      const result = await cleanupTranscripts({ threadId: row.id });
-      if (result.result === 'complete') store.delete(row.id);
-      else { pending.result = 'incomplete'; pending.remaining += result.remaining; }
-    }
-    return pending;
+  async function residual(filename, info) {
+    if (!info.isDirectory() || info.isSymbolicLink()) return 1;
+    try {
+      const names = await io.readdir(filename);
+      let count = 0;
+      for (const name of names) {
+        const item = path.join(filename, name);
+        const entry = await stat(item);
+        if (entry) count += await residual(item, entry);
+      }
+      if (!count) await io.rmdir(filename);
+      return count;
+    } catch (err) { return err.code === 'ENOENT' ? 0 : 1; }
   }
   function persistPartial() {
     try { commitTurn('partial'); publish(); }
     catch (err) { storageFailed(err); void close().catch(() => {}); }
   }
-  async function cleanupTranscriptsLocked({ threadId, includeLegacy = false } = {}) {
-    if (!namespaceReady && !await stat(root)) return { result: 'complete', remaining: 0 };
+  async function cleanupTranscriptsLocked({ threadId, processCleanup = false } = {}) {
+    if (!namespaceReady && !await stat(root)) {
+      if (processCleanup) for (const row of store.deletingThreads()) store.delete(row.id);
+      return { result: 'complete', remaining: 0 };
+    }
     if (!namespaceReady) await namespace();
     await privateDir(root);
     const entries = (await readPrivate(ownedPath)).split('\n').filter(Boolean);
@@ -664,7 +673,7 @@ function createSessionHubService(options = {}) {
     for (const entry of entries) {
       const [id, owner] = entry.split('\t');
       // DELETE touches exactly the requested owner. Legacy IDs belong only to process cleanup.
-      if (owner ? owner !== threadId : !includeLegacy) { retained.push(entry); continue; }
+      if (!processCleanup && owner !== threadId) { retained.push(entry); continue; }
       if (!safe || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) {
         retained.push(entry); remaining++; continue;
       }
@@ -678,7 +687,27 @@ function createSessionHubService(options = {}) {
       catch (err) { if (err.code !== 'ENOENT') { retained.push(entry); remaining++; } }
     }
     await privateFile(ownedPath, retained.length ? `${retained.join('\n')}\n` : '');
-    transcriptsRemaining = retained.length;
+    if (processCleanup) {
+      // Failed owned files remain in the ledger across thread changes and server restarts.
+      const pendingOwners = new Set(retained.map(entry => entry.split('\t')[1]));
+      for (const row of store.deletingThreads()) {
+        if (!pendingOwners.has(row.id)) store.delete(row.id);
+      }
+      if (!safe) remaining = Math.max(remaining, 1);
+      else {
+        const accounted = new Set(retained.map(entry => `${entry.split('\t')[0]}.jsonl`));
+        const directory = await stat(transcriptDir);
+        if (directory) {
+          for (const name of await io.readdir(transcriptDir)) {
+            if (accounted.has(name)) continue;
+            const filename = path.join(transcriptDir, name);
+            const info = await stat(filename);
+            if (info) remaining += await residual(filename, info);
+          }
+        }
+      }
+    }
+    transcriptsRemaining = processCleanup ? remaining : retained.length;
     return { result: remaining ? 'incomplete' : 'complete', remaining };
   }
   function close({ shutdown = false } = {}) {
@@ -716,10 +745,7 @@ function createSessionHubService(options = {}) {
       try { await removeConfig(); } catch (err) { cleanupFailure = err; }
       let result = { result: 'incomplete', remaining: transcriptsRemaining };
       try {
-        result = await cleanupTranscripts({ threadId: boundThread, includeLegacy: true });
-        const pending = await retryDeletions();
-        if (pending.result === 'incomplete') result.result = 'incomplete';
-        result.remaining += pending.remaining;
+        result = await cleanupTranscripts({ processCleanup: true });
       } catch (err) { cleanupFailure ||= err; }
       if (persistenceFailure || cleanupFailure) {
         if (persistenceFailure) throw fail('assistant_storage_failed', 503);
@@ -747,7 +773,7 @@ function createSessionHubService(options = {}) {
     return close();
   }
   function shutdown() { return close({ shutdown: true }); }
-  bootCleanup = retryDeletions();
+  bootCleanup = cleanupTranscripts({ processCleanup: true });
   bootCleanup.catch(err => storageFailed(err));
   return { start, message, stop, close, shutdown, newThread, deleteThread,
     listThreads: () => store.list(), messages: (id, query) => store.messages(id, query),

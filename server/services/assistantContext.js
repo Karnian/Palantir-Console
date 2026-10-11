@@ -22,6 +22,7 @@ function buildAssistantContext(store, threadId, before, memoryProvider) {
     sections.push(utf8Prefix(`기억 자료\n${selected.join('\n')}\n기억 ${excluded}개 더 있음`, 4096));
   }
   const selected = [];
+  let excluded = 0;
   let bytes = Buffer.byteLength('최근 대화 자료\n');
   let cursor = before;
   let done = false;
@@ -31,7 +32,10 @@ function buildAssistantContext(store, threadId, before, memoryProvider) {
     for (const row of page.reverse()) {
       cursor = row.seq;
       const content = redactSecrets(row.content).text;
-      if (!content || detectInjection(content)) continue;
+      if (!content) continue;
+      if (detectInjection(content)) { excluded++; continue; }
+      let finalContent = content;
+      let truncated = false;
       let entry = JSON.stringify({ seq: row.seq, role: row.role, content });
       const remaining = 24 * 1024 - bytes - 1;
       if (Buffer.byteLength(entry) > remaining) {
@@ -46,15 +50,25 @@ function buildAssistantContext(store, threadId, before, memoryProvider) {
           else high = middle - 1;
         }
         if (!low) { done = true; break; }
-        entry = clipped(low);
+        finalContent = chars.slice(chars.length - low).join('');
+        truncated = true;
         done = true;
       }
+      // Clipping can turn an embedded role label into a line-start instruction.
+      finalContent = redactSecrets(finalContent).text;
+      if (detectInjection(finalContent)) { excluded++; continue; }
+      entry = JSON.stringify({ seq: row.seq, role: row.role, content: finalContent,
+        ...(truncated ? { truncated: true } : {}) });
+      if (Buffer.byteLength(entry) > remaining) { done = true; break; }
       selected.unshift(entry);
       bytes += Buffer.byteLength(entry) + 1;
     }
     if (page.length < 50) break;
   }
-  sections.push(`최근 대화 자료\n${selected.join('\n')}`);
+  const notice = excluded ? `\n주입 의심 대화 자료 ${excluded}개 제외` : '';
+  const history = () => `최근 대화 자료\n${selected.join('\n')}${notice}`;
+  while (Buffer.byteLength(history()) > 24 * 1024) selected.shift();
+  sections.push(history());
   if (before > 1) sections.push('이전 대화가 더 있음 — 필요하면 search_assistant_history 로 찾을 것');
   sections.push('[비서 맥락 자료 끝]');
   return sections.join('\n\n');
