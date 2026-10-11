@@ -827,8 +827,7 @@ function claudeStatus(records, windowed = false) {
   if (remaining.some(record => record.isSidechain !== true
     && ['user', 'assistant'].includes(record.type) && typeof record.uuid !== 'string'))
     return snapshotPolicy.unknownStatus('status_format_unsupported');
-  const implicit = instruction.type === 'attachment' && instruction.parentUuid == null;
-  const after = (implicit ? remaining : records).filter(record => main.has(record));
+  const after = remaining.filter(record => main.has(record));
   const evidence = [instruction];
   const commandWrapper = /^<(command-name|command-message)>/.test(classifyClaudeRecord(instruction)?.text || '');
   let status = statusAt('working', instruction);

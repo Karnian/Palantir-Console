@@ -6006,6 +6006,25 @@ const localStdout = (type = 'user', extra = {}) => {
 };
 
 for (const large of [false, true]) {
+  test(`PR-S stdout recorded before an explicit queued command cannot end it, tail=${large}`, t => {
+    const fx = createFixture(t);
+    const stamp = milliseconds => `2026-10-08T02:00:00.${milliseconds}Z`;
+    const rows = [localCommand(),
+      localStdout('system', { uuid: 's', parentUuid: 'q', timestamp: stamp('101') }),
+      statusQueued({ uuid: 'q', parentUuid: 'u', timestamp: stamp('100'),
+        attachment: { type: 'queued_command', commandMode: 'prompt', origin: { kind: 'human' },
+          prompt: localCommand('/custom-skill').message.content } }),
+      { type: 'system', subtype: 'stop_hook_summary', sessionId: 's', uuid: 'tip', parentUuid: 's',
+        timestamp: stamp('102') }];
+    if (large) largeStatusFile(fx, 'claude', rows);
+    else fx.file('claude', 'queued-command-before-stdout', rows);
+    const snapshot = snapshotReader.runSnapshot(fx.options);
+    assert.deepEqual(snapshot.sessions[0].status,
+      { state: 'working', source: 'transcript', evidence_at: stamp('100'), reason: null });
+    assert.equal(snapshot.sessions[0].instruction_total, large ? 3 : 2);
+    assert.equal(JSON.stringify(snapshot).includes('PRIVATE_LOCAL_STDOUT_SENTINEL'), false);
+  });
+
   for (const [name, rows, state, reason, evidenceAt, instructions] of [
     ['exit user stdout', [localCommand(), localStdout()], 'ended', 'local_command', LOCAL_STDOUT_TIME, 1],
     ['login system stdout', [localCommand('/login'), localStdout('system')],
