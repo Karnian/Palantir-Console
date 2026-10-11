@@ -834,12 +834,20 @@ function createSessionHubService(options = {}) {
       memoryState = value;
       if (notify) publish();
     },
-    proposeMemory(memory, input, expectedToken) {
+    captureMemoryProposalSource(expectedToken) {
       if (!token || token !== expectedToken) throw fail('forbidden', 403);
       if (!turn || turn.generation !== generation || turn.user.thread_id !== boundThread) {
         throw fail('memory_turn_required');
       }
-      return memory.propose(input, { source_thread_id: boundThread, source_message_id: turn.user.id }, row => {
+      return Object.freeze({ generation, source_thread_id: boundThread,
+        turn_id: turn.user.turn_id, source_message_id: turn.user.id });
+    },
+    proposeMemory(memory, input, expectedToken, source) {
+      if (!source || !token || token !== expectedToken || !turn || source.generation !== generation
+        || turn.generation !== source.generation || boundThread !== source.source_thread_id
+        || turn.user.thread_id !== source.source_thread_id || turn.user.turn_id !== source.turn_id
+        || turn.user.id !== source.source_message_id) throw fail('proposal_turn_changed');
+      return memory.propose(input, source, row => {
         append('tool_note', '기억 제안을 올렸어요 — 승인하면 저장됩니다', {
           memory_proposal_id: row.id, turn_id: turn.user.turn_id, model_session_id: initSessionId,
         }, false);

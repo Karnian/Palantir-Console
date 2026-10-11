@@ -15,8 +15,33 @@ function appFixture(t, extra = {}) {
   const finish = () => process.children.at(-1).stdout.write('{"type":"result"}\n');
   return { app, hub, process, bearer, human, send, finish };
 }
-const input = { operation: 'add', content: '한국어로 답하는 것을 선호', kind: 'preference', reason: '사용자가 요청' };
+const input = { operation: 'add', content: '한국어로 답하는 것을 선호',
+  kind: 'preference', reason: '사용자가 요청' };
 const decision = p => ({ decision: 'approved', revision: p.revision, content_hash: p.content_hash });
+function delayedProposal(app, token, payload = input) {
+  const http = require('node:http');
+  const { Duplex } = require('node:stream');
+  const socket = new Duplex({ read() {}, write(chunk, encoding, callback) { callback(); } });
+  const req = new http.IncomingMessage(socket);
+  const body = JSON.stringify(payload);
+  req.method = 'POST'; req.url = `${BASE}/proposals`;
+  req.headers = { host: 'localhost', authorization: `Bearer ${token}`,
+    'content-type': 'application/json', 'content-length': String(Buffer.byteLength(body)) };
+  const res = new http.ServerResponse(req);
+  const chunks = [];
+  let result;
+  const completed = new Promise(resolve => {
+    res.write = chunk => { chunks.push(Buffer.from(chunk)); return true; };
+    res.end = chunk => {
+      if (chunk) chunks.push(Buffer.from(chunk));
+      result = { status: res.statusCode, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) };
+      resolve(result);
+      return res;
+    };
+  });
+  app.handle(req, res);
+  return { completed, get result() { return result; }, complete() { req.push(body); req.push(null); } };
+}
 
 test('hub creates pending only; source is current server-bound turn; tool_note and dedicated SSE carry proposal',
   async t => {
@@ -148,24 +173,76 @@ test('approval updates dedicated state immediately, rotates next turn, includes 
   });
 
 test('an authenticated proposal with delayed JSON cannot bind to a replacement token generation or turn', async t => {
-  const http = require('node:http');
-  const { Duplex } = require('node:stream');
   const { app, hub, send, finish } = appFixture(t);
   await hub.start(); await send('old', 'old turn');
   const oldToken = hub.current();
-  const socket = new Duplex({ read() {}, write(chunk, encoding, callback) { callback(); } });
-  const req = new http.IncomingMessage(socket);
-  const body = JSON.stringify(input);
-  req.method = 'POST'; req.url = `${BASE}/proposals`;
-  req.headers = { host: 'localhost', authorization: `Bearer ${oldToken}`,
-    'content-type': 'application/json', 'content-length': String(Buffer.byteLength(body)) };
-  const res = new http.ServerResponse(req);
-  const completed = new Promise(resolve => {
-    res.end = () => { resolve(res.statusCode); return res; };
-  });
-  app.handle(req, res);
+  const delayed = delayedProposal(app, oldToken);
   finish(); await hub.newThread(); await hub.start(); await send('new', 'new turn');
-  req.push(body); req.push(null);
-  assert.equal(await completed, 403);
+  delayed.complete();
+  assert.deepEqual(await delayed.completed, { status: 409,
+    body: { error: 'proposal_turn_changed', reason: 'proposal_turn_changed' } });
   assert.equal(app.assistantMemory.state().pending_count, 0);
+});
+
+for (const operation of ['add', 'forget']) {
+  test(`delayed ${operation} proposal cannot move from turn A to B with the same token/thread/generation`, async t => {
+    const { app, hub, process, send, finish } = appFixture(t);
+    const target = app.assistantMemory.add({ content: 'forget target', kind: 'fact' });
+    await hub.start();
+    const a = await send('a', 'turn A');
+    const token = hub.current();
+    const generation = hub.state().generation;
+    const processCount = process.children.length;
+    const payload = operation === 'add' ? input : { operation, memory_id: target.id, reason: 'turn A' };
+    const delayed = delayedProposal(app, token, payload);
+    finish();
+    const b = await send('b', 'turn B');
+    assert.notEqual(a.user.id, b.user.id);
+    assert.equal(hub.current(), token);
+    assert.equal(hub.state().generation, generation);
+    assert.equal(hub.state().thread_id, a.user.thread_id);
+    assert.equal(process.children.length, processCount);
+    delayed.complete();
+    assert.deepEqual(await delayed.completed, { status: 409,
+      body: { error: 'proposal_turn_changed', reason: 'proposal_turn_changed' } });
+    assert.equal(app.assistantMemory.state().pending_count, 0);
+    assert.equal(hub.state().messages.some(row => row.memory_proposal_id), false);
+    assert.equal(app.assistantMemory.get(target.id).status, 'active');
+  });
+}
+
+test('proposal arriving without a turn is rejected before JSON parsing and cannot attach to a later turn', async t => {
+  const { app, hub, send } = appFixture(t);
+  await hub.start();
+  const delayed = delayedProposal(app, hub.current());
+  assert.deepEqual(delayed.result, { status: 409,
+    body: { error: 'memory_turn_required', reason: 'memory_turn_required' } });
+  await send('later', 'later turn');
+  delayed.complete();
+  assert.deepEqual(await delayed.completed, { status: 409,
+    body: { error: 'memory_turn_required', reason: 'memory_turn_required' } });
+  assert.equal(app.assistantMemory.state().pending_count, 0);
+});
+
+test('delayed proposal is rejected if its captured turn ends without a replacement', async t => {
+  const { app, hub, send, finish } = appFixture(t);
+  await hub.start(); await send('a', 'turn A');
+  const delayed = delayedProposal(app, hub.current());
+  finish(); delayed.complete();
+  assert.deepEqual(await delayed.completed, { status: 409,
+    body: { error: 'proposal_turn_changed', reason: 'proposal_turn_changed' } });
+  assert.equal(app.assistantMemory.state().pending_count, 0);
+});
+
+test('delayed proposal in the same ongoing turn retains its captured user source', async t => {
+  const { app, hub, send } = appFixture(t);
+  await hub.start();
+  const sent = await send('a', 'turn A');
+  const delayed = delayedProposal(app, hub.current(), { ...input, generation: -1, turn_id: 'spoof',
+    source_thread_id: 'spoof', source_message_id: 'spoof' });
+  delayed.complete();
+  const response = await delayed.completed;
+  assert.equal(response.status, 200);
+  assert.equal(response.body.source_thread_id, sent.user.thread_id);
+  assert.equal(response.body.source_message_id, sent.user.id);
 });

@@ -16,10 +16,12 @@ function fixture(t) {
   }
   t.after(() => db.close());
   const store = createAssistantStore(db);
-  const user = store.reserve({ thread_id: store.active(), request_id: 'source', text: '사용자가 직접 한 말' }).user;
+  const user = store.reserve({ thread_id: store.active(), request_id: 'source',
+    text: '사용자가 직접 한 말' }).user;
   const source = { source_thread_id: user.thread_id, source_message_id: user.id };
   const memory = createAssistantMemoryService(db);
-  const propose = input => memory.propose({ operation: 'add', content: '기억할 사실', kind: 'fact', ...input }, source);
+  const propose = input => memory.propose({ operation: 'add', content: '기억할 사실',
+    kind: 'fact', ...input }, source);
   const decide = (p, decision = 'approved') => memory.decision(p.id,
     { decision, revision: p.revision, content_hash: p.content_hash });
   return { db, store, source, memory, propose, decide };
@@ -190,4 +192,30 @@ test('editing an archived memory increments its row revision without changing th
   assert.equal(edited.content, '[REDACTED] archived edit');
   assert.equal(memory.state().revision, counter);
   assert.equal(memory.injection().text.includes('archived edit'), false);
+});
+
+test('audit rejects REPLACE and all conflicting inserts with recursive triggers off', t => {
+  const { db, propose } = fixture(t);
+  assert.equal(db.pragma('recursive_triggers', { simple: true }), 0);
+  propose();
+  const before = db.prepare('SELECT * FROM assistant_memory_audit').all();
+  const replacement = `SELECT id, action, memory_id, proposal_id, '변조됨', created_at
+    FROM assistant_memory_audit LIMIT 1`;
+  for (const sql of [
+    `INSERT OR REPLACE INTO assistant_memory_audit ${replacement}`,
+    `REPLACE INTO assistant_memory_audit ${replacement}`,
+    `INSERT INTO assistant_memory_audit ${replacement}`,
+    `INSERT OR IGNORE INTO assistant_memory_audit ${replacement}`,
+    `INSERT INTO assistant_memory_audit ${replacement} ON CONFLICT(id) DO NOTHING`,
+    `INSERT INTO assistant_memory_audit ${replacement} ON CONFLICT(id) DO UPDATE SET text = excluded.text`,
+    `INSERT OR REPLACE INTO assistant_memory_audit (rowid, id, action, memory_id, proposal_id, text, created_at)
+      SELECT rowid, 'replacement-id', action, memory_id, proposal_id, '변조됨', created_at
+      FROM assistant_memory_audit LIMIT 1`,
+  ]) {
+    assert.throws(() => db.exec(sql), /assistant_memory_audit_append_only/, sql);
+    assert.deepEqual(db.prepare('SELECT * FROM assistant_memory_audit').all(), before);
+  }
+  propose();
+  assert.equal(db.prepare('SELECT count(*) AS n FROM assistant_memory_audit').get().n, 2);
+  assert.equal(db.pragma('recursive_triggers', { simple: true }), 0);
 });

@@ -42,6 +42,9 @@ CREATE TRIGGER assistant_memory_audit_no_update BEFORE UPDATE ON assistant_memor
 BEGIN SELECT RAISE(ABORT, 'assistant_memory_audit_append_only'); END;
 CREATE TRIGGER assistant_memory_audit_no_delete BEFORE DELETE ON assistant_memory_audit
 BEGIN SELECT RAISE(ABORT, 'assistant_memory_audit_append_only'); END;
+CREATE TRIGGER assistant_memory_audit_no_replace BEFORE INSERT ON assistant_memory_audit
+WHEN EXISTS (SELECT 1 FROM assistant_memory_audit WHERE id = NEW.id OR rowid = NEW.rowid)
+BEGIN SELECT RAISE(ABORT, 'assistant_memory_audit_append_only'); END;
 CREATE TABLE assistant_memory_revision (
   singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
   revision INTEGER NOT NULL CHECK(revision >= 0)

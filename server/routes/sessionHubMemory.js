@@ -10,6 +10,9 @@ function createSessionHubMemoryRouter({ memory, service, provider, clock = Date.
     if (req.auth?.actor === 'session_hub') {
       const path = String(req.originalUrl).split('?')[0];
       if (req.method !== 'POST' || path !== '/api/session-hub/memory/proposals') return error(res, 'forbidden');
+      try {
+        req.memoryProposalSource = service.captureMemoryProposalSource(req.headers.authorization.slice(7));
+      } catch (err) { return next(err); }
       const token = provider.current();
       const time = clock();
       if (bucket.token !== token || time - bucket.started >= 60000) {
@@ -34,7 +37,7 @@ function createSessionHubMemoryRouter({ memory, service, provider, clock = Date.
   };
   router.post('/proposals', handle(req => {
     if (req.auth?.actor !== 'session_hub') throw Object.assign(new Error('forbidden'), { status: 403 });
-    return service.proposeMemory(memory, req.body, req.headers.authorization.slice(7));
+    return service.proposeMemory(memory, req.body, req.headers.authorization.slice(7), req.memoryProposalSource);
   }));
   router.get('/', handle(() => memory.list()));
   router.post('/proposals/:id/decision', handle(req => memory.decision(req.params.id, req.body)));
