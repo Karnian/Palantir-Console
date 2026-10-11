@@ -463,7 +463,7 @@ test('system prompt advertises exactly the allowed tools including history with 
   const { sessionHubArgv, TOOL_NAMES } = require('../services/sessionHubService');
   const toolLine = SESSION_HUB_PROMPT.split('\n').find(line => line.startsWith('도구는 '));
   for (const name of TOOL_NAMES) assert.ok(toolLine.includes(name), name);
-  assert.equal(SESSION_HUB_PROMPT_VERSION, 'c1-pa-pr-p-3');
+  assert.equal(SESSION_HUB_PROMPT_VERSION, 'c1-pa-pr-m-1');
   const argv = sessionHubArgv('/fixture/mcp.json');
   assert.equal(argv[argv.indexOf('--append-system-prompt') + 1], SESSION_HUB_PROMPT);
   assert.doesNotMatch(SESSION_HUB_PROMPT, /최근 대화 자료|기억 자료/);

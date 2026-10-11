@@ -22,6 +22,13 @@ const TOOLS = [
   { name: 'search_assistant_history', description: 'Search active assistant conversation', inputSchema: schema({
     q: string(), limit: { type: 'integer', minimum: 1, maximum: 50 },
   }, ['q']) },
+  { name: 'propose_memory', description: 'Propose memory for human approval', inputSchema: schema({
+    content: string(null, 500), kind: { type: 'string', enum: ['preference', 'fact', 'person', 'project', 'other'] },
+    reason: string(null, 300),
+  }, ['content', 'kind', 'reason']) },
+  { name: 'propose_forget', description: 'Propose archiving memory for human approval', inputSchema: schema({
+    memory_id: string(ID, 128), reason: string(null, 300),
+  }, ['memory_id', 'reason']) },
   { name: 'get_session', description: 'Read a snapshot session timeline', inputSchema: schema({
     key: string(ID, 128),
     rev: string('^[0-9a-f]{16}$', 16), around: string(instruction, 140),
@@ -36,8 +43,8 @@ function valid(args, spec) {
     if (!rule || typeof value !== (rule.type === 'integer' ? 'number' : rule.type)) return false;
     if (rule.type === 'integer' && (!Number.isSafeInteger(value)
       || value < rule.minimum || value > rule.maximum)) return false;
-    if (rule.type === 'string' && (value.length < (rule.minLength || 0)
-      || value.length > (rule.maxLength || Infinity))) return false;
+    if (rule.type === 'string' && ([...value].length < (rule.minLength || 0)
+      || [...value].length > (rule.maxLength || Infinity))) return false;
     if (rule.pattern && !new RegExp(rule.pattern).test(value)) return false;
     if (rule.enum && !rule.enum.includes(value)) return false;
   }
@@ -46,6 +53,7 @@ function valid(args, spec) {
 }
 
 function brokerGet(name, args, env) {
+  if (name === 'propose_memory' || name === 'propose_forget') return brokerPost(name, args, env);
   const base = new URL(env.PALANTIR_SESSION_HUB_BASE_URL);
   if (base.protocol !== 'http:' || base.username || base.password || base.pathname !== '/') {
     throw new Error('invalid_base_url');
@@ -69,6 +77,35 @@ function brokerGet(name, args, env) {
     });
     req.setTimeout(10000, () => req.destroy(new Error('broker_timeout')));
     req.on('error', reject);
+  });
+}
+
+function brokerPost(name, args, env) {
+  const base = new URL(env.PALANTIR_SESSION_HUB_BASE_URL);
+  if (base.protocol !== 'http:' || base.username || base.password || base.pathname !== '/') {
+    throw new Error('invalid_base_url');
+  }
+  const url = new URL('/api/session-hub/memory/proposals', base);
+  const body = JSON.stringify({ ...args, operation: name === 'propose_forget' ? 'forget' : 'add' });
+  if (Buffer.byteLength(body) > 4096) throw new Error('invalid_query');
+  return new Promise((resolve, reject) => {
+    const req = http.request(url, { method: 'POST', headers: {
+      Authorization: `Bearer ${env.PALANTIR_SESSION_HUB_TOKEN}`,
+      'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body),
+    } }, res => {
+      const chunks = [];
+      let bytes = 0;
+      res.on('data', chunk => {
+        bytes += chunk.length;
+        if (bytes > 65536) res.destroy(new Error('broker_response_too_large'));
+        else chunks.push(chunk);
+      });
+      res.on('error', reject);
+      res.on('end', () => resolve({ text: Buffer.concat(chunks).toString('utf8'), isError: res.statusCode >= 400 }));
+    });
+    req.setTimeout(10000, () => req.destroy(new Error('broker_timeout')));
+    req.on('error', reject);
+    req.end(body);
   });
 }
 
