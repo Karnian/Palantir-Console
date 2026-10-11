@@ -102,8 +102,8 @@ function SessionCard({ card, query, rank, now }) {
     </div>`}
     <div class="work-meta"><span>${W.lastObserved}</span>
       <${SnapshotTime} value=${card.last_record_at} now=${now} /></div>
-    ${card.orca_link.confirmed && html`<div class="work-meta work-orca">
-      <span>Orca · ${W.states[card.agent?.state || 'unknown']}</span></div>`}
+    <div class="work-meta work-orca"><span>${W.states[card.status.state]}</span>
+      <${SnapshotTime} value=${card.status.evidence_at} now=${now} label="근거" /></div>
     ${(card.compact_only_history || card.unknown_count > 0) && html`<div class="work-meta">
       ${card.compact_only_history && html`<span class="work-warning">${W.compact}</span>`}
       ${card.unknown_count > 0 && html`<span class="work-warning">

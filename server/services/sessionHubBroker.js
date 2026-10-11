@@ -3,7 +3,7 @@
 const { pathToFileURL } = require('node:url');
 const path = require('node:path');
 const storeDefault = require('./observeSnapshotStore');
-const { isSafeId, isSafeInstructionId } = require('./observeSnapshotPolicy');
+const { isSafeId, isSafeInstructionId, isSafeEnum } = require('./observeSnapshotPolicy');
 const { redactSecrets } = require('./memorySanitize');
 
 let board;
@@ -113,11 +113,14 @@ function createSessionHubBroker({ state, store = storeDefault, now = () => new D
       recent: recentText, recent_at: recent?.ts || null,
       recent_flags: instructionFlags(recent,
         recentText !== null && recentText !== text(helpers, recent?.text, Infinity)),
+      status: { state: card.status.state, source: card.status.source,
+        evidence_at: card.status.evidence_at, reason: card.status.reason },
       format_unverified: card.format_unverified,
       instruction_total: card.instruction_total, instructions_held: card.instructions.length,
       last_record_at: card.last_record_at,
       orca: { link: card.orca_link.confirmed ? 'confirmed' : 'unknown',
-        state: card.orca_link.confirmed ? card.agent?.state || null : null,
+        state: card.orca_link.confirmed && card.agent
+          ? isSafeEnum('agent_state', card.agent.state) ? card.agent.state : 'unknown' : null,
         state_since: card.orca_link.confirmed ? card.agent?.state_started_at || null : null },
     };
   }
