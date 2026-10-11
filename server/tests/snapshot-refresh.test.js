@@ -46,9 +46,13 @@ test('single-flight, success rename, private clean staging, bounded output and f
   assert.deepEqual(fx.result(), { code: 'ok' });
   const calls = fs.readFileSync(fx.log, 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(calls.length, 1); assert.equal(calls[0].blocked, '1'); assert.ok(calls[0].context);
-  assert.ok(calls[0].args.includes(dir));
+  const runDir = calls[0].args[calls[0].args.indexOf('--out-dir') + 1];
+  assert.equal(path.dirname(runDir), dir);
+  assert.match(path.basename(runDir), /^run-/);
+  assert.equal(fs.existsSync(runDir), false);
+  assert.equal(fs.existsSync(path.join(dir, 'stale')), true);
   assert.equal(fs.statSync(dir).mode & 0o777, 0o700);
-  assert.deepEqual(fs.readdirSync(dir), []);
+  assert.deepEqual(fs.readdirSync(dir), ['stale']);
   assert.equal(fs.readFileSync(path.join(fx.dir, 'alpha.json'), 'utf8'), fx.original.toString() + '\n');
   assert.equal(fs.statSync(path.join(fx.dir, 'alpha.json')).mode & 0o777, 0o600);
   assert.ok(fx.service.state().targets[0].last_success_at);
@@ -216,7 +220,83 @@ test('SSH argv and target configuration are sealed at boot without executing ssh
   service.refresh(); await service.settled();
   const call = JSON.parse(fs.readFileSync(fx.log, 'utf8').trim());
   assert.deepEqual(call.args, ['remote', '--host', 'codev@codev2', '--remote-node', '/synthetic/node',
-    'snapshot', '--out-dir', path.join(fx.dir, '.staging', 'alpha'), '--label', 'codev2',
+    'snapshot', '--out-dir', call.args[7], '--label', 'codev2',
     '--orca-bin', '/synthetic/orca']);
+  assert.equal(path.dirname(call.args[7]), path.join(fx.dir, '.staging', 'alpha'));
   assert.equal(service.state().targets[0].name, 'codev2'); await service.shutdown();
+});
+
+test('every execution owns a unique directory and removes only that directory', async t => {
+  const fx = setup(t);
+  const parent = path.join(fx.dir, '.staging', 'alpha');
+  fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
+  const sibling = fs.mkdtempSync(path.join(parent, 'run-sibling-'));
+  fs.writeFileSync(path.join(sibling, 'alpha.json'), 'old bytes');
+  for (let index = 0; index < 2; index++) { fx.service.refresh(); await fx.service.settled(); }
+  const calls = fs.readFileSync(fx.log, 'utf8').trim().split('\n').map(JSON.parse);
+  const dirs = calls.map(call => call.args[call.args.indexOf('--out-dir') + 1]);
+  assert.notEqual(dirs[0], dirs[1]);
+  for (const dir of dirs) assert.equal(fs.existsSync(dir), false);
+  assert.equal(fs.readFileSync(path.join(sibling, 'alpha.json'), 'utf8'), 'old bytes');
+});
+
+test('boot removes crash remnants, including targets removed from configuration', async t => {
+  const fx = setup(t);
+  await fx.service.shutdown();
+  const old = path.join(fx.dir, '.staging', 'removed', 'run-old');
+  fs.mkdirSync(old, { recursive: true }); fs.writeFileSync(path.join(old, 'executor.pgid'), '12345');
+  const service = createSnapshotRefreshService(fx.options);
+  assert.equal(service.state().enabled, true); assert.equal(fs.existsSync(old), false);
+  await service.shutdown();
+});
+
+test('timeout reaps a detached executor and grandchild while the fixture CLI is SIGSTOPed', async t => {
+  const fx = setup(t, 'stopped_cli');
+  await fx.service.shutdown();
+  let executor;
+  const service = createSnapshotRefreshService({ ...fx.options,
+    env: { ...fx.env, PALANTIR_SNAPSHOT_TIMEOUT_MS: '1000' },
+    reapOptions: { termMs: 100, reapMs: 3000, pollMs: 10 },
+    psBin: path.resolve(__dirname, 'fixtures/bin/fake-snapshot-ps.cjs'),
+    execFile(command, args, options, callback) {
+      assert.deepEqual(args, ['-axo', 'pid=,pgid=,uid=']);
+      callback(null, `${process.pid} ${process.pid} ${process.getuid()}\n`
+        + `${executor} ${executor} ${process.getuid()}\n`);
+    } });
+  t.after(async () => {
+    if (executor) { try { process.kill(-executor, 'SIGKILL'); } catch {} }
+    await service.shutdown().catch(() => {});
+  });
+  service.refresh(); await until(() => fs.existsSync(fx.pid));
+  const grandchild = Number(fs.readFileSync(fx.pid, 'utf8'));
+  const call = JSON.parse(fs.readFileSync(fx.log, 'utf8').trim().split('\n')[0]);
+  const dir = call.args[call.args.indexOf('--out-dir') + 1];
+  executor = Number(fs.readFileSync(path.join(dir, 'executor.pgid'), 'utf8'));
+  process.kill(call.pid, 'SIGSTOP');
+  await service.settled();
+  assert.deepEqual(service.state().targets[0].last_result, { code: 'timeout' });
+  for (const pid of [call.pid, executor, grandchild]) {
+    assert.throws(() => process.kill(pid, 0), err => err.code === 'ESRCH');
+  }
+  assert.equal(fs.existsSync(dir), false); fx.unchanged();
+});
+
+test('executor PGID rejects invalid, own-group, symlink and foreign-uid markers before signalling', async t => {
+  const { reapExecutorGroup } = require('../utils/snapshotExecutorGroup');
+  const fx = setup(t);
+  const marker = path.join(fx.root, 'executor.pgid');
+  let signals = 0; let rows = `${process.pid} 5000 ${process.getuid()}\n`;
+  const options = { psBin: path.resolve(__dirname, 'fixtures/bin/fake-snapshot-ps.cjs'),
+    execFile(command, argv, settings, callback) { callback(null, rows); },
+    reapOptions: { kill() { signals++; } } };
+  for (const value of ['0', '1', '-2', '2\n', '2147483648', 'not-a-pid', '5000']) {
+    fs.writeFileSync(marker, value, { mode: 0o600 });
+    await assert.rejects(reapExecutorGroup(fx.root, options), err => err.code === 'reap_failed');
+  }
+  rows += `6000 6000 ${process.getuid() + 1}\n`;
+  fs.writeFileSync(marker, '6000');
+  await assert.rejects(reapExecutorGroup(fx.root, options), err => err.code === 'reap_failed');
+  fs.unlinkSync(marker); fs.symlinkSync(path.join(fx.root, 'input.json'), marker);
+  await assert.rejects(reapExecutorGroup(fx.root, options), err => err.code === 'reap_failed');
+  assert.equal(signals, 0);
 });

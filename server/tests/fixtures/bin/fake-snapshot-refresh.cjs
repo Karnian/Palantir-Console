@@ -9,7 +9,17 @@ const dir = args[args.indexOf('--out-dir') + 1];
 fs.appendFileSync(env.FAKE_REFRESH_LOG, JSON.stringify({ args, blocked: env.PALANTIR_BLOCK_REAL_SPAWN,
   context: env.NODE_TEST_CONTEXT, pid: process.pid }) + '\n');
 const mode = env.FAKE_REFRESH_MODE || 'ok';
-if (mode === 'descendant' || mode === 'early_exit') {
+if (mode === 'stopped_cli') {
+  const executor = spawn(process.execPath, [__filename, '--executor'], { detached: true,
+    env: { ...env, FAKE_REFRESH_MODE: 'executor' }, stdio: 'ignore' });
+  fs.writeFileSync(path.join(dir, 'executor.pgid'), String(executor.pid), { mode: 0o600 });
+  setInterval(() => {}, 1000);
+} else if (mode === 'executor') {
+  spawn(process.execPath, [__filename, '--grandchild'], { env: { ...env,
+    FAKE_REFRESH_MODE: 'grandchild' }, stdio: 'ignore' });
+  process.on('SIGTERM', () => {});
+  setInterval(() => {}, 1000);
+} else if (mode === 'descendant' || mode === 'early_exit') {
   const child = spawn(process.execPath, [__filename, '--grandchild'], { env: { ...env,
     FAKE_REFRESH_MODE: 'grandchild' }, stdio: 'ignore' });
   child.on('exit', () => { if (stopping) process.exit(0); });

@@ -89,7 +89,7 @@ export function buildBundle({ request, sourceOverrides = {} }) {
   return { code: `const REQUEST = ${JSON.stringify(request)};\n${runtime}`, readerBuild };
 }
 export function runExecutor({ target, bundle, sshBin = 'ssh', env = process.env,
-  maxStdoutBytes = 16 * 1024 * 1024, timeoutMs = 120000, spawnImpl = spawn }) {
+  maxStdoutBytes = 16 * 1024 * 1024, timeoutMs = 120000, spawnImpl = spawn, outDir }) {
   const command = target.kind === 'local' ? process.execPath : resolveExecutable(sshBin, env);
   const args = target.kind === 'local' ? ['--no-warnings', '-']
     : ['-o', 'BatchMode=yes', '--', target.host, target.remoteNode || 'node', '--no-warnings', '-'];
@@ -164,7 +164,17 @@ export function runExecutor({ target, bundle, sshBin = 'ssh', env = process.env,
       if (!signalCleanup) finish(exitCode, signal);
     });
     child.stdin.on('error', function ignorePipeError() {});
-    child.stdin.end(typeof bundle === 'string' ? bundle : bundle.code);
+    try {
+      if (outDir && child.pid) {
+        fs.mkdirSync(outDir, { recursive: true, mode: 0o700 });
+        const temporary = path.join(outDir, `.executor-${crypto.randomBytes(8).toString('hex')}.tmp`);
+        try {
+          fs.writeFileSync(temporary, String(child.pid), { flag: 'wx', mode: 0o600 });
+          fs.renameSync(temporary, path.join(outDir, 'executor.pgid'));
+        } finally { fs.rmSync(temporary, { force: true }); }
+      }
+      child.stdin.end(typeof bundle === 'string' ? bundle : bundle.code);
+    } catch { kill('pgid_record_failed'); }
   });
 }
 function resolveExecutable(command, env) {

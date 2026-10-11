@@ -76,7 +76,11 @@ observe가 비활성화되면 수집도 비활성화된다.
 
 자동 수집은 기본 5분마다 실행하며 실행 중인 대상은 건너뛴다.
 `PALANTIR_SNAPSHOT_REFRESH_MS=0`이면 자동 수집만 끈다. 수동 버튼은 계속 사용할 수 있다.
-각 실행은 `<정본 디렉터리>/.staging/<machineId>/`를 비운 뒤 수집한다(0700).
+observe 루트 하나당 보드 서버 인스턴스 하나만 실행한다.
+각 실행은 `.staging/<machineId>/run-<고유 ID>/`를 새로 만든다(0700).
+해당 실행 디렉터리의 검증된 파일만 게시한다.
+성공·실패·취소 후 그 디렉터리만 삭제한다.
+서버 부팅 시 이전 실행 디렉터리 등 staging 잔재를 정리한다.
 기존 observe 크기·닫힌 스키마 검증과 예상 machine id 확인 후에만 정본으로 원자 rename한다.
 실패·timeout·shutdown에서는 마지막 성공 파일을 유지한다.
 
@@ -85,7 +89,10 @@ observe가 비활성화되면 수집도 비활성화된다.
 POST는 서버 scheme·host·port와 정확히 같은 Origin이 필요하다.
 결과는 `ok`, `timeout`, `failed`(CLI 종료 코드 포함), `machine_mismatch`, `invalid_output`, `cancelled`다.
 stdout·stderr 내용은 상태에 포함하지 않는다.
-timeout·종료 시 그룹을 회수하며 5초 뒤 SIGKILL로 승격한다.
+CLI는 실행 디렉터리의 `executor.pgid`에 detached executor PGID를 기록한다(0600).
+timeout·종료 시 CLI 그룹을 회수하며 5초 뒤 SIGKILL로 승격한다.
+이후 서버가 PGID 파일과 ps의 UID·그룹을 검증하고 executor 그룹도 회수한다.
+CLI가 멈춰 신호를 처리하지 못해도 서버가 두 그룹의 ESRCH를 확인한다.
 ESRCH를 확인하지 못하면 `reap_failed`와 잠금 상태를 표시한다.
 해당 대상의 다음 실행을 거부한다.
 남은 프로세스를 확인·정리하고 서버를 재시작한다.

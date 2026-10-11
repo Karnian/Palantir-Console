@@ -25,7 +25,8 @@ function createSnapshotRefreshRouter({ service }) {
   router.use((err, req, res, next) => {
     if (res.headersSent) return next(err);
     const code = ['request_invalid', 'snapshot_refresh_closed', 'snapshot_targets_invalid',
-      'snapshot_refresh_config_invalid', 'snapshot_targets_unset', 'observe_off', 'reap_failed'].includes(err.code)
+      'snapshot_staging_invalid', 'snapshot_refresh_config_invalid', 'snapshot_targets_unset',
+      'observe_off', 'reap_failed'].includes(err.code)
       ? err.code : 'request_invalid';
     return res.status(err.status || 400).json({ error: code, reason: code });
   });

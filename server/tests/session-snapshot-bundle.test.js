@@ -659,3 +659,23 @@ test('PR1c D fake Orca executes actual envelopes through the bundle and projects
   assert.equal(envelope.sessions[0].orca_link.terminal_handle, 'term_fixture');
   assert.equal(JSON.stringify(envelope).includes('FAKE_ORCA_PRIVATE_TEXT'), false);
 });
+
+test('executor publishes its detached PGID as digits in a private marker before feeding stdin', async t => {
+  const f = fixture(t);
+  const { spawn } = require('node:child_process');
+  let pgid;
+  const result = await execute(f, f.request, { outDir: f.out, spawnImpl(command, args, options) {
+    const child = spawn(command, args, options);
+    pgid = child.pid;
+    const end = child.stdin.end.bind(child.stdin);
+    child.stdin.end = (...values) => {
+      const marker = path.join(f.out, 'executor.pgid');
+      assert.equal(fs.readFileSync(marker, 'utf8'), String(pgid));
+      assert.equal(fs.statSync(marker).mode & 0o777, 0o600);
+      return end(...values);
+    };
+    return child;
+  } });
+  assert.equal(result.result.exitCode, 0);
+  assert.throws(() => process.kill(pgid, 0), err => err.code === 'ESRCH');
+});

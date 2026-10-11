@@ -7,6 +7,7 @@ const store = require('./observeSnapshotStore');
 const { isSafeId, validateSnapshot } = require('./observeSnapshotPolicy');
 const { assertSpawnAllowed, isSpawnGuardActive } = require('../utils/spawnGuard');
 const { reapProcessGroup } = require('../utils/reapProcessGroup');
+const { reapExecutorGroup } = require('../utils/snapshotExecutorGroup');
 
 const CLI = path.resolve(__dirname, '../../scripts/session-snapshot.mjs');
 const FIXTURES = path.resolve(__dirname, '../tests/fixtures/bin');
@@ -67,7 +68,14 @@ function createSnapshotRefreshService(options = {}) {
     code = err.code || 'snapshot_targets_invalid'; targets = [];
     (options.warn || console.warn)(code);
   }
-  const enabled = observe.on && !code && targets.length > 0;
+  let enabled = observe.on && !code && targets.length > 0;
+  if (enabled) {
+    try { cleanOldStaging(); }
+    catch {
+      enabled = false; code = 'snapshot_staging_invalid';
+      (options.warn || console.warn)(code);
+    }
+  }
   code ||= !observe.on ? 'observe_off' : !targets.length ? 'snapshot_targets_unset' : null;
   const entries = targets.map(target => ({ target, running: false, last_success_at: null,
     last_attempt_at: null, last_result: null, locked: false, task: null, run: null }));
@@ -86,13 +94,26 @@ function createSnapshotRefreshService(options = {}) {
     }
     fs.chmodSync(dir, 0o700);
   }
-  function staging(entry) {
+  function stagingBase() {
     if (!observe.on || fs.realpathSync(observe.root) !== observe.root) throw fail('invalid_output');
     const base = path.join(observe.root, '.staging');
     privateDirectory(base);
-    const dir = path.join(base, entry.target.machineId);
-    privateDirectory(dir);
-    for (const name of fs.readdirSync(dir)) fs.rmSync(path.join(dir, name), { recursive: true, force: true });
+    return base;
+  }
+  function cleanOldStaging() {
+    const base = stagingBase();
+    for (const name of fs.readdirSync(base)) {
+      if (!isSafeId(name)) continue;
+      const dir = path.join(base, name);
+      privateDirectory(dir);
+      for (const old of fs.readdirSync(dir)) fs.rmSync(path.join(dir, old), { recursive: true, force: true });
+    }
+  }
+  function staging(entry) {
+    const parent = path.join(stagingBase(), entry.target.machineId);
+    privateDirectory(parent);
+    const dir = fs.mkdtempSync(path.join(parent, 'run-'));
+    fs.chmodSync(dir, 0o700);
     return dir;
   }
   function argumentsFor(target, dir) {
@@ -117,7 +138,7 @@ function createSnapshotRefreshService(options = {}) {
         || env.PALANTIR_BLOCK_REAL_SPAWN === '1';
       if (guarded) fixtureScript(script);
       assertSpawnAllowed({ command, source: 'snapshot-refresh:cli' });
-      dir = staging(entry);
+      dir = staging(entry); run.dir = dir;
       if (run.cancelled) return { code: run.cancelled };
       const childEnv = { ...env };
       if (guarded) {
@@ -187,10 +208,17 @@ function createSnapshotRefreshService(options = {}) {
       if (err.code === 'reap_failed') { entry.locked = true; return { code: 'reap_failed' }; }
       return { code: run.cancelled || (validating ? 'invalid_output' : 'failed'),
         ...(!run.cancelled && !validating ? { status_code: null } : {}) };
+    } finally {
+      if (dir) fs.rmSync(dir, { recursive: true, force: true });
     }
   }
   function reap(run) {
-    if (!run.reaping) run.reaping = reapProcessGroup(run.pgid, options.reapOptions);
+    if (!run.reaping) run.reaping = (async () => {
+      // Inspect the executor only after the CLI can no longer create or replace its marker.
+      const cli = await Promise.allSettled([reapProcessGroup(run.pgid, options.reapOptions)]);
+      if (run.dir) await reapExecutorGroup(run.dir, options);
+      if (cli[0].status === 'rejected') throw cli[0].reason;
+    })();
     return run.reaping;
   }
   function cancel(run, reason) {
