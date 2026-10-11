@@ -15,7 +15,8 @@ const { assertSpawnAllowed } = require('../utils/spawnGuard');
 const { SESSION_HUB_PROMPT, SESSION_HUB_PROMPT_VERSION } = require('./sessionHubPrompt');
 
 const { buildAssistantContext } = require('./assistantContext');
-const { sanitize } = require('./assistantStore');
+const { utf8Prefix } = require('./assistantStore');
+const { redactSecrets, normalizeForScan } = require('./memorySanitize');
 const TOOL_NAMES = ['list_sessions', 'search_instructions', 'get_session', 'search_assistant_history'];
 const fail = (code, status = 409) => Object.assign(new Error(code), { code, status });
 const PRIVATE_BYTES = 1024 * 1024;
@@ -91,6 +92,17 @@ function createSessionHubService(options = {}) {
   let mcpLossPending = false;
   let stdoutHandler = null;
   let writeQueue = Promise.resolve();
+  let bootCleanup = null;
+  let persistenceFailure = null;
+  const enqueueLedger = fn => {
+    const result = writeQueue.then(fn);
+    writeQueue = result.catch(() => {});
+    return result;
+  };
+  function storageFailed(err) {
+    persistenceFailure ||= err;
+    error = 'assistant_storage_failed';
+  }
   let socketServer = null;
   let socketDir = null;
   let mcpReady = false;
@@ -105,7 +117,10 @@ function createSessionHubService(options = {}) {
   const ownedPath = path.join(root, 'owned-sessions');
 
   function snapshot() {
-    if (!closedComplete) { activeThread = store.active(); cachedMessages = store.window(activeThread); }
+    if (!closedComplete) {
+      try { activeThread = store.active(); cachedMessages = store.window(activeThread); }
+      catch (err) { storageFailed(err); }
+    }
     return { state, epoch, version, generation, error, disabled, turnInProgress: !!turn,
       promptVersion: SESSION_HUB_PROMPT_VERSION, thread_id: activeThread,
       transcripts_remaining: transcriptsRemaining, messages: cachedMessages };
@@ -124,10 +139,29 @@ function createSessionHubService(options = {}) {
   }
   function commitTurn(status) {
     if (!turn) return;
+    // Keep raw text only in this turn. Every commit re-scans the entire stream across chunk boundaries.
+    let content = redactSecrets(turn.raw).text;
+    const scan = normalizeForScan(content);
+    const unfinishedPem = /-----BEGIN[A-Z ]*PRIVATE KEY-----/.test(scan)
+      && scan.lastIndexOf('-----BEGIN') > scan.lastIndexOf('-----END');
+    const unfinishedAssignment = /\b[\w-]*(?:key|token|secret|password|passwd|pwd)\s*[:=]\s*["'][^"']*$/i
+      .test(scan);
+    if (unfinishedPem || unfinishedAssignment) content = '[REDACTED]';
+    if (status === 'partial') {
+      const openPem = normalizeForScan(content).lastIndexOf('-----BEGIN');
+      const endPem = normalizeForScan(content).lastIndexOf('-----END');
+      const openQuote = ["'", '"'].some(quote => content.split(quote).length % 2 === 0);
+      if (openPem > endPem || openQuote) content = '';
+      else content = content.slice(0, content.lastIndexOf('\n') + 1);
+    }
+    turn.content = utf8Prefix(content, 65536);
     store.update(turn.assistant.id, turn.content, status, initSessionId);
     turn.lastCommit = Date.now();
   }
-  function setError(code) { error = code; append('system_note', code); }
+  function setError(code) {
+    error = code;
+    try { append('system_note', code); } catch (err) { storageFailed(err); }
+  }
   async function stat(filename) {
     try { return await io.lstat(filename); }
     catch (err) { if (err.code === 'ENOENT') return null; throw err; }
@@ -222,9 +256,8 @@ function createSessionHubService(options = {}) {
         // MCP stdin EOF can precede the parent's final stdout/exit. Revoke access now but keep parsing stdout.
         mcpLossTimer = setTimeout(() => {
           if (!live(gen) || !mcpLossPending) return;
-          error = 'session_hub_mcp_lost';
+          setError('session_hub_mcp_lost');
           void close().catch(() => {});
-          append('error', error);
         }, 2000);
       };
       socket.on('close', () => { sockets.delete(socket); lost(); });
@@ -291,6 +324,7 @@ function createSessionHubService(options = {}) {
     return url.origin;
   }
   async function prepare(gen) {
+    await bootCleanup;
     if (managedSettingsPresent(managedPaths, options.managedFs || fs)) {
       disabled = 'session_hub_managed_settings';
       throw fail(disabled, 503);
@@ -322,21 +356,22 @@ function createSessionHubService(options = {}) {
       throw fail('session_hub_unexpected_paths', 503);
     }
     const owner = boundThread;
-    writeQueue = writeQueue.then(async () => {
+    enqueueLedger(async () => {
       const owned = new Set((await readPrivate(ownedPath)).split('\n').filter(Boolean));
       owned.add(`${id}\t${owner}`);
       await privateFile(ownedPath, `${[...owned].join('\n')}\n`);
-    });
-    writeQueue.catch(() => {
+    }).catch(() => {
       setError('session_hub_storage_failed');
       void close().catch(() => {});
     });
   }
   function finishTurn(gen) {
     if (!live(gen)) return;
-    commitTurn(turn?.failed ? 'error' : 'complete');
+    try { commitTurn(turn?.failed ? 'error' : 'complete'); }
+    catch (err) { storageFailed(err); }
     clearInterval(partialTimer); partialTimer = null;
     clearTimeout(timer); timer = null; turn = null; publish();
+    if (persistenceFailure) void close().catch(() => {});
   }
   function verifyTranscript(gen) {
     if (transcriptCheck) return;
@@ -378,8 +413,11 @@ function createSessionHubService(options = {}) {
       for (const block of event.message?.content || []) {
         if (!turn) continue;
         if (block.type === 'text') {
-          turn.content = sanitize(turn.content + String(block.text));
-          if (Date.now() - turn.lastCommit >= 2000) { commitTurn('partial'); publish(); }
+          turn.raw += String(block.text);
+          if (Buffer.byteLength(turn.raw) > 4 * LINE_LIMIT) {
+            setError('session_hub_output_too_large'); void close().catch(() => {}); return;
+          }
+          if (Date.now() - turn.lastCommit >= 2000) persistPartial();
         }
         if (block.type === 'tool_use') append('tool_note', String(block.name).slice(0, 150), {
           turn_id: turn.user.turn_id, model_session_id: initSessionId,
@@ -391,7 +429,7 @@ function createSessionHubService(options = {}) {
       const input = Number(usage.input_tokens || 0) + Number(usage.cache_read_input_tokens || 0)
         + Number(usage.cache_creation_input_tokens || 0);
       if (input > (options.contextTokenLimit ?? 120000)) rotateContext = true;
-      if (event.is_error && turn) { turn.failed = true; turn.content += '\nsession_hub_turn_failed'; }
+      if (event.is_error && turn) { turn.failed = true; turn.raw += '\nsession_hub_turn_failed'; }
       if (requiresTranscript && !transcriptVerified) verifyTranscript(gen);
       else finishTurn(gen);
     }
@@ -406,7 +444,7 @@ function createSessionHubService(options = {}) {
     state = 'starting'; error = null;
     boundThread = store.active(); contextFresh = true;
     mcpLossPending = false;
-    closePromise = null; cleanupComplete = false; writeQueue = Promise.resolve(); initSeen = false; mcpReady = false;
+    closePromise = null; cleanupComplete = false; persistenceFailure = null; initSeen = false; mcpReady = false;
     initSessionId = null; requiresTranscript = false; transcriptVerified = false; transcriptCheck = null;
     const gen = ++generation;
     preparation = prepare(gen);
@@ -432,7 +470,10 @@ function createSessionHubService(options = {}) {
         let newline;
         while ((newline = buffer.indexOf('\n')) !== -1) {
           const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1);
-          try { protocol(JSON.parse(line), gen); } catch { /* ignore non-protocol output */ }
+          let event;
+          try { event = JSON.parse(line); } catch { continue; }
+          try { protocol(event, gen); }
+          catch (err) { storageFailed(err); void close().catch(() => {}); }
         }
       };
       child.stdout.on('data', stdoutHandler);
@@ -471,7 +512,7 @@ function createSessionHubService(options = {}) {
         || !/^[A-Za-z0-9_-]{1,128}$/.test(request_id)) throw fail('invalid_message', 400);
       const prior = store.findRequest(thread_id, request_id);
       if (prior) {
-        if (prior.user.content !== store.sanitize(text)) throw fail('request_conflict');
+        if (prior.receipt.content_hash !== store.contentHash(text)) throw fail('request_conflict');
         return { ...snapshot(), ...prior, replayed: true };
       }
       if (store.active() !== thread_id) throw fail('thread_not_active');
@@ -488,9 +529,9 @@ function createSessionHubService(options = {}) {
       if (permanent || state !== 'running') throw fail('session_hub_not_running');
       const reserved = store.reserve(payload);
       const gen = generation;
-      turn = { ...reserved, generation: gen, content: '', lastCommit: Date.now() - 2000 };
+      turn = { ...reserved, generation: gen, raw: '', content: '', lastCommit: Date.now() - 2000 };
       partialTimer = setInterval(() => {
-        if (live(gen) && turn?.generation === gen) { commitTurn('partial'); publish(); }
+        if (live(gen) && turn?.generation === gen) persistPartial();
       }, 2000);
       let content = reserved.user.content;
       try {
@@ -530,13 +571,11 @@ function createSessionHubService(options = {}) {
     return serialize(async () => {
       if (permanent) throw fail('session_hub_closed');
       if (id === store.active()) throw fail('thread_active');
-      // Validate before touching files; deletion is limited to ledger entries for this thread.
-      store.messages(id, { limit: 1 });
-      await writeQueue;
+      store.markDeleting(id);
       if (permanent) throw fail('session_hub_closed');
       const result = await cleanupTranscripts({ threadId: id });
       if (permanent) throw fail('session_hub_closed');
-      store.delete(id);
+      if (result.result === 'complete') store.delete(id);
       publish();
       return { thread_id: id, ...result };
     });
@@ -598,7 +637,23 @@ function createSessionHubService(options = {}) {
       if (parent === path.dirname(parent)) return true;
     }
   }
-  async function cleanupTranscripts({ threadId, all = false } = {}) {
+  function cleanupTranscripts(query = {}) {
+    return enqueueLedger(() => cleanupTranscriptsLocked(query));
+  }
+  async function retryDeletions() {
+    const pending = { result: 'complete', remaining: 0 };
+    for (const row of store.deletingThreads()) {
+      const result = await cleanupTranscripts({ threadId: row.id });
+      if (result.result === 'complete') store.delete(row.id);
+      else { pending.result = 'incomplete'; pending.remaining += result.remaining; }
+    }
+    return pending;
+  }
+  function persistPartial() {
+    try { commitTurn('partial'); publish(); }
+    catch (err) { storageFailed(err); void close().catch(() => {}); }
+  }
+  async function cleanupTranscriptsLocked({ threadId, includeLegacy = false } = {}) {
     if (!namespaceReady && !await stat(root)) return { result: 'complete', remaining: 0 };
     if (!namespaceReady) await namespace();
     await privateDir(root);
@@ -608,8 +663,8 @@ function createSessionHubService(options = {}) {
     let remaining = 0;
     for (const entry of entries) {
       const [id, owner] = entry.split('\t');
-      // Unbound legacy IDs are eligible at the next cleanup. Other threads stay untouched.
-      if (owner && !all && owner !== threadId) { retained.push(entry); continue; }
+      // DELETE touches exactly the requested owner. Legacy IDs belong only to process cleanup.
+      if (owner ? owner !== threadId : !includeLegacy) { retained.push(entry); continue; }
       if (!safe || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) {
         retained.push(entry); remaining++; continue;
       }
@@ -637,14 +692,15 @@ function createSessionHubService(options = {}) {
     }
     if (!permanent) state = 'closing';
     if (turn) {
-      turn.content = sanitize(turn.content + '\n' + (error || '응답이 중단됨'));
-      commitTurn('error');
+      turn.raw += '\n' + (error || '응답이 중단됨');
+      try { commitTurn('error'); } catch (err) { storageFailed(err); }
     }
     clearInterval(partialTimer); partialTimer = null;
     clearTimeout(timer); timer = null; turn = null;
     closePromise = (async () => {
       // start's continuation checks state; delayed writes cannot resurrect files.
       await preparation?.catch(() => {});
+      await bootCleanup?.catch(err => storageFailed(err));
       try { await reap(); }
       catch {
         error = 'reap_failed';
@@ -656,8 +712,19 @@ function createSessionHubService(options = {}) {
       stdoutHandler = null; child = null;
       await writeQueue.catch(() => {});
       await transcriptCheck;
-      await removeConfig();
-      const result = await cleanupTranscripts({ threadId: boundThread });
+      let cleanupFailure = null;
+      try { await removeConfig(); } catch (err) { cleanupFailure = err; }
+      let result = { result: 'incomplete', remaining: transcriptsRemaining };
+      try {
+        result = await cleanupTranscripts({ threadId: boundThread, includeLegacy: true });
+        const pending = await retryDeletions();
+        if (pending.result === 'incomplete') result.result = 'incomplete';
+        result.remaining += pending.remaining;
+      } catch (err) { cleanupFailure ||= err; }
+      if (persistenceFailure || cleanupFailure) {
+        if (persistenceFailure) throw fail('assistant_storage_failed', 503);
+        throw cleanupFailure;
+      }
       if (!permanent) state = 'idle';
       publish();
       const value = { ...snapshot(), ...result };
@@ -680,6 +747,8 @@ function createSessionHubService(options = {}) {
     return close();
   }
   function shutdown() { return close({ shutdown: true }); }
+  bootCleanup = retryDeletions();
+  bootCleanup.catch(err => storageFailed(err));
   return { start, message, stop, close, shutdown, newThread, deleteThread,
     listThreads: () => store.list(), messages: (id, query) => store.messages(id, query),
     getMessage: (id, mid) => store.get(id, mid),
@@ -688,7 +757,8 @@ function createSessionHubService(options = {}) {
     setMemoryProvider(fn) { memoryProvider = fn; },
     invalidateContext() { invalidationVersion++; rotateContext = true; }, state: snapshot, current: () => token,
     subscribe(fn) { subscribers.add(fn); return () => subscribers.delete(fn); },
-    diagnostics: () => ({ cwd, transcriptDir, pgid, initSeen, mcpReady, transcriptVerified }),
+    diagnostics: () => ({ cwd, transcriptDir, pgid, initSeen, mcpReady, transcriptVerified,
+      storageErrorCode: persistenceFailure?.code || null }),
   };
 }
 

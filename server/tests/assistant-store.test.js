@@ -10,6 +10,7 @@ function fixture(t, options) {
   const db = new Database(':memory:');
   db.pragma('foreign_keys = ON');
   db.exec(fs.readFileSync(path.join(__dirname, '../db/migrations/096_assistant_threads.sql'), 'utf8'));
+  db.exec(fs.readFileSync(path.join(__dirname, '../db/migrations/098_assistant_request_receipts.sql'), 'utf8'));
   t.after(() => db.close());
   return { db, store: createAssistantStore(db, options) };
 }

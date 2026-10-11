@@ -973,7 +973,7 @@ test('thread deletion only removes its bound transcripts, retains symlinks for r
   fs.writeFileSync(path.join(fx.root, 'owned-sessions'),
     `old-session\t${old}\nactive-session\t${active}\nlegacy\n`, { mode: 0o600 });
   const deleted = await fx.service.deleteThread(old);
-  assert.equal(deleted.remaining, 1);
+  assert.equal(deleted.remaining, 0);
   assert.equal(fs.existsSync(oldFile), false);
   assert.equal(fs.readFileSync(activeFile, 'utf8'), 'active');
   assert.equal(fs.readFileSync(protectedFile, 'utf8'), 'keep');
@@ -989,10 +989,10 @@ test('partial output commits within two seconds and final commit sanitizes witho
   const fx = serviceFixture(t);
   await fx.service.start(); fx.init('partial');
   const reserved = await send(fx.service, 'streaming turn');
-  fx.event({ type: 'assistant', message: { content: [{ type: 'text', text: 'first chunk ' }] } });
-  fx.event({ type: 'assistant', message: { content: [{ type: 'text', text: 'password=secret-value' },
+  fx.event({ type: 'assistant', message: { content: [{ type: 'text', text: 'first chunk\n' }] } });
+  fx.event({ type: 'assistant', message: { content: [{ type: 'text', text: 'password=secret-value\n' },
     { type: 'tool_use', name: 'search_assistant_history', input: { q: 'sensitive-query' } }] } });
-  assert.equal(fx.store.get(reserved.user.thread_id, reserved.assistant.id).content, 'first chunk ');
+  assert.equal(fx.store.get(reserved.user.thread_id, reserved.assistant.id).content, 'first chunk\n');
   await until(() => fx.store.get(reserved.user.thread_id, reserved.assistant.id).content.includes('[REDACTED]'), 2500);
   assert.equal(fx.store.get(reserved.user.thread_id, reserved.assistant.id).status, 'partial');
   fx.event({ type: 'result' });

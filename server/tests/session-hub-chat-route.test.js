@@ -96,7 +96,7 @@ test('private SSE snapshots current messages once and subsequent changes, discon
   const fetched = await request(app).get(`${BASE}/state`).set('Cookie', COOKIE);
   assert.equal(fetched.body.epoch, epoch);
   process.children[0].stdout.write(`${JSON.stringify({ type: 'assistant', message: {
-    content: [{ type: 'text', text: 'answer' }],
+    content: [{ type: 'text', text: 'answer\n' }],
   } })}\n`);
   assert.equal(sse.frames.length, 2);
   assert.ok(sse.frames[1].includes('answer'));

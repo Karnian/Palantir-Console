@@ -27,6 +27,7 @@ function serviceFixture(t, overrides = {}) {
   fs.mkdirSync(home, { mode: 0o700 });
   const db = new Database(':memory:');
   db.exec(fs.readFileSync(path.resolve(__dirname, '../../db/migrations/096_assistant_threads.sql'), 'utf8'));
+  db.exec(fs.readFileSync(path.resolve(__dirname, '../../db/migrations/098_assistant_request_receipts.sql'), 'utf8'));
   const store = createAssistantStore(db);
   const calls = [];
   const signals = [];
