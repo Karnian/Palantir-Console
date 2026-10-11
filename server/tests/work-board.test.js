@@ -1044,7 +1044,8 @@ test('normal and search cards share title rules, omit duplicate rows and limit w
     assert.deepEqual(Array.from(card.querySelectorAll('.work-warning'), node => node.textContent.trim()),
       ['compact 이력', '판별 불명 1/3']);
     assert.equal(card.textContent.includes('형식 미검증'), false);
-    assert.equal(card.querySelectorAll('.work-orca').length, 0);
+    assert.equal(card.querySelectorAll('.work-orca').length, 1);
+    assert.ok(card.querySelector('.work-orca').textContent.includes('작업 중'));
     assert.equal(card.textContent.includes('스냅샷 시점 관측'), false);
     assert.equal(card.textContent.includes('Orca 연결 불명'), false);
     assert.equal(root.querySelectorAll('.work-observation-note').length, 1);
@@ -1158,7 +1159,8 @@ test('all composed separators have one space on each side; machine pill uses one
   assert.equal(pill.firstChild.childNodes.length, 1);
   assert.equal(pill.firstChild.firstChild.nodeType, env.window.Node.TEXT_NODE);
   assert.equal(root.querySelector('.work-recent-block .work-label').textContent, '최근 지시 · 1시간 전');
-  assert.equal(root.querySelector('.work-orca').textContent.trim(), 'Orca · 응답 대기');
+  assert.equal(root.querySelector('.work-orca span').textContent, '작업 중');
+  assert.ok(root.querySelector('.work-orca time').textContent.startsWith('근거 · '));
   root.querySelector('.work-card button').click(); await flushEffects();
   assert.equal(root.querySelectorAll('.work-event').length, 2);
   const walker = env.document.createTreeWalker(root, env.window.NodeFilter.SHOW_TEXT);
@@ -1178,4 +1180,15 @@ test('PR1d footer shows total before retention while unknown ratio keeps the exp
   env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
   assert.equal(root.querySelector('.work-card-footer span').textContent, env.context.W.instructions(401));
   assert.ok(root.textContent.includes(env.context.W.unknownRatio(1, 3)));
+});
+
+test('PR-S v1 snapshots without status have unknown cards regardless of legacy Orca state', async t => {
+  const { snapshotCards } = await logic;
+  const { alpha } = fixtures(t);
+  alpha.policy_version = 1;
+  for (const session of alpha.sessions) delete session.status;
+  alpha.orca.worktrees[0].agents[0].state = 'completed';
+  const cards = snapshotCards(alpha);
+  for (const card of cards) assert.deepEqual(card.status,
+    { state: 'unknown', source: 'none', evidence_at: null, reason: null });
 });

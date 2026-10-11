@@ -71,7 +71,9 @@ export function snapshotCards(snapshot) {
     const aiTitle = displayKey(session.ai_title) ? session.ai_title : null;
     const title = aiTitle ? displayInstructionText(aiTitle) : firstLine(titleInstruction);
     return {
-      ...session, machine: snapshot.machine, instructions, recent, first,
+      ...session,
+      status: session.status || { state: 'unknown', source: 'none', evidence_at: null, reason: null },
+      machine: snapshot.machine, instructions, recent, first,
       ai_title: aiTitle, title, titleSource: aiTitle ? 'ai' : 'first',
       titleTransformed: aiTitle ? title !== aiTitle : instructionTransformed(titleInstruction),
       recentTransformed: instructionTransformed(instructions.at(-1)),

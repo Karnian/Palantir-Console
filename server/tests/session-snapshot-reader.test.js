@@ -2270,7 +2270,9 @@ test('PR1c fixed pre-change bytes preserve window, whole sessions, exclusions an
   });
   // Spec §1.4 / §3: freeze the complete serialized pre-change output, including order and refs.
   const legacy = JSON.parse(JSON.stringify(snapshot));
+  legacy.policy_version = 1;
   for (const session of legacy.sessions) {
+    delete session.status;
     delete session.instruction_total;
     // The fixture's complete unsupported JSON value now intentionally blocks Claude links.
     if (session.provider === 'claude') {
@@ -4156,11 +4158,12 @@ test('PR1d streaming is byte-equivalent to array parsing, bounds text retention,
   assert.equal(snapshot.sessions[0].instruction_total, 450);
   assert.equal(snapshot.sessions[0].instruction_count, 201);
   assert.deepEqual(streamed.coverage.claude, { ...oldCoverage, files_scanned: 1 });
-  // Crossing the obsolete 16MB threshold has no effect on the complete verified content.
+  // PR-S preserves instruction collection while declining streaming status interpretation.
   fs.appendFileSync(file, '\n' + (JSON.stringify({ type: 'assistant', timestamp: RECORD_TIMESTAMP,
     padding: 'x'.repeat(1024 * 1024) }) + '\n').repeat(17));
   assert.ok(fs.statSync(file).size > snapshotReader.MAX_FILE_BYTES);
   const large = snapshotReader.runSnapshot(fixture.options);
+  snapshot.sessions[0].status = snapshotPolicy.unknownStatus('truncated');
   assert.deepEqual(large, snapshot);
   const target = instructionTarget(large.instructions[0]);
   const preview = snapshotReader.excludeQuery({ ...fixture.options, target });
@@ -4801,6 +4804,7 @@ test('PR1d R1a-3 a 9MB line inside a legacy small file preserves byte-identical 
   const baseline = snapshotReader.runSnapshot(fixture.options);
   fs.appendFileSync(file, '\n' + JSON.stringify({ type: 'assistant', padding: 'x'.repeat(9 * 1024 * 1024) }) + '\n');
   assert.ok(fs.statSync(file).size <= snapshotReader.MAX_FILE_BYTES);
+  baseline.sessions[0].status = snapshotPolicy.unknownStatus('status_format_unsupported');
   assert.deepEqual(snapshotReader.runSnapshot(fixture.options), baseline);
 });
 
@@ -5479,7 +5483,7 @@ test('PR1d R5-A workflow condition failure uses one buffer read rather than a fu
   forceLargeFileLimits(t);
   totals.bytes = 0;
   assert.deepEqual(snapshotReader.runSnapshot(fixture.options), snapshot);
-  assert.equal(totals.bytes, fs.statSync(file).size);
+  assert.equal(totals.bytes, fs.statSync(file).size * 2);
 });
 
 test('PR1d R5-C1 small files cannot combine lookahead identity with a replacement body', t => {
@@ -5548,9 +5552,9 @@ for (const mutation of ['append', 'truncate', 'replace', 'early-eof']) {
     });
     const snapshot = snapshotReader.runSnapshot(fixture.options);
     assert.equal(mutated, true);
-    assert.equal(starts, 1);
+    assert.equal(starts, ['append', 'replace'].includes(mutation) ? 2 : 1);
     if (mutation === 'append') {
-      assert.equal(bytes, initialSize);
+      assert.equal(bytes, initialSize * 2);
       assert.equal(snapshot.coverage.claude.link_blocked, 0);
       assert.equal(snapshot.sessions[0].instruction_total, 1);
       assert.equal(snapshot.instructions[0].text, 'initial instruction');
@@ -5577,7 +5581,7 @@ for (const provider of ['claude', 'codex']) {
     const reads = trackTranscriptReads(t, file);
     const actual = snapshotReader.runSnapshot(fixture.options);
     assert.deepEqual(actual, expected);
-    assert.equal(reads.bytes, fs.statSync(file).size);
+    assert.equal(reads.bytes, fs.statSync(file).size * 2);
   });
 }
 
@@ -5736,7 +5740,7 @@ test('PR1d mutation coverage large-file shrink after all S0 bytes were read is w
   });
   t.mock.method(fs, 'fstatSync', function(fd, ...args) {
     if (fd === descriptor && ++statsRead === 2) {
-      assert.equal(bytes, initial.size, 'truncate must occur after the complete initial boundary was consumed');
+      assert.equal(bytes, initial.size * 2, 'truncate occurs after S0 and the bounded status tail read');
       fs.truncateSync(file, initial.size - 1);
       truncated = true;
     }
@@ -5746,7 +5750,7 @@ test('PR1d mutation coverage large-file shrink after all S0 bytes were read is w
   const final = fs.statSync(file);
   assert.equal(truncated, true);
   assert.equal(statsRead, 2);
-  assert.equal(bytes, initial.size);
+  assert.equal(bytes, initial.size * 2);
   assert.equal(final.dev, initial.dev);
   assert.equal(final.ino, initial.ino);
   assert.equal(final.size, initial.size - 1);
@@ -5756,3 +5760,556 @@ test('PR1d mutation coverage large-file shrink after all S0 bytes were read is w
   assert.equal(snapshot.sessions.length, 0);
   assert.equal(snapshot.instructions.length, 0);
 });
+
+const statusAssistant = (stop, uuid = 'a', parentUuid = 'u', extra = {}) => ({
+  type: 'assistant', sessionId: 's', uuid, parentUuid, timestamp: RECORD_TIMESTAMP,
+  message: { stop_reason: stop, content: [{ type: 'text', text: 'PRIVATE_ASSISTANT_SENTINEL' }] }, ...extra
+});
+const statusQueued = (extra = {}) => ({
+  type: 'attachment', sessionId: 's', uuid: 'queued', timestamp: RECORD_TIMESTAMP,
+  attachment: { type: 'queued_command', commandMode: 'prompt', prompt: 'new instruction',
+    origin: { kind: 'human' } }, ...extra
+});
+const statusEvent = (type, turn_id = 'turn-1', extra = {}) => ({
+  type: 'event_msg', timestamp: RECORD_TIMESTAMP,
+  payload: { type, turn_id, last_agent_message: 'PRIVATE_COMPLETION_SENTINEL', ...extra }
+});
+
+for (const [name, tail, state, reason] of [
+  ['end turn', [statusAssistant('end_turn')], 'ended', null],
+  ['tool use', [statusAssistant('tool_use')], 'working', null],
+  ['resume', [statusAssistant('end_turn'), statusAssistant('tool_use', 'a2', 'a')], 'working', null],
+  ['interrupt', [claudeUserRecord('[Request interrupted by user]',
+    { uuid: 'interrupt', parentUuid: 'u', origin: undefined })], 'interrupted', null],
+  ['tool interrupt', [claudeUserRecord('[Request interrupted by user for tool use]',
+    { uuid: 'interrupt', parentUuid: 'u', origin: undefined })], 'interrupted', null],
+  ['branch', [statusAssistant('end_turn'), statusAssistant('tool_use', 'branch', 'u')], 'working', null],
+  ['sidechain', [statusAssistant('end_turn'), statusAssistant('tool_use', 'side', 'u',
+    { isSidechain: true })], 'ended', null],
+  ['title', [statusAssistant('end_turn'), { type: 'ai-title', timestamp: RECORD_TIMESTAMP,
+    title: 'safe title' }], 'ended', null],
+  ['queued parent off path', [statusAssistant('end_turn'), statusQueued({ parentUuid: 'a' })],
+    'unknown', 'instruction_unbound'],
+  ['queued implicit', [statusAssistant('end_turn'), statusQueued()], 'working', null],
+  ['queued null parent', [statusAssistant('end_turn'), statusQueued({ parentUuid: null })], 'working', null],
+  ['queued other branch', [statusAssistant('end_turn'), statusAssistant('tool_use', 'other', 'u'),
+    statusQueued(), statusAssistant('end_turn', 'main', 'a')], 'unknown', 'instruction_unbound'],
+  ['queued invalid parent', [statusAssistant('end_turn'), statusQueued({ parentUuid: 'missing' })],
+    'unknown', 'instruction_unbound'],
+  ['open instruction', [], 'working', null],
+  ['missing chain', [statusAssistant('end_turn', 'a', 'missing')], 'unknown', 'instruction_unbound'],
+  ['missing stop', [statusAssistant(undefined)], 'unknown', 'status_format_unsupported'],
+  ['reverse time', [statusAssistant('end_turn', 'a', 'u',
+    { timestamp: '2026-10-08T01:00:00.000Z' })], 'unknown', 'order_unknown'],
+]) {
+  test(`PR-S Claude status ${name}`, t => {
+    const fx = createFixture(t);
+    fx.file('claude', 'status', [claudeUserRecord('instruction'), ...tail]);
+    const snapshot = snapshotReader.runSnapshot(fx.options);
+    assert.equal(snapshot.sessions[0].status.state, state);
+    assert.equal(snapshot.sessions[0].status.reason, reason);
+    assert.equal(snapshot.sessions[0].format_unverified, true);
+    assert.equal(JSON.stringify(snapshot).includes('PRIVATE_ASSISTANT_SENTINEL'), false);
+  });
+}
+
+for (const [name, start, tail, state, reason] of [
+  ['complete', [statusEvent('task_started')], [statusEvent('task_complete')], 'ended', null],
+  ['wrong turn', [statusEvent('task_started')], [statusEvent('task_complete', 'turn-2')],
+    'unknown', 'turn_unbound'],
+  ['aborted', [statusEvent('task_started')], [statusEvent('turn_aborted')], 'interrupted', null],
+  ['open', [statusEvent('task_started')], [], 'working', null],
+  ['missing start', [], [statusEvent('task_complete')], 'unknown', 'turn_unbound'],
+  ['missing id', [statusEvent('task_started', null)], [], 'unknown', 'status_format_unsupported'],
+]) {
+  test(`PR-S Codex status ${name}`, t => {
+    const fx = createFixture(t);
+    fx.file('codex', 'status', [codexSessionMeta(), ...start,
+      statusEvent('user_message', undefined, { message: 'instruction' }), codexMessage('instruction'), ...tail]);
+    const snapshot = snapshotReader.runSnapshot(fx.options);
+    assert.equal(snapshot.sessions[0].status.state, state);
+    assert.equal(snapshot.sessions[0].status.reason, reason);
+    assert.equal(JSON.stringify(snapshot).includes('PRIVATE_COMPLETION_SENTINEL'), false);
+  });
+}
+
+test('PR-S large-file streaming reports truncated when the instruction is outside the tail window', t => {
+  for (const provider of ['claude', 'codex']) {
+    const fx = createFixture(t);
+    const rows = provider === 'claude' ? [claudeUserRecord('instruction'), statusAssistant('end_turn')]
+      : [codexSessionMeta(), statusEvent('task_started'), codexMessage('instruction'), statusEvent('task_complete')];
+    const file = fx.file(provider, 'large', rows);
+    const filler = JSON.stringify({ type: 'metadata', padding: 'x'.repeat(1024 * 1024) }) + '\n';
+    fs.appendFileSync(file, '\n' + filler.repeat(17));
+    assert.ok(fs.statSync(file).size > snapshotReader.MAX_FILE_BYTES);
+    const snapshot = snapshotReader.runSnapshot(fx.options);
+    assert.deepEqual(snapshot.sessions[0].status,
+      { state: 'unknown', source: 'none', evidence_at: null, reason: 'truncated' });
+  }
+});
+
+test('PR-S Orca states are projected and synthesized only through a confirmed link', t => {
+  for (const [state, expected] of [['working', 'working'], ['blocked', 'waiting'], ['waiting', 'waiting'],
+    ['done', 'ended'], ['running', 'unknown'], ['surprise', 'unknown']]) {
+    const fx = createFixture(t);
+    const prompt = 'synthetic instruction long enough for exact Orca matching';
+    fx.file('claude', 'status', [claudeUserRecord(prompt), statusAssistant('end_turn')]);
+    const tree = orcaWorktree(prompt);
+    tree.agents[0].state = state;
+    fx.options.runOrca = orcaRunner([tree], []);
+    const snapshot = snapshotReader.runSnapshot(fx.options);
+    assert.equal(snapshot.sessions[0].orca_link.confirmed, true);
+    assert.equal(snapshot.sessions[0].status.state, expected);
+    assert.equal(snapshot.sessions[0].status.source, 'orca');
+    tree.agents[0].interrupted = true;
+    assert.equal(snapshotReader.runSnapshot(fx.options).sessions[0].status.state, 'interrupted');
+  }
+});
+
+test('PR-S pending final JSON is ignored; malformed complete JSON refuses transcript state', t => {
+  for (const [tail, reason] of [['\n{"type":', null], ['\ninvalid\n', 'parse_failed']]) {
+    const fx = createFixture(t);
+    const file = fx.file('claude', 'broken', [claudeUserRecord('instruction'), statusAssistant('end_turn')]);
+    fs.appendFileSync(file, tail);
+    assert.equal(snapshotReader.runSnapshot(fx.options).sessions[0].status.reason, reason);
+  }
+  const fx = createFixture(t);
+  fx.file('claude', 'no-human', [statusAssistant('end_turn', 'a', null)]);
+  assert.equal(snapshotReader.runSnapshot(fx.options).sessions[0].status.reason, 'no_instruction');
+});
+
+test('PR-S tool results resume a turn and sidechain instructions do not replace the main instruction', t => {
+  const fx = createFixture(t);
+  fx.file('claude', 'status', [claudeUserRecord('instruction'), statusAssistant('end_turn'),
+    claudeUserRecord([{ type: 'tool_result', content: 'PRIVATE_TOOL_SENTINEL' }],
+      { uuid: 'result', parentUuid: 'a' }),
+    claudeUserRecord('side instruction', { uuid: 'side', parentUuid: 'u', isSidechain: true })]);
+  const snapshot = snapshotReader.runSnapshot(fx.options);
+  assert.equal(snapshot.sessions[0].status.state, 'working');
+  assert.equal(JSON.stringify(snapshot).includes('PRIVATE_TOOL_SENTINEL'), false);
+});
+
+test('PR-S Orca updated_at cannot supply state evidence or beat newer transcript evidence', t => {
+  const fx = createFixture(t);
+  const prompt = 'synthetic instruction long enough for exact Orca matching';
+  fx.file('claude', 'status', [claudeUserRecord(prompt), statusAssistant('end_turn')]);
+  const tree = orcaWorktree(prompt);
+  tree.agents[0].state = 'working';
+  tree.agents[0].stateStartedAt = undefined;
+  tree.agents[0].updatedAt = Date.parse(RECORD_TIMESTAMP) + 60000;
+  fx.options.runOrca = orcaRunner([tree], []);
+  const snapshot = snapshotReader.runSnapshot(fx.options);
+  assert.equal(snapshot.orca.worktrees[0].agents[0].state_started_at, null);
+  assert.equal(snapshot.sessions[0].status.source, 'transcript');
+  assert.equal(snapshot.sessions[0].status.state, 'ended');
+  assert.equal(snapshot.sessions[0].status.reason, 'conflict');
+});
+
+for (const cancelledBy of ['worktree inventory', 'terminal inventory', 'invalid terminal']) {
+  test(`PR-S ${cancelledBy} cancellation preserves transcript status`, t => {
+    const fx = createFixture(t);
+    const prompt = 'unique instruction with a newer done Orca agent';
+    fx.file('claude', 'status', [claudeUserRecord(prompt), statusAssistant('tool_use')]);
+    const tree = orcaWorktree(prompt, 'p:leaf',
+      { state: 'done', stateStartedAt: Date.parse(RECORD_TIMESTAMP) + 60000 });
+    const responses = { worktree: orcaResponse('worktrees', [tree]),
+      terminal: orcaResponse('terminals', [orcaTerminal()]) };
+    fx.options.runOrca = args => JSON.stringify(responses[args[0]]);
+    const confirmed = snapshotReader.runSnapshot(fx.options).sessions[0];
+    assert.equal(confirmed.orca_link.confirmed, true);
+    assert.equal(confirmed.status.state, 'ended');
+    assert.equal(confirmed.status.source, 'orca');
+    if (cancelledBy === 'invalid terminal') responses.terminal.result.terminals.push({ handle: 'invalid' });
+    else responses[cancelledBy === 'worktree inventory' ? 'worktree' : 'terminal'].result.truncated = true;
+    const cancelled = snapshotReader.runSnapshot(fx.options).sessions[0];
+    assert.equal(cancelled.orca_link.confirmed, false);
+    assert.equal(cancelled.orca_link.terminal_handle, null);
+    assert.deepEqual(cancelled.status,
+      { state: 'working', source: 'transcript', evidence_at: RECORD_TIMESTAMP, reason: null });
+  });
+}
+
+test('PR-S scoped terminal cancellation preserves transcript while unrelated confirmed status still composes', t => {
+  const { fixture, worktrees } = orcaTerminalPartialFixture(t);
+  for (const tree of worktrees) Object.assign(tree.agents[0],
+    { state: 'done', stateStartedAt: Date.parse(RECORD_TIMESTAMP) + 60000 });
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  const cancelled = snapshot.sessions.find(session => session.session_id === 'orphan');
+  const confirmed = snapshot.sessions.find(session => session.session_id === 's');
+  assert.equal(cancelled.orca_link.confirmed, false);
+  assert.deepEqual(cancelled.status,
+    { state: 'working', source: 'transcript', evidence_at: RECORD_TIMESTAMP, reason: null });
+  assert.equal(confirmed.orca_link.confirmed, true);
+  assert.equal(confirmed.status.state, 'ended');
+  assert.equal(confirmed.status.source, 'orca');
+});
+
+const statusAttachment = (uuid, parentUuid, type) => ({
+  type: 'attachment', sessionId: 's', uuid, parentUuid, timestamp: RECORD_TIMESTAMP,
+  attachment: { type, content: 'PRIVATE_ATTACHMENT_SENTINEL' }
+});
+function statusHookChain(stop) {
+  return [claudeUserRecord('latest instruction', { parentUuid: 'history-outside-window' }),
+    statusAttachment('reminder', 'u', 'total_tokens_reminder'), statusAssistant(stop, 'a', 'reminder'),
+    statusAttachment('hook', 'a', 'hook_success'),
+    { type: 'system', subtype: 'stop_hook_summary', sessionId: 's', uuid: 'summary', parentUuid: 'hook',
+      timestamp: RECORD_TIMESTAMP },
+    // An attachment is a traversal member, but never replaces the last user/assistant/system terminal.
+    statusAttachment('other-attachment', 'history-outside-window', 'hook_success')];
+}
+
+for (const stop of ['end_turn', 'tool_use']) {
+  test(`PR-S attachment parent chain reaches latest instruction for ${stop}`, t => {
+    const fx = createFixture(t);
+    fx.file('claude', 'hook-chain', statusHookChain(stop));
+    const snapshot = snapshotReader.runSnapshot(fx.options);
+    assert.equal(snapshot.sessions[0].status.state, stop === 'end_turn' ? 'ended' : 'working');
+    assert.equal(snapshot.sessions[0].status.reason, null);
+    assert.equal(JSON.stringify(snapshot).includes('PRIVATE_ATTACHMENT_SENTINEL'), false);
+  });
+}
+
+test('PR-S null compaction parent before instruction is unbound; logical parents are not followed', t => {
+  const fx = createFixture(t);
+  fx.file('claude', 'compact', [claudeUserRecord('instruction'),
+    statusAttachment('boundary', null, 'hook_success'),
+    statusAssistant('end_turn', 'a', 'boundary', { logicalParentUuid: 'u' })]);
+  assert.equal(snapshotReader.runSnapshot(fx.options).sessions[0].status.reason, 'instruction_unbound');
+});
+
+test('PR-S duplicate attachment UUIDs are ambiguous across the whole traversal set', t => {
+  const fx = createFixture(t);
+  fx.file('claude', 'duplicate', [claudeUserRecord('instruction'),
+    statusAttachment('reminder', 'u', 'total_tokens_reminder'),
+    statusAttachment('reminder', 'u', 'hook_success'), statusAssistant('end_turn', 'a', 'reminder')]);
+  assert.equal(snapshotReader.runSnapshot(fx.options).sessions[0].status.reason, 'branch_ambiguous');
+});
+
+function largeStatusFile(fx, provider, tail) {
+  const initial = provider === 'claude'
+    ? [claudeUserRecord('old instruction', { uuid: 'old' })] : [codexSessionMeta()];
+  const file = fx.file(provider, 'status-tail', initial);
+  const filler = JSON.stringify({ type: 'metadata', padding: 'x'.repeat(1024 * 1024) }) + '\n';
+  fs.appendFileSync(file, '\n' + filler.repeat(17) + tail.map(JSON.stringify).join('\n') + '\n');
+  return file;
+}
+
+for (const provider of ['claude', 'codex']) {
+  for (const state of ['ended', 'working']) {
+    test(`PR-S ${provider} tail window evaluates ${state} with bounded reads and complete or pending final JSON`, t => {
+      const fx = createFixture(t);
+      const rows = provider === 'claude' ? statusHookChain(state === 'ended' ? 'end_turn' : 'tool_use')
+        : [statusEvent('task_started'), codexMessage('latest instruction'),
+          ...(state === 'ended' ? [statusEvent('task_complete')] : [])];
+      const file = largeStatusFile(fx, provider, rows);
+      if (state === 'working') fs.appendFileSync(file, '{"type":"unfinished');
+      const reads = trackTranscriptReads(t, file);
+      const size = fs.statSync(file).size;
+      const originalRead = fs.readSync;
+      let tailBytes = 0, tailReads = 0;
+      t.mock.method(fs, 'readSync', function(fd, buffer, ...args) {
+        if (buffer.length === snapshotReader.STATUS_TAIL_BYTES) {
+          tailReads++;
+          assert.equal(args[2], size - snapshotReader.STATUS_TAIL_BYTES);
+          assert.ok(args[1] <= snapshotReader.STATUS_TAIL_BYTES);
+        }
+        const count = originalRead(fd, buffer, ...args);
+        if (buffer.length === snapshotReader.STATUS_TAIL_BYTES) tailBytes += count;
+        return count;
+      });
+      const snapshot = snapshotReader.runSnapshot(fx.options);
+      assert.equal(snapshot.sessions[0].status.state, state);
+      assert.equal(snapshot.sessions[0].status.reason, null);
+      assert.equal(tailReads, 1);
+      assert.equal(tailBytes, 8 * 1024 * 1024);
+      assert.equal(reads.bytes, size + snapshotReader.STATUS_TAIL_BYTES);
+      assert.equal(reads.fullReads, 1); // The tracker counts the first 256KB S0 chunk as one head read.
+      for (const sentinel of ['PRIVATE_ASSISTANT_SENTINEL', 'PRIVATE_COMPLETION_SENTINEL',
+        'PRIVATE_ATTACHMENT_SENTINEL']) assert.equal(JSON.stringify(snapshot).includes(sentinel), false);
+    });
+  }
+}
+
+test('PR-S tail chain leaving the window before a visible instruction is truncated', t => {
+  const fx = createFixture(t);
+  largeStatusFile(fx, 'claude', [claudeUserRecord('visible instruction'),
+    statusAssistant('end_turn', 'a', 'outside-window')]);
+  assert.equal(snapshotReader.runSnapshot(fx.options).sessions[0].status.reason, 'truncated');
+});
+
+test('PR-S Codex instruction with task_started outside the tail window is truncated', t => {
+  const fx = createFixture(t);
+  const file = fx.file('codex', 'status-tail', [codexSessionMeta(), statusEvent('task_started')]);
+  const filler = JSON.stringify({ type: 'metadata', padding: 'x'.repeat(1024 * 1024) }) + '\n';
+  fs.appendFileSync(file, '\n' + filler.repeat(17)
+    + [codexMessage('visible instruction'), statusEvent('task_complete')].map(JSON.stringify).join('\n') + '\n');
+  assert.equal(snapshotReader.runSnapshot(fx.options).sessions[0].status.reason, 'truncated');
+});
+
+for (const provider of ['claude', 'codex']) {
+  test(`PR-S ${provider} small-file pending last record preserves ended status`, t => {
+    const fx = createFixture(t);
+    const rows = provider === 'claude' ? statusHookChain('end_turn')
+      : [codexSessionMeta(), statusEvent('task_started'), codexMessage('instruction'), statusEvent('task_complete')];
+    const file = fx.file(provider, 'pending', rows);
+    fs.appendFileSync(file, '\n{"type":"unfinished');
+    assert.equal(snapshotReader.runSnapshot(fx.options).sessions[0].status.state, 'ended');
+  });
+}
+
+test('PR-S tail metadata count stays bounded without rejecting the collected session', t => {
+  const previous = snapshotReader.STREAM_LIMITS.identities;
+  t.after(() => { snapshotReader.STREAM_LIMITS.identities = previous; });
+  snapshotReader.STREAM_LIMITS.identities = 20;
+  const fx = createFixture(t);
+  largeStatusFile(fx, 'claude', [...Array.from({ length: 30 }, () => ({ type: 'metadata' })),
+    claudeUserRecord('recent instruction'), statusAssistant('end_turn')]);
+  const snapshot = snapshotReader.runSnapshot(fx.options);
+  assert.equal(snapshot.sessions[0].status.reason, 'truncated');
+  assert.equal(snapshot.coverage.claude.files_failed, 0);
+  assert.equal(snapshot.sessions[0].instruction_total, 2);
+});
+
+test('PR-S explicit queued instruction off the tail branch remains unbound', t => {
+  const fx = createFixture(t);
+  largeStatusFile(fx, 'claude', [claudeUserRecord('visible instruction'), statusAssistant('end_turn'),
+    statusQueued({ parentUuid: 'outside-window' })]);
+  assert.equal(snapshotReader.runSnapshot(fx.options).sessions[0].status.reason, 'instruction_unbound');
+});
+
+test('PR-S a complete instruction exactly at the tail boundary is retained without an extra byte read', t => {
+  const fx = createFixture(t);
+  const rows = [claudeUserRecord('boundary instruction', { parentUuid: 'outside-window' }),
+    statusAssistant('end_turn')];
+  const body = rows.map(JSON.stringify).join('\n') + '\n';
+  const emptyFiller = JSON.stringify({ type: 'metadata', padding: '' }) + '\n';
+  const padding = 'x'.repeat(snapshotReader.STATUS_TAIL_BYTES - Buffer.byteLength(body + emptyFiller));
+  const tail = body + JSON.stringify({ type: 'metadata', padding }) + '\n';
+  assert.equal(Buffer.byteLength(tail), snapshotReader.STATUS_TAIL_BYTES);
+  const file = largeStatusFile(fx, 'claude', []);
+  fs.appendFileSync(file, tail);
+  const reads = trackTranscriptReads(t, file);
+  const snapshot = snapshotReader.runSnapshot(fx.options);
+  assert.equal(snapshot.sessions[0].status.state, 'ended');
+  assert.equal(reads.bytes, fs.statSync(file).size + snapshotReader.STATUS_TAIL_BYTES);
+});
+
+const claudeClockTime = time => `2026-10-08T07:22:${time}Z`;
+for (const streamed of [false, true]) {
+  for (const [stop, expected] of [['end_turn', 'ended'], ['tool_use', 'working']]) {
+    test(`PR-S Claude ${expected} ignores measured attachment time reversals, streaming=${streamed}`, t => {
+      const fx = createFixture(t);
+      fx.options.now = new Date('2026-10-08T08:00:00.000Z');
+      if (streamed) forceLargeFileLimits(t);
+      const rows = [
+        claudeUserRecord('instruction', { timestamp: claudeClockTime('36.479') }),
+        { ...statusAttachment('environment', 'u', 'environment'), timestamp: claudeClockTime('36.478') },
+        statusAssistant('tool_use', 'a', 'environment', { timestamp: claudeClockTime('43.988') }),
+        { ...statusAttachment('hook', 'a', 'hook_success'), timestamp: claudeClockTime('43.885') },
+        statusAssistant(stop, 'a2', 'hook', { timestamp: claudeClockTime('44.001') }),
+        { ...statusAttachment('last-hook', 'a2', 'hook_success'), timestamp: claudeClockTime('44.000') },
+        { type: 'system', subtype: 'stop_hook_summary', sessionId: 's', uuid: 'summary',
+          parentUuid: 'last-hook', timestamp: claudeClockTime('43.990') },
+      ];
+      fx.file('claude', 'clock-order', rows);
+      const snapshot = snapshotReader.runSnapshot(fx.options);
+      assert.deepEqual(snapshot.sessions[0].status, { state: expected, source: 'transcript',
+        evidence_at: claudeClockTime('44.001'), reason: null });
+    });
+  }
+}
+
+for (const [stop, finalTime, expected, reason] of [
+  ['end_turn', '36.601', 'ended', null],
+  ['tool_use', '36.601', 'working', null],
+  ['end_turn', '36.500', 'unknown', 'order_unknown'],
+  ['tool_use', '36.500', 'unknown', 'order_unknown'],
+  ['end_turn', '36.478', 'unknown', 'order_unknown'],
+  ['tool_use', '36.478', 'unknown', 'order_unknown'],
+]) {
+  test(`PR-S Claude final ${stop} at ${finalTime} must follow earlier transition times`, t => {
+    const fx = createFixture(t);
+    fx.options.now = new Date('2026-10-08T08:00:00.000Z');
+    fx.file('claude', 'clock-order', [
+      claudeUserRecord('instruction', { timestamp: claudeClockTime('36.479') }),
+      statusAssistant('tool_use', 'a', 'u', { timestamp: claudeClockTime('36.600') }),
+      statusAssistant(stop, 'a2', 'a', { timestamp: claudeClockTime(finalTime) }),
+    ]);
+    const status = snapshotReader.runSnapshot(fx.options).sessions[0].status;
+    assert.equal(status.state, expected);
+    assert.equal(status.reason, reason);
+    assert.equal(status.evidence_at, reason ? null : claudeClockTime(finalTime));
+  });
+}
+
+test('PR-S Claude an intermediate transition before the instruction makes order unknown', t => {
+  const fx = createFixture(t);
+  fx.options.now = new Date('2026-10-08T08:00:00.000Z');
+  fx.file('claude', 'clock-order', [
+    claudeUserRecord('instruction', { timestamp: claudeClockTime('36.479') }),
+    statusAssistant('tool_use', 'a', 'u', { timestamp: claudeClockTime('36.478') }),
+    statusAssistant('end_turn', 'a2', 'a', { timestamp: claudeClockTime('36.500') }),
+  ]);
+  const status = snapshotReader.runSnapshot(fx.options).sessions[0].status;
+  assert.deepEqual(status, { state: 'unknown', source: 'none', evidence_at: null, reason: 'order_unknown' });
+});
+
+for (const large of [false, true]) {
+  for (const queuedFirst of [false, true]) {
+    for (const hasResponse of [false, true]) {
+      test(`PR-S explicit queued instruction must lie on the branch: tail=${large}, queued first=${queuedFirst},`
+        + ` response=${hasResponse}`, t => {
+        const fx = createFixture(t);
+        fx.options.now = new Date('2026-10-08T08:00:00.000Z');
+        const user = claudeUserRecord('old instruction', { timestamp: claudeClockTime('36.000') });
+        const prior = statusAssistant('end_turn', 'a', 'u', { timestamp: claudeClockTime('37.000') });
+        const queued = statusQueued({ parentUuid: 'a', timestamp: claudeClockTime('36.999') });
+        const rows = [user, ...(queuedFirst ? [queued, prior] : [prior, queued])];
+        if (hasResponse) rows.push(statusAssistant('end_turn', 'new-answer', 'queued',
+          { timestamp: claudeClockTime('37.100') }));
+        if (large) largeStatusFile(fx, 'claude', rows);
+        else fx.file('claude', 'queued-order', rows);
+        const snapshot = snapshotReader.runSnapshot(fx.options);
+        assert.deepEqual(snapshot.sessions[0].status, hasResponse
+          ? { state: 'ended', source: 'transcript', evidence_at: claudeClockTime('37.100'), reason: null }
+          : { state: 'unknown', source: 'none', evidence_at: null, reason: 'instruction_unbound' });
+        assert.equal(snapshot.instructions.at(-1).text, 'new instruction');
+        assert.equal(JSON.stringify(snapshot).includes('PRIVATE_ASSISTANT_SENTINEL'), false);
+      });
+    }
+  }
+}
+
+for (const large of [false, true]) {
+  for (const kind of ['tool_result', 'interrupted']) {
+    test(`PR-S ${kind} state evidence with reversed time is unknown, tail=${large}`, t => {
+      const fx = createFixture(t);
+      fx.options.now = new Date('2026-10-08T08:00:00.000Z');
+      const content = kind === 'tool_result' ? [{ type: 'tool_result', content: 'PRIVATE_TOOL_SENTINEL' }]
+        : '[Request interrupted by user]';
+      const rows = [claudeUserRecord('instruction', { timestamp: claudeClockTime('36.479') }),
+        statusAssistant('tool_use', 'a', 'u', { timestamp: claudeClockTime('36.600') }),
+        claudeUserRecord(content, { uuid: 'state-user', parentUuid: 'a', timestamp: claudeClockTime('36.500') }),
+        statusAssistant('end_turn', 'answer', 'state-user', { timestamp: claudeClockTime('36.700') })];
+      if (large) largeStatusFile(fx, 'claude', rows);
+      else fx.file('claude', 'clock-order', rows);
+      const snapshot = snapshotReader.runSnapshot(fx.options);
+      assert.deepEqual(snapshot.sessions[0].status,
+        { state: 'unknown', source: 'none', evidence_at: null, reason: 'order_unknown' });
+      assert.equal(JSON.stringify(snapshot).includes('PRIVATE_TOOL_SENTINEL'), false);
+    });
+  }
+}
+
+for (const large of [false, true]) {
+  test(`PR-S queued sibling branch cannot borrow a common parent's end_turn, tail=${large}`, t => {
+    const fx = createFixture(t);
+    fx.options.now = new Date('2026-10-08T08:00:00.000Z');
+    const rows = [claudeUserRecord('old instruction', { timestamp: claudeClockTime('00.000') }),
+      statusAssistant('tool_use', 'a', 'u', { timestamp: claudeClockTime('10.000') }),
+      statusQueued({ uuid: 'q', parentUuid: 'a', timestamp: claudeClockTime('10.999') }),
+      statusAssistant('tool_use', 'c', 'q', { timestamp: claudeClockTime('11.000') }),
+      statusAssistant('end_turn', 'b', 'a', { timestamp: claudeClockTime('11.001') })];
+    if (large) largeStatusFile(fx, 'claude', rows);
+    else fx.file('claude', 'queued-sibling', rows);
+    assert.deepEqual(snapshotReader.runSnapshot(fx.options).sessions[0].status,
+      { state: 'unknown', source: 'none', evidence_at: null, reason: 'instruction_unbound' });
+  });
+
+  test(`PR-S implicit queued instruction ignores branch evidence recorded before it, tail=${large}`, t => {
+    const fx = createFixture(t);
+    fx.options.now = new Date('2026-10-08T08:00:00.000Z');
+    const rows = [claudeUserRecord('old instruction', { timestamp: claudeClockTime('00.000') }),
+      statusAssistant('end_turn', 'early', 'anchor', { timestamp: claudeClockTime('10.000') }),
+      { type: 'system', sessionId: 's', uuid: 'anchor', parentUuid: 'u', timestamp: claudeClockTime('09.999') },
+      statusQueued({ timestamp: claudeClockTime('10.999') }),
+      { type: 'system', sessionId: 's', uuid: 'tip', parentUuid: 'early', timestamp: claudeClockTime('11.000') }];
+    if (large) largeStatusFile(fx, 'claude', rows);
+    else fx.file('claude', 'queued-implicit', rows);
+    assert.deepEqual(snapshotReader.runSnapshot(fx.options).sessions[0].status,
+      { state: 'working', source: 'transcript', evidence_at: claudeClockTime('10.999'), reason: null });
+  });
+
+  test(`PR-S implicit queued instruction still uses branch evidence recorded after it, tail=${large}`, t => {
+    const fx = createFixture(t);
+    const rows = [claudeUserRecord('old instruction'), statusAssistant('end_turn'), statusQueued(),
+      statusAssistant('end_turn', 'new-answer', 'a')];
+    if (large) largeStatusFile(fx, 'claude', rows);
+    else fx.file('claude', 'queued-implicit-response', rows);
+    assert.deepEqual(snapshotReader.runSnapshot(fx.options).sessions[0].status,
+      { state: 'ended', source: 'transcript', evidence_at: RECORD_TIMESTAMP, reason: null });
+  });
+
+  for (const throughTurn of [false, true]) {
+    test(`PR-S readable ancestors are checked for indirect cycles, through turn=${throughTurn}, tail=${large}`, t => {
+      const fx = createFixture(t);
+      const rows = [claudeUserRecord('instruction', { parentUuid: 'h' }),
+        statusAttachment('h', throughTurn ? 'a' : 'older', 'environment'),
+        ...(throughTurn ? [] : [statusAttachment('older', 'h', 'hook_success')]),
+        statusAssistant('end_turn')];
+      if (large) largeStatusFile(fx, 'claude', rows);
+      else fx.file('claude', 'ancestor-cycle', rows);
+      assert.deepEqual(snapshotReader.runSnapshot(fx.options).sessions[0].status,
+        { state: 'unknown', source: 'none', evidence_at: null, reason: 'branch_ambiguous' });
+    });
+  }
+
+  test(`PR-S missing readable ancestor after binding does not truncate the current turn, tail=${large}`, t => {
+    const fx = createFixture(t);
+    const rows = [claudeUserRecord('instruction', { parentUuid: 'h' }),
+      statusAttachment('h', 'missing-older-parent', 'environment'), statusAssistant('end_turn')];
+    if (large) largeStatusFile(fx, 'claude', rows);
+    else fx.file('claude', 'missing-ancestor', rows);
+    assert.deepEqual(snapshotReader.runSnapshot(fx.options).sessions[0].status,
+      { state: 'ended', source: 'transcript', evidence_at: RECORD_TIMESTAMP, reason: null });
+  });
+}
+
+function reorderedAttachmentChain() {
+  return [
+    statusAssistant('end_turn', '6240c18b', '948dacdf'),
+    statusAttachment('9ac90482', 'cb73793b', 'environment'),
+    statusAttachment('fad44720', '6240c18b', 'hook_success'),
+    claudeUserRecord('latest instruction', { uuid: '9e142b29', parentUuid: '6240c18b' }),
+    statusAttachment('cb73793b', '9e142b29', 'hook_success'),
+    statusAttachment('324437f6', '9ac90482', 'total_tokens_reminder'),
+  ];
+}
+
+for (const large of [false, true]) {
+  for (const [stop, expected] of [['end_turn', 'ended'], ['tool_use', 'working']]) {
+    test(`PR-S reordered attachment parents preserve ${expected} and the latest instruction, tail=${large}`, t => {
+      const fx = createFixture(t);
+      const rows = [...reorderedAttachmentChain(),
+        statusAssistant('tool_use', 'progress', '324437f6'),
+        statusAssistant(stop, 'answer', 'progress', { timestamp: '2026-10-08T02:00:01.000Z' })];
+      if (large) largeStatusFile(fx, 'claude', rows);
+      else fx.file('claude', 'reordered', rows);
+      const snapshot = snapshotReader.runSnapshot(fx.options);
+      assert.deepEqual(snapshot.sessions[0].status, { state: expected, source: 'transcript',
+        evidence_at: '2026-10-08T02:00:01.000Z', reason: null });
+      assert.equal(snapshot.instructions.at(-1).id, 'claude:s:u9e142b29');
+    });
+  }
+  test(`PR-S reordered attachments after a new instruction do not reuse the earlier end_turn, tail=${large}`, t => {
+    const fx = createFixture(t);
+    const rows = reorderedAttachmentChain();
+    if (large) largeStatusFile(fx, 'claude', rows);
+    else fx.file('claude', 'reordered', rows);
+    assert.deepEqual(snapshotReader.runSnapshot(fx.options).sessions[0].status,
+      { state: 'working', source: 'transcript', evidence_at: RECORD_TIMESTAMP, reason: null });
+  });
+  for (const atInstruction of [false, true]) {
+    test(`PR-S actual parent cycles remain ambiguous, at instruction=${atInstruction}, tail=${large}`, t => {
+      const fx = createFixture(t);
+      const rows = atInstruction
+        ? [claudeUserRecord('instruction', { parentUuid: 'a' }), statusAssistant('end_turn')]
+        : [claudeUserRecord('instruction'), statusAttachment('cycle-a', 'cycle-b', 'environment'),
+          statusAttachment('cycle-b', 'cycle-a', 'hook_success'), statusAssistant('end_turn', 'a', 'cycle-a')];
+      if (large) largeStatusFile(fx, 'claude', rows);
+      else fx.file('claude', 'cycle', rows);
+      assert.deepEqual(snapshotReader.runSnapshot(fx.options).sessions[0].status,
+        { state: 'unknown', source: 'none', evidence_at: null, reason: 'branch_ambiguous' });
+    });
+  }
+}
