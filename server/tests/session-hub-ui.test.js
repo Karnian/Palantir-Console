@@ -27,6 +27,7 @@ function setup(t) {
     vm.runInContext(transformComponentSource(src), env.context);
   }
   env.loadComponent('AssistantMemory');
+  env.loadComponent('SnapshotRefreshControls');
   env.loadComponent('SessionHubSidebar');
   env.loadComponent('Dropdown'); env.loadComponent('SessionSnapshotParts'); env.loadComponent('AllSessionsPanel');
   env.loadComponent('SessionHubChat');
@@ -1647,4 +1648,102 @@ for (const operation of ['add', 'edit']) for (const outcome of ['success', 'fail
     assert.equal(env.root.querySelector('textarea').value, '', 'success must clear the next draft');
     assert.ok(env.root.querySelector('[aria-label="기억 종류, 선호"]'));
     assert.ok(writes.every(write => !/router|conversations/.test(write.url)));
+  });
+
+for (const outcome of ['complete', 'disabled', 'error']) test(
+  `R4 hub off standalone work restores snapshot refresh ${outcome}`, async t => {
+    const env = setup(t), { alpha } = fixture(t), calls = [], polls = [];
+    let snapshot = alpha, loads = 0;
+    let status = { enabled: outcome !== 'disabled', auto_interval_ms: 0, targets: [
+      { name: 'mac', machine_id: 'alpha', running: false, last_result: null },
+      { name: 'codev2', machine_id: 'beta', running: false, last_result: { code: 'failed' } },
+    ] };
+    const schedule = env.window.setTimeout.bind(env.window);
+    env.window.setTimeout = (fn, delay, ...args) => {
+      if (delay === 10000 || delay === 1000) { polls.push(fn); return schedule(() => {}, 60000); }
+      return schedule(fn, delay, ...args);
+    };
+    env.context.fetch = async (url, options = {}) => {
+      calls.push({ url, options });
+      if (url === '/api/health') return response({ sessionHubActive: false });
+      if (url.endsWith('/snapshots/status')) return response(status);
+      if (url.endsWith('/snapshots/refresh')) {
+        if (outcome === 'error') return response({}, 500);
+        status = { ...status, targets: status.targets.map(target => ({ ...target, running: true })) };
+        return response(status, 202);
+      }
+      if (url === '/api/observe/snapshots') { loads++;
+        return response({ rev: snapshot === alpha ? REV : NEXT, snapshots: [{ machine_id: 'alpha', sha256: 'a' }] }); }
+      if (url.includes('/snapshots/alpha')) return response(snapshot);
+      return response({ nodes: [], queued: [] });
+    };
+    loadAppShell(env); env.window.location.hash = '#work'; env.render(env.h(env.context.App), env.root);
+    await flushEffects(); await flushEffects(); await flushEffects();
+    const board = env.root.querySelector('[data-view="work"]'); assert.ok(board);
+    assert.equal(env.root.querySelector('.session-hub-chat'), null);
+    const button = board.querySelector('[aria-label="새로 만들기"]');
+    assert.ok(button, 'standalone board must retain snapshot generation');
+    assert.ok(board.textContent.includes('mac · 수집 전')); assert.ok(board.textContent.includes('codev2 · 수집 실패'));
+    assert.equal(button.disabled, outcome === 'disabled');
+    const initialLoads = loads;
+    button.click(); await flushEffects();
+    const posts = calls.filter(call => call.options.method === 'POST');
+    if (outcome === 'disabled') { assert.equal(posts.length, 0); return; }
+    assert.equal(posts.length, 1); assert.equal(posts[0].url, '/api/session-hub/snapshots/refresh');
+    assert.equal(posts[0].options.body, '{}'); assert.equal(posts[0].options.credentials, 'same-origin');
+    if (outcome === 'error') {
+      assert.equal(button.disabled, false); assert.ok(board.querySelector('[role="alert"]'));
+      assert.equal(loads, initialLoads); return;
+    }
+    assert.equal(button.disabled, true); assert.ok(board.textContent.includes('mac · 수집 중'));
+    assert.ok(board.textContent.includes('codev2 · 수집 중'));
+    snapshot = structuredClone(alpha); snapshot.generated_at = '2026-10-12T00:00:00.000Z';
+    snapshot.sessions[0].ai_title = '수집 후 새 상태';
+    status = { ...status, targets: status.targets.map(target => ({ ...target, running: false,
+      last_result: { code: 'ok' }, last_success_at: snapshot.generated_at })) };
+    await polls.shift()(); await flushEffects(); await flushEffects();
+    assert.equal(loads, initialLoads + 1); assert.equal(button.disabled, false);
+    assert.ok(board.textContent.includes('mac · 수집 완료')); assert.ok(board.textContent.includes('codev2 · 수집 완료'));
+    assert.ok(board.textContent.includes('수집 후 새 상태'));
+    const reads = loads;
+    Array.from(board.querySelectorAll('button')).find(node => node.textContent === '스냅샷 새로고침').click();
+    await flushEffects(); await flushEffects(); assert.equal(loads, reads + 1);
+    assert.ok(!calls.some(call => /router|conversations|session-hub\/chat/.test(call.url)));
+  });
+
+for (const action of ['picker', 'reset']) test(
+  `R4 right ManagerChat ${action} synchronizes sidebar aria-current`, async t => {
+    const { env } = await r1Manager(t), targets = [], calls = [];
+    env.context.confirm = () => true;
+    env.context.useConversation = target => {
+      targets.push(target); return { run: { id: 'operator-run', status: 'running' }, events: [], queuedMessages: [] };
+    };
+    const fetch = env.context.fetch;
+    env.context.fetch = async (url, options) => {
+      calls.push({ url, options }); return url.endsWith('/reset') ? response({}) : fetch(url, options);
+    };
+    env.render(env.h(env.context.ManagerView, { manager: { status: { active: true, pms: [] }, events: [],
+      queuedMessages: [], reloadQueue: () => {} }, projects: [{ id: 'p1', name: 'Project 1', pm_enabled: true }],
+      runs: [], tasks: [], agents: [], nodeSummary: {}, sessionHubActive: true,
+      initialTarget: action === 'reset' ? 'operator:p1' : 'top' }), env.root);
+    await flushEffects(); await flushEffects();
+    const chat = env.root.querySelector('.manager-chat-side');
+    const nav = label => Array.from(env.root.querySelectorAll('.session-hub-nav'))
+      .find(node => node.textContent === label);
+    if (action === 'picker') {
+      chat.querySelector('.manager-pm-picker button').click(); await flushEffects();
+      chat.querySelector('[role="option"][data-value="operator:p1"]').click(); await flushEffects();
+      assert.equal(targets.at(-1), 'operator:p1');
+      assert.equal(nav('Operator · Project 1').getAttribute('aria-current'), 'page');
+      assert.equal(nav('Top').getAttribute('aria-current'), null);
+    } else {
+      chat.querySelector('[data-action="reset-pm"]').click(); await flushEffects(); await flushEffects();
+      assert.equal(calls.filter(call => call.url === '/api/manager/pm/p1/reset').length, 1);
+      assert.equal(targets.at(-1), null);
+      assert.equal(nav('Top').getAttribute('aria-current'), 'page');
+      assert.equal(nav('Operator · Project 1').getAttribute('aria-current'), null);
+    }
+    assert.equal(env.root.querySelector('.manager-chat-side'), chat);
+    nav('작업').click(); await flushEffects(); assert.equal(nav('작업').getAttribute('aria-current'), 'page');
+    assert.ok(!calls.some(call => /^\/api\/conversations\/hub/.test(decodeURIComponent(call.url))));
   });

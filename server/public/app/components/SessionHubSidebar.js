@@ -4,7 +4,7 @@ import htm from '../../vendor/htm.module.js';
 import { WORK_BOARD_LABELS as W } from '../lib/copy.js';
 import { rankCards, sessionDisplayState, sessionDisplayStatusLabel,
   sessionHasOldTranscript } from '../lib/workBoard.js';
-import { useSnapshotRefresh } from '../lib/hooks/useSnapshotRefresh.js';
+import { SnapshotRefreshControls } from './SnapshotRefreshControls.js';
 import { Dropdown } from './Dropdown.js';
 import { SnapshotTime, SessionRow, SessionCard, Coverage } from './SessionSnapshotParts.js';
 const html = htm.bind(h);
@@ -46,16 +46,11 @@ export function SessionHubSidebar({ data, projects = [], onAssistant, onConversa
   const [grouping, setGrouping] = useState(() =>
     readPreference(GROUP_KEY, 'status') === 'repo' ? 'repo' : 'status');
   const [palantir, setPalantir] = useState(() => readPreference(PALANTIR_KEY, 'open') !== 'closed');
-  const refresh = useSnapshotRefresh({ onComplete: reload });
   const results = useMemo(() => rankCards(cards, query, machine, provider), [cards, query, machine, provider]);
   const groups = useMemo(() => sessionGroups(results, grouping, now), [results, grouping, now]);
   const machines = load.entries.filter(entry => entry.machine_id).map(entry => ({
     value: entry.machine_id, label: entry.machine_label || entry.machine_id,
   }));
-  const times = load.entries.filter(entry => entry.machine_id).map(entry =>
-    load.snapshots.find(item => item.machine.id === entry.machine_id)?.generated_at || entry.generated_at);
-  const oldest = times.filter(value => Number.isFinite(Date.parse(value)))
-    .sort((a, b) => Date.parse(a) - Date.parse(b))[0];
   return html`<aside class="session-hub-sidebar all-sessions-panel" aria-label="세션 목록">
     <header class="session-hub-sidebar-header">
       <input id="hub-query" class="work-search" type="search" value=${query} placeholder="세션 검색"
@@ -70,25 +65,7 @@ export function SessionHubSidebar({ data, projects = [], onAssistant, onConversa
           options=${[{ value: '', label: '도구' }, { value: 'claude', label: 'Claude' },
             { value: 'codex', label: 'Codex' }]} /></div>
       </div>
-      <div class="session-hub-snapshot-line">
-        <span>스냅샷 <${SnapshotTime} value=${oldest} now=${now} relativeOnly=${true} /></span>
-        <button class="ghost session-hub-icon" type="button" aria-label="새로 만들기"
-          title="스냅샷 새로 만들기" disabled=${refresh.busy || refresh.status?.enabled === false}
-          onClick=${() => refresh.refresh()}>${refresh.busy ? '⋯' : '⟳'}</button>
-        <details class="session-hub-snapshot-details">
-          <summary aria-label="스냅샷 상세">상세</summary>
-          <div class="session-hub-snapshot-info">
-            ${load.entries.filter(entry => entry.machine_id).map(entry => html`<p key=${entry.machine_id}>
-              <${SnapshotTime} value=${load.snapshots.find(item => item.machine.id === entry.machine_id)?.generated_at
-                || entry.generated_at} now=${now} label=${entry.machine_label} snapshot=${true} /></p>`)}
-            ${refresh.status?.targets.map(target => html`<p role="status" key=${target.name}>
-              ${target.name} · ${target.running ? '수집 중' : target.last_result?.code === 'ok' ? '수집 완료'
-                : target.last_result ? '수집 실패' : '수집 전'}</p>`)}
-            <button class="ghost" type="button" disabled=${loading} onClick=${reload}>스냅샷 새로고침</button>
-          </div>
-        </details>
-      </div>
-      ${refresh.error && html`<p role="alert">수집 상태를 읽지 못했습니다.</p>`}
+      <${SnapshotRefreshControls} load=${load} now=${now} loading=${loading} reload=${reload} />
       ${!loading && !load.rev && html`<p class="work-label" role="status">스냅샷 확인 불가
         <button class="ghost" onClick=${reload}>다시 시도</button></p>`}
       ${revisionMismatch && html`<p class="work-label" role="status">답변 뒤 갱신됨</p>`}

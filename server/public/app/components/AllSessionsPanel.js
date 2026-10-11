@@ -5,6 +5,7 @@ import { WORK_BOARD_LABELS as W } from '../lib/copy.js';
 import { snapshotCards, rankCards } from '../lib/workBoard.js';
 import { SnapshotTime, SessionCard, SessionRow, Coverage } from './SessionSnapshotParts.js';
 import { Dropdown } from './Dropdown.js';
+import { SnapshotRefreshControls } from './SnapshotRefreshControls.js';
 import { useSessionSnapshots } from '../lib/hooks/useSessionSnapshots.js';
 const html = htm.bind(h);
 
@@ -43,6 +44,9 @@ export function AllSessionsPanel({ onData, selection, onSelectionChange,
   return html`<section ref=${panelRef} data-view=${standalone ? 'work' : 'all-sessions'}
     class="work-board all-sessions-panel ${standalone ? 'session-board-standalone' : ''}" aria-label="모든 세션">
     <header class="work-header">
+      ${standalone ? html`<${SnapshotRefreshControls} load=${load} now=${now}
+        loading=${loading} reload=${reload} compact=${false} />
+        <span class="work-observation-note">${W.observationNote}</span>` : html`
       <div class="work-snapshot-times">${load.entries.filter(entry => entry.machine_id).map(entry => {
         const snapshot = load.snapshots.find(item => item.machine.id === entry.machine_id);
         return html`<span key=${entry.machine_id}><${SnapshotTime}
@@ -50,7 +54,7 @@ export function AllSessionsPanel({ onData, selection, onSelectionChange,
           label=${snapshot?.machine.label || entry.machine_label} snapshot=${true} /></span>`;
       })}<span class="work-observation-note">${W.observationNote}</span></div>
       <button type="button" class="ghost" disabled=${loading}
-        onClick=${reload}><span aria-hidden="true">↻</span> ${W.refresh}</button>
+        onClick=${reload}><span aria-hidden="true">↻</span> ${W.refresh}</button>`}
       ${!loading && !load.rev && html`<p class="work-label" role="status">스냅샷 rev 미확정 · 확인 불가
         <button type="button" class="ghost"
           onClick=${reload}>다시 시도</button></p>`}

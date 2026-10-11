@@ -706,6 +706,7 @@ function boardEnv(t, snapshotRequest = async () => ({ enabled: true, targets: []
   }
   env.loadComponent('Dropdown');
   env.loadComponent('SessionSnapshotParts');
+  env.loadComponent('SnapshotRefreshControls');
   env.loadComponent('SessionHubSidebar');
   require('./helpers/session-detail-cards').installDetailCards(env);
   // Keep rich timeline display contracts intact; compact row contracts live in session-hub-ui.test.js.

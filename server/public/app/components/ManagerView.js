@@ -56,10 +56,12 @@ export function ManagerView({ manager, runs, tasks, projects, agents, agentsErro
     onSelectConversation=${setConversationTarget} nodeSummary=${nodeSummary} />`;
   if (!sessionHubActive) return html`<div class="manager-view" data-view="manager">${chat}${grid}</div>`;
   return html`<${AssistantLayout} projects=${projects} initialTarget=${initialTarget} initialPanel=${initialPanel}
-    chat=${chat} grid=${grid} setConversationTarget=${setConversationTarget} />`;
+    chat=${chat} grid=${grid} conversationTarget=${conversationTarget}
+    setConversationTarget=${setConversationTarget} />`;
 }
 
-function AssistantLayout({ projects, initialTarget, initialPanel, chat, grid, setConversationTarget }) {
+function AssistantLayout({ projects, initialTarget, initialPanel, chat, grid,
+  conversationTarget, setConversationTarget }) {
   const snapshots = useSessionSnapshots();
   const cards = snapshots.load.snapshots.flatMap(snapshotCards);
   const data = { ...snapshots, cards };
@@ -136,7 +138,8 @@ function AssistantLayout({ projects, initialTarget, initialPanel, chat, grid, se
       onConversation=${openConversation} onWork=${() => {
         setActiveItem('work'); setRight('work'); setMobilePane('right');
       }}
-      activeItem=${activeItem} onOpenSession=${openSession} revisionMismatch=${revisionMismatch} />
+      activeItem=${right === 'manager' ? conversationTarget : activeItem}
+      onOpenSession=${openSession} revisionMismatch=${revisionMismatch} />
     <div class="session-hub-chat-side">
       <${SessionHubChat} panel=${panel} onOpenSession=${openSession} draft=${draft}
         onRevisionMismatch=${setRevisionMismatch} />
