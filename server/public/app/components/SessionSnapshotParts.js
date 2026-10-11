@@ -1,16 +1,14 @@
 import { h } from '../../vendor/preact.module.js';
-import { useEffect, useMemo, useRef, useState } from '../../vendor/hooks.module.js';
+import { useEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import htm from '../../vendor/htm.module.js';
-import { apiFetch } from '../lib/api.js';
 import { WORK_BOARD_LABELS as W } from '../lib/copy.js';
 import { snapshotCards, rankCards, highlightParts, matchedLines,
-  coverageCounts, loadWorkSnapshots, formatLocalSnapshotTime, cardLineVisibility,
+  coverageCounts, formatLocalSnapshotTime, cardLineVisibility,
   displayInstructionText } from '../lib/workBoard.js';
 
 const html = htm.bind(h);
-const emptyLoad = () => ({ entries: [], snapshots: [], failures: [], done: 0, total: 0 });
 
-function SnapshotTime({ value, now, relativeOnly = false, snapshot = false, label = '' }) {
+export function SnapshotTime({ value, now, relativeOnly = false, snapshot = false, label = '' }) {
   const epoch = Date.parse(value);
   if (!Number.isFinite(epoch)) return html`<span>${label ? `${label} · ${W.timeUnknown}` : W.timeUnknown}</span>`;
   const minutes = Math.floor((now - epoch) / 60000);
@@ -23,13 +21,14 @@ function SnapshotTime({ value, now, relativeOnly = false, snapshot = false, labe
   return html`<time dateTime=${value}>${label ? `${label} · ${text}` : text}</time>`;
 }
 
-function Highlight({ text, query, transformed = false }) {
-  if (transformed) return text;
+export function Highlight({ text, query, transformed = false }) {
+  if (transformed) return String(text || '').split(/(\[붙여넣은 내용\])/u).map(part =>
+    part === '[붙여넣은 내용]' ? html`<span class="session-pasted-label">${part}</span>` : part);
   return highlightParts(text, query).map((part, index) => part.highlighted
     ? html`<mark key=${index}>${part.text}</mark>` : part.text);
 }
 
-function Instruction({ instruction, query, now }) {
+export function Instruction({ instruction, query, now }) {
   const text = displayInstructionText(instruction.text);
   const transformed = !instruction.text_missing && text !== instruction.text;
   const [copyState, setCopyState] = useState('');
@@ -58,15 +57,15 @@ function Instruction({ instruction, query, now }) {
     </div>
     <p class="work-instruction"><${Highlight}
       text=${instruction.text_missing ? W.missing : text} query=${query} transformed=${transformed} /></p>
-    <button class="work-button" type="button" onClick=${copy}>${W.copy}</button>
+    <button class="ghost" type="button" onClick=${copy}>${W.copy}</button>
     <span role="status">${copyState === 'copied' ? W.copied : copyState === 'fallback' ? W.copyFallback : ''}</span>
     ${copyState === 'fallback' && html`<input ref=${selectorRef} class="work-selector"
       aria-label=${W.selector} value=${selector} readOnly />`}
   </li>`;
 }
 
-function SessionCard({ card, query, rank, now }) {
-  const [expanded, setExpanded] = useState(false);
+export function SessionCard({ card, query, rank, now, onOpen, timeline = false }) {
+  const [expanded, setExpanded] = useState(timeline);
   const first = card.first_instruction === 'unrecoverable' ? W.unrecoverable
     : card.first_instruction === 'unknown' ? W.unknownFirst : card.first || W.missing;
   const titleFallback = card.first_instruction === 'unrecoverable' ? W.unrecoverable
@@ -110,8 +109,9 @@ function SessionCard({ card, query, rank, now }) {
         ${W.unknownRatio(card.unknown_count, card.unknown_count + card.instruction_count)}</span>`}
     </div>`}
     <footer class="work-card-footer"><span>${W.instructions(card.instruction_total)}</span>
-      <button class="work-button" type="button" aria-expanded=${expanded}
-        aria-controls=${timelineId} onClick=${() => setExpanded(value => !value)}>
+      <button class="ghost" type="button" aria-label=${onOpen ? `${card.machine.label} · ${title} · ${W.timeline}`
+        : undefined} aria-expanded=${expanded}
+        aria-controls=${timelineId} onClick=${() => onOpen ? onOpen(card.key) : setExpanded(value => !value)}>
         ${expanded ? W.closeTimeline : W.timeline}</button></footer>
     <div id=${timelineId} class="work-timeline" hidden=${!expanded}>
       ${expanded && (card.instructions.length === 0 ? html`<p>${W.timelineEmpty}</p>` : html`<ol>
@@ -121,16 +121,7 @@ function SessionCard({ card, query, rank, now }) {
   </article>`;
 }
 
-function FilterChips({ label, options, selected, onSelect }) {
-  return html`<div class="work-filters" role="group" aria-label=${label}>
-    <span class="work-label">${label}</span>
-    ${[{ value: '', label: W.all }, ...options].map(option => html`<button type="button"
-      key=${option.value} class="work-button work-chip" aria-pressed=${selected === option.value}
-      onClick=${() => onSelect(option.value)}>${option.label}</button>`)}
-  </div>`;
-}
-
-function Coverage({ load }) {
+export function Coverage({ load }) {
   return html`<section class="work-coverage" aria-labelledby="work-coverage-title">
     <h2 id="work-coverage-title">${W.coverage}</h2>
     ${[...load.snapshots].sort((a, b) => a.machine.id < b.machine.id ? -1 : 1).map(snapshot => html`
@@ -148,64 +139,4 @@ function Coverage({ load }) {
   </section>`;
 }
 
-export function WorkBoardView({ activation = 'on' }) {
-  const [load, setLoad] = useState(emptyLoad);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(false);
-  const [revision, setRevision] = useState(0);
-  const [query, setQuery] = useState('');
-  const [machine, setMachine] = useState('');
-  const [provider, setProvider] = useState('');
-  const [now, setNow] = useState(Date.now);
-  useEffect(() => {
-    if (activation !== 'on') return;
-    const controller = new AbortController();
-    let active = true;
-    setLoad(emptyLoad()); setLoading(true); setError(false);
-    loadWorkSnapshots(apiFetch, controller.signal, setLoad).catch(() => {
-      if (active) { controller.abort(); setLoad(emptyLoad()); setError(true); }
-    }).finally(() => { if (active) setLoading(false); });
-    const timer = setInterval(() => setNow(Date.now()), 60000);
-    return () => { active = false; controller.abort(); clearInterval(timer); };
-  }, [activation, revision]);
-  const cards = useMemo(() => load.snapshots.flatMap(snapshotCards), [load.snapshots]);
-  const results = useMemo(() => rankCards(cards, query, machine, provider), [cards, query, machine, provider]);
-  const machines = load.entries.filter(entry => entry.machine_id)
-    .map(entry => ({ value: entry.machine_id, label: entry.machine_label }));
-  if (activation !== 'on') return html`<section data-view="work" class="work-board">
-    <h1>${W.title}</h1><p role="status">${activation === 'pending' ? W.pending
-      : activation === 'error' ? W.error : W.off}</p></section>`;
-  return html`<section data-view="work" class="work-board">
-    <header class="work-header">
-      <div><h1>${W.title}</h1><p class="work-label">${W.description}</p></div>
-      <div class="work-snapshot-times">${load.entries.filter(entry => entry.machine_id).map(entry => {
-        const snapshot = load.snapshots.find(item => item.machine.id === entry.machine_id);
-        return html`<span class="work-pill" key=${entry.machine_id}><${SnapshotTime}
-          value=${snapshot?.generated_at || entry.generated_at} now=${now}
-          label=${snapshot?.machine.label || entry.machine_label} snapshot=${true} /></span>`;
-      })}</div>
-      <p class="work-label work-observation-note">${W.observationNote}</p>
-      <button type="button" class="work-button" disabled=${loading}
-        onClick=${() => setRevision(value => value + 1)}>${W.refresh}</button>
-    </header>
-    <div class="work-body">
-      <label class="work-label" for="work-query">${W.search}</label>
-      <input id="work-query" class="work-search" type="search" value=${query}
-        placeholder=${W.searchPlaceholder} aria-describedby="work-search-hint"
-        onInput=${event => setQuery(event.target.value)} />
-      <p id="work-search-hint" class="work-label">${W.searchHint}</p>
-      <div class="work-filter-row">
-        <${FilterChips} label=${W.machine} options=${machines} selected=${machine} onSelect=${setMachine} />
-        <${FilterChips} label=${W.tool} options=${[{ value: 'claude', label: 'Claude' },
-          { value: 'codex', label: 'Codex' }]} selected=${provider} onSelect=${setProvider} />
-      </div>
-      <p class="work-label" role="status">${loading ? W.loading(load.done, load.total)
-        : `${W.results(results.length)} · ${query.trim() ? W.searchOrder : W.order}`}</p>
-      ${error && html`<p role="alert">${W.error}</p>`}
-      ${!loading && !error && results.length === 0 && html`<p>${cards.length ? W.noResults : W.empty}</p>`}
-      <div class="work-grid">${results.map((card, index) => html`<${SessionCard} key=${card.key}
-        card=${card} query=${query} rank=${card.match ? index + 1 : null} now=${now} />`)}</div>
-      <${Coverage} load=${load} />
-    </div>
-  </section>`;
-}
+

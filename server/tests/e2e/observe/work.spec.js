@@ -2,6 +2,11 @@ const { test, expect } = require('@playwright/test');
 const AxeBuilder = require('@axe-core/playwright').default;
 const { NOW } = require('../../helpers/work-board-fixture.cjs');
 
+// Keep the real cookie-only observe server; only activate and mock the independent assistant.
+test.beforeEach(async ({ page }) => {
+  await require('../helpers/session-hub').mockSessionHub(page, { observe: false, clock: false });
+});
+
 const viewports = [
   { name: 'desktop', width: 1280, height: 800 },
   { name: 'mobile', width: 375, height: 667 },
@@ -14,8 +19,8 @@ async function openBoard(page, theme, viewport) {
   await page.goto('/#work');
   await expect(page.locator('.work-card')).toHaveCount(3);
   await expect(page.getByRole('status').filter({ hasText: '세션 3개' })).toBeVisible();
-  await expect(page.locator('.nav-work-label')).toHaveText('작업');
-  await expect(page.locator('.nav-work')).toHaveAccessibleName('작업');
+  await expect(page.locator('.nav-work-label, .nav-work')).toHaveCount(0);
+  await expect(page.locator('.nav-item.active')).toHaveAccessibleName('매니저');
   await expect(page.locator('.work-title')).toHaveText([
     '합성 세션 검토', '이미지 크기별 결과를 정리해 주세요.',
     '주간 보고 초안을 작성해 주세요.',
@@ -47,14 +52,14 @@ for (const theme of ['light', 'dark']) {
         mask: [page.locator('.nav-status')],
       });
       const cards = page.locator('.work-card');
-      await cards.first().getByRole('button', { name: '타임라인', exact: true }).click();
+      await cards.first().getByRole('button').click();
       await expect(page.locator('.work-event')).toHaveCount(2);
       await scan(page);
       await expect(page).toHaveScreenshot(`timeline-${theme}-${viewport.name}.png`, {
         fullPage: true, animations: 'disabled', maxDiffPixels: 100, threshold: 0.2,
         mask: [page.locator('.nav-status')],
       });
-      await cards.first().getByRole('button', { name: '타임라인 접기', exact: true }).click();
+      await page.getByRole('button', { name: '← 모든 세션', exact: true }).click();
       await page.getByLabel('지시 검색', { exact: true }).fill('로그인리다');
       await expect(cards).toHaveCount(1);
       await expect(cards.locator('.work-title')).toHaveText('합성 세션 검토');
@@ -66,9 +71,11 @@ for (const theme of ['light', 'dark']) {
       });
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
       expect(overflow).toBe(false);
-      for (const button of await page.locator('[data-view="work"] button').all()) {
+      for (const button of await page.locator('[data-view="all-sessions"] button').all()) {
         const box = await button.boundingBox();
-        expect(box.height).toBeGreaterThanOrEqual(44);
+        if (!box) continue;
+        expect(box.height).toBeGreaterThanOrEqual(28);
+        expect(box.height).toBeLessThanOrEqual(32);
       }
     });
   }
@@ -76,30 +83,31 @@ for (const theme of ['light', 'dark']) {
 
 test('entry default, exact work route, nav and command palette preserve explicit paths', async ({ page }) => {
   await page.goto('/');
-  await expect(page).toHaveURL(/#work$/);
+  await expect(page).toHaveURL(/#manager\/all-sessions$/);
   await expect(page.locator('.work-card')).toHaveCount(3);
   await page.goto('/#dashboard');
   await expect(page.locator('[data-view="dashboard"]')).toBeVisible();
-  await expect(page.locator('.nav-work')).toBeVisible();
+  await expect(page.locator('.nav-work')).toHaveCount(0);
   await page.keyboard.press('Control+k');
   await expect(page.getByRole('dialog').locator('.command-palette-label')
-    .filter({ hasText: /^작업$/ })).toBeVisible();
+    .filter({ hasText: /^매니저$/ })).toBeVisible();
+  await expect(page.getByRole('dialog').getByText('작업', { exact: true })).toHaveCount(0);
   await page.keyboard.press('Escape');
   await page.goto('/#work/child');
   await expect(page.locator('[data-view="dashboard"]')).toBeVisible();
   await expect(page).toHaveURL(/#work\/child$/);
-  await expect(page.locator('[data-view="work"]')).toHaveCount(0);
+  await expect(page.locator('[data-view="all-sessions"]')).toHaveCount(0);
 });
 
 test('partial detail failure keeps healthy cards and Korean coverage message', async ({ page }) => {
-  await page.route('**/api/observe/snapshots/beta', route => route.fulfill({
+  await page.route('**/api/observe/snapshots/beta?*', route => route.fulfill({
     status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'internal_error' }),
   }));
   await page.goto('/#work');
   await expect(page.locator('.work-card')).toHaveCount(2);
   await expect(page.locator('.work-failure'))
     .toContainText('codev2 · 이 머신의 스냅샷을 읽지 못했습니다.');
-  await expect(page.locator('[data-view="work"]')).not.toContainText('internal_error');
+  await expect(page.locator('[data-view="all-sessions"]')).not.toContainText('internal_error');
 });
 
 async function holdEntryProbe(page) {
@@ -126,7 +134,7 @@ async function holdEntryProbe(page) {
   return async () => { release(); await responseSent; await page.clock.runFor(100); };
 }
 
-test('one-second verdict keeps the pending shell until work becomes the default', async ({ page }) => {
+test('one-second verdict keeps the pending shell until manager panel becomes the default', async ({ page }) => {
   const release = await holdEntryProbe(page);
   const shell = page.locator('.work-entry-loading');
   await expect(shell).toBeVisible();
@@ -137,14 +145,14 @@ test('one-second verdict keeps the pending shell until work becomes the default'
   await expect(shell).toBeVisible();
   await expect(page.locator('[data-view="dashboard"]')).toHaveCount(0);
   await release();
-  await expect(page).toHaveURL(/#work$/);
+  await expect(page).toHaveURL(/#manager\/all-sessions$/);
   await page.clock.runFor(100);
   await expect(page.locator('.work-card')).toHaveCount(3);
-  await expect(page.locator('.nav-work')).toBeVisible();
+  await expect(page.locator('.nav-work')).toHaveCount(0);
   await expect(shell).toHaveCount(0);
 });
 
-test('two-second verdict falls back without a hash write and late on only adds nav', async ({ page }) => {
+test('two-second verdict falls back without a hash write and late on preserves navigation', async ({ page }) => {
   const release = await holdEntryProbe(page);
   const shell = page.locator('.work-entry-loading');
   await expect(shell).toBeVisible();
@@ -161,11 +169,11 @@ test('two-second verdict falls back without a hash write and late on only adds n
   const originalDashboard = await dashboard.elementHandle();
   await page.clock.runFor(400);
   await release();
-  await expect(page.locator('.nav-work')).toBeVisible();
+  await expect(page.locator('.nav-work')).toHaveCount(0);
   await expect(dashboard).toBeVisible();
   expect(await originalDashboard.evaluate(element => element === document.querySelector('[data-view="dashboard"]')))
     .toBe(true);
   expect(await page.evaluate(() => location.hash)).toBe('');
-  await expect(page.locator('[data-view="work"]')).toHaveCount(0);
+  await expect(page.locator('[data-view="all-sessions"]')).toHaveCount(0);
   await expect(shell).toHaveCount(0);
 });

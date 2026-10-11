@@ -523,3 +523,31 @@ for (const modal of FORM_MODALS) {
     });
   }
 }
+
+// C1 baseline additions: session assistant replaces the default active-hub manager view.
+// Host generates these baselines after reviewing the compact controls and mobile segments.
+for (const theme of THEMES) {
+  for (const vp of VIEWPORTS) {
+    test(`@visual session-hub manager [${theme}/${vp.name}]`, async ({ page }) => {
+      await require('./helpers/session-hub').mockSessionHub(page);
+      await page.setViewportSize({ width: vp.width, height: vp.height });
+      await setTheme(page, theme);
+      await page.goto('/#manager');
+      await expect(page.locator('button.session-evidence')).toBeVisible();
+      await stabilize(page);
+      await expect(page).toHaveScreenshot(`session-hub-chat-${theme}-${vp.name}.png`, {
+        maxDiffPixels: 100, threshold: 0.2,
+      });
+      await page.locator('button.session-evidence').click();
+      await expect(page.locator('.work-event').first()).toBeVisible();
+      await expect(page).toHaveScreenshot(`session-hub-timeline-${theme}-${vp.name}.png`, {
+        maxDiffPixels: 100, threshold: 0.2,
+      });
+      await page.getByRole('button', { name: '← 모든 세션', exact: true }).click();
+      await expect(page.locator('.session-rows .work-card')).toHaveCount(3);
+      await expect(page).toHaveScreenshot(`session-hub-panel-${theme}-${vp.name}.png`, {
+        maxDiffPixels: 100, threshold: 0.2,
+      });
+    });
+  }
+}

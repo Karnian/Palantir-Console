@@ -14,7 +14,10 @@ import { useState, useEffect } from '../../../vendor/hooks.module.js';
 const DEFAULT_ROUTE = 'dashboard';
 
 export function useRoute() {
-  const getHash = () => location.hash.slice(1) || DEFAULT_ROUTE;
+  const getHash = () => {
+    if (location.hash === '#work') location.replace('#manager/all-sessions');
+    return location.hash.slice(1) || DEFAULT_ROUTE;
+  };
   const [route, setRoute] = useState(getHash);
   useEffect(() => {
     const onHash = () => setRoute(getHash());

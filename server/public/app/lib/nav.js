@@ -36,11 +36,8 @@ export const NAV_ITEMS = [
   { hash: 'memory',      icon: '◈', label: NAV_LABELS.memory },
 ];
 
-// Spec §6: the observe entry is visible only after a successful probe.
-export const getNavItems = activation => {
-  return activation === 'on'
-    ? [{ hash: 'work', icon: '▤', label: NAV_LABELS.work }, ...NAV_ITEMS] : NAV_ITEMS;
-};
+// The snapshot board now lives in the manager's all-sessions panel.
+export const getNavItems = () => NAV_ITEMS;
 
 // Sub-items for CommandPalette search — deep-linkable canonical hashes.
 // Number-key shortcuts in CommandPalette are NOT wired to these

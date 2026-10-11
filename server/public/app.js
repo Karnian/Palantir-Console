@@ -29,7 +29,6 @@ import { EmptyState } from './app/components/EmptyState.js';
 import { MentionInput } from './app/components/MentionInput.js';
 import { CommandPalette } from './app/components/CommandPalette.js';
 import { DashboardView } from './app/components/DashboardView.js';
-import { WorkBoardView } from './app/components/WorkBoardView.js';
 import { BoardView, CalendarView, DirectoryPicker } from './app/components/BoardView.js';
 import { ProjectsView } from './app/components/ProjectsView.js';
 import { AgentsView } from './app/components/AgentsView.js';
@@ -409,7 +408,6 @@ function App() {
     if (observe.loading && !location.hash) {
       return html`<div class="work-entry-loading" role="status">${WORK_BOARD_LABELS.pending}</div>`;
     }
-    if (route === 'work') return html`<${WorkBoardView} activation=${observe.activation} />`;
     if (routeBase === 'manager') {
       const routeParts = route.split('/');
       const rawProjectId = routeParts[1] === 'operator' ? (routeParts.slice(2).join('/') || null) : null;
@@ -422,7 +420,8 @@ function App() {
       return html`<${ManagerView} manager=${manager} runs=${runs} tasks=${tasks} projects=${projects}
         agents=${agents} agentsError=${agentsError} agentsLoading=${agentsLoading} reloadAgents=${reloadAgents}
         driftAudit=${driftAudit} onOpenDrift=${() => setShowDriftDrawer(true)}
-        initialTarget=${managerInitialTarget} />`;
+        initialTarget=${managerInitialTarget} sessionHubActive=${observe.sessionHubActive}
+        initialPanel=${routeParts[1] === 'all-sessions' ? 'all' : undefined} />`;
     }
     if (routeBase === 'board') {
       if (tasksLoading) return html`<${Loading} />`;

@@ -196,6 +196,56 @@ export async function loadWorkSnapshots(request, signal, publish) {
   }));
 }
 
+// Confirm one complete observe generation; a changed detail restarts the entire list.
+export async function loadSessionSnapshots(request, signal, publish) {
+  for (let attempt = 0; attempt <= 3; attempt++) {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) { abort(); return; }
+    try {
+      const list = await request('/api/observe/snapshots',
+        { signal: controller.signal, allowAppForbidden: true });
+      if (signal.aborted) return;
+      const result = { entries: list.snapshots, snapshots: [], failures: [],
+        done: 0, total: list.snapshots.length, rev: null };
+      const emit = () => publish({ ...result, snapshots: [...result.snapshots], failures: [...result.failures] });
+      emit();
+      let changed = false;
+      const details = Promise.all(list.snapshots.map(async entry => {
+        try {
+          if (!entry.machine_id || !entry.sha256 || entry.error_code) {
+            result.failures.push(entry); return;
+          }
+          const path = `/api/observe/snapshots/${encodeURIComponent(entry.machine_id)}`;
+          const snapshot = await request(`${path}?sha256=${encodeURIComponent(entry.sha256)}`,
+            { signal: controller.signal, allowAppForbidden: true });
+          if (!controller.signal.aborted) result.snapshots.push(snapshot);
+        } catch (error) {
+          if (error.status === 409) { changed = true; controller.abort(); }
+          else if (error.message === 'Not authenticated') throw error;
+          else if (!controller.signal.aborted) result.failures.push(entry);
+        } finally { result.done++; }
+      }));
+      await Promise.race([details, new Promise(resolve => {
+        if (controller.signal.aborted) resolve();
+        else controller.signal.addEventListener('abort', resolve, { once: true });
+      })]);
+      if (signal.aborted) return;
+      if (changed) {
+        if (attempt === 3) throw new Error('snapshot_changed');
+        continue;
+      }
+      result.rev = list.rev;
+      emit();
+      return;
+    } finally {
+      controller.abort();
+      signal.removeEventListener('abort', abort);
+    }
+  }
+}
+
 // Spec §6 entry: fallback and any user navigation permanently close default selection.
 export function startObserveEntry({ request, getHash, navigate, subscribe, publish,
   setTimer = setTimeout, clearTimer = clearTimeout }) {

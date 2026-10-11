@@ -349,3 +349,28 @@ test.afterAll(() => {
     );
   }
 });
+
+// C1: populated session assistant, compact panel, and evidence timeline in both themes and sizes.
+for (const theme of THEMES) {
+  for (const vp of VIEWPORTS) {
+    test(`@a11y session-hub manager [${theme}/${vp.name}]`, async ({ page }) => {
+      await require('./helpers/session-hub').mockSessionHub(page);
+      await page.setViewportSize({ width: vp.width, height: vp.height });
+      await setTheme(page, theme);
+      await page.goto('/#manager');
+      await expect(page.locator('button.session-evidence')).toBeVisible();
+      const check = async () => {
+        const result = await new AxeBuilder({ page }).withTags(WCAG_TAGS)
+          .include('[data-view="manager"]').analyze();
+        expect(result.violations.filter(item => item.impact !== 'minor')).toEqual([]);
+      };
+      await check();
+      await page.locator('button.session-evidence').click();
+      await expect(page.locator('.work-event').first()).toBeVisible();
+      await check();
+      await page.getByRole('button', { name: '← 모든 세션', exact: true }).click();
+      await expect(page.locator('.session-rows .work-card')).toHaveCount(3);
+      await check();
+    });
+  }
+}
