@@ -55,18 +55,6 @@ function createAssistantStore(db, { maxMessages = 5000, now = () => new Date().t
     return row;
   });
   if (!active()) newThread();
-  // Upgrade previously retained requests without changing an already-applied migration.
-  db.transaction(() => {
-    const missing = db.prepare(`SELECT u.thread_id, u.request_id, u.content, u.turn_id,
-      coalesce(a.status, 'complete') AS status FROM assistant_messages u
-      LEFT JOIN assistant_messages a ON a.thread_id = u.thread_id AND a.turn_id = u.turn_id AND a.role = 'assistant'
-      LEFT JOIN assistant_requests r ON r.thread_id = u.thread_id AND r.request_id = u.request_id
-      WHERE u.request_id IS NOT NULL AND r.request_id IS NULL`).all();
-    const insertReceipt = db.prepare('INSERT INTO assistant_requests VALUES (?, ?, ?, ?, ?)');
-    for (const row of missing) {
-      insertReceipt.run(row.thread_id, row.request_id, contentHash(row.content), row.turn_id, row.status);
-    }
-  })();
   const findRequest = (id, requestId) => {
     const receipt = db.prepare('SELECT * FROM assistant_requests WHERE thread_id = ? AND request_id = ?')
       .get(id, requestId);
