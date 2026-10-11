@@ -30,9 +30,15 @@ function readExecutorPgid(dir) {
   } finally { if (fd !== undefined) fs.closeSync(fd); }
 }
 
-async function reapExecutorGroup(dir, options = {}) {
-  const pgid = readExecutorPgid(dir);
-  if (!pgid) return;
+async function reapExecutorPgid(pgid, options = {}) {
+  if (pgid === null || pgid === undefined) return;
+  if (!Number.isSafeInteger(pgid) || pgid <= 1 || pgid > 2147483647) throw failed();
+  const kill = options.reapOptions?.kill || process.kill;
+  try { kill(-pgid, 0); }
+  catch (err) {
+    if (err.code === 'ESRCH') return;
+    if (err.code !== 'EPERM') throw failed();
+  }
   const command = options.psBin || '/bin/ps';
   assertSpawnAllowed({ command, source: 'snapshot-refresh:executor-uid' });
   let stdout;
@@ -45,15 +51,25 @@ async function reapExecutorGroup(dir, options = {}) {
     });
   } catch { throw failed(); }
   if (typeof stdout !== 'string') throw failed();
-  const rows = stdout.trim().split('\n').filter(Boolean).map(line => {
-    if (!/^\s*\d+\s+\d+\s+\d+\s*$/.test(line)) throw failed();
-    return line.trim().split(/\s+/).map(Number);
-  });
+  const rows = [];
+  for (const line of stdout.split('\n')) {
+    const fields = line.trim().split(/\s+/);
+    if (!/^\d+$/.test(fields[0]) || !/^\d+$/.test(fields[1])) continue;
+    const pid = Number(fields[0]); const group = Number(fields[1]);
+    if (!Number.isSafeInteger(pid) || pid <= 0 || !Number.isSafeInteger(group) || group <= 0) continue;
+    const uid = Number(fields[2]);
+    if (fields.length !== 3 || !/^-?\d+$/.test(fields[2]) || !Number.isSafeInteger(uid)) {
+      // Ignore unrelated noise, but never hide an unreadable member or the server's own group.
+      if (pid === process.pid || group === pgid) throw failed();
+      continue;
+    }
+    rows.push([pid, group, uid]);
+  }
   const own = rows.find(([pid]) => pid === process.pid);
   if (!own || own[1] === pgid) throw failed();
   const members = rows.filter(([, group]) => group === pgid);
   if (!members.length) {
-    try { (options.reapOptions?.kill || process.kill)(-pgid, 0); }
+    try { kill(-pgid, 0); }
     catch (err) { if (err.code === 'ESRCH') return; }
     throw failed();
   }
@@ -61,4 +77,8 @@ async function reapExecutorGroup(dir, options = {}) {
   await reapProcessGroup(pgid, options.reapOptions);
 }
 
-module.exports = { readExecutorPgid, reapExecutorGroup };
+async function reapExecutorGroup(dir, options = {}) {
+  return reapExecutorPgid(readExecutorPgid(dir), options);
+}
+
+module.exports = { readExecutorPgid, reapExecutorGroup, reapExecutorPgid };

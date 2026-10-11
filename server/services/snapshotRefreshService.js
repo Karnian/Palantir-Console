@@ -7,7 +7,7 @@ const store = require('./observeSnapshotStore');
 const { isSafeId, validateSnapshot } = require('./observeSnapshotPolicy');
 const { assertSpawnAllowed, isSpawnGuardActive } = require('../utils/spawnGuard');
 const { reapProcessGroup } = require('../utils/reapProcessGroup');
-const { reapExecutorGroup } = require('../utils/snapshotExecutorGroup');
+const { readExecutorPgid, reapExecutorPgid } = require('../utils/snapshotExecutorGroup');
 
 const CLI = path.resolve(__dirname, '../../scripts/session-snapshot.mjs');
 const FIXTURES = path.resolve(__dirname, '../tests/fixtures/bin');
@@ -78,7 +78,7 @@ function createSnapshotRefreshService(options = {}) {
   }
   code ||= !observe.on ? 'observe_off' : !targets.length ? 'snapshot_targets_unset' : null;
   const entries = targets.map(target => ({ target, running: false, last_success_at: null,
-    last_attempt_at: null, last_result: null, locked: false, task: null, run: null }));
+    last_attempt_at: null, last_result: null, locked: false, task: null, run: null, failedGroups: null }));
   let closed = false; let shutdownPromise; let timer;
   const state = () => ({ enabled, code, closed, auto_interval_ms: enabled ? intervalMs : 0,
     targets: entries.map(entry => ({ name: entry.target.name, machine_id: entry.target.machineId,
@@ -216,7 +216,10 @@ function createSnapshotRefreshService(options = {}) {
     if (!run.reaping) run.reaping = (async () => {
       // Inspect the executor only after the CLI can no longer create or replace its marker.
       const cli = await Promise.allSettled([reapProcessGroup(run.pgid, options.reapOptions)]);
-      if (run.dir) await reapExecutorGroup(run.dir, options);
+      if (run.dir) {
+        run.executorPgid = readExecutorPgid(run.dir); run.executorKnown = true;
+        await reapExecutorPgid(run.executorPgid, options);
+      }
       if (cli[0].status === 'rejected') throw cli[0].reason;
     })();
     return run.reaping;
@@ -232,6 +235,8 @@ function createSnapshotRefreshService(options = {}) {
     entry.running = true; entry.run = run; entry.last_attempt_at = new Date().toISOString();
     entry.task = Promise.resolve().then(() => execute(entry, run)).then(result => {
       entry.last_result = result;
+      if (entry.locked) entry.failedGroups = { cliPgid: run.pgid,
+        executorPgid: run.executorPgid, executorKnown: run.executorKnown };
       if (result.code === 'ok') entry.last_success_at = new Date().toISOString();
     }).finally(() => { entry.running = false; entry.run = null; });
     return entry.task;
@@ -250,8 +255,19 @@ function createSnapshotRefreshService(options = {}) {
     if (shutdownPromise) return shutdownPromise;
     closed = true; (options.clearInterval || clearInterval)(timer);
     for (const entry of entries) if (entry.run) cancel(entry.run, 'cancelled');
-    shutdownPromise = Promise.allSettled(entries.map(entry => entry.task)).then(() => {
-      if (entries.some(entry => entry.locked)) throw fail('reap_failed', 503);
+    shutdownPromise = Promise.allSettled(entries.map(entry => entry.task)).then(async () => {
+      const cleanup = await Promise.allSettled(entries.filter(entry => entry.locked).map(async entry => {
+        const groups = entry.failedGroups;
+        if (!groups) throw fail('reap_failed', 503);
+        const reaped = await Promise.allSettled([
+          reapExecutorPgid(groups.cliPgid, options),
+          groups.executorKnown ? reapExecutorPgid(groups.executorPgid, options)
+            : Promise.reject(fail('reap_failed', 503)),
+        ]);
+        if (reaped.some(result => result.status === 'rejected')) throw fail('reap_failed', 503);
+        entry.failedGroups = null;
+      }));
+      if (cleanup.some(result => result.status === 'rejected')) throw fail('reap_failed', 503);
     });
     return shutdownPromise;
   }
