@@ -21,6 +21,9 @@ const html = htm.bind(h);
 // still find managerProfileAuthState at the same path.
 export { managerProfileAuthState };
 
+const isManagerTarget = target => target === 'top'
+  || (typeof target === 'string' && target.startsWith('operator:') && target.length > 'operator:'.length);
+
 export function ManagerView({ manager, runs, tasks, projects, agents, agentsError, agentsLoading,
   reloadAgents, driftAudit, onOpenDrift, nodeSummary: nodeSummaryProp, initialTarget,
   sessionHubActive = false, initialPanel }) {
@@ -32,11 +35,16 @@ export function ManagerView({ manager, runs, tasks, projects, agents, agentsErro
   const nodeSummary = hasNodeSummaryProp ? nodeSummaryProp : fetchedNodeSummary;
   // Lifted conversation target state — shared between ManagerChat (dropdown)
   // and SessionGrid (PM session click).
-  const [conversationTarget, setConversationTarget] = useState(() =>
-    initialTarget || (sessionHubActive ? 'hub' : 'top'));
+  const routeManagerTarget = isManagerTarget(initialTarget) ? initialTarget : null;
+  const [managerTarget, setManagerTarget] = useState(() => routeManagerTarget || 'top');
+  const conversationTarget = managerTarget;
+  const setConversationTarget = target => {
+    if (isManagerTarget(target)) setManagerTarget(target);
+  };
   useEffect(() => {
-    setConversationTarget(initialTarget || (sessionHubActive ? 'hub' : 'top'));
-  }, [initialTarget, sessionHubActive]);
+    // Assistant selection belongs to AssistantLayout; it never becomes a send target.
+    if (routeManagerTarget || !sessionHubActive) setManagerTarget(routeManagerTarget || 'top');
+  }, [routeManagerTarget, sessionHubActive]);
   const activePms = manager.status?.pms || [];
 
   const chat = html`<${ManagerChat} manager=${manager} projects=${projects} runs=${runs} tasks=${tasks}
@@ -56,9 +64,9 @@ function AssistantLayout({ projects, initialTarget, initialPanel, chat, grid, se
   const cards = snapshots.load.snapshots.flatMap(snapshotCards);
   const data = { ...snapshots, cards };
   const panel = { cards, rev: snapshots.load.rev };
-  const [activeItem, setActiveItem] = useState(initialTarget && initialTarget !== 'hub' ? initialTarget : 'assistant');
-  const [right, setRight] = useState(initialTarget && initialTarget !== 'hub' ? 'manager' : null);
-  const [managerVisited, setManagerVisited] = useState(!!initialTarget && initialTarget !== 'hub');
+  const [activeItem, setActiveItem] = useState(isManagerTarget(initialTarget) ? initialTarget : 'assistant');
+  const [right, setRight] = useState(isManagerTarget(initialTarget) ? 'manager' : null);
+  const [managerVisited, setManagerVisited] = useState(isManagerTarget(initialTarget));
   const [mobilePane, setMobilePane] = useState(initialPanel ? 'sidebar' : 'chat');
   const [selection, setSelection] = useState(null);
   const [revisionMismatch, setRevisionMismatch] = useState(false);
@@ -72,9 +80,11 @@ function AssistantLayout({ projects, initialTarget, initialPanel, chat, grid, se
   };
   const close = () => { setRight(null); setActiveItem('assistant'); focusAssistant(); };
   useEffect(() => {
-    if (initialTarget && initialTarget !== 'hub') {
+    if (isManagerTarget(initialTarget)) {
       setManagerVisited(true);
       setActiveItem(initialTarget); setRight('manager'); setMobilePane('right');
+    } else {
+      setActiveItem('assistant'); setRight(null); setMobilePane(initialPanel ? 'sidebar' : 'chat');
     }
   }, [initialTarget]);
   useEffect(() => {
@@ -82,7 +92,9 @@ function AssistantLayout({ projects, initialTarget, initialPanel, chat, grid, se
   }, [initialPanel]);
   useEffect(() => {
     const syncPanel = () => {
-      if (location.hash === '#work' || location.hash === '#manager/all-sessions') {
+      if (location.hash === '#manager' || location.hash === '#manager/hub') {
+        setActiveItem('assistant'); setRight(null); setMobilePane('chat');
+      } else if (location.hash === '#work' || location.hash === '#manager/all-sessions') {
         setActiveItem('assistant'); setRight(null); setMobilePane('sidebar');
       }
     };
@@ -93,7 +105,8 @@ function AssistantLayout({ projects, initialTarget, initialPanel, chat, grid, se
       if (!link || (link.target && link.target !== '_self') || link.hasAttribute('download')) return;
       const url = new URL(link.href, location.href);
       if (url.origin === location.origin && url.pathname === location.pathname && url.search === location.search
-        && url.hash === '#manager/all-sessions' && location.hash === url.hash) syncPanel();
+        && ['#manager', '#manager/hub', '#manager/all-sessions'].includes(url.hash)
+        && location.hash === url.hash) syncPanel();
     };
     window.addEventListener('hashchange', syncPanel);
     document.addEventListener('click', onLink);
@@ -106,6 +119,7 @@ function AssistantLayout({ projects, initialTarget, initialPanel, chat, grid, se
     setActiveItem(key); setSelection({ key, rev, query }); setRight('session'); setMobilePane('right');
   };
   const openConversation = target => {
+    if (!isManagerTarget(target)) return;
     setManagerVisited(true);
     setActiveItem(target); setConversationTarget(target); setRight('manager'); setMobilePane('right');
   };

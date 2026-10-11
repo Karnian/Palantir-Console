@@ -1,5 +1,5 @@
 import { h } from '../../vendor/preact.module.js';
-import { useState } from '../../vendor/hooks.module.js';
+import { useRef, useState } from '../../vendor/hooks.module.js';
 import htm from '../../vendor/htm.module.js';
 import { useAssistantMemory } from '../lib/hooks/useAssistantMemory.js';
 import { Dropdown } from './Dropdown.js';
@@ -26,11 +26,22 @@ export function AssistantMemoryView() {
   const [content, setContent] = useState('');
   const [kind, setKind] = useState('preference');
   const [adding, setAdding] = useState(false);
+  const formGeneration = useRef(0);
+  const inputGeneration = useRef(0);
   const save = async event => {
     event.preventDefault();
+    const requestedForm = formGeneration.current, requestedInput = inputGeneration.current;
     const success = await memory.mutate(editing ? `/${encodeURIComponent(editing.id)}` : '',
       editing ? 'PATCH' : 'POST', { content, kind, ...(editing ? { revision: editing.revision } : {}) }, '기억을 저장했습니다.');
-    if (success) { setEditing(null); setAdding(false); }
+    if (!success || requestedForm !== formGeneration.current) return;
+    if (requestedInput !== inputGeneration.current) {
+      // This successful PATCH advanced our revision once; retain newer edits against that acknowledgement.
+      if (editing) setEditing(current => current?.id === editing.id && current.revision === editing.revision
+        ? { ...current, revision: editing.revision + 1 } : current);
+      return;
+    }
+    formGeneration.current++; inputGeneration.current++;
+    setEditing(null); setAdding(false); setContent(''); setKind('preference');
   };
   return html`<section class="assistant-memory-content" aria-label="비서 기억">
     <div class="memory-hub-toolbar">
@@ -40,6 +51,7 @@ export function AssistantMemoryView() {
             aria-pressed=${status === value} onClick=${() => setStatus(value)}>${label}</button>`)}
       </div>
       <button class="ghost" type="button" onClick=${() => {
+        formGeneration.current++;
         setEditing(null); setAdding(true); setContent(''); setKind('preference');
       }}>기억 추가</button>
       <button class="ghost" type="button" onClick=${memory.reload}>새로고침</button>
@@ -49,12 +61,16 @@ export function AssistantMemoryView() {
     ${memory.loading && html`<p role="status">기억 읽는 중</p>`}
     ${(editing || adding) && html`<form onSubmit=${save}>
       <label>기억 내용<textarea aria-label="비서 기억 내용" value=${content}
-        onInput=${event => setContent(event.target.value)} /></label>
-      <${Dropdown} ariaLabel="기억 종류" value=${kind} onChange=${setKind}
+        onInput=${event => { inputGeneration.current++; setContent(event.target.value); }} /></label>
+      <${Dropdown} ariaLabel="기억 종류" value=${kind} onChange=${value => {
+        inputGeneration.current++; setKind(value);
+      }}
         options=${Object.entries(ASSISTANT_KINDS).map(([value, label]) => ({ value, label }))} />
       <button class="primary" type="submit" disabled=${memory.busy || !content.trim() || [...content].length > 500}>
         저장</button>
-      <button class="ghost" type="button" onClick=${() => { setEditing(null); setAdding(false); }}>취소</button>
+      <button class="ghost" type="button" onClick=${() => {
+        formGeneration.current++; setEditing(null); setAdding(false);
+      }}>취소</button>
     </form>`}
     ${status === 'pending' ? memory.data.proposals.map(proposal => html`<${AssistantMemoryProposal}
       key=${proposal.id} proposal=${proposal} busy=${memory.busy} onDecision=${memory.decide} />`)
@@ -63,6 +79,7 @@ export function AssistantMemoryView() {
           <span class="work-label">${ASSISTANT_KINDS[item.kind]}</span><p>${item.content}</p>
           ${status === 'active' && html`<footer>
             <button class="ghost" type="button" disabled=${memory.busy} onClick=${() => {
+              formGeneration.current++;
               setAdding(false); setEditing(item); setContent(item.content); setKind(item.kind);
             }}>수정</button>
             <button class="ghost" type="button" disabled=${memory.busy} onClick=${() =>

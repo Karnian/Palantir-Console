@@ -1483,3 +1483,133 @@ test('R1 drawer asking assistant closes the drawer and focuses its draft', async
   const input = env.root.querySelector('.session-hub-chat textarea');
   assert.equal(env.document.activeElement, input); assert.ok(input.value.includes('[[session:'));
 });
+
+test('R2 real manager route return never reads or sends a hub conversation', async t => {
+  const env = setup(t), { alpha } = fixture(t), calls = [];
+  env.context.EventSource = class { addEventListener() {} close() {} };
+  env.context.fetch = async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url === '/api/health') return response({ sessionHubActive: true });
+    if (url.endsWith('/chat/state')) return response({ thread_id: 'current', epoch: 'boot', version: 1,
+      state: 'running', messages: [] });
+    if (url.endsWith('/snapshots/status')) return response({ enabled: true, targets: [] });
+    if (url === '/api/observe/snapshots') return response({ rev: REV,
+      snapshots: [{ machine_id: 'alpha', sha256: 'a' }] });
+    if (url.includes('/snapshots/alpha')) return response(alpha);
+    if (url === '/api/router/resolve') {
+      const body = JSON.parse(options.body); return response({ target: body.currentConversationId, text: body.text });
+    }
+    return response({ conversation: { run: { id: 'manager-run', status: 'running' } },
+      events: [], messages: [], profiles: [], nodes: [], queued: [], message: { id: 'sent', status: 'queued' } });
+  };
+  loadAppShell(env); env.loadComponent('MentionInput');
+  env.context.useProjects = () => ({ projects: [{ id: 'p1', name: 'Project 1', pm_enabled: 1 }], reload: () => {} });
+  env.context.useManagerLifecycle = () => ({ status: { active: true, pms: [] }, reloadQueue: () => {} });
+  const hook = fs.readFileSync(path.join(publicRoot, 'app/lib/hooks/conversation.js'), 'utf8');
+  vm.runInContext(transformComponentSource(hook), env.context);
+  const hubCalls = () => calls.filter(call => /^\/api\/conversations\/hub/.test(decodeURIComponent(call.url)));
+  env.window.location.hash = '#manager/operator/p1'; env.render(env.h(env.context.App), env.root);
+  await flushEffects(); await flushEffects(); await flushEffects();
+  const chat = env.root.querySelector('.manager-chat-side'); assert.ok(chat);
+  env.window.location.hash = '#manager'; await flushEffects(); await flushEffects();
+  assert.deepEqual(hubCalls(), []);
+  assert.equal(env.root.querySelector('.session-hub-manager').dataset.right, 'closed');
+  assert.equal(env.root.querySelector('.manager-chat-side'), chat);
+  const nav = async label => {
+    Array.from(env.root.querySelectorAll('.session-hub-nav')).find(node => node.textContent === label).click();
+    await flushEffects();
+  };
+  await nav('Operator · Project 1');
+  const file = chat.querySelector('input[type="file"]');
+  Object.defineProperty(file, 'files', { value: [new env.window.File(['image'], 'only.png', { type: 'image/png' })] });
+  file.dispatchEvent(new env.window.Event('change', { bubbles: true })); await flushEffects();
+  chat.querySelector('.manager-send-btn').click(); await flushEffects();
+  let sent = calls.filter(call => call.options.method === 'POST' && call.url.endsWith('/message'));
+  assert.equal(decodeURIComponent(sent.at(-1).url), '/api/conversations/operator:p1/message');
+  assert.equal(JSON.parse(sent.at(-1).options.body).images.length, 1);
+  await nav('Top');
+  const input = chat.querySelector('textarea'); input.value = 'Top 질문';
+  input.dispatchEvent(new env.window.Event('input', { bubbles: true })); await flushEffects();
+  chat.querySelector('.manager-send-btn').click(); await flushEffects();
+  sent = calls.filter(call => call.options.method === 'POST' && call.url.endsWith('/message'));
+  assert.equal(sent.at(-1).url, '/api/conversations/top/message');
+  for (const hash of ['#manager/all-sessions', '#manager', '#manager/operator/p1', '#manager']) {
+    env.window.location.hash = hash; await flushEffects(); await flushEffects();
+  }
+  assert.deepEqual(hubCalls(), []);
+});
+
+test('R2 active ManagerView accepts only manager targets from props and callbacks', async t => {
+  const env = setup(t), calls = [], targets = []; let change;
+  env.context.EventSource = class { addEventListener() {} close() {} };
+  env.context.fetch = async url => {
+    calls.push(url); return response(url.endsWith('/chat/state') ? { thread_id: 'current', epoch: 'boot', version: 1,
+      state: 'running', messages: [] } : url.endsWith('/snapshots/status') ? { enabled: true, targets: [] }
+        : { rev: REV, snapshots: [] });
+  };
+  env.context.ManagerChat = props => {
+    targets.push(props.conversationTarget); change = props.onConversationChange;
+    env.context.preactHooks.useEffect(() => {
+      void env.context.apiFetch(`/api/conversations/${encodeURIComponent(props.conversationTarget)}`);
+    }, [props.conversationTarget]);
+    return env.h('div', { class: 'manager-chat-side' });
+  };
+  env.context.SessionGrid = props => env.h('button', { class: 'manager-grid-side',
+    onClick: () => props.onSelectConversation('hub') }, 'bad grid target');
+  env.context.managerProfileAuthState = () => 'ok';
+  const source = fs.readFileSync(path.join(publicRoot, 'app/components/ManagerView.js'), 'utf8');
+  vm.runInContext(transformComponentSource(source).replace(/^export\s+\{[^}]+\};?\s*$/gm, ''), env.context);
+  const props = { manager: { status: {} }, projects: [], runs: [], tasks: [], nodeSummary: {}, sessionHubActive: true };
+  const render = async (initialTarget, sessionHubActive = true) => {
+    env.render(env.h(env.context.ManagerView, { ...props, initialTarget, sessionHubActive }), env.root);
+    await flushEffects();
+  };
+  await render('operator:p1'); await render('hub'); await render(undefined);
+  change('hub'); await flushEffects(); change('hub:invalid'); await flushEffects();
+  Array.from(env.root.querySelectorAll('.session-hub-nav')).find(node => node.textContent === '작업').click();
+  await flushEffects(); env.root.querySelector('.manager-grid-side').click(); await flushEffects();
+  await render('operator:'); await render('operator:p2'); change('top'); await flushEffects();
+  await render('hub', false); change('hub'); await flushEffects();
+  await render(undefined, false); await render('hub', true);
+  assert.ok(targets.every(target => target === 'top' || /^operator:.+/.test(target)), targets.join(','));
+  assert.ok(!calls.some(url => /^\/api\/conversations\/hub/.test(decodeURIComponent(url))));
+});
+
+for (const operation of ['add', 'edit']) for (const newer of ['new-form', 'content', 'kind']) test(
+  `R2 delayed memory ${operation} keeps newer ${newer} draft`, async t => {
+    const env = setup(t), delayed = deferred(), posts = [];
+    let item = { id: 'm1', content: '기존 기억', kind: 'fact', status: 'active', revision: 2 };
+    env.context.fetch = async (url, options = {}) => {
+      assert.match(url, /^\/api\/session-hub\/memory/);
+      if (options.method === 'POST' || options.method === 'PATCH') {
+        posts.push({ url, body: JSON.parse(options.body) });
+        if (posts.length === 1) await delayed.promise;
+        item = { ...item, ...JSON.parse(options.body), revision: item.revision + 1 }; return response(item);
+      }
+      return response({ memories: [item], proposals: [], pending_count: 0 });
+    };
+    env.render(env.h(env.context.AssistantMemoryView), env.root); await flushEffects(); await flushEffects();
+    const click = async label => {
+      Array.from(env.root.querySelectorAll('button')).find(node => node.textContent.trim() === label).click();
+      await flushEffects();
+    };
+    const type = async text => {
+      const input = env.root.querySelector('textarea'); input.value = text;
+      input.dispatchEvent(new env.window.Event('input', { bubbles: true })); await flushEffects();
+    };
+    await click(operation === 'add' ? '기억 추가' : '수정'); await type('내용 A'); await click('저장');
+    if (newer === 'new-form') await click('기억 추가');
+    if (newer === 'kind') {
+      env.root.querySelector('[aria-label^="기억 종류,"]').click(); await flushEffects();
+      Array.from(env.root.querySelectorAll('[role="option"]')).find(node => node.textContent === '인물').click();
+      await flushEffects();
+    } else await type('내용 B');
+    delayed.resolve(); await flushEffects(); await flushEffects();
+    const input = env.root.querySelector('textarea'); assert.ok(input, 'newer form must stay open');
+    assert.equal(input.value, newer === 'kind' ? '내용 A' : '내용 B');
+    if (newer === 'kind') assert.ok(env.root.querySelector('[aria-label="기억 종류, 인물"]'));
+    assert.equal(posts[0].body.content, '내용 A');
+    await click('저장'); assert.equal(env.root.querySelector('textarea'), null);
+    assert.equal(posts[1].body.content, newer === 'kind' ? '내용 A' : '내용 B');
+    if (operation === 'edit' && newer !== 'new-form') assert.equal(posts[1].body.revision, 3);
+  });
