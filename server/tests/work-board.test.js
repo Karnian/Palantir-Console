@@ -55,6 +55,43 @@ test('pasted display uses a short inline marker for tags without content', async
   }
 });
 
+test('multiline pasted display keeps both instructions visible in title, first and recent', async t => {
+  const { snapshotCards } = await logic;
+  const { alpha } = fixtures(t);
+  const session = alpha.sessions[0];
+  session.ai_title = null;
+  const rows = alpha.instructions.filter(row => row.session_key === session.key);
+  rows[0].text = '<pasted_content id="first">\n인증 구현\n</pasted_content>';
+  rows[1].text = '<pasted_content id="recent">\n검색 구현\n</pasted_content>';
+  const card = snapshotCards(alpha).find(item => item.key === session.key);
+  assert.equal(card.title, '[붙여넣은 내용] 인증 구현');
+  assert.equal(card.first, '[붙여넣은 내용] 인증 구현');
+  assert.equal(card.recent, '[붙여넣은 내용] 검색 구현');
+  assert.equal(card.omitRecent, false);
+});
+
+test('multiline pasted display separates consecutive blocks and surrounding ordinary text', async () => {
+  const { displayInstructionText } = await logic;
+  const first = '<pasted_content id="a">\n인증 구현\n</pasted_content>';
+  const recent = '<pasted_content id="b">\r\n검색 구현\r\n</pasted_content>';
+  assert.equal(displayInstructionText(first + '\n\n' + recent),
+    '[붙여넣은 내용] 인증 구현\n[붙여넣은 내용] 검색 구현');
+  assert.equal(displayInstructionText('앞 설명\n' + first + '\n뒤 설명'),
+    '앞 설명\n[붙여넣은 내용] 인증 구현\n뒤 설명');
+  assert.equal(displayInstructionText('앞 설명 ' + first + ' 뒤 설명'),
+    '앞 설명 [붙여넣은 내용] 인증 구현\n뒤 설명');
+  assert.equal(displayInstructionText('<pasted_content id="x">\n첫 줄\n둘째 줄\n</pasted_content>\n끝'),
+    '[붙여넣은 내용] 첫 줄\n둘째 줄\n끝');
+});
+
+test('multiline pasted display collapses empty blocks to the marker alone', async () => {
+  const { displayInstructionText } = await logic;
+  for (const text of ['<pasted_content id="empty">\n \t\n</pasted_content>',
+    '<pasted_content id="empty">\n \t']) {
+    assert.equal(displayInstructionText(text), '[붙여넣은 내용]');
+  }
+});
+
 test('command display accepts one name and matching optional message in every order', async () => {
   const { displayInstructionText } = await logic;
   const tags = ['<command-message> \t///deep-research\n </command-message>',

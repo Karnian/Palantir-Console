@@ -2,8 +2,9 @@
 // Display only: input is already sanitized. Keep payloads literal and search the original text.
 export function displayInstructionText(text) {
   if (typeof text !== 'string') return text;
-  const pasted = text.replace(/<pasted_content\b[^>]*>/giu, '[붙여넣은 내용] ')
-    .replace(/<\/pasted_content\s*>/giu, '');
+  const pasted = text.replace(/<pasted_content\b[^>]*>\s*/giu, '[붙여넣은 내용] ')
+    .replace(/\s*<\/pasted_content\s*>\s*/giu,
+      (tag, offset, source) => offset + tag.length < source.length ? '\n' : '');
   if (pasted !== text) text = pasted.replace(/\[붙여넣은 내용\] $/u, '[붙여넣은 내용]');
   const trimmed = text.trim();
   const tags = /<command-(name|message|args)>([\s\S]*?)<\/command-\1>/gu;

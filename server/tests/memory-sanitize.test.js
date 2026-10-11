@@ -74,6 +74,14 @@ test('redactSecrets: quoted multi-word value is fully masked (Codex follow-up BL
   assert.doesNotMatch(text, /horse|battery|staple/, 'trailing words after the first space must not survive');
 });
 
+test('redactSecrets: password CLI arguments mask the whole quoted or unquoted value', () => {
+  for (const argument of ['--password "correct horse battery staple"', "--passwd 'private value'", '--pwd hunter2']) {
+    const result = redactSecrets(`review ${argument} --other keep`);
+    assert.equal(result.redacted, true);
+    assert.equal(result.text, 'review [REDACTED] --other keep');
+  }
+});
+
 test('redactSecrets: leaves clean text untouched', () => {
   const { text, redacted } = redactSecrets('Run npm test before pushing; the lint step is slow.');
   assert.equal(redacted, false);

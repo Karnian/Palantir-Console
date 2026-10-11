@@ -10,6 +10,7 @@ const { fixture, COOKIE, request } = require('./helpers/session-hub-fixture.cjs'
 const store = require('../services/observeSnapshotStore');
 const { createSessionHubBroker, INCOMPLETE_KEYS } = require('../services/sessionHubBroker');
 const { validateSnapshot } = require('../services/observeSnapshotPolicy');
+const { redactSecrets } = require('../services/memorySanitize');
 const board = import(pathToFileURL(path.join(__dirname, '../public/app/lib/workBoard.js')).href);
 const BASE = '/api/session-hub';
 const bytes = value => Buffer.byteLength(JSON.stringify(value));
@@ -245,6 +246,75 @@ test('search snippets retain raw tag-attribute matches and crop before display t
   assert.ok(snippet.includes('needle'));
   assert.ok(snippet.startsWith('한'.repeat(50)), 'centered window is selected from the original text');
   assert.equal(snippet.length, 240);
+});
+
+test('snippet redacts whole command args before centering on a command-name match', async t => {
+  const fx = fixture(t);
+  const helpers = await board;
+  const secret = '비밀'.repeat(300);
+  for (const argument of [`--password="${secret}"`, `--password "${secret}"`]) {
+    const snapshot = structuredClone(fx.alpha);
+    const row = snapshot.instructions[0];
+    row.text = `<command-args>${argument}</command-args><command-name>review</command-name>`;
+    const broker = createSessionHubBroker({ state: fx.state, store: { readAllSnapshots: () => ({
+      ok: true, snapshots: [{ machineId: 'alpha', ok: true, snapshot, sha256: 'a'.repeat(64) }],
+    }) } });
+    const result = await broker.search({ q: 'review' });
+    const snippet = result.sessions[0].instructions[0].snippet;
+    assert.equal(snippet.includes('비밀'), false);
+    assert.ok(snippet.includes('[REDACTED]'));
+    const expected = helpers.displayInstructionText(redactSecrets(row.text).text);
+    assert.equal(snippet, expected);
+    const detail = await broker.detail(row.session_key, {});
+    assert.equal(detail.first.text, expected);
+    const list = await broker.list({});
+    assert.equal(list.sessions.find(session => session.key === row.session_key).first, expected);
+  }
+});
+
+test('snippet never restores a query inside a redacted secret and uses the safe leading excerpt', async t => {
+  const fx = fixture(t);
+  const helpers = await board;
+  const snapshot = structuredClone(fx.alpha);
+  const row = snapshot.instructions[0];
+  const secret = '가'.repeat(300) + 'needle' + '나'.repeat(300);
+  row.text = '<pasted_content id="x">' + '안전 안내 '.repeat(50) + `--password="${secret}"</pasted_content>`;
+  const broker = createSessionHubBroker({ state: fx.state, store: { readAllSnapshots: () => ({
+    ok: true, snapshots: [{ machineId: 'alpha', ok: true, snapshot, sha256: 'a'.repeat(64) }],
+  }) } });
+  const result = await broker.search({ q: 'needle' });
+  const match = result.sessions[0].instructions[0];
+  assert.equal(match.snippet.includes('needle'), false);
+  assert.equal(match.snippet.includes('가'.repeat(20)), false);
+  assert.equal(match.snippet.includes('나'.repeat(20)), false);
+  assert.ok(match.flags.includes('clipped_text'));
+  const safe = redactSecrets(row.text).text;
+  assert.equal(match.snippet, helpers.displayInstructionText(safe.slice(0, 240)));
+  const detail = await broker.detail(row.session_key, {});
+  assert.equal(detail.first.text, helpers.displayInstructionText(safe));
+  const list = await broker.list({});
+  assert.equal(list.sessions.find(session => session.key === row.session_key).first,
+    helpers.displayInstructionText(safe).slice(0, 120));
+  row.text = '<pasted_content id="x">--password="needle hidden"</pasted_content>';
+  const short = (await broker.search({ q: 'needle' })).sessions[0].instructions[0];
+  assert.equal(short.snippet, '[붙여넣은 내용] --[REDACTED]');
+  assert.ok(short.flags.includes('clipped_text'), 'a redacted-only match is marked even below the size limit');
+});
+
+test('broker shares multiline pasted display in first, recent and detail text', async t => {
+  const fx = fixture(t);
+  const key = fx.alpha.sessions[0].key;
+  const rows = fx.alpha.instructions.filter(row => row.session_key === key);
+  rows[0].text = '<pasted_content id="first">\n인증 구현\n</pasted_content>';
+  rows[1].text = '<pasted_content id="recent">\n검색 구현\n</pasted_content>\n후속 설명';
+  fx.write(fx.alpha);
+  const broker = createSessionHubBroker({ state: fx.state });
+  const list = (await broker.list({})).sessions.find(session => session.key === key);
+  assert.equal(list.first, '[붙여넣은 내용] 인증 구현');
+  assert.equal(list.recent, '[붙여넣은 내용] 검색 구현\n후속 설명');
+  const detail = await broker.detail(key, {});
+  assert.equal(detail.first.text, list.first);
+  assert.equal(detail.instructions.at(-1).text, list.recent);
 });
 
 test('observe list shares partial-failure rev with broker and detail hash prevents replacement races', async t => {

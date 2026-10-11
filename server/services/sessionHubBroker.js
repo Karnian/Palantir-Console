@@ -81,7 +81,8 @@ function createSessionHubBroker({ state, store = storeDefault, now = () => new D
 
   function text(helpers, value, cap) {
     if (value == null) return null;
-    const normalized = redactSecrets(helpers.displayInstructionText(value)).text;
+    const safe = redactSecrets(value).text;
+    const normalized = redactSecrets(helpers.displayInstructionText(safe)).text;
     return redactSecrets(normalized.slice(0, cap)).text;
   }
 
@@ -108,18 +109,21 @@ function createSessionHubBroker({ state, store = storeDefault, now = () => new D
   }
 
   function snippet(helpers, row, query) {
-    const line = helpers.matchedLines(row.text, query);
+    const safe = redactSecrets(row.text).text;
+    const match = helpers.matchText(safe, query);
+    const line = match ? helpers.matchedLines(safe, query) : safe;
     const parts = helpers.highlightParts(line, query);
+    const marked = parts.find(part => part.highlighted);
     const position = parts[0]?.highlighted ? 0 : parts[0]?.text.length || 0;
-    const matchLength = parts.find(part => part.highlighted)?.text.length || 0;
+    const matchLength = marked?.text.length || 0;
     const centered = Math.floor(position + matchLength / 2 - 120);
-    const start = Math.max(0, Math.min(centered, line.length - 240));
-    const clipped = line.length > 240 || line !== row.text;
+    const start = match ? Math.max(0, Math.min(centered, line.length - 240)) : 0;
+    const clipped = !match || line.length > 240 || line !== safe;
     const excerpt = line.slice(start, start + 240);
-    let displayed = text(helpers, excerpt, Infinity);
-    // Keep match-bearing markup literal when display normalization would erase the evidence.
-    if (!helpers.matchText(displayed, query)) displayed = redactSecrets(excerpt).text;
-    return { id: row.id, ts: row.ts, snippet: displayed,
+    let displayed = helpers.displayInstructionText(excerpt);
+    // Preserve only a matched span from the fully redacted source if a display tag hides it.
+    if (marked && !helpers.matchText(displayed, query)) displayed = `${marked.text} ${displayed}`;
+    return { id: row.id, ts: row.ts, snippet: text(helpers, displayed, 240),
       flags: instructionFlags(row, clipped) };
   }
 
