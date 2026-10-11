@@ -339,6 +339,47 @@ for (const success of [true, false]) {
   });
 }
 
+for (const replyEpoch of ['old', 'fresh']) {
+  test(`${replyEpoch} message reply after restart preserves the question until a fresh resend`, async t => {
+    const env = setup(t), post = deferred(), calls = [];
+    let source, messages = 0;
+    const question = '재시작 뒤 다시 보낼 질문';
+    const old = { epoch: 'old', version: 2, state: 'running', messages: [], turnInProgress: false };
+    const fresh = { ...old, epoch: 'fresh', version: 0, state: 'idle' };
+    const notice = '서버가 다시 시작되어 질문이 '
+      + '전달되지 않았을 수 있습니다. 다시 보내 주세요.';
+    env.context.EventSource = class {
+      constructor() { source = this; }
+      addEventListener(name, callback) { this.receive = callback; }
+      close() {}
+    };
+    env.context.fetch = async (url, opts) => {
+      calls.push({ url, opts });
+      if (url.endsWith('/message')) return ++messages === 1 ? post.promise
+        : response({ ...fresh, version: 5, state: 'running', messages: [{ role: 'user', text: question }] });
+      return response(url.endsWith('/start') ? { ...fresh, version: 1, state: 'running' } : old);
+    };
+    env.render(env.h(env.context.SessionHubChat), env.root); await flushEffects(); await flushEffects();
+    const input = env.root.querySelector('textarea'), submit = env.root.querySelector('button[type="submit"]');
+    input.value = question; input.dispatchEvent(new env.window.Event('input', { bubbles: true }));
+    await flushEffects(); submit.click(); await flushEffects();
+    assert.equal(input.disabled, true);
+    source.receive({ data: JSON.stringify(fresh) }); await flushEffects();
+    post.resolve(response({ ...old, epoch: replyEpoch, version: 3 })); await flushEffects();
+    assert.equal(input.disabled, false);
+    assert.equal(input.value, question);
+    assert.equal(submit.disabled, false);
+    assert.equal(env.root.querySelector('.session-hub-note[role="status"]').textContent, notice);
+    assert.equal(env.root.querySelector('[role="alert"]'), null);
+    assert.equal(calls.filter(call => call.url.endsWith('/message')).length, 1);
+    submit.click(); await flushEffects(); await flushEffects();
+    assert.equal(input.value, '');
+    assert.equal(input.disabled, false);
+    assert.equal(env.root.querySelector('.session-hub-note[role="status"]'), null);
+    assert.equal(calls.filter(call => call.url.endsWith('/message')).length, 2);
+  });
+}
+
 test('a start reply matching the SSE version clears only the local starting indicator', async t => {
   const env = setup(t), start = deferred();
   let source;

@@ -118,6 +118,7 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch }) {
   const [localTransition, setLocalTransition] = useState('');
   const [error, setError] = useState('');
   const [clearNotice, setClearNotice] = useState('');
+  const [sendNotice, setSendNotice] = useState('');
   const alive = useRef(false);
   const epoch = useRef(null);
   const version = useRef(-1);
@@ -183,9 +184,15 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch }) {
           return;
         }
       }
+      const sentEpoch = epoch.current;
       const value = await request(name, body);
       if (!alive.current) return;
-      if (name === 'message') setText('');
+      if (name === 'message') {
+        if (value.epoch === sentEpoch && value.epoch === epoch.current) {
+          setText(''); setSendNotice('');
+        } else setSendNotice('서버가 다시 시작되어 질문이 '
+          + '전달되지 않았을 수 있습니다. 다시 보내 주세요.');
+      }
       if (name === 'clear') setClearNotice(value.result === 'incomplete'
         ? `대화는 지웠지만 파일 ${value.remaining}개가 남았습니다.` : '대화를 지웠습니다.');
     } catch (err) {
@@ -238,6 +245,7 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch }) {
     ${state.error && html`<p class="session-hub-error" role="alert">${sessionHubErrorText(state.error)}</p>`}
     <div class="manager-messages session-hub-messages" tabindex="0" role="log" aria-label="세션 비서 대화">
       ${clearNotice && html`<p class="session-hub-note" role="status">${clearNotice}</p>`}
+      ${sendNotice && html`<p class="session-hub-note" role="status">${sendNotice}</p>`}
       ${!state.messages.length && html`<p class="session-hub-empty">
         여러 머신의 세션을 물어보세요 — '아까 orca 상위 레이어 얘기한 세션 어디야?'</p>`}
       ${rendered.messages.map((message, index) => message.role === 'tools' ? html`
