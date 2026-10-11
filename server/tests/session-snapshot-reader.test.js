@@ -5796,7 +5796,7 @@ for (const [name, tail, state, reason] of [
   ['queued invalid parent', [statusAssistant('end_turn'), statusQueued({ parentUuid: 'missing' })],
     'unknown', 'instruction_unbound'],
   ['open instruction', [], 'working', null],
-  ['missing chain', [statusAssistant('end_turn', 'a', 'missing')], 'unknown', 'branch_ambiguous'],
+  ['missing chain', [statusAssistant('end_turn', 'a', 'missing')], 'unknown', 'instruction_unbound'],
   ['missing stop', [statusAssistant(undefined)], 'unknown', 'status_format_unsupported'],
   ['reverse time', [statusAssistant('end_turn', 'a', 'u',
     { timestamp: '2026-10-08T01:00:00.000Z' })], 'unknown', 'order_unknown'],
@@ -6113,3 +6113,52 @@ test('PR-S Claude an earlier intermediate transition does not override later val
   assert.equal(status.evidence_at, claudeClockTime('36.500'));
   assert.equal(status.reason, null);
 });
+
+function reorderedAttachmentChain() {
+  return [
+    statusAssistant('end_turn', '6240c18b', '948dacdf'),
+    statusAttachment('9ac90482', 'cb73793b', 'environment'),
+    statusAttachment('fad44720', '6240c18b', 'hook_success'),
+    claudeUserRecord('latest instruction', { uuid: '9e142b29', parentUuid: '6240c18b' }),
+    statusAttachment('cb73793b', '9e142b29', 'hook_success'),
+    statusAttachment('324437f6', '9ac90482', 'total_tokens_reminder'),
+  ];
+}
+
+for (const large of [false, true]) {
+  for (const [stop, expected] of [['end_turn', 'ended'], ['tool_use', 'working']]) {
+    test(`PR-S reordered attachment parents preserve ${expected} and the latest instruction, tail=${large}`, t => {
+      const fx = createFixture(t);
+      const rows = [...reorderedAttachmentChain(),
+        statusAssistant('tool_use', 'progress', '324437f6'),
+        statusAssistant(stop, 'answer', 'progress', { timestamp: '2026-10-08T02:00:01.000Z' })];
+      if (large) largeStatusFile(fx, 'claude', rows);
+      else fx.file('claude', 'reordered', rows);
+      const snapshot = snapshotReader.runSnapshot(fx.options);
+      assert.deepEqual(snapshot.sessions[0].status, { state: expected, source: 'transcript',
+        evidence_at: '2026-10-08T02:00:01.000Z', reason: null });
+      assert.equal(snapshot.instructions.at(-1).id, 'claude:s:u9e142b29');
+    });
+  }
+  test(`PR-S reordered attachments after a new instruction do not reuse the earlier end_turn, tail=${large}`, t => {
+    const fx = createFixture(t);
+    const rows = reorderedAttachmentChain();
+    if (large) largeStatusFile(fx, 'claude', rows);
+    else fx.file('claude', 'reordered', rows);
+    assert.deepEqual(snapshotReader.runSnapshot(fx.options).sessions[0].status,
+      { state: 'working', source: 'transcript', evidence_at: RECORD_TIMESTAMP, reason: null });
+  });
+  for (const atInstruction of [false, true]) {
+    test(`PR-S actual parent cycles remain ambiguous, at instruction=${atInstruction}, tail=${large}`, t => {
+      const fx = createFixture(t);
+      const rows = atInstruction
+        ? [claudeUserRecord('instruction', { parentUuid: 'a' }), statusAssistant('end_turn')]
+        : [claudeUserRecord('instruction'), statusAttachment('cycle-a', 'cycle-b', 'environment'),
+          statusAttachment('cycle-b', 'cycle-a', 'hook_success'), statusAssistant('end_turn', 'a', 'cycle-a')];
+      if (large) largeStatusFile(fx, 'claude', rows);
+      else fx.file('claude', 'cycle', rows);
+      assert.deepEqual(snapshotReader.runSnapshot(fx.options).sessions[0].status,
+        { state: 'unknown', source: 'none', evidence_at: null, reason: 'branch_ambiguous' });
+    });
+  }
+}

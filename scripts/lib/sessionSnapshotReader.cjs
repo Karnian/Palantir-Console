@@ -770,7 +770,6 @@ function claudeStatus(records, windowed = false) {
   const traversal = records.filter(record => record.isSidechain !== true && typeof record.uuid === 'string');
   const chain = traversal.filter(record => ['user', 'assistant', 'system'].includes(record.type));
   const byId = new Map(traversal.map(record => [record.uuid, record]));
-  const positions = new Map(traversal.map((record, index) => [record, index]));
   if (byId.size !== traversal.length) return snapshotPolicy.unknownStatus('branch_ambiguous');
   let instruction = null, previousChain = null, anchor = null;
   for (const record of records) {
@@ -792,15 +791,17 @@ function claudeStatus(records, windowed = false) {
     if (!current.uuid) return snapshotPolicy.unknownStatus('status_format_unsupported');
     main.add(current);
     // Queued instructions may be on the parent path or attached immediately after its last chain record.
-    if (current === instruction || current === anchor) { bound = true; break; }
+    if (current === instruction || current === anchor) {
+      if (main.has(byId.get(current.parentUuid))) return snapshotPolicy.unknownStatus('branch_ambiguous');
+      bound = true;
+      break;
+    }
     if (!current.uuid || !Object.hasOwn(current, 'parentUuid')
       || !(current.parentUuid === null || typeof current.parentUuid === 'string'))
       return snapshotPolicy.unknownStatus('status_format_unsupported');
     if (current.parentUuid === null) break;
     const parent = byId.get(current.parentUuid);
-    if (!parent) return snapshotPolicy.unknownStatus(windowed ? 'truncated' : 'branch_ambiguous');
-    if (positions.get(parent) >= positions.get(current))
-      return snapshotPolicy.unknownStatus('branch_ambiguous');
+    if (!parent) return snapshotPolicy.unknownStatus(windowed ? 'truncated' : 'instruction_unbound');
     current = parent;
   }
   if (!bound) return snapshotPolicy.unknownStatus(windowed && !anchor ? 'truncated' : 'instruction_unbound');
@@ -823,7 +824,7 @@ function claudeStatus(records, windowed = false) {
     } else if (record.type === 'user' && Array.isArray(record.message?.content)
       && record.message.content.some(block => block.type === 'tool_result')) status = statusAt('working', record);
   }
-  // File positions and parent links establish order; only the final evidence must not predate the instruction.
+  // Parent links select the branch; transitions keep file order. Final evidence must not predate the instruction.
   const instructionAt = toIsoTimestamp(instruction.timestamp);
   if (!instructionAt || !status.evidence_at || status.evidence_at < instructionAt)
     return snapshotPolicy.unknownStatus('order_unknown');
