@@ -72,6 +72,8 @@ const { createRouterRouter } = require('./routes/router');
 const { createAuthRouter } = require('./routes/auth');
 const { sealObserveState } = require('./services/observeSnapshotStore');
 const { sessionHubActive: computeSessionHubActive } = require('./services/sessionHubActivation');
+const { createSessionHubService } = require('./services/sessionHubService');
+const { createSessionHubChatRouter } = require('./routes/sessionHubChat');
 const { createSessionHubOffGate, createSessionHubTokenGate, createSessionHubRouter,
   sessionHubErrorHandler } = require('./routes/sessionHub');
 const { createObserveOffGate, createObserveRouter, observeErrorHandler } = require('./routes/observe');
@@ -1121,7 +1123,19 @@ function createApp(options = {}) {
     observeState, authToken, managedPaths: options.sessionHubManagedPaths,
     resolveBinary: options.sessionHubResolveClaudeBinary,
   }) : options.sessionHubActive === true;
-  const sessionHubTokenProvider = options.sessionHubTokenProvider || { current: () => null };
+  const sessionHubService = sessionHubActive ? createSessionHubService({
+    baseUrl: () => {
+      const address = lastServer?.address();
+      if (!address || typeof address === 'string') return null;
+      const host = ['::', '0.0.0.0'].includes(address.address) ? '127.0.0.1' : address.address;
+      return `http://${host.includes(':') ? `[${host}]` : host}:${address.port}`;
+    },
+    ...options.sessionHubServiceOptions,
+    ...(options.sessionHubManagedPaths ? { managedPaths: options.sessionHubManagedPaths } : {}),
+    ...(options.sessionHubResolveClaudeBinary ? { resolveBinary: options.sessionHubResolveClaudeBinary } : {}),
+  }) : null;
+  const sessionHubTokenProvider = options.sessionHubTokenProvider || sessionHubService || { current: () => null };
+  app.sessionHubService = sessionHubService;
   app.sessionHubActive = sessionHubActive;
   const actorTokenOptions = {
     actorTokenSource: options.actorTokenSource,
@@ -1895,6 +1909,9 @@ function createApp(options = {}) {
     },
   });
   app.use('/api', auth);
+  if (sessionHubService) {
+    app.use('/api/session-hub/chat', createSessionHubChatRouter({ service: sessionHubService }));
+  }
   app.use('/api/session-hub', createSessionHubRouter({
     state: observeState, store: options.observeSnapshotStore, provider: sessionHubTokenProvider,
     clock: options.sessionHubClock,
@@ -2314,6 +2331,7 @@ function createApp(options = {}) {
     // disposeSession() itself calling app.shutdown) so every phase runs once.
     if (_shuttingDown) return Promise.resolve();
     _shuttingDown = true;
+    const hubShutdown = sessionHubService?.shutdown();
     try { _questionWaiterDrain = questionsRouter.stopWaiters(); }
     catch (err) { console.warn('[app.shutdown] question waiter stop failed:', err && err.message); }
 
@@ -2330,6 +2348,12 @@ function createApp(options = {}) {
       // With no admitted workers, start the lease sweep in this same call. Its
       // no-work path remains synchronous and preserves manager shutdown timing.
       _shutdownPromise = Promise.resolve(_sweepWorkersThenFinish());
+    }
+    if (hubShutdown) {
+      _shutdownPromise = Promise.allSettled([_shutdownPromise, hubShutdown]).then(results => {
+        const failed = results.find(result => result.status === 'rejected');
+        if (failed) throw failed.reason;
+      });
     }
     return _shutdownPromise;
   };
