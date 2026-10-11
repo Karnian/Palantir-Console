@@ -151,16 +151,18 @@ test('reconnected SSE replaces version 40 with a new epoch at version zero', asy
     messages: [{ role: 'assistant', content: '이전 서버 답변' }] };
   const restarted = { thread_id: 'thread-1', epoch: 'next-boot', version: 0,
     state: 'idle', messages: [], turnInProgress: false };
+  let serverState = previous;
   env.context.EventSource = class {
     constructor() { source = this; }
     addEventListener(name, callback) { this.receive = callback; }
     close() {}
   };
-  env.context.fetch = async () => response(previous);
+  env.context.fetch = async () => response(serverState);
   env.render(env.h(env.context.SessionHubChat), env.root); await flushEffects(); await flushEffects();
   assert.equal(env.root.querySelector('.manager-status-badge').textContent, '조회 준비됨');
   assert.ok(env.root.textContent.includes('이전 서버 답변'));
   source.onerror(); await flushEffects();
+  serverState = restarted;
   source.onopen(); source.receive({ data: JSON.stringify(restarted) }); await flushEffects();
   assert.equal(env.root.querySelector('.manager-status-badge').textContent, '중지됨');
   assert.equal(env.root.querySelector('.manager-msg-assistant'), null);
@@ -179,20 +181,25 @@ for (const [operation, replyEpoch] of [['GET', 'old'], ['POST', 'old'], ['POST',
     const old = { thread_id: 'thread-1', epoch: 'old', version: 40,
       state: 'idle', messages: [], turnInProgress: false };
     const fresh = { ...old, epoch: 'fresh', version: 0, messages: [{ role: 'assistant', content: '새 서버' }] };
+    let serverState = old, reads = 0;
     env.context.EventSource = class {
       constructor() { source = this; }
       addEventListener(name, callback) { this.receive = callback; }
       close() {}
     };
-    env.context.fetch = async (url, opts) => operation === 'GET' || opts.method === 'POST'
-      ? delayed.promise : response(old);
+    env.context.fetch = async (url, opts) => {
+      if (opts.method === 'POST' || (operation === 'GET' && ++reads === 1)) return delayed.promise;
+      return response(serverState);
+    };
     env.render(env.h(env.context.SessionHubChat), env.root); await flushEffects(); await flushEffects();
     if (operation === 'POST') { env.root.querySelector('[data-action="start"]').click(); await flushEffects(); }
+    serverState = fresh;
     source.receive({ data: JSON.stringify(fresh) }); await flushEffects();
     delayed.resolve(response({ ...old, epoch: replyEpoch, state: 'running' })); await flushEffects();
     assert.equal(env.root.querySelector('.manager-status-badge').textContent, '중지됨');
     assert.equal(env.root.querySelector('.manager-msg-assistant').textContent.trim(), '새 서버');
-    // Once accepted, a retired epoch must also be rejected through ordered SSE.
+    // Each different epoch requires the current HTTP state, never cumulative epoch tracking.
+    serverState = { ...fresh, epoch: 'newest' };
     source.receive({ data: JSON.stringify({ ...fresh, epoch: 'newest' }) }); await flushEffects();
     source.receive({ data: JSON.stringify({ ...fresh, version: 100, state: 'running' }) }); await flushEffects();
     assert.equal(env.root.querySelector('.manager-status-badge').textContent, '중지됨');
@@ -363,6 +370,7 @@ for (const replyEpoch of ['old', 'fresh']) {
     const old = { thread_id: 'thread-1', epoch: 'old', version: 2,
       state: 'running', messages: [], turnInProgress: false };
     const fresh = { ...old, epoch: 'fresh', version: 0, state: 'idle' };
+    let serverState = old;
     const notice = '서버가 다시 시작되어 질문이 '
       + '전달되지 않았을 수 있습니다. 다시 보내 주세요.';
     env.context.EventSource = class {
@@ -374,13 +382,14 @@ for (const replyEpoch of ['old', 'fresh']) {
       calls.push({ url, opts });
       if (url.endsWith('/message')) return ++messages === 1 ? post.promise
         : response({ ...fresh, version: 5, state: 'running', messages: [{ role: 'user', content: question }] });
-      return response(url.endsWith('/start') ? { ...fresh, version: 1, state: 'running' } : old);
+      return response(url.endsWith('/start') ? { ...fresh, version: 1, state: 'running' } : serverState);
     };
     env.render(env.h(env.context.SessionHubChat), env.root); await flushEffects(); await flushEffects();
     const input = env.root.querySelector('textarea'), submit = env.root.querySelector('button[type="submit"]');
     input.value = question; input.dispatchEvent(new env.window.Event('input', { bubbles: true }));
     await flushEffects(); submit.click(); await flushEffects();
     assert.equal(input.disabled, true);
+    serverState = fresh;
     source.receive({ data: JSON.stringify(fresh) }); await flushEffects();
     post.resolve(response({ ...old, epoch: replyEpoch, version: 3 })); await flushEffects();
     assert.equal(input.disabled, false);
@@ -1746,4 +1755,122 @@ for (const action of ['picker', 'reset']) test(
     assert.equal(env.root.querySelector('.manager-chat-side'), chat);
     nav('작업').click(); await flushEffects(); assert.equal(nav('작업').getAttribute('aria-current'), 'page');
     assert.ok(!calls.some(call => /^\/api\/conversations\/hub/.test(decodeURIComponent(call.url))));
+  });
+
+function r5Snapshots() {
+  const snapshot = (epoch, version, content) => ({ epoch, version, thread_id: `thread-${epoch}`,
+    state: 'idle', turnInProgress: false, messages: [{ id: `answer-${epoch}`, seq: 1,
+      role: 'assistant', status: 'complete', content }] });
+  return { a: snapshot('A', 40, '이전 A'), b: snapshot('B', 0, '확정 B'), snapshot };
+}
+function r5Sources(env) {
+  const sources = [];
+  env.context.EventSource = class {
+    constructor(url) { assert.equal(url, '/api/session-hub/chat/stream'); sources.push(this); this.closed = false; }
+    addEventListener(name, callback) { assert.equal(name, 'snapshot'); this.receive = callback; }
+    emit(value) { this.receive({ data: JSON.stringify(value) }); }
+    close() { this.closed = true; }
+  };
+  return sources;
+}
+
+test('R5 delayed initial A cannot replace HTTP B and later B SSE remains live', async t => {
+  const env = setup(t), { a, b, snapshot } = r5Snapshots(), sources = r5Sources(env), sync = deferred();
+  const calls = [];
+  env.context.fetch = async (url, options) => {
+    calls.push({ url, options }); assert.equal(url, '/api/session-hub/chat/state');
+    return calls.length === 1 ? response(b) : sync.promise;
+  };
+  env.render(env.h(env.context.SessionHubChat), env.root); await flushEffects(); await flushEffects();
+  const old = sources[0]; old.emit(a); await flushEffects();
+  assert.ok(env.root.textContent.includes('확정 B'), 'unconfirmed A must never replace B');
+  assert.ok(!env.root.textContent.includes('이전 A')); assert.equal(old.closed, true); assert.equal(calls.length, 2);
+  assert.equal(sources.length, 1, 'new stream must wait for canonical state');
+  old.emit(snapshot('B', 500, '이전 연결 B')); old.receive({ data: '{bad json' });
+  old.onerror(); old.onopen(); await flushEffects();
+  assert.ok(!env.root.textContent.includes('이전 연결 B')); assert.equal(env.root.querySelector('[role="alert"]'), null);
+  sync.resolve(response(snapshot('B', 1, '재동기화 B'))); await flushEffects(); await flushEffects();
+  assert.equal(sources.length, 2); assert.ok(env.root.textContent.includes('재동기화 B'));
+  sources[1].emit(snapshot('B', 2, '후속 B')); await flushEffects();
+  old.emit(a); old.onerror(); await flushEffects();
+  sources[1].emit(snapshot('B', 2, '같은 버전')); sources[1].emit(snapshot('B', 0, '낮은 버전')); await flushEffects();
+  assert.ok(env.root.textContent.includes('후속 B')); assert.equal(env.root.querySelector('[role="alert"]'), null);
+  assert.equal(calls.length, 2);
+});
+
+test('R5 different HTTP epoch is confirmed only by resynchronized state', async t => {
+  const env = setup(t), { a, b, snapshot } = r5Snapshots(), sources = r5Sources(env);
+  const post = deferred(), sync = deferred();
+  const calls = [];
+  env.context.fetch = async (url, options = {}) => {
+    calls.push({ url, options }); assert.match(url, /^\/api\/session-hub\/chat\/(state|start)$/);
+    if (url.endsWith('/start')) return post.promise;
+    return calls.filter(call => call.url.endsWith('/state')).length === 1 ? response(a) : sync.promise;
+  };
+  env.render(env.h(env.context.SessionHubChat), env.root); await flushEffects(); await flushEffects();
+  env.root.querySelector('[data-action="start"]').click(); await flushEffects();
+  post.resolve(response({ ...b, state: 'running', messages: [{ role: 'assistant', content: '미확정 HTTP B' }] }));
+  await flushEffects();
+  assert.equal(sources[0].closed, true); assert.equal(sources.length, 1);
+  assert.ok(env.root.textContent.includes('이전 A')); assert.ok(!env.root.textContent.includes('미확정 HTTP B'));
+  sources[0].emit(snapshot('A', 100, '늦은 A')); await flushEffects();
+  assert.ok(!env.root.textContent.includes('늦은 A'));
+  sync.resolve(response(b)); await flushEffects(); await flushEffects();
+  assert.ok(env.root.textContent.includes('확정 B')); assert.equal(sources.length, 2);
+  sources[1].emit({ ...snapshot('B', 1, '최신 B'), state: 'running' }); await flushEffects();
+  assert.ok(env.root.textContent.includes('최신 B'));
+  assert.equal(env.root.querySelector('.manager-status-badge').textContent, '조회 준비됨');
+});
+
+test('R5 resynchronization ignores an older initial HTTP response and all retired callbacks', async t => {
+  const env = setup(t), { a, b, snapshot } = r5Snapshots(), sources = r5Sources(env);
+  const initial = deferred(), sync = deferred(); let reads = 0;
+  env.context.fetch = async url => {
+    assert.equal(url, '/api/session-hub/chat/state'); return ++reads === 1 ? initial.promise : sync.promise;
+  };
+  env.render(env.h(env.context.SessionHubChat), env.root); await flushEffects();
+  sources[0].emit(b); await flushEffects();
+  sources[0].emit(snapshot('C', 0, '미확정 C')); await flushEffects();
+  assert.equal(sources[0].closed, true); assert.equal(reads, 2);
+  initial.resolve(response(a)); sources[0].emit(snapshot('B', 900, '폐기된 갱신'));
+  sources[0].onerror(); sources[0].onopen(); await flushEffects();
+  assert.ok(env.root.textContent.includes('확정 B')); assert.ok(!env.root.textContent.includes('미확정 C'));
+  assert.ok(!env.root.textContent.includes('이전 A')); assert.equal(reads, 2);
+  sync.resolve(response(b)); await flushEffects(); await flushEffects();
+  sources[1].emit(snapshot('B', 1, '유효 갱신')); await flushEffects();
+  assert.ok(env.root.textContent.includes('유효 갱신')); assert.equal(reads, 2);
+});
+
+for (const outcome of ['recover', 'unmount']) test(`R5 failed state resynchronization retries safely through ${outcome}`,
+  async t => {
+    const env = setup(t), { a, b, snapshot } = r5Snapshots(), sources = r5Sources(env), retried = deferred();
+    const timers = [];
+    const schedule = env.window.setTimeout.bind(env.window);
+    env.window.setTimeout = (fn, delay, ...args) => {
+      if (delay === 1000) { timers.push(fn); return schedule(() => {}, 60000); }
+      return schedule(fn, delay, ...args);
+    };
+    let reads = 0;
+    env.context.fetch = async url => {
+      assert.equal(url, '/api/session-hub/chat/state');
+      return ++reads === 1 ? response(b) : reads === 2 ? response({}, 500) : retried.promise;
+    };
+    env.render(env.h(env.context.SessionHubChat), env.root); await flushEffects(); await flushEffects();
+    sources[0].emit(a); await flushEffects(); await flushEffects();
+    assert.equal(sources[0].closed, true); assert.equal(sources.length, 1); assert.equal(timers.length, 1);
+    assert.equal(env.root.querySelector('textarea').disabled, true);
+    assert.ok(env.root.textContent.includes('확정 B'));
+    sources[0].emit(snapshot('B', 500, '폐기된 응답')); sources[0].onopen(); await flushEffects();
+    assert.ok(env.root.querySelector('[role="alert"]'), 'old open callback must not clear retry failure');
+    assert.ok(!env.root.textContent.includes('폐기된 응답'));
+    timers[0](); await flushEffects(); assert.equal(reads, 3);
+    if (outcome === 'unmount') env.render(null, env.root);
+    retried.resolve(response(snapshot('B', 1, '복구된 B'))); await flushEffects(); await flushEffects();
+    if (outcome === 'unmount') {
+      assert.equal(sources.length, 1); assert.equal(env.root.textContent, '');
+    } else {
+      assert.equal(sources.length, 2); assert.ok(env.root.textContent.includes('복구된 B'));
+      assert.equal(env.root.querySelector('textarea').disabled, false);
+      assert.equal(env.root.querySelector('[role="alert"]'), null);
+    }
   });
