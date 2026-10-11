@@ -154,11 +154,24 @@ function snapshotMetadata(result, hashed = false) {
   };
 }
 
-// A domain-tagged JSON tuple encoding separates names, hashes and error codes unambiguously.
+// Sort actual filenames, including their suffix, and frame every UTF-8 field with a byte length.
 function snapshotRevision(entries) {
-  const tuples = [...entries].sort((a, b) => a.machineId < b.machineId ? -1 : a.machineId > b.machineId ? 1 : 0)
-    .map(entry => entry.ok ? [entry.machineId, 'sha256', entry.sha256] : [entry.machineId, 'error', entry.reason]);
-  return createHash('sha256').update(JSON.stringify(['session-snapshots-v1', tuples])).digest('hex').slice(0, 16);
+  const hash = createHash('sha256');
+  function part(value) {
+    const bytes = Buffer.from(value, 'utf8');
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(bytes.length);
+    hash.update(length).update(bytes);
+  }
+  part('session-snapshots-v1');
+  const named = entries.map(entry => ({ ...entry, filename: `${entry.machineId}.json` }));
+  named.sort((a, b) => a.filename < b.filename ? -1 : a.filename > b.filename ? 1 : 0);
+  for (const entry of named) {
+    part(entry.filename);
+    part(entry.ok ? 'sha256' : 'error');
+    part(entry.ok ? entry.sha256 : entry.reason);
+  }
+  return hash.digest('hex').slice(0, 16);
 }
 
 function listSnapshots(state, limits = STORE_LIMITS) {

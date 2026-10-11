@@ -349,3 +349,132 @@ test('long query remains fully visible in the centered snippet and HTTP errors n
   assert.equal(response.status, 503);
   assert.deepEqual(response.body, { error: 'snapshot_unavailable', reason: 'snapshot_unavailable' });
 });
+
+test('search ranking agrees with the board for target, whitespace, position, timestamp and filters', async t => {
+  const fx = fixture(t);
+  const snapshot = manySessions(fx, 18);
+  const texts = ['찾을표현', '앞쪽 찾을표현', '찾 을 표 현',
+    '다른 지시', '찾을표현 뒤쪽', '전혀 다름'];
+  snapshot.instructions.forEach((row, index) => {
+    row.text = texts[index % texts.length];
+    row.ts = new Date(Date.parse(row.ts) + index * 1000).toISOString();
+    snapshot.sessions[index].ai_title = index % texts.length === 3 ? '찾을표현 제목' : '다른 제목';
+    snapshot.sessions[index].last_record_at = row.ts;
+  });
+  fx.write(snapshot);
+  fx.beta.instructions[0].text = '찾을표현'; fx.write(fx.beta);
+  const broker = createSessionHubBroker({ state: fx.state });
+  const helpers = await board;
+  const cards = [...helpers.snapshotCards(snapshot), ...helpers.snapshotCards(fx.beta)];
+  for (const filter of [{}, { machine: 'alpha' }, { machine: 'beta' }, { provider: 'codex' }]) {
+    const expected = helpers.rankCards(cards, '찾을표현', filter.machine, filter.provider).map(card => card.key);
+    const keys = [];
+    let cursor;
+    do {
+      const response = await broker.search({ q: '찾을표현', limit: '3', ...filter, ...(cursor ? { cursor } : {}) });
+      keys.push(...response.sessions.map(card => card.key));
+      cursor = response.next;
+    } while (cursor);
+    assert.deepEqual(keys, expected);
+  }
+  const nfc = await broker.search({ q: '찾을표현'.normalize('NFD') });
+  assert.deepEqual(nfc.sessions.map(card => card.key),
+    helpers.rankCards(cards, '찾을표현').slice(0, 10).map(card => card.key));
+});
+
+test('batch debits failed reads from the shared budget and never trusts a swapped file identity', t => {
+  const fx = fixture(t);
+  const alphaBytes = fs.statSync(path.join(fx.dir, 'alpha.json')).size;
+  const bad = Buffer.alloc(alphaBytes, 'x');
+  fs.writeFileSync(path.join(fx.dir, 'a-broken.json'), bad);
+  const limited = store.createObserveSnapshotStore({ totalBytes: alphaBytes * 2 });
+  const entries = limited.readAllSnapshots(fx.state).snapshots;
+  assert.equal(entries[0].reason, 'parse_error'); assert.equal(entries[0].bytes, alphaBytes);
+  assert.equal(entries[1].ok, true);
+  assert.equal(entries[2].reason, 'total_limit'); assert.equal(entries[2].bytes, 0);
+  fs.unlinkSync(path.join(fx.dir, 'a-broken.json'));
+  const filename = path.join(fx.dir, 'alpha.json');
+  const replacement = `${filename}.replacement`;
+  fs.writeFileSync(replacement, JSON.stringify(fx.alpha));
+  const open = fs.openSync;
+  fs.openSync = function (name, ...args) {
+    if (name === filename) fs.renameSync(replacement, filename);
+    return open.call(fs, name, ...args);
+  };
+  try {
+    const swapped = store.readAllSnapshots(fx.state).snapshots[0];
+    assert.equal(swapped.reason, 'identity_mismatch');
+    assert.equal(swapped.bytes, 0); assert.equal(swapped.sha256, null);
+  } finally { fs.openSync = open; }
+});
+
+test('hash remains tied to bytes on the opened descriptor when the pathname is replaced after its read', t => {
+  const fx = fixture(t);
+  const filename = path.join(fx.dir, 'alpha.json');
+  const before = fs.readFileSync(filename);
+  const updated = structuredClone(fx.alpha);
+  updated.instructions[0].text = '교체된 내용';
+  const replacement = `${filename}.replacement`;
+  fs.writeFileSync(replacement, JSON.stringify(updated));
+  const read = fs.readSync;
+  let swapped = false;
+  fs.readSync = function (...args) {
+    const count = read.apply(fs, args);
+    if (!swapped && count > 0) { swapped = true; fs.renameSync(replacement, filename); }
+    return count;
+  };
+  let entry;
+  try { entry = store.readAllSnapshots(fx.state).snapshots[0]; } finally { fs.readSync = read; }
+  assert.equal(entry.ok, true); assert.deepEqual(entry.snapshot, fx.alpha);
+  assert.equal(entry.sha256, createHash('sha256').update(before).digest('hex'));
+  assert.notEqual(entry.sha256, createHash('sha256').update(fs.readFileSync(filename)).digest('hex'));
+});
+
+test('replacement during the next directory enumeration rejects list cursor and Codex around via HTTP', async t => {
+  const fx = fixture(t);
+  manySessions(fx, 40);
+  const app = fx.app();
+
+  // The Codex fixture uses n<sequence> ids; their meaning must stay bound to the search generation.
+  fx.beta.instructions[0].text = '중간 검색'; fx.write(fx.beta);
+  const first = await request(app).get(`${BASE}/sessions?limit=1`).set('Cookie', COOKIE);
+  async function replaceDuringEnumeration(url, snapshot) {
+    const readdir = fs.readdirSync;
+    let calls = 0;
+    fs.readdirSync = function (...args) {
+      const names = readdir.apply(fs, args);
+      if (args[0] === fx.dir) {
+        calls++;
+        snapshot.instructions[0].text += ' 교체';
+        fx.write(snapshot);
+      }
+      return names;
+    };
+    try {
+      const response = await request(app).get(url).set('Cookie', COOKIE);
+      assert.equal(response.status, 409);
+      assert.deepEqual(response.body, { error: 'snapshot_changed', reason: 'snapshot_changed' });
+      assert.equal(calls, 1);
+    } finally { fs.readdirSync = readdir; }
+  }
+  await replaceDuringEnumeration(`${BASE}/sessions?cursor=${first.body.next}`, fx.alpha);
+  const codex = await request(app).get(`${BASE}/search?q=중간&provider=codex`).set('Cookie', COOKIE);
+  assert.equal(codex.status, 200); assert.equal(codex.body.sessions.length, 1);
+  const row = codex.body.sessions[0];
+  await replaceDuringEnumeration(`${BASE}/sessions/${row.key}?rev=${codex.body.meta.rev}`
+    + `&around=${row.instructions[0].id}`, fx.beta);
+});
+
+test('revision sorts filenames and uses a length-prefixed canonical vector including failed machines', () => {
+  // Vector encoded independently as uint32be byte length + UTF-8 field, in actual filename order:
+  // domain, a-b.json/sha256/b*64, a.json/sha256/a*64, broken.json/error/parse_error.
+  const entries = [
+    { machineId: 'a', ok: true, sha256: 'a'.repeat(64) },
+    { machineId: 'broken', ok: false, reason: 'parse_error' },
+    { machineId: 'a-b', ok: true, sha256: 'b'.repeat(64) },
+  ];
+  assert.equal(store.snapshotRevision(entries), 'cd73df58035fec99');
+  assert.equal(store.snapshotRevision([...entries].reverse()), 'cd73df58035fec99');
+  assert.notEqual(store.snapshotRevision(entries.map(entry => entry.ok ? entry : { ...entry, reason: 'read_error' })),
+    'cd73df58035fec99');
+});

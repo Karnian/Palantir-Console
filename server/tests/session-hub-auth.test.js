@@ -87,19 +87,24 @@ test('off activation combinations return 404 before auth/body with identical sto
     else process.env.PALANTIR_SESSION_HUB = previous;
   });
   let storeCalls = 0;
+  let spawns = 0;
+  const sameEngine = { type: 'off-fixture', hasProcess: () => false, isAlive: () => false,
+    listSessions: () => [], kill: () => true,
+    spawnAgent: () => { spawns++; throw new Error('unexpected engine spawn'); } };
   const noRead = () => { storeCalls++; throw new Error('unexpected read'); };
   const sameStore = { readAllSnapshots: noRead, readSnapshotHashed: noRead,
     listSnapshots: noRead, readSnapshot: noRead };
   process.env.PALANTIR_SESSION_HUB = '0';
-  const flagOff = fx.app({ sessionHubActive: undefined, observeSnapshotStore: sameStore });
+  const flagOff = fx.app({ sessionHubActive: undefined, observeSnapshotStore: sameStore, executionEngine: sameEngine });
   process.env.PALANTIR_SESSION_HUB = '1';
   const apps = [
     flagOff,
-    fx.app({ sessionHubActive: undefined, observeSnapshotDir: null, observeSnapshotStore: sameStore }),
-    fx.app({ sessionHubActive: undefined, authToken: null, observeSnapshotStore: sameStore }),
+    fx.app({ sessionHubActive: undefined, observeSnapshotDir: null, observeSnapshotStore: sameStore,
+      executionEngine: sameEngine }),
+    fx.app({ sessionHubActive: undefined, authToken: null, observeSnapshotStore: sameStore,
+      executionEngine: sameEngine }),
   ];
   let fsCalls = 0;
-  let spawns = 0;
   const names = ['realpathSync', 'lstatSync', 'statSync', 'readdirSync', 'openSync', 'readSync', 'readFileSync'];
   const originals = Object.fromEntries(names.map(name => [name, fs[name]]));
   const spawn = childProcess.spawn;
