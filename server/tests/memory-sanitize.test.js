@@ -311,7 +311,7 @@ test('sanitizeProposalContent: clean content -> ok, trimmed, not redacted', () =
   assert.equal(r.ok, true);
   assert.equal(r.redacted, false);
   assert.equal(r.content, 'When tests fail, rebuild the native module first.');
-  assert.equal(r.redactionVersion, 2);
+  assert.equal(r.redactionVersion, 3);
   assert.equal(r.redactionVersion, REDACTION_VERSION);
 });
 

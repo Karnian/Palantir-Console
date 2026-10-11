@@ -38,6 +38,18 @@ function manySessions(fx, count, text = '동일한 지시') {
   return snapshot;
 }
 
+test('version 3 reader fixtures are accepted and version 2 snapshots require regeneration', t => {
+  const fx = fixture(t);
+  const old = structuredClone(fx.alpha);
+  old.redaction_version = 2;
+  assert.equal(validateSnapshot(old).ok, false);
+  fx.write(old);
+  assert.equal(store.readAllSnapshots(fx.state).snapshots[0].reason, 'policy_violation');
+  assert.equal(fx.alpha.redaction_version, 3);
+  fx.write(fx.alpha);
+  assert.equal(store.readAllSnapshots(fx.state).snapshots[0].ok, true);
+});
+
 test('batch shares bounded bytes/hash, one enumeration and one budget; legacy shapes stay intact', t => {
   const fx = fixture(t);
   const readdir = fs.readdirSync;
@@ -225,7 +237,7 @@ test('display normalization is shared and secrets are redacted after transformat
   assert.equal(JSON.stringify(redacted).includes('Q'.repeat(80)), false);
 });
 
-test('search snippets retain raw tag-attribute matches and crop before display transformation', async t => {
+test('search snippets use displayed sanitized text and do not restore hidden tag attributes', async t => {
   const fx = fixture(t);
   const snapshot = manySessions(fx, 1, '<pasted_content id="needle">' + '가'.repeat(1000));
   const broker = createSessionHubBroker({ state: fx.state });
@@ -235,7 +247,11 @@ test('search snippets retain raw tag-attribute matches and crop before display t
   assert.ok(helpers.matchedLines(ranked[0].match.text, 'needle').includes('id="needle"'));
   const result = await broker.search({ q: 'needle' });
   assert.equal(result.sessions.length, 1);
-  assert.ok(result.sessions[0].instructions[0].snippet.includes('needle'));
+  const hidden = result.sessions[0].instructions[0];
+  const full = redactSecrets(helpers.displayInstructionText(snapshot.instructions[0].text)).text;
+  assert.equal(hidden.snippet, full.slice(0, 240));
+  assert.equal(hidden.snippet.includes('needle'), false);
+  assert.ok(hidden.flags.includes('clipped_text'));
   assert.ok(result.sessions[0].instructions[0].snippet.length <= 240);
 
   snapshot.instructions[0].text = '<pasted_content id="' + '한'.repeat(600) + '">needle' + '가'.repeat(1000);
@@ -244,7 +260,7 @@ test('search snippets retain raw tag-attribute matches and crop before display t
   const contentMatch = await broker.search({ q: 'needle' });
   const snippet = contentMatch.sessions[0].instructions[0].snippet;
   assert.ok(snippet.includes('needle'));
-  assert.ok(snippet.startsWith('한'.repeat(50)), 'centered window is selected from the original text');
+  assert.ok(snippet.startsWith('[붙여넣은 내용] needle'), 'window is selected after display normalization');
   assert.equal(snippet.length, 240);
 });
 
@@ -263,7 +279,7 @@ test('snippet redacts whole command args before centering on a command-name matc
     const snippet = result.sessions[0].instructions[0].snippet;
     assert.equal(snippet.includes('비밀'), false);
     assert.ok(snippet.includes('[REDACTED]'));
-    const expected = helpers.displayInstructionText(redactSecrets(row.text).text);
+    const expected = redactSecrets(helpers.displayInstructionText(row.text)).text;
     assert.equal(snippet, expected);
     const detail = await broker.detail(row.session_key, {});
     assert.equal(detail.first.text, expected);
@@ -288,17 +304,62 @@ test('snippet never restores a query inside a redacted secret and uses the safe 
   assert.equal(match.snippet.includes('가'.repeat(20)), false);
   assert.equal(match.snippet.includes('나'.repeat(20)), false);
   assert.ok(match.flags.includes('clipped_text'));
-  const safe = redactSecrets(row.text).text;
-  assert.equal(match.snippet, helpers.displayInstructionText(safe.slice(0, 240)));
+  const safe = redactSecrets(helpers.displayInstructionText(row.text)).text;
+  assert.equal(match.snippet, safe.slice(0, 240));
   const detail = await broker.detail(row.session_key, {});
-  assert.equal(detail.first.text, helpers.displayInstructionText(safe));
+  assert.equal(detail.first.text, safe);
   const list = await broker.list({});
   assert.equal(list.sessions.find(session => session.key === row.session_key).first,
-    helpers.displayInstructionText(safe).slice(0, 120));
+    safe.slice(0, 120));
   row.text = '<pasted_content id="x">--password="needle hidden"</pasted_content>';
   const short = (await broker.search({ q: 'needle' })).sessions[0].instructions[0];
   assert.equal(short.snippet, '[붙여넣은 내용] --[REDACTED]');
   assert.ok(short.flags.includes('clipped_text'), 'a redacted-only match is marked even below the size limit');
+});
+
+test('snippet uses exactly the same displayed redacted full text as list and detail for Bearer commands', async t => {
+  const fx = fixture(t);
+  const helpers = await board;
+  const snapshot = structuredClone(fx.alpha);
+  const row = snapshot.instructions[0];
+  row.text = '<command-name>Bearer</command-name><command-args>needle</command-args>';
+  const full = redactSecrets(helpers.displayInstructionText(row.text)).text;
+  const broker = createSessionHubBroker({ state: fx.state, store: { readAllSnapshots: () => ({
+    ok: true, snapshots: [{ machineId: 'alpha', ok: true, snapshot, sha256: 'a'.repeat(64) }],
+  }) } });
+  const match = (await broker.search({ q: 'needle' })).sessions[0].instructions[0];
+  if (helpers.matchText(full, 'needle')) assert.ok(match.snippet.includes('needle'));
+  else {
+    assert.equal(match.snippet, full.slice(0, 240));
+    assert.ok(match.flags.includes('clipped_text'));
+  }
+  assert.equal((await broker.detail(row.session_key, {})).first.text, full);
+  const list = (await broker.list({})).sessions.find(session => session.key === row.session_key);
+  assert.equal(list.first, full.slice(0, 120));
+});
+
+test('snippet does not transform or redact again after slicing the canonical full text', async t => {
+  const fx = fixture(t);
+  const raw = '가'.repeat(800) + 'xBearer ' + 'Q'.repeat(110) + 'needle' + '나'.repeat(500);
+  manySessions(fx, 1, raw);
+  const full = redactSecrets((await board).displayInstructionText(raw)).text;
+  assert.equal(full, raw);
+  const match = (await createSessionHubBroker({ state: fx.state }).search({ q: 'needle' }))
+    .sessions[0].instructions[0];
+  assert.equal(match.snippet, full.slice(801, 1041));
+  assert.ok(match.snippet.includes('needle'));
+});
+
+test('snippet slices preserve surrogate pairs at both window boundaries', async t => {
+  const fx = fixture(t);
+  const broker = createSessionHubBroker({ state: fx.state });
+  for (const query of ['needle', 'x']) {
+    manySessions(fx, 1, '😀'.repeat(250) + query + '😀'.repeat(250));
+    const snippet = (await broker.search({ q: query })).sessions[0].instructions[0].snippet;
+    assert.ok(snippet.isWellFormed(), 'neither boundary may split a surrogate pair');
+    assert.ok(snippet.includes(query));
+    assert.ok(snippet.length <= 240);
+  }
 });
 
 test('broker shares multiline pasted display in first, recent and detail text', async t => {

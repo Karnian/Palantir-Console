@@ -13,7 +13,7 @@ function equivalent(input, label) {
 
 test('linear redaction preserves API, version, and the reflowed injection expressions', () => {
   assert.deepEqual(Object.keys(current), Object.keys(oracle));
-  assert.equal(current.REDACTION_VERSION, 2);
+  assert.equal(current.REDACTION_VERSION, 3);
   function expressions(filename) {
     const source = fs.readFileSync(filename, 'utf8');
     const record = { exports: {} };
@@ -133,6 +133,18 @@ test('oracle: exact JWT 7/8 body floors without alphabet suffixes', () => {
   }
 });
 
+test('oracle: version 3 adds only CLI password argument masking', () => {
+  for (const flag of ['--password', '--passwd', '--pwd', '--PASSWORD']) {
+    for (const value of ['"correct horse battery staple"', "'private value'", 'hunter2']) {
+      equivalent(`review ${flag} ${value} --other keep`);
+    }
+  }
+  for (const input of ['--passwordx hunter2', '--password-extra hunter2', '--password "unclosed']) {
+    equivalent(input);
+    assert.deepEqual(current.redactSecrets(input), { text: input, redacted: false });
+  }
+});
+
 function generator(seed) {
   let state = seed >>> 0;
   function integer(maximum) {
@@ -221,12 +233,16 @@ const benchmark = `
   const { redactSecrets } = require(process.argv[1]);
   const unit = process.argv[2];
   const tail = process.argv[3];
+  const masked = process.argv[4] === 'masked';
   function input(size) { return unit.repeat(Math.ceil(size / unit.length)).slice(0, size - tail.length) + tail; }
   function measure(text) {
     const start = performance.now();
     const result = redactSecrets(text);
     const elapsed = performance.now() - start;
-    assert.deepEqual(result, { text, redacted: false });
+    if (masked) {
+      assert.equal(result.redacted, true);
+      assert.ok(result.text.length < text.length);
+    } else assert.deepEqual(result, { text, redacted: false });
     return elapsed;
   }
   for (let i = 0; i < 5; i++) measure(input(50000));
@@ -246,16 +262,17 @@ const benchmark = `
   process.stdout.write(JSON.stringify({ sizes, milliseconds, ratio: milliseconds[2] / milliseconds[0] }));
 `;
 
-for (const [family, unit] of [
+for (const [family, unit, masked = false] of [
   ['UPPER_SNAKE', 'AKEY'],
   ['PEM without END', '-----BEGIN PRIVATE KEY-----'],
   ['JWT', 'eyJ-'],
   ['connection scheme', 'a-'],
+  ['CLI password repeated arguments', '--password ', true],
 ]) {
   for (const [mode, tail] of [['raw', ''], ['normalized backstop', '\u200B']]) {
     test(`linear performance: ${family}, ${mode}, 200K/400K/800K`, { timeout: 15000 }, t => {
       const child = spawnSync(process.execPath,
-        ['-e', benchmark, require.resolve('../services/memorySanitize'), unit, tail],
+        ['-e', benchmark, require.resolve('../services/memorySanitize'), unit, tail, masked ? 'masked' : 'clean'],
         { encoding: 'utf8', timeout: 12000, killSignal: 'SIGKILL', maxBuffer: 65536 });
       assert.ifError(child.error);
       assert.equal(child.signal, null, child.stderr);

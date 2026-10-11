@@ -370,7 +370,7 @@ test('runOnce: end-to-end promotes a candidate to active w/ evidence provenance'
   assert.equal(ev.rule, 'R1b');
   assert.equal(ev.task_id, 't1');
   assert.deepEqual(ev.run_ids, ['x', 'y']);
-  assert.equal(ev.redaction_version, 2);
+  assert.equal(ev.redaction_version, 3);
   // and it is now retrievable for injection
   assert.ok(svc.retrieveForProject('p1').some((m) => m.id === item.id));
 });

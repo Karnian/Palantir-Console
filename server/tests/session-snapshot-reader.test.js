@@ -2245,6 +2245,7 @@ function installMemoryEquivalenceFixture(testContext) {
 test('PR1c fixed pre-change bytes preserve window, whole sessions, exclusions and coverage', testContext => {
   const fixture = installMemoryEquivalenceFixture(testContext);
   const snapshot = snapshotReader.runSnapshot(fixture.options);
+  assert.equal(snapshot.redaction_version, 3);
   assert.equal(snapshot.sessions.length, 2);
   assert.deepEqual(snapshot.sessions.map(session => `${session.provider}:${session.session_id}`), [
     'claude:keep', 'codex:keep'
@@ -2284,7 +2285,11 @@ test('PR1c fixed pre-change bytes preserve window, whole sessions, exclusions an
     delete legacy.coverage[provider].queued_duplicate_withheld;
   }
   const digest = crypto.createHash('sha256').update(JSON.stringify(legacy)).digest('hex');
-  assert.equal(digest, 'feea4682e9e7a23f8342acdec8c1aca5979a691394d838baa14e1fbca4a6c569');
+  assert.equal(digest, '181fe725fb6a3ea91050dde8abb723de3774ee0a46a1989a5d213faf93d71029');
+  // Version 3 changes only the marker here; preserve the original byte-equivalence assertion too.
+  legacy.redaction_version = 2;
+  const oldDigest = crypto.createHash('sha256').update(JSON.stringify(legacy)).digest('hex');
+  assert.equal(oldDigest, 'feea4682e9e7a23f8342acdec8c1aca5979a691394d838baa14e1fbca4a6c569');
 });
 
 function trackTranscriptReads(testContext, file) {

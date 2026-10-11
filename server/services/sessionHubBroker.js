@@ -58,6 +58,18 @@ function instructionFlags(row, clipped = false) {
   return FLAGS.filter(key => values[key]);
 }
 
+function sliceText(value, start, limit) {
+  let end = Math.min(value.length, start + limit);
+  const splitsPair = index => {
+    const before = value.charCodeAt(index - 1);
+    const after = value.charCodeAt(index);
+    return before >= 0xd800 && before <= 0xdbff && after >= 0xdc00 && after <= 0xdfff;
+  };
+  if (splitsPair(start)) start++;
+  if (splitsPair(end)) end--;
+  return value.slice(start, end);
+}
+
 function createSessionHubBroker({ state, store = storeDefault, now = () => new Date() }) {
   async function load() {
     const result = store.readAllSnapshots(state);
@@ -79,11 +91,13 @@ function createSessionHubBroker({ state, store = storeDefault, now = () => new D
     return { helpers, meta, cards: readable.flatMap(entry => helpers.snapshotCards(entry.snapshot)) };
   }
 
+  function fullText(helpers, value) {
+    return value == null ? null : redactSecrets(helpers.displayInstructionText(value)).text;
+  }
+
   function text(helpers, value, cap) {
-    if (value == null) return null;
-    const safe = redactSecrets(value).text;
-    const normalized = redactSecrets(helpers.displayInstructionText(safe)).text;
-    return redactSecrets(normalized.slice(0, cap)).text;
+    const full = fullText(helpers, value);
+    return full === null ? null : sliceText(full, 0, cap);
   }
 
   function summary(card, helpers) {
@@ -109,21 +123,17 @@ function createSessionHubBroker({ state, store = storeDefault, now = () => new D
   }
 
   function snippet(helpers, row, query) {
-    const safe = redactSecrets(row.text).text;
-    const match = helpers.matchText(safe, query);
-    const line = match ? helpers.matchedLines(safe, query) : safe;
+    const full = fullText(helpers, row.text);
+    const match = helpers.matchText(full, query);
+    const line = match ? helpers.matchedLines(full, query) : full;
     const parts = helpers.highlightParts(line, query);
     const marked = parts.find(part => part.highlighted);
     const position = parts[0]?.highlighted ? 0 : parts[0]?.text.length || 0;
     const matchLength = marked?.text.length || 0;
     const centered = Math.floor(position + matchLength / 2 - 120);
     const start = match ? Math.max(0, Math.min(centered, line.length - 240)) : 0;
-    const clipped = !match || line.length > 240 || line !== safe;
-    const excerpt = line.slice(start, start + 240);
-    let displayed = helpers.displayInstructionText(excerpt);
-    // Preserve only a matched span from the fully redacted source if a display tag hides it.
-    if (marked && !helpers.matchText(displayed, query)) displayed = `${marked.text} ${displayed}`;
-    return { id: row.id, ts: row.ts, snippet: text(helpers, displayed, 240),
+    const clipped = !match || line.length > 240 || line !== full;
+    return { id: row.id, ts: row.ts, snippet: sliceText(line, start, 240),
       flags: instructionFlags(row, clipped) };
   }
 

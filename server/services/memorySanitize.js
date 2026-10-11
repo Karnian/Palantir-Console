@@ -12,7 +12,7 @@
 //   - injection-> REJECTED (content dropped; never promoted)
 // Plus length floor/ceiling. Deterministic, no external deps.
 
-const REDACTION_VERSION = 2;
+const REDACTION_VERSION = 3;
 const DEFAULT_MAX_LEN = 500;
 const HARD_MAX_LEN = 2000;   // absolute ceiling — caller maxLen is clamped to this
 const MIN_LEN = 8;
