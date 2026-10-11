@@ -20,15 +20,19 @@ function managedSettingsPresent(paths, filesystem = fs) {
 }
 
 function sessionHubActive({ env = process.env, observeState, authToken, managedPaths,
-  filesystem = fs, resolveBinary = resolveClaudeBinary, user = os.userInfo().username } = {}) {
+  filesystem = fs, resolveBinary = resolveClaudeBinary, user } = {}) {
   if (env.PALANTIR_SESSION_HUB !== '1' || !observeState.on || !authToken) return false;
   if (!resolveBinary().executable) return false;
-  return !managedSettingsPresent(managedPaths || [
-    '/Library/Application Support/ClaudeCode/',
-    '/Library/Managed Preferences/com.anthropic.claudecode.plist',
-    `/Library/Managed Preferences/${user}/com.anthropic.claudecode.plist`,
-    '/etc/claude-code/',
-  ], filesystem);
+  if (!managedPaths) {
+    try { user ??= os.userInfo().username; } catch { return false; }
+    managedPaths = [
+      '/Library/Application Support/ClaudeCode/',
+      '/Library/Managed Preferences/com.anthropic.claudecode.plist',
+      `/Library/Managed Preferences/${user}/com.anthropic.claudecode.plist`,
+      '/etc/claude-code/',
+    ];
+  }
+  return !managedSettingsPresent(managedPaths, filesystem);
 }
 
 module.exports = { sessionHubActive, managedSettingsPresent };

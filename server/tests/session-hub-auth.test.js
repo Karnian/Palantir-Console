@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
 const childProcess = require('node:child_process');
 const { fixture, managerToken, request, TOKEN, PM, COOKIE } = require('./helpers/session-hub-fixture.cjs');
 const { sessionHubActive, managedSettingsPresent } = require('../services/sessionHubActivation');
@@ -129,6 +130,25 @@ test('off activation combinations return 404 before auth/body with identical sto
   }
 });
 
+test('off activation never calls userInfo or binary resolution when user lookup would throw', t => {
+  let lookups = 0;
+  t.mock.method(os, 'userInfo', () => { lookups++; throw new Error('user lookup unavailable'); });
+  const resolveBinary = () => { throw new Error('off must not resolve binaries'); };
+  for (const override of [{ env: {} }, { observeState: { on: false } }, { authToken: null }]) {
+    assert.equal(sessionHubActive({ env: { PALANTIR_SESSION_HUB: '1' }, observeState: { on: true },
+      authToken: TOKEN, resolveBinary, ...override }), false);
+  }
+  assert.equal(lookups, 0);
+});
+
+test('on activation fails closed without throwing when managed user lookup is unavailable', t => {
+  let lookups = 0;
+  t.mock.method(os, 'userInfo', () => { lookups++; throw new Error('user lookup unavailable'); });
+  assert.equal(sessionHubActive({ env: { PALANTIR_SESSION_HUB: '1' }, observeState: { on: true },
+    authToken: TOKEN, resolveBinary: () => ({ executable: true }) }), false);
+  assert.equal(lookups, 1);
+});
+
 test('boot activation requires executable claude and rejects managed directories and both MDM paths', t => {
   const fx = fixture(t);
   const base = { env: { PALANTIR_SESSION_HUB: '1' }, observeState: fx.state, authToken: TOKEN,
@@ -224,15 +244,33 @@ test('Top events are permanently blocked for Operator, literal/encoded; other re
     const app = fx.app({ sessionHubActive: active });
     const top = managerToken(app, 'top', 'top');
     const operator = managerToken(app, 'operator', 'operator:fixture');
+    managerToken(app, 'operator', 'operator:other');
+    const seed = (conversationId, text) => {
+      const runId = app.managerRegistry.getActiveRunId(conversationId);
+      assert.ok(runId);
+      const id = app.services.runService.addRunEvent(runId, 'fixture:conversation', JSON.stringify({ text }));
+      return { after: id - 1, body: { events: [app.services.runService.getRunEventById(runId, id)] } };
+    };
+    const topEvent = seed('top', 'Top 대화 이벤트');
+    const ownEvent = seed('operator:fixture', 'Operator 자기 대화 이벤트');
+    const otherEvent = seed('operator:other', 'Top이 읽는 다른 Operator 이벤트');
+    const expectEvents = (response, expected) => {
+      assert.equal(response.status, 200);
+      assert.deepEqual(response.body, expected.body);
+    };
     for (const id of ['top', '%74op', '%74%6f%70']) {
-      const url = `/api/conversations/${id}/events`;
+      const url = `/api/conversations/${id}/events?after=${topEvent.after}`;
       assert.equal((await auth(app, operator, url)).status, 403);
-      assert.equal((await auth(app, top, url)).status, 200);
-      assert.equal((await request(app).get(url).set('Cookie', COOKIE)).status, 200);
+      expectEvents(await auth(app, top, url), topEvent);
+      expectEvents(await request(app).get(url).set('Cookie', COOKIE), topEvent);
     }
-    const own = '/api/conversations/operator%3Afixture/events';
-    assert.equal((await auth(app, operator, own)).status, 200);
-    assert.equal((await auth(app, top, own)).status, 200);
+    const own = `/api/conversations/operator%3Afixture/events?after=${ownEvent.after}`;
+    expectEvents(await auth(app, operator, own), ownEvent);
+    expectEvents(await auth(app, top, own), ownEvent);
+    expectEvents(await request(app).get(own).set('Cookie', COOKIE), ownEvent);
+    const other = `/api/conversations/operator%3Aother/events?after=${otherEvent.after}`;
+    expectEvents(await auth(app, top, other), otherEvent);
+    expectEvents(await request(app).get(other).set('Cookie', COOKIE), otherEvent);
   }
   assert.equal(managerCapabilityRequestAllowed({ method: 'GET', originalUrl: '/api/conversations/%74op/events' },
     { layer: 'pm' }), false);

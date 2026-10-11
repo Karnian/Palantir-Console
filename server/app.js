@@ -234,8 +234,7 @@ function buildPmReviewText({ run, harvestSummary, count, autoReviewMax = AUTO_RE
     // Tell the PM so it doesn't ALSO spawn a duplicate retry — check for a
     // newer attempt run on this task first.
     status === 'failed'
-      ? '- NOTE: the system may have already queued ONE automatic retry for this failure. Check GET /api/tasks/'
-        + taskId + ' runs for a newer attempt before spawning another — avoid duplicate retries.'
+      ? '- NOTE: the system may have already queued ONE automatic retry for this failure. Check GET /api/tasks/' + taskId + ' runs for a newer attempt before spawning another — avoid duplicate retries.'
       : '',
   ].filter(Boolean).join('\n');
 }
@@ -264,8 +263,7 @@ function buildGoalReviewText({ run, task }) {
     const accStatus = acc.status === 'skipped'
       ? `SKIPPED (${acc.reason || 'runner_unavailable'})`
       : (acc.passed === true ? 'PASS' : acc.passed === false ? 'FAIL' : 'RAN');
-    lines.push(`  gate1 acceptance: ${accStatus} — ${acc.kind || '?'} check [${acc.name || 'unnamed'}] `
-      + `(${acc.gate ? 'gate' : 'advisory'})`);
+    lines.push(`  gate1 acceptance: ${accStatus} — ${acc.kind || '?'} check [${acc.name || 'unnamed'}] (${acc.gate ? 'gate' : 'advisory'})`);
     if (acc.passed === false && acc.output_tail) {
       lines.push('  gate1 output:');
       lines.push(indentBlock(acc.output_tail));
@@ -290,23 +288,14 @@ function buildGoalReviewText({ run, task }) {
 
   lines.push('');
   if (verdict === 'exhausted') {
-    lines.push(`예산 소진 (${attempt}/${max} attempts) — `
-      + '자율 반복이 검증을 통과하지 못했습니다. '
-      + '사용자 에스컬레이션을 권고합니다.');
-    lines.push('진단 후: 기준/검증을 조정해 재위임하거나 '
-      + '사용자에게 에스컬레이션하세요.');
+    lines.push(`예산 소진 (${attempt}/${max} attempts) — 자율 반복이 검증을 통과하지 못했습니다. 사용자 에스컬레이션을 권고합니다.`);
+    lines.push('진단 후: 기준/검증을 조정해 재위임하거나 사용자에게 에스컬레이션하세요.');
   } else if (verdict === 'error') {
-    lines.push(`verdict=error (${run.goal_verdict_reason || 'internal'})`
-      + ' — 인프라/소스 이상으로 재시도하지 않았습니다. '
-      + '원인을 진단하세요 (자동 재시도 아님).');
+    lines.push(`verdict=error (${run.goal_verdict_reason || 'internal'}) — 인프라/소스 이상으로 재시도하지 않았습니다. 원인을 진단하세요 (자동 재시도 아님).`);
   } else {
-    lines.push('Gate 1 (기계 검증) 통과 또는 미해당 — '
-      + '이제 의미 판단(Gate 2)이 필요합니다.');
-    lines.push('- 실행 증거·gate 결과·미충족 사항을 요약하고 '
-      + '사람에게 acceptance/rejection을 권고하세요. '
-      + 'task 상태는 "review"로 유지하세요.');
-    lines.push('- 부족하면 corrective 지시로 새 워커를 /execute 하세요 '
-      + '(goal 루프가 다음 attempt 를 돕니다).');
+    lines.push('Gate 1 (기계 검증) 통과 또는 미해당 — 이제 의미 판단(Gate 2)이 필요합니다.');
+    lines.push('- 실행 증거·gate 결과·미충족 사항을 요약하고 사람에게 acceptance/rejection을 권고하세요. task 상태는 "review"로 유지하세요.');
+    lines.push('- 부족하면 corrective 지시로 새 워커를 /execute 하세요 (goal 루프가 다음 attempt 를 돕니다).');
   }
   return lines.filter((l) => l !== undefined && l !== null).join('\n');
 }
@@ -323,8 +312,7 @@ function createPmAutoReview({
   logger = console,
 } = {}) {
   const autoReviewCounts = new Map(); // "receiverInstanceId:taskId" or "project:<projectId>:taskId" -> count
-  // countKey -> slotKey (W-P4 R1: lets a Top slot clear reset Top-fallback counts)
-  const autoReviewCountSlots = new Map();
+  const autoReviewCountSlots = new Map(); // countKey -> slotKey (W-P4 R1: lets a Top slot clear reset Top-fallback counts)
 
   function resolveOperatorConversation(conversationId) {
     if (runService && typeof runService.resolveOperatorConversationId === 'function') {
@@ -472,8 +460,7 @@ function createPmAutoReview({
     const countKey = receiver.countKey;
     const count = autoReviewCounts.get(countKey) || 0;
     if (count >= autoReviewMax) {
-      logger.warn(`[pm-auto-review] Circuit breaker: ${countKey} hit ${autoReviewMax} reviews; `
-        + 'skipping. User intervention needed.');
+      logger.warn(`[pm-auto-review] Circuit breaker: ${countKey} hit ${autoReviewMax} reviews; skipping. User intervention needed.`);
       return 'breaker_max';
     }
 
@@ -497,9 +484,7 @@ function createPmAutoReview({
       reviewText = buildText(count);
     } catch (err) {
       rollbackBreaker();
-      try {
-        logger.warn(`[pm-auto-review] Review text build failed for ${receiver.slotKey}: ${err.message}`);
-      } catch { /* logger must not break */ }
+      try { logger.warn(`[pm-auto-review] Review text build failed for ${receiver.slotKey}: ${err.message}`); } catch { /* logger must not break */ }
       return 'build_failed';
     }
 
@@ -518,16 +503,13 @@ function createPmAutoReview({
             conversationService.sendMessage(receiver.slotKey, {
               text: reviewText,
               codebaseProjectId: run.project_id || null,
-              // A2a §5.0: auto-review is its own turnMode (B1 injects only the worker codebase workspace).
-              turnMode: 'auto_review',
+              turnMode: 'auto_review', // A2a §5.0: auto-review is its own turnMode (B1 injects the worker codebase workspace only)
               source: 'auto_review', // F-1: batch review turn → codex standard tier (never 2.5×)
             });
             sent = true;
           } catch (err) {
             rollbackBreaker();
-            try {
-              logger.warn(`[pm-auto-review] Failed to send review to ${receiver.slotKey}: ${err.message}`);
-            } catch { /* logger must not break */ }
+            try { logger.warn(`[pm-auto-review] Failed to send review to ${receiver.slotKey}: ${err.message}`); } catch { /* logger must not break */ }
           }
           if (sent && onSent) { try { onSent(); } catch { /* marker best-effort */ } }
         } finally {
@@ -536,9 +518,7 @@ function createPmAutoReview({
       });
     } catch (err) {
       rollbackBreaker();
-      try {
-        logger.warn(`[pm-auto-review] Review defer scheduling failed for ${receiver.slotKey}: ${err.message}`);
-      } catch { /* logger must not break */ }
+      try { logger.warn(`[pm-auto-review] Review defer scheduling failed for ${receiver.slotKey}: ${err.message}`); } catch { /* logger must not break */ }
       return 'defer_failed';
     }
     return 'dispatched';
@@ -643,9 +623,7 @@ function createPmAutoReview({
     let ids = [];
     try { ids = runService.listReviewableGoalRunsWithoutReview(); } catch { return; }
     for (const id of ids) {
-      try { dispatchGate2Review(id); } catch (err) {
-        logger.warn(`[gate2-review] sweep failed run=${id}: ${err.message}`);
-      }
+      try { dispatchGate2Review(id); } catch (err) { logger.warn(`[gate2-review] sweep failed run=${id}: ${err.message}`); }
     }
   }
 
@@ -749,8 +727,7 @@ function createR6FactCapture({ eventBus, runService, memoryService, logger = con
           });
         } catch (err) { logger.warn(`[r6-fact] node_resolution run=${run.id}: ${err.message}`); }
       } else {
-        logger.warn('[r6-fact] node_resolution admission rejected (episodic) '
-          + `node_source=${String(payload.node_source)} run=${run.id}`);
+        logger.warn(`[r6-fact] node_resolution admission rejected (episodic) node_source=${String(payload.node_source)} run=${run.id}`);
       }
     }
   }
@@ -955,9 +932,7 @@ function createR3Capture({ eventBus, memoryService, logger = console } = {}) {
   return { capture };
 }
 
-function startMasterMemoryDecayScheduler({
-  masterMemoryService, intervalMs = 6 * 60 * 60 * 1000, logger = console,
-} = {}) {
+function startMasterMemoryDecayScheduler({ masterMemoryService, intervalMs = 6 * 60 * 60 * 1000, logger = console } = {}) {
   const tick = () => {
     try {
       if (masterMemoryService && typeof masterMemoryService.expireStaleMemories === 'function') {
@@ -1308,8 +1283,7 @@ function createApp(options = {}) {
   questionService = createQuestionService(db, eventBus, {
     runService,
     onRunCreated(run) {
-      Promise.resolve().then(() => lifecycleService.drainQueue(run.agent_profile_id,
-        { nodeId: run.node_id || undefined }))
+      Promise.resolve().then(() => lifecycleService.drainQueue(run.agent_profile_id, { nodeId: run.node_id || undefined }))
         .catch(err => console.warn(`[questions] resumed run queue drain failed: ${err.message}`));
     },
   });
@@ -1380,8 +1354,7 @@ function createApp(options = {}) {
       try { goalJudgeService = createGoalJudge({ apiKey: judgeApiKey }); }
       catch (err) { console.warn(`[goal-judge] failed to create: ${err.message}`); }
     } else {
-      console.warn('[goal-judge] PALANTIR_GOAL_JUDGE=1 but no ANTHROPIC_API_KEY and no injected judge '
-        + '— Gate 1.5 disabled');
+      console.warn('[goal-judge] PALANTIR_GOAL_JUDGE=1 but no ANTHROPIC_API_KEY and no injected judge — Gate 1.5 disabled');
     }
   }
   const harvestService = createHarvestService({
@@ -1708,8 +1681,7 @@ function createApp(options = {}) {
           reason: missingReason,
           last_error: missingReason,
         };
-        console.warn(`[memory-distill] scheduler NOT started: ${missingReason} `
-          + '(set PALANTIR_MEMORY_DISTILL=0 to silence)');
+        console.warn(`[memory-distill] scheduler NOT started: ${missingReason} (set PALANTIR_MEMORY_DISTILL=0 to silence)`);
       } else {
         try {
           const distillService = createMemoryDistillService({ memoryService, distiller });
@@ -1725,8 +1697,7 @@ function createApp(options = {}) {
             reason: null,
             last_error: null,
           };
-          console.log(`[memory-distill] scheduler started `
-            + `(interval ${intervalMs}ms, backend=${memoryDistillStatus.backend})`);
+          console.log(`[memory-distill] scheduler started (interval ${intervalMs}ms, backend=${memoryDistillStatus.backend})`);
         } catch (err) {
           memoryDistillStatus = {
             state: 'failed',
@@ -1784,13 +1755,10 @@ function createApp(options = {}) {
       let backend = options.specialistBackend || null;
       const apiKey = process.env.ANTHROPIC_API_KEY;
       if (!backend && !apiKey && !options.specialistCallModel) {
-        console.warn('[operator-specialist] PALANTIR_OPERATOR_SPECIALIST=1 '
-          + 'but no ANTHROPIC_API_KEY / injected backend — specialist disabled');
+        console.warn('[operator-specialist] PALANTIR_OPERATOR_SPECIALIST=1 but no ANTHROPIC_API_KEY / injected backend — specialist disabled');
       } else {
         try {
-          if (!backend) backend = createSpecialistBackend({
-            apiKey, callModel: options.specialistCallModel, registryService, agentProfileService,
-          });
+          if (!backend) backend = createSpecialistBackend({ apiKey, callModel: options.specialistCallModel, registryService, agentProfileService });
           specialistService = createSpecialistService({
             specialistBackend: backend,
             memoryComposer,
@@ -1844,8 +1812,7 @@ function createApp(options = {}) {
     // vendor/fonts/ has Inter woff2. No external CDN dependencies.
     res.setHeader(
       'Content-Security-Policy',
-      "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
-        + "font-src 'self'; script-src 'self'; connect-src 'self'"
+      "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self'; script-src 'self'; connect-src 'self'"
     );
     // PR1 round 2: prevent any URL-carried credentials (even if a caller
     // accidentally builds a URL like `/?foo=token`) from leaking via
@@ -1954,14 +1921,8 @@ function createApp(options = {}) {
   app.use('/api/usage', createUsageRouter({ codexService, providerRegistry }));
 
   // New routes (v2)
-  app.use('/api/projects', createProjectsRouter({
-    projectService, taskService, runService, projectBriefService, operatorBriefService, operatorCleanupService,
-    operatorInstanceService, operatorScheduleService, nodeBindingValidator, lifecycleService,
-    repoPreflightService,
-  }));
-  app.use('/api/operator-instances', createOperatorInstancesRouter({
-    operatorInstanceService, operatorIdentityLifecycleService, operatorBriefService,
-  }));
+  app.use('/api/projects', createProjectsRouter({ projectService, taskService, runService, projectBriefService, operatorBriefService, operatorCleanupService, operatorInstanceService, operatorScheduleService, nodeBindingValidator, lifecycleService, repoPreflightService }));
+  app.use('/api/operator-instances', createOperatorInstancesRouter({ operatorInstanceService, operatorIdentityLifecycleService, operatorBriefService }));
   app.use('/api', createOperatorSchedulesRouter({ operatorScheduleService, operatorScheduler }));
   app.use('/api/nodes', createNodesRouter({ nodeService, nodeUsageService, nodeSummaryService, lifecycleService }));
   app.use('/api/projects', createMemoryRouter({ memoryService, projectService })); // ML PR1: GET /:projectId/memory
@@ -1990,13 +1951,8 @@ function createApp(options = {}) {
   app.use('/api', questionsRouter);
   app.stopQuestionWaiters = questionsRouter.stopWaiters;
   app.getQuestionWaiterCount = questionsRouter.getGlobalWaiterCount;
-  app.use('/api/tasks', createTasksRouter({
-    taskService, lifecycleService, presetService, goalDeliveryService, runService, verifyCheckService,
-  }));
-  app.use('/api/runs', createRunsRouter({
-    runService, lifecycleService, executionEngine, streamJsonEngine, conversationService, presetService,
-    mcpTemplateService, projectService, taskService, nodeExecutor, nodeService,
-  }));
+  app.use('/api/tasks', createTasksRouter({ taskService, lifecycleService, presetService, goalDeliveryService, runService, verifyCheckService }));
+  app.use('/api/runs', createRunsRouter({ runService, lifecycleService, executionEngine, streamJsonEngine, conversationService, presetService, mcpTemplateService, projectService, taskService, nodeExecutor, nodeService }));
   app.use('/api/actions', createActionsRouter({ ledger: actionLedger }));
   // PR18: tests can pass options.authResolverOpts (e.g. a fake `hasKeychain`)
   // so /api/agents and /api/manager preflights are deterministic across CI
@@ -2006,29 +1962,19 @@ function createApp(options = {}) {
   app.use('/api/agents', createAgentsRouter({ agentProfileService, providerRegistry, authResolverOpts }));
   app.use('/api/events', createEventsRouter({ eventBus }));
   app.use('/api/claude-sessions', createClaudeSessionsRouter());
-  app.use('/api/manager', createManagerRouter({
-    runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus,
-    projectService, projectBriefService, agentProfileService, operatorProfileService, operatorCleanupService,
-    operatorSpawnService, skillPackService, nodeService, operatorInstanceService, modelPolicyService,
-    isSpecialistAvailable, authResolverOpts, actorTokens: actorTokenPolicy, managerCapabilityTokenService,
-    managerApiEndpoints, goalFeatureActive,
-  }));
+  app.use('/api/manager', createManagerRouter({ runService, streamJsonEngine, managerAdapterFactory, managerRegistry, conversationService, eventBus, projectService, projectBriefService, agentProfileService, operatorProfileService, operatorCleanupService, operatorSpawnService, skillPackService, nodeService, operatorInstanceService, modelPolicyService, isSpecialistAvailable, authResolverOpts, actorTokens: actorTokenPolicy, managerCapabilityTokenService, managerApiEndpoints, goalFeatureActive }));
   app.use('/api/conversations', createConversationsRouter({ conversationService, runService }));
   // Operator P-B2c-3: specialist entry. Mounted ONLY when the feature is enabled
   // (specialistService is null unless PALANTIR_OPERATOR_SPECIALIST=1 + a backend),
   // so the route does not exist when off (behavior-preserving).
   if (specialistService) {
-    app.use('/api/operator/specialist', createOperatorSpecialistRouter({
-      specialistService, runService, operatorProfileService,
-    }));
+    app.use('/api/operator/specialist', createOperatorSpecialistRouter({ specialistService, runService, operatorProfileService }));
   }
   app.use('/api/dispatch-audit', createDispatchAuditRouter({ reconciliationService }));
   app.use('/api/router', createRouterRouter({ routerService }));
   app.use('/api/worker-presets', createWorkerPresetsRouter({ presetService }));
   app.use('/api/verify-checks', createVerifyChecksRouter({ verifyCheckService, taskService, goalFeatureActive }));
-  app.use('/api/operator/profiles', createOperatorProfilesRouter({
-    operatorProfileService, operatorIdentityLifecycleService,
-  }));
+  app.use('/api/operator/profiles', createOperatorProfilesRouter({ operatorProfileService, operatorIdentityLifecycleService }));
   // R4b: profile-scoped R4 remember (POST /:id/memory/remember). Separate router on
   // the same base — the CRUD router's /:id routes don't match the deeper path.
   app.use('/api/operator/profiles', createOperatorProfileMemoryRouter({ memoryService, operatorProfileService }));
@@ -2129,14 +2075,10 @@ function createApp(options = {}) {
   // duplicate. Revisit if this ever runs multi-process/clustered.
   let gate2ReviewSweepTimer = null;
   if (shouldBootDrain && pmAutoReview && typeof pmAutoReview.reviewSweep === 'function') {
-    try { pmAutoReview.reviewSweep(); } catch (err) {
-      console.warn(`[app] Gate 2 review boot sweep failed: ${err.message}`);
-    }
+    try { pmAutoReview.reviewSweep(); } catch (err) { console.warn(`[app] Gate 2 review boot sweep failed: ${err.message}`); }
     if (!process.env.NODE_TEST_CONTEXT) {
       gate2ReviewSweepTimer = setInterval(() => {
-        try { pmAutoReview.reviewSweep(); } catch (err) {
-          console.warn(`[app] Gate 2 review periodic sweep failed: ${err.message}`);
-        }
+        try { pmAutoReview.reviewSweep(); } catch (err) { console.warn(`[app] Gate 2 review periodic sweep failed: ${err.message}`); }
       }, 60000);
       if (typeof gate2ReviewSweepTimer.unref === 'function') gate2ReviewSweepTimer.unref();
     }
@@ -2307,20 +2249,17 @@ function createApp(options = {}) {
             if (result && typeof result.then === 'function') {
               disposeWaits.push(Promise.resolve(result).then((cleaned) => {
                 if (cleaned === false) {
-                  console.warn('[app.shutdown] secret cleanup remains pending for '
-                    + `${slot.conversationId}/${slot.runId}`);
+                  console.warn(`[app.shutdown] secret cleanup remains pending for ${slot.conversationId}/${slot.runId}`);
                 }
               }, (err) => {
-                console.warn(`[app.shutdown] disposeSession failed for ${slot.conversationId}/${slot.runId}:`,
-                  err && err.message);
+                console.warn(`[app.shutdown] disposeSession failed for ${slot.conversationId}/${slot.runId}:`, err && err.message);
               }));
             } else if (result === false) {
               console.warn(`[app.shutdown] secret cleanup remains pending for ${slot.conversationId}/${slot.runId}`);
             }
           }
         } catch (err) {
-          console.warn(`[app.shutdown] disposeSession failed for ${slot.conversationId}/${slot.runId}:`,
-            err && err.message);
+          console.warn(`[app.shutdown] disposeSession failed for ${slot.conversationId}/${slot.runId}:`, err && err.message);
         }
       }
     } catch (err) {
@@ -2332,12 +2271,8 @@ function createApp(options = {}) {
     try { if (memoryDistillScheduler) memoryDistillScheduler.stop(); } catch { /* ignore */ }
     try { if (nodeHeartbeatService) nodeHeartbeatService.stop(); } catch { /* ignore */ }
     try { if (operatorScheduler) operatorScheduler.stop(); } catch { /* ignore */ }
-    try {
-      if (specialistService && typeof specialistService.stop === 'function') specialistService.stop();
-    } catch { /* ignore */ }
-    try {
-      if (gate2ReviewSweepTimer) { clearInterval(gate2ReviewSweepTimer); gate2ReviewSweepTimer = null; }
-    } catch { /* ignore */ }
+    try { if (specialistService && typeof specialistService.stop === 'function') specialistService.stop(); } catch { /* ignore */ }
+    try { if (gate2ReviewSweepTimer) { clearInterval(gate2ReviewSweepTimer); gate2ReviewSweepTimer = null; } } catch { /* ignore */ }
     lifecycleService.stopMonitoring();
     // PR5b graceful shutdown: if a distill drain is in flight, close the DB only
     // AFTER it settles so the drain never writes into a closed handle. Adapter
@@ -2345,18 +2280,14 @@ function createApp(options = {}) {
     // cleanup finishes before the process can complete graceful shutdown.
     let inflight = null;
     try {
-      inflight = (memoryDistillScheduler && memoryDistillScheduler.awaitDrain)
-        ? memoryDistillScheduler.awaitDrain() : null;
+      inflight = (memoryDistillScheduler && memoryDistillScheduler.awaitDrain) ? memoryDistillScheduler.awaitDrain() : null;
     } catch { inflight = null; }
     if (inflight && typeof inflight.then === 'function') {
       disposeWaits.push(Promise.resolve(inflight));
     }
     try {
-      const schedulerInflight = operatorScheduler && operatorScheduler.awaitDrain
-        ? operatorScheduler.awaitDrain() : null;
-      if (schedulerInflight && typeof schedulerInflight.then === 'function') {
-        disposeWaits.push(Promise.resolve(schedulerInflight));
-      }
+      const schedulerInflight = operatorScheduler && operatorScheduler.awaitDrain ? operatorScheduler.awaitDrain() : null;
+      if (schedulerInflight && typeof schedulerInflight.then === 'function') disposeWaits.push(Promise.resolve(schedulerInflight));
     } catch { /* ignore */ }
     if (disposeWaits.length > 0) {
       return Promise.allSettled(disposeWaits).then(_closeDbOnce);

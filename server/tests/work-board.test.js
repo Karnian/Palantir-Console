@@ -29,6 +29,32 @@ const drain = async () => { await Promise.resolve(); await Promise.resolve(); };
 const commandText = (name, args = '') =>
   `<command-name>${name}</command-name><command-args>${args}</command-args>`;
 
+test('pasted display keeps distinct instruction content in title, first and recent lines', async t => {
+  const { displayInstructionText, snapshotCards, cardLineVisibility } = await logic;
+  const { alpha } = fixtures(t);
+  const session = alpha.sessions[0];
+  session.ai_title = null;
+  const rows = alpha.instructions.filter(row => row.session_key === session.key);
+  assert.equal(rows.length, 2);
+  rows[0].text = '<pasted_content id="first">인증 구현</pasted_content>';
+  rows[1].text = '<pasted_content id="recent">검색 구현</pasted_content>';
+  const card = snapshotCards(alpha).find(item => item.key === session.key);
+  assert.equal(card.title, '[붙여넣은 내용] 인증 구현');
+  assert.equal(card.first, '[붙여넣은 내용] 인증 구현');
+  assert.equal(card.recent, '[붙여넣은 내용] 검색 구현');
+  assert.equal(card.omitRecent, false);
+  assert.deepEqual(cardLineVisibility('별도 제목', card.recent, card.first),
+    { omitRecent: false, showFirst: true });
+  assert.notEqual(displayInstructionText(rows[0].text), displayInstructionText(rows[1].text));
+});
+
+test('pasted display uses a short inline marker for tags without content', async () => {
+  const { displayInstructionText } = await logic;
+  for (const text of ['<pasted_content id="empty">', '<pasted_content id="empty"></pasted_content>']) {
+    assert.equal(displayInstructionText(text), '[붙여넣은 내용]');
+  }
+});
+
 test('command display accepts one name and matching optional message in every order', async () => {
   const { displayInstructionText } = await logic;
   const tags = ['<command-message> \t///deep-research\n </command-message>',

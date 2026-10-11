@@ -212,7 +212,7 @@ test('display normalization is shared and secrets are redacted after transformat
   fx.write(fx.alpha);
   const broker = createSessionHubBroker({ state: fx.state });
   const result = await broker.detail(fx.alpha.sessions[0].key, {});
-  assert.equal(result.first.text, '붙여넣은 내용\n붙인 지시');
+  assert.equal(result.first.text, '[붙여넣은 내용] 붙인 지시');
   assert.equal(result.session.first, result.first.text);
   const poisoned = structuredClone(fx.alpha);
   poisoned.instructions[0].text = 'sk-ant-api03-' + 'Q'.repeat(80);
@@ -222,6 +222,29 @@ test('display normalization is shared and secrets are redacted after transformat
   const redacted = await createSessionHubBroker({ state: fx.state, store: double })
     .detail(poisoned.sessions[0].key, {});
   assert.equal(JSON.stringify(redacted).includes('Q'.repeat(80)), false);
+});
+
+test('search snippets retain raw tag-attribute matches and crop before display transformation', async t => {
+  const fx = fixture(t);
+  const snapshot = manySessions(fx, 1, '<pasted_content id="needle">' + '가'.repeat(1000));
+  const broker = createSessionHubBroker({ state: fx.state });
+  const helpers = await board;
+  const ranked = helpers.rankCards(helpers.snapshotCards(snapshot), 'needle');
+  assert.equal(ranked.length, 1);
+  assert.ok(helpers.matchedLines(ranked[0].match.text, 'needle').includes('id="needle"'));
+  const result = await broker.search({ q: 'needle' });
+  assert.equal(result.sessions.length, 1);
+  assert.ok(result.sessions[0].instructions[0].snippet.includes('needle'));
+  assert.ok(result.sessions[0].instructions[0].snippet.length <= 240);
+
+  snapshot.instructions[0].text = '<pasted_content id="' + '한'.repeat(600) + '">needle' + '가'.repeat(1000);
+  assert.equal(validateSnapshot(snapshot).ok, true);
+  fx.write(snapshot);
+  const contentMatch = await broker.search({ q: 'needle' });
+  const snippet = contentMatch.sessions[0].instructions[0].snippet;
+  assert.ok(snippet.includes('needle'));
+  assert.ok(snippet.startsWith('한'.repeat(50)), 'centered window is selected from the original text');
+  assert.equal(snippet.length, 240);
 });
 
 test('observe list shares partial-failure rev with broker and detail hash prevents replacement races', async t => {

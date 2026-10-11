@@ -315,9 +315,7 @@ function createStreamJsonEngine({
    * Spawn a Claude Code agent with stream-json protocol.
    */
   function spawnAgent(runId, { prompt, cwd, env, systemPrompt, permissionMode,
-    tools, allowedTools, disallowedTools, maxBudgetUsd, model, mcpConfig, strictMcpConfig, safeMode, bare,
-    disableSlashCommands, noChrome, settingSources, settings, addDir, isManager, maxTurns,
-    resumeSessionId, onVendorEvent,
+    tools, allowedTools, disallowedTools, maxBudgetUsd, model, mcpConfig, strictMcpConfig, safeMode, bare, disableSlashCommands, noChrome, settingSources, settings, addDir, isManager, maxTurns, resumeSessionId, onVendorEvent,
     // Phase 10D Tier 2
     isolated, pluginDirs, settingsPath, onCleanup,
     executor, nodePrefix, envAllowlist, nodeId, leaseId, onExit }) {
