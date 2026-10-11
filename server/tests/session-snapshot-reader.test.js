@@ -6053,3 +6053,63 @@ test('PR-S a complete instruction exactly at the tail boundary is retained witho
   assert.equal(snapshot.sessions[0].status.state, 'ended');
   assert.equal(reads.bytes, fs.statSync(file).size + snapshotReader.STATUS_TAIL_BYTES);
 });
+
+const claudeClockTime = time => `2026-10-08T07:22:${time}Z`;
+for (const streamed of [false, true]) {
+  for (const [stop, expected] of [['end_turn', 'ended'], ['tool_use', 'working']]) {
+    test(`PR-S Claude ${expected} ignores measured attachment time reversals, streaming=${streamed}`, t => {
+      const fx = createFixture(t);
+      fx.options.now = new Date('2026-10-08T08:00:00.000Z');
+      if (streamed) forceLargeFileLimits(t);
+      const rows = [
+        claudeUserRecord('instruction', { timestamp: claudeClockTime('36.479') }),
+        { ...statusAttachment('environment', 'u', 'environment'), timestamp: claudeClockTime('36.478') },
+        statusAssistant('tool_use', 'a', 'environment', { timestamp: claudeClockTime('43.988') }),
+        { ...statusAttachment('hook', 'a', 'hook_success'), timestamp: claudeClockTime('43.885') },
+        statusAssistant(stop, 'a2', 'hook', { timestamp: claudeClockTime('44.001') }),
+        { ...statusAttachment('last-hook', 'a2', 'hook_success'), timestamp: claudeClockTime('44.000') },
+        { type: 'system', subtype: 'stop_hook_summary', sessionId: 's', uuid: 'summary',
+          parentUuid: 'last-hook', timestamp: claudeClockTime('43.990') },
+      ];
+      fx.file('claude', 'clock-order', rows);
+      const snapshot = snapshotReader.runSnapshot(fx.options);
+      assert.deepEqual(snapshot.sessions[0].status, { state: expected, source: 'transcript',
+        evidence_at: claudeClockTime('44.001'), reason: null });
+    });
+  }
+}
+
+for (const [stop, finalTime, expected, reason] of [
+  ['end_turn', '36.500', 'ended', null],
+  ['tool_use', '36.500', 'working', null],
+  ['end_turn', '36.478', 'unknown', 'order_unknown'],
+  ['tool_use', '36.478', 'unknown', 'order_unknown'],
+]) {
+  test(`PR-S Claude final ${stop} at ${finalTime} is compared only with the instruction time`, t => {
+    const fx = createFixture(t);
+    fx.options.now = new Date('2026-10-08T08:00:00.000Z');
+    fx.file('claude', 'clock-order', [
+      claudeUserRecord('instruction', { timestamp: claudeClockTime('36.479') }),
+      statusAssistant('tool_use', 'a', 'u', { timestamp: claudeClockTime('36.600') }),
+      statusAssistant(stop, 'a2', 'a', { timestamp: claudeClockTime(finalTime) }),
+    ]);
+    const status = snapshotReader.runSnapshot(fx.options).sessions[0].status;
+    assert.equal(status.state, expected);
+    assert.equal(status.reason, reason);
+    assert.equal(status.evidence_at, reason ? null : claudeClockTime(finalTime));
+  });
+}
+
+test('PR-S Claude an earlier intermediate transition does not override later valid evidence', t => {
+  const fx = createFixture(t);
+  fx.options.now = new Date('2026-10-08T08:00:00.000Z');
+  fx.file('claude', 'clock-order', [
+    claudeUserRecord('instruction', { timestamp: claudeClockTime('36.479') }),
+    statusAssistant('tool_use', 'a', 'u', { timestamp: claudeClockTime('36.478') }),
+    statusAssistant('end_turn', 'a2', 'a', { timestamp: claudeClockTime('36.500') }),
+  ]);
+  const status = snapshotReader.runSnapshot(fx.options).sessions[0].status;
+  assert.equal(status.state, 'ended');
+  assert.equal(status.evidence_at, claudeClockTime('36.500'));
+  assert.equal(status.reason, null);
+});

@@ -812,8 +812,6 @@ function claudeStatus(records, windowed = false) {
     && ['user', 'assistant'].includes(record.type) && typeof record.uuid !== 'string'))
     return snapshotPolicy.unknownStatus('status_format_unsupported');
   const after = remaining.filter(record => main.has(record));
-  const ordered = records.filter(record => main.has(record) || record === instruction);
-  if (!orderedStatusRecords(ordered)) return snapshotPolicy.unknownStatus('order_unknown');
   let status = statusAt('working', instruction);
   for (const record of after) {
     if (claudeInterrupted(record)) status = statusAt('interrupted', record);
@@ -825,6 +823,10 @@ function claudeStatus(records, windowed = false) {
     } else if (record.type === 'user' && Array.isArray(record.message?.content)
       && record.message.content.some(block => block.type === 'tool_result')) status = statusAt('working', record);
   }
+  // File positions and parent links establish order; only the final evidence must not predate the instruction.
+  const instructionAt = toIsoTimestamp(instruction.timestamp);
+  if (!instructionAt || !status.evidence_at || status.evidence_at < instructionAt)
+    return snapshotPolicy.unknownStatus('order_unknown');
   return status;
 }
 function codexStatus(records, windowed = false) {
