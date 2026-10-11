@@ -256,6 +256,8 @@ test('PR-S v2 requires closed status; v1 accepts absent status and old Orca enum
   }
   session.status = status;
   assert.equal(snapshotPolicy.validateSnapshot(snapshot).ok, true);
+  session.status = { ...status, state: 'ended', source: 'transcript', reason: 'local_command' };
+  assert.equal(snapshotPolicy.validateSnapshot(snapshot).ok, true);
   snapshot.policy_version = 1;
   for (const card of snapshot.sessions) delete card.status;
   for (const state of ['idle', 'running', 'busy', 'completed', 'error', 'stopped']) {

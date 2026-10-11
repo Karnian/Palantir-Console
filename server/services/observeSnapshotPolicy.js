@@ -28,7 +28,8 @@ const ORCA_STATUS_MAP = Object.freeze({
 });
 const STATUS_STATES = ['working', 'waiting', 'ended', 'interrupted', 'unknown'];
 const STATUS_REASONS = ['orca_blocked', 'conflict', 'status_format_unsupported', 'branch_ambiguous',
-  'instruction_unbound', 'turn_unbound', 'truncated', 'parse_failed', 'order_unknown', 'no_instruction'];
+  'instruction_unbound', 'turn_unbound', 'truncated', 'parse_failed', 'order_unknown', 'no_instruction',
+  'local_command'];
 function unknownStatus(reason = null) {
   return { state: 'unknown', source: 'none', evidence_at: null, reason };
 }

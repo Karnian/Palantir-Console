@@ -53,9 +53,17 @@ codex 교차검토(R1 GO, 합의): 상태는 reader 에서 계산 + 실제 스�
 ### 1.3 transcript 턴 상태 (reader, 작업 머신에서 계산)
 - 이미 읽는 transcript 의 **완전한 레코드**만 쓴다. assistant 본문·tool 결과 본문은 새로 반출하지 않는다 — 반출하는 것은 상태 값·근거 시각·이유 코드뿐이다.
 - **상태 형식 지원 판정 (`format_unverified` 와 별개)**: 기존 `format_unverified` 는 지금 모든 세션에 true 로 하드코딩돼 있고(지시 텍스트 해석의 미검증 표시) 그 의미를 바꾸지 않는다. 상태 계산은 별도 판정 `status_format_ok` 를 쓴다 — 아래 전이에 필요한 필드(Claude: 체인 레코드의 `uuid`·`parentUuid`·`type`·assistant `message.stop_reason`; Codex: `event_msg` 의 `task_started`/`task_complete`/`turn_aborted` 와 그 `turn_id`)가 지원 형식대로 있는지 레코드 단위로 검사한다. 판정 실패면 `unknown` + `reason:'status_format_unsupported'`.
-- **현재 턴 식별 후 순서대로 전이**: 먼저 현재 분기(Claude: **체인 레코드**(`uuid` 를 가진 user/assistant/system 레코드) 중 파일상 마지막 것에서 `parentUuid` 사슬을 거슬러 올라간 본선 — `ai-title`·`queue-operation`·`summary` 등 비체인 메타데이터는 말단 후보가 아니다. 사이드체인·하위 에이전트 파일 제외. 사슬이 끊기거나 같은 위치의 말단이 여럿이라 모호하면 `unknown` + `reason:'branch_ambiguous'`)와 그 분기의 **마지막 사람 지시**(기존 판정 그대로 — tool_result·명령 래퍼 제외, 작업 중 지시 attachment 포함)를 찾는다. 그 지시 **이후** 레코드만 파일 순서대로 훑어 상태 전이를 적용하고, **마지막 유효 전이**가 상태다. 앞선 종료가 있어도 뒤에 재개(새 tool_use·assistant 진행) 증거가 있으면 `working`. "존재 검사"로 구현하지 않는다.
+- **현재 턴 식별 후 순서대로 전이**: 먼저 현재 분기(Claude: **체인 레코드**(`uuid` 를 가진 user/assistant/system 레코드) 중 파일상 마지막 것에서
+  `parentUuid` 사슬을 거슬러 올라간 본선 — `ai-title`·`queue-operation`·`summary` 등 비체인 메타데이터는 말단 후보가 아니다. 사이드체인·하위 에이전트
+  파일 제외. 사슬이 끊기거나 같은 위치의 말단이 여럿이라 모호하면 `unknown` + `reason:'branch_ambiguous'`)와 그 분기의 **마지막 사람 지시**(기존 판정 그대로
+  — tool_result·로컬 명령 caveat·stdout 제외, 명령 래퍼 포함, 작업 중 지시 attachment 포함)를 찾는다. 그 지시 **이후** 레코드만 파일 순서대로 훑어 상태
+  전이를 적용하고, **마지막 유효 전이**가 상태다. 앞선 종료가 있어도 뒤에 재개(새 tool_use·assistant 진행) 증거가 있으면 `working`. "존재 검사"로 구현하지
+  않는다.
 - **말단 후보 집합과 지시 집합을 구분**한다: 분기 말단·사슬 탐색은 체인 레코드로 하고, 마지막 사람 지시 판정은 reader 가 이미 인정하는 사람 지시 전부(user 레코드 + 작업 중 지시 `attachment{queued_command, origin.kind=human}`)로 한다. attachment 는 `parentUuid` 가 있으면 그것으로, 없으면 **파일상 바로 앞의 비사이드체인 체인 레코드**가 현재 본선에 속할 때만 그 뒤로 결속한다(다른 분기 레코드를 건너뛰어 과거 본선 레코드에 붙이지 않는다). 파일상 가장 최근 사람 지시 후보를 현재 분기에 결속할 수 없으면 이전 `ended` 를 재사용하지 않고 `unknown` + `reason:'instruction_unbound'`.
 - Claude 전이: assistant `stop_reason:"end_turn"` → `ended`; `stop_reason:"tool_use"` 또는 tool_result 뒤 후속 진행 → `working`; 사용자 중단 레코드(형식은 실데이터에서 확인해 fixture 로 고정) → `interrupted`. 지시 이후 레코드가 하나도 없으면 `working`.
+- Claude 로컬 명령: 마지막 사람 지시가 명령 래퍼이고 그 지시의 현재 분기 후손에 `<local-command-stdout>` 레코드가 있으면 `ended` +
+  `reason:'local_command'`. user 문자열 내용 또는 system `subtype:'local_command'` 의 content 를 인정하고 그 레코드 시각을 근거로 쓴다.
+  stdout 이 없으면 `working`; 스킬·커스텀 명령은 기존 assistant 전이를 따른다. caveat 는 지시가 아니며 stdout 본문은 반출하지 않는다.
 - Codex 전이: 실측(2026-10-02 rollout)상 `event_msg/task_started{turn_id}` → 사람 지시 → `event_msg/task_complete{turn_id}` 순이다. 마지막 사람 지시를 **직전 `task_started` 의 turn_id** 에 결속하고, **같은 turn_id** 의 `task_complete` → `ended`, `turn_aborted` → `interrupted`, 같은 turn_id 의 종료가 없으면 `working`. 결속할 `task_started` 가 없거나 turn_id 가 다르면 종료 이벤트를 쓰지 않고 `unknown` + `reason:'turn_unbound'`. reader 가 지금 건너뛰는 이 이벤트들을 상태 계산용으로만 읽는다(본문·`last_agent_message` 미반출).
 - 상태 형식 미지원(`status_format_ok=false`)·잘린 파일·파싱 실패·순서 불명(시각 역전 등) → `unknown` + 이유 코드. 기존 `format_unverified` 는 상태 계산의 게이트로 쓰지 않는다.
 

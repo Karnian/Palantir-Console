@@ -5994,6 +5994,64 @@ function largeStatusFile(fx, provider, tail) {
   return file;
 }
 
+const LOCAL_STDOUT_TIME = '2026-10-08T02:00:01.000Z';
+const localCommand = (command = '/exit') => claudeUserRecord(
+  `<command-name>${command}</command-name>\n<command-message>${command.slice(1)}</command-message>`
+    + '\n<command-args></command-args>', { origin: undefined });
+const localStdout = (type = 'user', extra = {}) => {
+  const content = '<local-command-stdout>PRIVATE_LOCAL_STDOUT_SENTINEL</local-command-stdout>';
+  return { type, sessionId: 's', uuid: 'stdout', parentUuid: 'u', timestamp: LOCAL_STDOUT_TIME,
+    ...(type === 'user' ? { message: { role: 'user', content } } : { subtype: 'local_command', content }),
+    ...extra };
+};
+
+for (const large of [false, true]) {
+  for (const [name, rows, state, reason, evidenceAt, instructions] of [
+    ['exit user stdout', [localCommand(), localStdout()], 'ended', 'local_command', LOCAL_STDOUT_TIME, 1],
+    ['login system stdout', [localCommand('/login'), localStdout('system')],
+      'ended', 'local_command', LOCAL_STDOUT_TIME, 1],
+    ['pending local command', [localCommand()], 'working', null, RECORD_TIMESTAMP, 1],
+    ['caveat is not an instruction', [localCommand(), localStdout(),
+      claudeUserRecord('<local-command-caveat>PRIVATE_CAVEAT_SENTINEL</local-command-caveat>',
+        { uuid: 'caveat', parentUuid: 'stdout', timestamp: LOCAL_STDOUT_TIME, origin: undefined })],
+      'ended', 'local_command', LOCAL_STDOUT_TIME, 1],
+    ['new instruction', [localCommand(), localStdout(), claudeUserRecord('next instruction',
+      { uuid: 'next', parentUuid: 'stdout', timestamp: LOCAL_STDOUT_TIME })],
+      'working', null, LOCAL_STDOUT_TIME, 2],
+    ['new instruction answered', [localCommand(), localStdout(), claudeUserRecord('next instruction',
+      { uuid: 'next', parentUuid: 'stdout', timestamp: LOCAL_STDOUT_TIME }),
+      statusAssistant('end_turn', 'a', 'next', { timestamp: LOCAL_STDOUT_TIME })],
+      'ended', null, LOCAL_STDOUT_TIME, 2],
+    ['skill assistant turn', [localCommand('/custom-skill'), statusAssistant('end_turn')],
+      'ended', null, RECORD_TIMESTAMP, 1],
+    ['stdout after plain instruction', [claudeUserRecord('plain instruction'), localStdout()],
+      'working', null, RECORD_TIMESTAMP, 1],
+    ['old stdout after new instruction', [localCommand(), claudeUserRecord('next instruction',
+      { uuid: 'next', parentUuid: 'u' }), localStdout('user', { parentUuid: 'next' })],
+      'working', null, RECORD_TIMESTAMP, 2],
+    ['sidechain stdout', [localCommand(), localStdout('user', { isSidechain: true })],
+      'working', null, RECORD_TIMESTAMP, 1],
+    ['resume after stdout', [localCommand(), localStdout(),
+      statusAssistant('tool_use', 'a', 'stdout', { timestamp: LOCAL_STDOUT_TIME })],
+      'working', null, LOCAL_STDOUT_TIME, 1],
+    ['reverse stdout time', [localCommand(), localStdout('system',
+      { timestamp: '2026-10-08T01:00:00.000Z' })], 'unknown', 'order_unknown', null, 1],
+  ]) {
+    test(`PR-S Claude local command ${name}, tail=${large}`, t => {
+      const fx = createFixture(t);
+      if (large) largeStatusFile(fx, 'claude', rows);
+      else fx.file('claude', 'local-command', rows);
+      const snapshot = snapshotReader.runSnapshot(fx.options);
+      assert.deepEqual(snapshot.sessions[0].status,
+        { state, source: state === 'unknown' ? 'none' : 'transcript', evidence_at: evidenceAt, reason });
+      assert.equal(snapshot.sessions[0].instruction_total, instructions + (large ? 1 : 0));
+      assert.equal(snapshotPolicy.validateSnapshot(snapshot).ok, true);
+      for (const sentinel of ['PRIVATE_LOCAL_STDOUT_SENTINEL', 'PRIVATE_CAVEAT_SENTINEL',
+        'PRIVATE_ASSISTANT_SENTINEL']) assert.equal(JSON.stringify(snapshot).includes(sentinel), false);
+    });
+  }
+}
+
 for (const provider of ['claude', 'codex']) {
   for (const state of ['ended', 'working']) {
     test(`PR-S ${provider} tail window evaluates ${state} with bounded reads and complete or pending final JSON`, t => {
