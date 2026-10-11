@@ -341,6 +341,29 @@ test('a second instance cannot clean active staging or publish and cannot releas
   assert.equal(next.state().enabled, true); await next.shutdown();
 });
 
+test('second instance routes return the root-lock error and expose locked status', async t => {
+  const fx = setup(t); await fx.service.shutdown();
+  const first = fx.app({ snapshotRefreshServiceOptions: fx.options });
+  const second = fx.app({ snapshotRefreshServiceOptions: fx.options });
+  assert.equal(first.snapshotRefreshService.state().enabled, true);
+  const lock = path.join(fx.dir, '.staging', '.lock');
+  const bytes = fs.readFileSync(lock);
+  for (const body of [undefined, { targets: ['mac'] }]) {
+    const call = request(second).post(`${BASE}/refresh`).set('Cookie', COOKIE)
+      .set('Origin', 'http://localhost');
+    const response = await (body === undefined ? call : call.send(body));
+    assert.equal(response.status, 503);
+    assert.deepEqual(response.body, { error: 'snapshot_refresh_locked', reason: 'snapshot_refresh_locked' });
+  }
+  const status = await request(second).get(`${BASE}/status`).set('Cookie', COOKIE);
+  assert.equal(status.status, 200);
+  assert.equal(status.body.enabled, false); assert.equal(status.body.code, 'snapshot_refresh_locked');
+  assert.equal(status.body.auto_interval_ms, 0); assert.equal(status.body.targets[0].running, false);
+  assert.equal(fs.existsSync(fx.log), false); fx.unchanged();
+  await second.shutdown(); assert.deepEqual(fs.readFileSync(lock), bytes);
+  await first.shutdown(); assert.equal(fs.existsSync(lock), false);
+});
+
 test('a dead PID lock is taken over before crash remnants are cleaned', async t => {
   const fx = setup(t); await fx.service.shutdown();
   const base = path.join(fx.dir, '.staging');
