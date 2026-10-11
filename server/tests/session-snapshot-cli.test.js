@@ -349,3 +349,21 @@ test('PR1c B invalid labels and labels on exclude are rejected by Mac with zero 
   assert.equal(denied.calls.length, 0);
   assert.equal(fs.existsSync(good.file), true);
 });
+
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  test(`CLI ${signal} reaps its detached executor and descendant before returning`, async t => {
+    const f = fixture(t);
+    const good = await initialize(f);
+    const before = fs.readFileSync(good.file);
+    const probe = descendantProbe(t, f.root);
+    const env = { ...f.env, FAKE_SSH_MODE: 'hang_descendant', FAKE_SSH_DESCENDANT_PID: probe.pidFile };
+    const running = invoke(f, args(f), '', env);
+    await probe.readPid();
+    process.emit(signal);
+    const result = await running;
+    assert.equal(result.code, 1);
+    await probe.waitForExit();
+    assert.deepEqual(fs.readFileSync(good.file), before);
+    assert.equal(process.listenerCount(signal), 0);
+  });
+}

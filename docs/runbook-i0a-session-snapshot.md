@@ -46,6 +46,50 @@ node scripts/session-snapshot.mjs remote --host codev@codev2 \
 `--out-dir <실제 절대경로>`로 출력 디렉터리를 명시할 수도 있다. 실행 실패나 수신 검증 실패 시
 기존 파일은 보존된다. 목록과 상세 응답에는 `Cache-Control: no-store`가 붙는다.
 
+## 서버에서 새로 만들기·자동 수집
+
+이 Mac에서 실행하는 보드 서버가 로컬 CLI와 `codev@codev2` SSH를 실행한다.
+서버 사용자에게 비대화형 SSH 접속과 각 머신의 Orca 실행 권한이 있어야 한다.
+부팅 전에 대상과 예상 machine id를 고정한다.
+중복 machine id나 잘못된 설정은 서비스를 비활성화한다.
+
+```sh
+export PALANTIR_SNAPSHOT_TARGETS='[
+  {"name":"mac","kind":"local","machineId":"5d1c09d0d3cf2cfc","label":"mac"},
+  {"name":"codev2","kind":"ssh","host":"codev@codev2","machineId":"26de0b2b4038dfff",
+   "label":"codev2","orcaBin":"/home/codev/.local/bin/orca"}
+]'
+export PALANTIR_SNAPSHOT_REFRESH_MS=300000
+export PALANTIR_SNAPSHOT_TIMEOUT_MS=120000
+npm start
+```
+
+원격 Node 경로가 필요하면 SSH 대상에 `"remoteNode":"/home/codev/.local/bin/node"`를 넣는다.
+대상·주기·timeout 설정 변경은 서버 재시작 후 적용된다.
+observe가 비활성화되면 수집도 비활성화된다.
+
+`#work` 보드 상단의 **새로 만들기**는 등록된 대상을 수집한다.
+대상별 진행·결과·마지막 성공 시각을 표시한다.
+완료하면 보드 데이터를 다시 읽는다.
+기존 새로고침 버튼은 이미 게시된 스냅샷을 다시 읽는다.
+사람 로그인 cookie로만 실행할 수 있고 세션 비서 hub 토큰이나 bearer로 실행할 수 없다.
+
+자동 수집은 기본 5분마다 실행하며 실행 중인 대상은 건너뛴다.
+`PALANTIR_SNAPSHOT_REFRESH_MS=0`이면 자동 수집만 끈다. 수동 버튼은 계속 사용할 수 있다.
+각 실행은 `<정본 디렉터리>/.staging/<machineId>/`를 비운 뒤 수집한다(0700).
+기존 observe 크기·닫힌 스키마 검증과 예상 machine id 확인 후에만 정본으로 원자 rename한다.
+실패·timeout·shutdown에서는 마지막 성공 파일을 유지한다.
+
+상태는 `GET /api/session-hub/snapshots/status`, 수동 요청은
+`POST /api/session-hub/snapshots/refresh`(본문 없음 또는 `{"targets":["mac"]}`)이며 수락 응답은 202다.
+POST는 서버 scheme·host·port와 정확히 같은 Origin이 필요하다.
+결과는 `ok`, `timeout`, `failed`(CLI 종료 코드 포함), `machine_mismatch`, `invalid_output`, `cancelled`다.
+stdout·stderr 내용은 상태에 포함하지 않는다.
+timeout·종료 시 그룹을 회수하며 5초 뒤 SIGKILL로 승격한다.
+ESRCH를 확인하지 못하면 `reap_failed`와 잠금 상태를 표시한다.
+해당 대상의 다음 실행을 거부한다.
+남은 프로세스를 확인·정리하고 서버를 재시작한다.
+
 ## 제외·삭제 등록
 
 보드에서 `<INSTR_ID>#<ref>`를 복사한다. 지시가 나온 머신에 맞춰 Mac 터미널에서 실행한다.

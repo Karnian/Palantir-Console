@@ -88,10 +88,11 @@ test('executor fallback and backstop settle killed streams', { timeout: 10000 },
           return child;
         } });
       assert.ok(performance.now() - started <= timeoutMs + 3000);
-      assert.deepEqual(result, { exitCode: null, signal: 'SIGKILL', stdout: Buffer.from('partial'),
-        stderrBytes: 9, killedReason: 'timeout' });
+      assert.deepEqual(result, { exitCode: null, signal: fallback ? 'reap_failed' : 'SIGKILL',
+        stdout: Buffer.from('partial'), stderrBytes: 9, killedReason: fallback ? 'reap_failed' : 'timeout' });
       assert.ok(['stdin', 'stdout', 'stderr'].every(name => child[name].destroyed));
-      assert.deepEqual(groupKill.mock.calls.map(call => call.arguments), fallback ? [[-12345, 'SIGKILL']] : []);
+      assert.deepEqual(groupKill.mock.calls.map(call => call.arguments),
+        fallback ? [[-12345, 'SIGKILL'], [-12345, 'SIGTERM']] : []);
       assert.deepEqual(signals, fallback ? ['SIGKILL'] : []);
       child.emit('close', 0, null);
       child.emit('error', new Error('late child error'));

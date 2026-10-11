@@ -5,9 +5,7 @@ const express = require('express');
 function chatError(res, code, status = 403) {
   return res.status(status).json({ error: code, reason: code });
 }
-function createSessionHubChatRouter({ service }) {
-  const router = express.Router();
-  router.use((req, res, next) => {
+function requireSessionHubCookie(req, res, next) {
     res.set('Cache-Control', 'no-store');
     if (req.auth?.method !== 'cookie') return chatError(res, 'forbidden');
     if (req.method === 'POST') {
@@ -22,7 +20,11 @@ function createSessionHubChatRouter({ service }) {
       if (site !== undefined && site !== 'same-origin' && site !== 'none') return chatError(res, 'forbidden');
     } else return chatError(res, 'not_found', 404);
     return next();
-  });
+}
+
+function createSessionHubChatRouter({ service }) {
+  const router = express.Router();
+  router.use(requireSessionHubCookie);
   router.use(express.json({ limit: '1mb' }));
   const post = handler => async (req, res, next) => {
     try { res.json(await handler(req)); } catch (err) { next(err); }
@@ -79,4 +81,4 @@ function createSessionHubChatRouter({ service }) {
   });
   return router;
 }
-module.exports = { createSessionHubChatRouter };
+module.exports = { createSessionHubChatRouter, requireSessionHubCookie };

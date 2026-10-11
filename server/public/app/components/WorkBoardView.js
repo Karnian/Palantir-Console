@@ -2,6 +2,7 @@ import { h } from '../../vendor/preact.module.js';
 import { useEffect, useMemo, useRef, useState } from '../../vendor/hooks.module.js';
 import htm from '../../vendor/htm.module.js';
 import { apiFetch } from '../lib/api.js';
+import { useSnapshotRefresh } from '../lib/hooks/useSnapshotRefresh.js';
 import { WORK_BOARD_LABELS as W } from '../lib/copy.js';
 import { snapshotCards, rankCards, highlightParts, matchedLines,
   coverageCounts, loadWorkSnapshots, formatLocalSnapshotTime, cardLineVisibility,
@@ -153,6 +154,8 @@ export function WorkBoardView({ activation = 'on' }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
   const [revision, setRevision] = useState(0);
+  const refresh = useSnapshotRefresh({ enabled: activation === 'on',
+    onComplete: () => setRevision(value => value + 1) });
   const [query, setQuery] = useState('');
   const [machine, setMachine] = useState('');
   const [provider, setProvider] = useState('');
@@ -185,6 +188,17 @@ export function WorkBoardView({ activation = 'on' }) {
           label=${snapshot?.machine.label || entry.machine_label} snapshot=${true} /></span>`;
       })}</div>
       <p class="work-label work-observation-note">${W.observationNote}</p>
+      <button type="button" class="ghost" disabled=${!refresh.status?.enabled || refresh.busy}
+        onClick=${() => refresh.refresh()}>새로 만들기</button>
+      <div class="work-label" role="status">
+        ${refresh.status?.targets.map(target => html`<p key=${target.name}>
+          ${target.name} · ${target.running ? '수집 중' : target.locked ? '회수 실패 · 서버 재시작 필요'
+            : target.last_result?.code === 'ok' ? '수집 완료'
+              : target.last_result ? `수집 실패 (${target.last_result.code})` : '아직 수집하지 않음'}
+          ${target.last_success_at && html` · <${SnapshotTime} value=${target.last_success_at} now=${now} />`}
+        </p>`)}
+        ${refresh.error && html`<p>수집 상태를 읽거나 새로 만들지 못했습니다.</p>`}
+      </div>
       <button type="button" class="work-button" disabled=${loading}
         onClick=${() => setRevision(value => value + 1)}>${W.refresh}</button>
     </header>
