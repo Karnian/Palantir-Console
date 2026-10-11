@@ -595,7 +595,7 @@ test('endpoint: deterministic list exposes only metadata and closed failure entr
   assert.deepEqual(result.body.snapshots[2], { name_id: 'failed', error_code: 'parse_error' });
   for (const metadata of result.body.snapshots.slice(0, 2)) {
     assert.deepEqual(Object.keys(metadata).sort(),
-      ['bytes', 'coverage_summary', 'generated_at', 'machine_id', 'machine_label']);
+      ['bytes', 'coverage_summary', 'generated_at', 'machine_id', 'machine_label', 'sha256']);
     assert.ok(metadata.bytes > 0);
     assert.deepEqual(Object.keys(metadata.coverage_summary).sort(), ['claude', 'codex']);
     for (const provider of Object.values(metadata.coverage_summary)) {
@@ -664,7 +664,7 @@ test('endpoint: existing health, global auth and SSE behavior is identical on an
 
 test('store: fixed status table covers every public read failure', () => {
   assert.deepEqual(ERROR_STATUS, {
-    observe_off: 404, invalid_machine_id: 400, not_found: 404, not_regular: 422, symlink: 422,
+    observe_off: 404, snapshot_changed: 409, invalid_machine_id: 400, not_found: 404, not_regular: 422, symlink: 422,
     identity_mismatch: 422, too_large: 413, total_limit: 413, parse_error: 422, policy_violation: 422,
     observe_root_changed: 503, read_error: 503, route_not_found: 404,
   });

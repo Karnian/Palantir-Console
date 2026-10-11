@@ -17,6 +17,45 @@ const {
   markWorkerLimitFailure,
 } = require('./workerLimit');
 
+function claudeCandidate({ env, homeDir, filesystem }) {
+  if (env.CLAUDE_BIN) return env.CLAUDE_BIN;
+
+  const claudeCodeBase = path.join(homeDir, 'Library', 'Application Support', 'Claude', 'claude-code');
+  const candidates = [];
+
+  try {
+    const versions = filesystem.readdirSync(claudeCodeBase).sort().reverse();
+    for (const ver of versions) {
+      candidates.push(path.join(claudeCodeBase, ver, 'claude.app', 'Contents', 'MacOS', 'claude'));
+    }
+  } catch { /* not on macOS */ }
+
+  candidates.push(
+    path.join(homeDir, '.claude', 'bin', 'claude'),
+    '/usr/local/bin/claude',
+    '/opt/homebrew/bin/claude',
+  );
+
+  for (const p of candidates) {
+    try { if (filesystem.existsSync(p)) return p; } catch { /* ignore */ }
+  }
+
+  return 'claude';
+}
+
+function resolveClaudeBinary({ env = process.env, homeDir = os.homedir(), filesystem = fs } = {}) {
+  const candidate = claudeCandidate({ env, homeDir, filesystem });
+  const paths = candidate.includes(path.sep) ? [candidate]
+    : (env.PATH || '').split(path.delimiter).map(dir => path.join(dir, candidate));
+  for (const filename of paths) {
+    try {
+      filesystem.accessSync(filename, fs.constants.X_OK);
+      if (filesystem.statSync(filename).isFile()) return { path: path.resolve(filename), executable: true };
+    } catch { /* Try the next PATH entry without executing anything. */ }
+  }
+  return { path: candidate, executable: false };
+}
+
 function buildRemoteWorkerEnv(env) {
   const selected = {};
   if (typeof env?.PALANTIR_API_BASE === 'string' && env.PALANTIR_API_BASE) {
@@ -91,36 +130,6 @@ function createStreamJsonEngine({
         ].includes(err.code)
       )
     );
-  }
-
-  /**
-   * Resolve Claude Code binary path.
-   */
-  function resolveClaudeBin() {
-    if (process.env.CLAUDE_BIN) return process.env.CLAUDE_BIN;
-
-    const claudeCodeBase = path.join(os.homedir(), 'Library', 'Application Support', 'Claude', 'claude-code');
-    const candidates = [];
-
-    try {
-      const versions = fs.readdirSync(claudeCodeBase).sort().reverse();
-      for (const ver of versions) {
-        candidates.push(path.join(claudeCodeBase, ver, 'claude.app', 'Contents', 'MacOS', 'claude'));
-      }
-    } catch { /* not on macOS */ }
-
-    candidates.push(
-      path.join(os.homedir(), '.claude', 'bin', 'claude'),
-      '/usr/local/bin/claude',
-      '/opt/homebrew/bin/claude',
-    );
-
-    for (const p of candidates) {
-      try { if (fs.existsSync(p)) return p; } catch { /* ignore */ }
-    }
-
-    console.warn('[engine] Claude binary not found in known paths, falling back to PATH lookup: "claude"');
-    return 'claude';
   }
 
   /**
@@ -306,7 +315,9 @@ function createStreamJsonEngine({
    * Spawn a Claude Code agent with stream-json protocol.
    */
   function spawnAgent(runId, { prompt, cwd, env, systemPrompt, permissionMode,
-    tools, allowedTools, disallowedTools, maxBudgetUsd, model, mcpConfig, strictMcpConfig, safeMode, bare, disableSlashCommands, noChrome, settingSources, settings, addDir, isManager, maxTurns, resumeSessionId, onVendorEvent,
+    tools, allowedTools, disallowedTools, maxBudgetUsd, model, mcpConfig, strictMcpConfig, safeMode, bare,
+    disableSlashCommands, noChrome, settingSources, settings, addDir, isManager, maxTurns,
+    resumeSessionId, onVendorEvent,
     // Phase 10D Tier 2
     isolated, pluginDirs, settingsPath, onCleanup,
     executor, nodePrefix, envAllowlist, nodeId, leaseId, onExit }) {
@@ -317,7 +328,11 @@ function createStreamJsonEngine({
       err.code = 'REMOTE_WORKER_DETACHED_REQUIRED';
       throw err;
     }
-    const claudeBin = usingRemoteExecutor ? 'claude' : resolveClaudeBin();
+    const claudeBin = usingRemoteExecutor ? 'claude'
+      : claudeCandidate({ env: process.env, homeDir: os.homedir(), filesystem: fs });
+    if (!usingRemoteExecutor && claudeBin === 'claude' && !process.env.CLAUDE_BIN) {
+      console.warn('[engine] Claude binary not found in known paths, falling back to PATH lookup: "claude"');
+    }
     const args = buildArgs({
       prompt, systemPrompt, permissionMode, tools, allowedTools, disallowedTools,
       maxBudgetUsd, model, mcpConfig, strictMcpConfig, safeMode, bare,
@@ -1038,4 +1053,4 @@ function createStreamJsonEngine({
   };
 }
 
-module.exports = { createStreamJsonEngine };
+module.exports = { createStreamJsonEngine, resolveClaudeBinary };

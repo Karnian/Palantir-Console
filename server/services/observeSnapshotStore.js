@@ -1,6 +1,7 @@
 'use strict';
 
 const fs = require('node:fs');
+const { createHash } = require('node:crypto');
 const path = require('node:path');
 const { isSafeId, SNAPSHOT_LIMITS, COVERAGE_KEYS, validateSnapshot } = require('./observeSnapshotPolicy');
 
@@ -63,10 +64,11 @@ function readBounded(fd, limit, budget) {
     chunks.push(chunk.subarray(0, count));
     budget.bytes += count;
   }
-  return { bytes: budget.bytes, text: Buffer.concat(chunks, budget.bytes).toString('utf8') };
+  const raw = Buffer.concat(chunks, budget.bytes);
+  return { bytes: budget.bytes, text: raw.toString('utf8'), raw };
 }
 
-function readFileSnapshot(root, machineId, limits, remaining) {
+function readFileSnapshot(root, machineId, limits, remaining, hashed = false) {
   let fd;
   const budget = { bytes: 0 };
   try {
@@ -94,7 +96,8 @@ function readFileSnapshot(root, machineId, limits, remaining) {
     if (!validateSnapshot(snapshot).ok || snapshot.machine.id !== machineId) {
       return failure('policy_violation', bytes);
     }
-    return { ok: true, snapshot, bytes };
+    return { ok: true, snapshot, bytes,
+      ...(hashed ? { sha256: createHash('sha256').update(content.raw).digest('hex') } : {}) };
   } catch (error) {
     return failure(fileError(error), budget.bytes);
   } finally {
@@ -123,37 +126,55 @@ function readSnapshotNames(root) {
   }
 }
 
-function listSnapshots(state, limits = STORE_LIMITS) {
+function readAllSnapshots(state, limits = STORE_LIMITS) {
   const rootCheck = checkRoot(state);
   if (!rootCheck.ok) return rootCheck;
   const entries = readSnapshotNames(state.root);
   if (!entries.ok) return entries;
   if (entries.names.length > limits.fileCount) return failure('total_limit');
-  const names = entries.names.map(function machineName(name) { return name.slice(0, -5); });
   let remaining = limits.totalBytes;
-  const snapshots = names.map(function snapshotMetadata(machineId) {
-    const result = readFileSnapshot(state.root, machineId, limits, remaining);
+  const snapshots = entries.names.map(function readEntry(name) {
+    const machineId = name.slice(0, -5);
+    const result = readFileSnapshot(state.root, machineId, limits, remaining, true);
     remaining -= result.bytes;
-    if (!result.ok) return { name_id: machineId, error_code: result.reason };
-    return {
-      machine_id: machineId,
-      machine_label: result.snapshot.machine.label,
-      generated_at: result.snapshot.generated_at,
-      bytes: result.bytes,
-      coverage_summary: coverageSummary(result.snapshot.coverage),
-    };
+    return { machineId, ...result, sha256: result.sha256 || null };
   });
   return { ok: true, snapshots };
 }
 
-function readSnapshot(state, machineId, limits = STORE_LIMITS) {
+function snapshotMetadata(result, hashed = false) {
+  if (!result.ok) return { name_id: result.machineId, error_code: result.reason };
+  return {
+    machine_id: result.machineId,
+    machine_label: result.snapshot.machine.label,
+    generated_at: result.snapshot.generated_at,
+    bytes: result.bytes,
+    coverage_summary: coverageSummary(result.snapshot.coverage),
+    ...(hashed ? { sha256: result.sha256 } : {}),
+  };
+}
+
+// A domain-tagged JSON tuple encoding separates names, hashes and error codes unambiguously.
+function snapshotRevision(entries) {
+  const tuples = [...entries].sort((a, b) => a.machineId < b.machineId ? -1 : a.machineId > b.machineId ? 1 : 0)
+    .map(entry => entry.ok ? [entry.machineId, 'sha256', entry.sha256] : [entry.machineId, 'error', entry.reason]);
+  return createHash('sha256').update(JSON.stringify(['session-snapshots-v1', tuples])).digest('hex').slice(0, 16);
+}
+
+function listSnapshots(state, limits = STORE_LIMITS) {
+  const result = readAllSnapshots(state, limits);
+  if (!result.ok) return result;
+  return { ok: true, snapshots: result.snapshots.map(entry => snapshotMetadata(entry)) };
+}
+
+function readSnapshot(state, machineId, limits = STORE_LIMITS, hashed = false) {
   const rootCheck = checkRoot(state);
   if (!rootCheck.ok) return rootCheck;
   if (!isSafeId(machineId)) return failure('invalid_machine_id');
   const entries = readSnapshotNames(state.root);
   if (!entries.ok) return entries;
   if (!entries.names.includes(`${machineId}.json`)) return failure('not_found');
-  return readFileSnapshot(state.root, machineId, limits, limits.totalBytes);
+  return readFileSnapshot(state.root, machineId, limits, limits.totalBytes, hashed);
 }
 
 // Smaller budgets keep limit tests practical; production caps cannot be raised.
@@ -167,9 +188,17 @@ function createObserveSnapshotStore({
   }
   const limits = Object.freeze({ fileBytes, totalBytes, fileCount });
   return {
+    readAllSnapshots: function batchWithLimits(state) { return readAllSnapshots(state, limits); },
+    readSnapshotHashed: function hashWithLimits(state, machineId) {
+      return readSnapshot(state, machineId, limits, true);
+    },
     listSnapshots: function listWithLimits(state) { return listSnapshots(state, limits); },
     readSnapshot: function readWithLimits(state, machineId) { return readSnapshot(state, machineId, limits); },
   };
 }
 
-module.exports = { sealObserveState, listSnapshots, readSnapshot, createObserveSnapshotStore, STORE_LIMITS };
+module.exports = {
+  sealObserveState, listSnapshots, readSnapshot, readAllSnapshots, snapshotMetadata, snapshotRevision,
+  readSnapshotHashed: (state, machineId) => readSnapshot(state, machineId, STORE_LIMITS, true),
+  createObserveSnapshotStore, STORE_LIMITS,
+};
