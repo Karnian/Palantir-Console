@@ -33,7 +33,7 @@ test('invalid tool arguments cause zero HTTP calls including wrong types and unk
     ['unknown', {}], ['list_sessions', { machine: '../escape' }], ['list_sessions', { provider: 'other' }],
     ['list_sessions', { limit: 31 }], ['list_sessions', { limit: '1' }], ['list_sessions', { limit: 1.5 }],
     ['list_sessions', { limit: 0 }], ['list_sessions', { cursor: 'bad' }], ['list_sessions', { extra: true }],
-    ['list_sessions', []], ['search_instructions', {}], ['search_instructions', { q: '' }],
+    ['list_sessions', []], ['list_sessions', null], ['search_instructions', {}], ['search_instructions', { q: '' }],
     ['search_instructions', { q: 'a'.repeat(201) }], ['search_instructions', { q: 'query', limit: 16 }],
     ['get_session', {}], ['get_session', { key: '../escape' }], ['get_session', { key: 'safe', rev: 'bad' }],
     ['get_session', { key: 'safe', around: 'claude:abc:u1' }],
@@ -52,7 +52,8 @@ test('valid calls hit broker once and preserve exact JSON bytes and broker error
     isError: true }; };
   for (const [name, args] of [['list_sessions', { machine: 'mac', provider: 'codex', limit: 30,
     cursor: '0123456789abcdef.30' }], ['search_instructions', { q: '오르카', limit: 15 }],
-    ['get_session', { key: 'claude:abc', rev: '0123456789abcdef', around: 'claude:abc:u1' }]]) {
+    ['get_session', { key: 'claude:abc', rev: '0123456789abcdef',
+      around: `claude:${'a'.repeat(64)}:u${'b'.repeat(64)}` }]]) {
     const response = await dispatch(call(name, args), { get });
     assert.equal(response.result.content[0].text, '{ "error": "snapshot_changed" }');
     assert.equal(response.result.isError, true);
@@ -95,4 +96,44 @@ test('stdio script handles newline requests, malformed JSON, initialized notific
   assert.equal(await exited, 0);
   assert.equal(lines.length, 3); assert.equal(lines[0].error.code, -32700);
   assert.equal(lines[1].result.tools.length, 3); assert.equal(lines[2].result.isError, true);
+});
+
+test('bootstrap tolerates fragmented delivery, spawns once and strips every other env key', () => {
+  const vm = require('node:vm');
+  const sockets = [];
+  const spawned = [];
+  const exited = [];
+  const source = fs.readFileSync(path.resolve(__dirname, '../../scripts/session-hub-mcp-bootstrap.cjs'), 'utf8');
+  const modules = {
+    'node:net': { connect() {
+      const socket = new EventEmitter(); socket.setEncoding = () => {};
+      socket.write = value => { socket.sent = value; }; socket.end = value => { socket.sent = value; };
+      sockets.push(socket); return socket;
+    } },
+    'node:path': path,
+    'node:child_process': {
+      execFileSync: () => '500',
+      spawn(command, argv, options) {
+        spawned.push({ command, argv, options });
+        return Object.assign(new EventEmitter(), { pid: 600 });
+      },
+    },
+  };
+  vm.runInNewContext(source, { require: name => modules[name], __dirname: '/fixture/scripts',
+    process: { pid: 501, argv: ['node', 'bootstrap', '/protected/broker.sock'], execPath: process.execPath,
+      exit: value => exited.push(value) } });
+  sockets[0].emit('connect');
+  const credentials = JSON.stringify({ PALANTIR_SESSION_HUB_TOKEN: 'secret',
+    PALANTIR_SESSION_HUB_BASE_URL: 'http://127.0.0.1:3000', PALANTIR_TOKEN: 'must-drop' }) + '\n';
+  sockets[0].emit('data', credentials.slice(0, 10));
+  assert.equal(spawned.length, 0);
+  sockets[0].emit('data', credentials.slice(10));
+  sockets[0].emit('data', credentials);
+  assert.equal(spawned.length, 1); assert.equal(exited.length, 0);
+  assert.deepEqual(JSON.parse(JSON.stringify(spawned[0].options.env)), { PALANTIR_SESSION_HUB_TOKEN: 'secret',
+    PALANTIR_SESSION_HUB_BASE_URL: 'http://127.0.0.1:3000' });
+  assert.equal(spawned[0].options.stdio, 'inherit');
+  assert.equal(spawned[0].argv.some(value => value.includes('secret')), false);
+  sockets[1].emit('connect');
+  assert.deepEqual(JSON.parse(sockets[1].sent), { pid: 600, pgid: 500, kind: 'mcp' });
 });

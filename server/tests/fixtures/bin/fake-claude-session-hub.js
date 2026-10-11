@@ -10,10 +10,11 @@ const directory = path.join(process.env.HOME, '.claude/projects', cwd.replace(/[
 const send = value => process.stdout.write(`${JSON.stringify(value)}\n`);
 const input = readline.createInterface({ input: process.stdin });
 if (process.argv.includes('--fixture-stubborn-child')) {
-  const child = spawn(process.execPath, ['-e', "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], {
-    stdio: 'ignore', detached: false,
+  const program = "process.on('SIGTERM',()=>{});process.send('ready');setInterval(()=>{},1000)";
+  const child = spawn(process.execPath, ['-e', program], {
+    stdio: ['ignore', 'ignore', 'ignore', 'ipc'], detached: false,
   });
-  fs.writeFileSync(path.join(cwd, 'child-pid'), String(child.pid));
+  child.once('message', () => fs.writeFileSync(path.join(cwd, 'child-pid'), String(child.pid)));
   process.on('SIGTERM', () => process.exit(0));
 }
 send({ type: 'system', subtype: 'init', session_id: 'fixture-session',

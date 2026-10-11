@@ -268,9 +268,10 @@ test('spawn error and natural exit use the single cleanup Promise', async t => {
 });
 
 test('real fixture group with SIGTERM-ignoring descendant is reaped after parent exits', async t => {
+  const signals = [];
   const fx = serviceFixture(t, { termMs: 60, reapMs: 1500, pollMs: 10,
     spawn: (command, argv, opts) => childProcess.spawn(command, [...argv, '--fixture-stubborn-child'], opts),
-    kill: (...args) => process.kill(...args),
+    kill: (...args) => { signals.push(args[1]); return process.kill(...args); },
   });
   await fx.service.start();
   const childFile = path.join(fx.service.diagnostics().cwd, 'child-pid');
@@ -278,6 +279,7 @@ test('real fixture group with SIGTERM-ignoring descendant is reaped after parent
   const descendant = Number(fs.readFileSync(childFile));
   await new Promise(resolve => setTimeout(resolve, 100));
   await fx.service.clear();
+  assert.ok(signals.includes('SIGKILL'));
   assert.throws(() => process.kill(descendant, 0), err => err.code === 'ESRCH');
 });
 
@@ -342,4 +344,75 @@ test('even a cancelled previous generation timer callback cannot terminate the n
   assert.equal(fx.service.state().turnInProgress, true);
   assert.equal(fx.service.state().error, null);
   fx.event({ type: 'result' });
+});
+
+test('ledger write failure still revokes token, reaps and disposes config/transport exactly once', async t => {
+  let failed = false;
+  const fx = serviceFixture(t, { fs: { ...fsp, async open(filename, ...args) {
+    if (path.basename(filename) === 'owned-sessions' && !failed) {
+      failed = true; throw Object.assign(new Error('injected write failure'), { code: 'EIO' });
+    }
+    return fsp.open(filename, ...args);
+  } } });
+  await fx.service.start(); fx.init();
+  await until(() => fx.service.state().state === 'idle');
+  assert.equal(fx.service.current(), null);
+  assert.equal(fx.service.state().error, 'session_hub_storage_failed');
+  assert.equal(fx.service.diagnostics().pgid, null);
+  assert.equal(fs.existsSync(path.join(fx.root, 'mcp.json')), false);
+  assert.equal(fs.readdirSync(fx.temp).some(name => name.startsWith('hub-mcp-')), false);
+  assert.equal(fx.signals.filter(([, signal]) => signal === 'SIGTERM').length, 1);
+});
+
+test('a subscriber stopping on user text cannot leave a new timer or write after closing', async t => {
+  const fx = serviceFixture(t, { turnTimeoutMs: 10 });
+  await fx.service.start();
+  const unsubscribe = fx.service.subscribe(value => {
+    if (value.state === 'running' && value.messages.some(row => row.role === 'user')) void fx.service.stop();
+  });
+  fx.service.message('close here');
+  await fx.service.close();
+  const messages = fx.service.state().messages;
+  await new Promise(resolve => setTimeout(resolve, 25));
+  assert.deepEqual(fx.service.state().messages, messages);
+  assert.equal(fx.service.state().error, null);
+  unsubscribe();
+});
+
+test('real fake CLI hook output closes and disables the service for this boot', async t => {
+  const fx = serviceFixture(t, { spawn: (...args) => childProcess.spawn(...args),
+    kill: (...args) => {
+      try { return process.kill(...args); }
+      catch (err) {
+        if (err.code !== 'ESRCH') t.diagnostic(`${err.message}; signal=${args[1]}`);
+        throw err;
+      }
+    }, reapMs: 1500 });
+  await fx.service.start();
+  await until(() => fx.service.diagnostics().initSeen, 5000);
+  fx.service.message('hook');
+  await until(() => fx.service.state().disabled === 'session_hub_hooks_detected', 5000);
+  await fx.service.close();
+  assert.equal(fx.service.state().state, 'idle');
+  assert.equal(fx.service.state().disabled, 'session_hub_hooks_detected');
+  assert.equal(fx.service.current(), null);
+  await assert.rejects(fx.service.start(), code('session_hub_hooks_detected'));
+});
+
+test('clear after reboot deletes old owned transcripts without resuming messages or spawning', async t => {
+  const fx = serviceFixture(t);
+  await fx.service.start(); fx.init('previous-boot'); await fx.service.stop();
+  const { transcriptDir, cwd } = fx.service.diagnostics();
+  fs.mkdirSync(transcriptDir, { recursive: true });
+  fs.writeFileSync(path.join(transcriptDir, 'previous-boot.jsonl'), 'x'.repeat(8 * 1024 * 1024 + 1));
+  fs.writeFileSync(path.join(cwd, 'leftover'), 'old CLI file');
+  const { createSessionHubService } = require('../services/sessionHubService');
+  const next = createSessionHubService(fx.options);
+  t.after(() => next.shutdown());
+  assert.deepEqual(next.state().messages, []);
+  const result = await next.clear();
+  assert.equal(result.result, 'complete'); assert.equal(result.remaining, 0);
+  assert.equal(fs.existsSync(transcriptDir), false); assert.equal(fs.existsSync(cwd), false);
+  assert.equal(fs.readFileSync(path.join(fx.root, 'owned-sessions'), 'utf8'), '');
+  assert.equal(fx.calls.length, 1);
 });

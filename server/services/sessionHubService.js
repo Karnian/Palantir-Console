@@ -44,7 +44,7 @@ function createSessionHubService(options = {}) {
   const uid = options.uid ?? process.getuid?.();
   const managedPaths = options.managedPaths || [
     '/Library/Application Support/ClaudeCode/', '/Library/Managed Preferences/com.anthropic.claudecode.plist',
-    `/Library/Managed Preferences/${env.USER || os.userInfo().username}/com.anthropic.claudecode.plist`,
+    `/Library/Managed Preferences/${os.userInfo().username}/com.anthropic.claudecode.plist`,
     '/etc/claude-code/',
   ];
   const subscribers = new Set();
@@ -71,6 +71,7 @@ function createSessionHubService(options = {}) {
   let socketDir = null;
   let mcpReady = false;
   let initSeen = false;
+  let namespaceReady = false;
   const sockets = new Set();
   const configPath = path.join(root, 'mcp.json');
   const ownedPath = path.join(root, 'owned-sessions');
@@ -85,10 +86,10 @@ function createSessionHubService(options = {}) {
       try { subscriber(value); } catch { /* a disconnected subscriber cannot interrupt cleanup */ }
     }
   }
-  function append(role, text, extra = {}) {
+  function append(role, text, extra = {}, notify = true) {
     messages.push({ role, text: String(text), ...extra });
     while (messages.length > MAX_MESSAGES || Buffer.byteLength(JSON.stringify(messages)) > MAX_BYTES) messages.shift();
-    publish();
+    if (notify) publish();
   }
   function setError(code) { error = code; append('error', code); }
   async function stat(filename) {
@@ -146,6 +147,7 @@ function createSessionHubService(options = {}) {
       if (ancestor === path.dirname(ancestor)) break;
     }
     transcriptDir = path.join(projects, cwd.replace(/[^a-zA-Z0-9]/g, '-'));
+    namespaceReady = true;
   }
   async function credentialSocket(gen) {
     socketDir = await io.mkdtemp(path.join(options.tmpDir || os.tmpdir(), 'hub-mcp-'));
@@ -333,13 +335,14 @@ function createSessionHubService(options = {}) {
     }
     const gen = generation;
     turn = { generation: gen };
-    append('user', text);
+    append('user', text, {}, false);
     timer = setTimeout(() => {
       if (!live(gen) || !turn) return;
       setError('session_hub_turn_timeout');
       void close().catch(() => {});
     }, options.turnTimeoutMs ?? 180000);
     child.stdin.write(`${JSON.stringify({ type: 'user', message: { role: 'user', content: text } })}\n`);
+    publish();
     return snapshot();
   }
   function groupAlive() {
@@ -365,17 +368,21 @@ function createSessionHubService(options = {}) {
     pgid = null;
   }
   async function removeConfig() {
-    if (await stat(root)) {
-      await privateDir(root);
-      const info = await stat(configPath);
-      if (info && info.isFile() && !info.isSymbolicLink()) await io.unlink(configPath);
+    // Socket disposal must also run after a ledger/config I/O failure.
+    try {
+      if (namespaceReady && await stat(root)) {
+        await privateDir(root);
+        const info = await stat(configPath);
+        if (info && info.isFile() && !info.isSymbolicLink()) await io.unlink(configPath);
+      }
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      if (socketServer) {
+        await new Promise(resolve => socketServer.close(resolve));
+        socketServer = null;
+      }
+      if (socketDir) { await io.rm(socketDir, { recursive: true, force: true }); socketDir = null; }
     }
-    for (const socket of sockets) socket.destroy();
-    if (socketServer) {
-      await new Promise(resolve => socketServer.close(resolve));
-      socketServer = null;
-    }
-    if (socketDir) { await io.rm(socketDir, { recursive: true, force: true }); socketDir = null; }
   }
   async function matchingTranscript(filename, info) {
     if (info.size > TRANSCRIPT_LIMIT) return false;
@@ -421,7 +428,7 @@ function createSessionHubService(options = {}) {
   }
   async function clearFiles() {
     // A clear before the first start also handles prior boots, without spawning.
-    if (!cwd) await namespace();
+    if (!namespaceReady) await namespace();
     await privateDir(root);
     const owned = new Set((await readPrivate(ownedPath)).split('\n').filter(Boolean));
     let remaining = 0;
@@ -478,14 +485,22 @@ function createSessionHubService(options = {}) {
       }
       if (stdoutHandler && child) child.stdout.removeListener('data', stdoutHandler);
       stdoutHandler = null; child = null;
-      await writeQueue;
+      await writeQueue.catch(() => {});
       await removeConfig();
       let result = { result: 'complete', remaining: 0 };
       if (clearRequested) { messages = []; result = await clearFiles(); }
       if (!permanent) state = 'idle';
+      const finished = { ...snapshot(), ...result };
       publish();
-      return { ...snapshot(), ...result };
-    })();
+      return finished;
+    })().catch(err => {
+      if (err.code !== 'reap_failed') {
+        error ||= 'session_hub_cleanup_failed';
+        if (!permanent) state = 'error:cleanup_failed';
+        publish();
+      }
+      throw err;
+    });
     publish();
     return closePromise;
   }

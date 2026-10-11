@@ -209,3 +209,27 @@ test('app.shutdown awaits group ESRCH before deleting MCP config', async t => {
   await shutdown;
   assert.equal(fs.existsSync(path.join(process.root, 'mcp.json')), false);
 });
+
+test('live service token reaches broker only and close immediately retires it', async t => {
+  const { app, hub } = integrated(t);
+  await hub.start();
+  const token = hub.current();
+  const broker = () => request(app).get('/api/session-hub/sessions').set('Authorization', `Bearer ${token}`);
+  assert.equal((await broker()).status, 200);
+  assert.equal((await request(app).get(`${BASE}/state`).set('Authorization', `Bearer ${token}`)).status, 403);
+  const closing = hub.stop();
+  assert.equal(hub.current(), null);
+  assert.equal((await broker()).status, 403);
+  await closing;
+});
+
+test('SSE without a cookie is refused and malformed POST cannot bypass the Origin check', async t => {
+  const { app, process } = integrated(t);
+  const denied = stream(app, `${BASE}/stream`, { cookie: undefined });
+  assert.equal(denied.res.statusCode, 403); denied.close();
+  const missing = await request(app).post(`${BASE}/start`).set('Cookie', COOKIE).send('{bad');
+  assert.equal(missing.status, 403);
+  const authorized = await request(app).post(`${BASE}/start`).set('Cookie', COOKIE)
+    .set('Origin', 'http://localhost').send('{bad');
+  assert.equal(authorized.status, 400); assert.equal(process.calls.length, 0);
+});

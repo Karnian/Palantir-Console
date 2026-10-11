@@ -24,10 +24,19 @@ let original;
 let planted;
 let originalMode;
 let temporary;
+let backupFile;
+const abort = new AbortController();
+const interrupt = () => {
+  abort.abort();
+  if (service) void service.shutdown().catch(() => {});
+};
+process.on('SIGINT', interrupt);
+process.on('SIGTERM', interrupt);
 
 async function waitFor(check, timeoutMs = 180000) {
   const deadline = Date.now() + timeoutMs;
   while (!check()) {
+    if (abort.signal.aborted) throw new Error('smoke_interrupted');
     if (Date.now() >= deadline) throw new Error('smoke_timeout');
     if (service.state().error) throw new Error(service.state().error);
     await new Promise(resolve => setTimeout(resolve, 50));
@@ -55,7 +64,7 @@ try {
   if (!binary.executable) throw new Error('claude_unavailable');
   // Only this manual script opts into the existing guard's explicit real-spawn policy.
   assertSpawnAllowed({ command: binary.path, source: 'session-hub-smoke-help' });
-  const help = await exec(binary.path, ['--help'], { timeout: 10000 });
+  const help = await exec(binary.path, ['--help'], { timeout: 10000, signal: abort.signal });
   result.checks.includeHookEventsSupported = help.stdout.includes('--include-hook-events');
   result.diagnostics.binary = binary.path;
   temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'hub-smoke-'));
@@ -70,7 +79,11 @@ try {
     if (!info.isFile() || info.isSymbolicLink()) throw new Error('unsafe_user_claude_md');
     original = await fs.readFile(markerFile);
     originalMode = info.mode & 0o777;
+    backupFile = path.join(temporary, 'claude-md.original');
+    await fs.writeFile(backupFile, original, { mode: 0o600 });
+    result.diagnostics.userInstructionsBackup = backupFile;
   }
+  if (abort.signal.aborted) throw new Error('smoke_interrupted');
   const sentinel = `HUB_SENTINEL_${crypto.randomBytes(16).toString('hex')}`;
   planted = Buffer.concat([original || Buffer.alloc(0), Buffer.from(`\nStartup smoke marker: ${sentinel}\n`)]);
   await fs.writeFile(markerFile, planted, { mode: originalMode || 0o600 });
@@ -167,14 +180,23 @@ try {
   if (planted) {
     try {
       const current = await fs.readFile(markerFile);
-      if (!current.equals(planted)) throw new Error('user_claude_md_changed_restore_manually');
-      if (original) await fs.writeFile(markerFile, original, { mode: originalMode });
-      else await fs.unlink(markerFile);
+      if (current.equals(planted)) {
+        if (original) await fs.writeFile(markerFile, original, { mode: originalMode });
+        else await fs.unlink(markerFile);
+      } else if (!original || !current.equals(original)) {
+        throw new Error('user_claude_md_changed_restore_manually');
+      }
+      if (backupFile) await fs.unlink(backupFile);
+      delete result.diagnostics.userInstructionsBackup;
     } catch (error) { result.errors.push(error.message); result.ok = false; }
   }
   // Preserve artifacts on failed reaping or incomplete clear for inspection/retry.
-  if (temporary && result.checks.clearComplete) await fs.rm(temporary, { recursive: true, force: true });
+  if (temporary && result.checks.clearComplete && result.errors.length === 0) {
+    await fs.rm(temporary, { recursive: true, force: true });
+  }
   else if (temporary) result.diagnostics.retainedRoot = temporary;
+  process.removeListener('SIGINT', interrupt);
+  process.removeListener('SIGTERM', interrupt);
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   process.exitCode = result.ok ? 0 : 1;
 }

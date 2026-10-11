@@ -21,7 +21,7 @@ const TOOLS = [
   }, ['q']) },
   { name: 'get_session', description: 'Read a snapshot session timeline', inputSchema: schema({
     key: string(ID, 128),
-    rev: string('^[0-9a-f]{16}$', 16), around: string(instruction, 128),
+    rev: string('^[0-9a-f]{16}$', 16), around: string(instruction, 140),
   }, ['key']) },
 ];
 
@@ -80,7 +80,7 @@ async function dispatch(message, { env = process.env, get = brokerGet } = {}) {
   } else if (message.method === 'tools/list') response.result = { tools: TOOLS };
   else if (message.method === 'tools/call') {
     const tool = TOOLS.find(row => row.name === message.params?.name);
-    const args = message.params?.arguments ?? {};
+    const args = Object.hasOwn(message.params || {}, 'arguments') ? message.params.arguments : {};
     let result;
     if (!tool || !valid(args, tool.inputSchema)) result = { text: '{"error":"invalid_query"}', isError: true };
     else {
