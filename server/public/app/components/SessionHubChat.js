@@ -163,7 +163,7 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch, draft
   const scrollRef = useRef(null);
   const atBottom = useRef(true);
   const retry = useRef(null);
-  const paging = useRef(false);
+  const paging = useRef(null);
   const currentThread = useRef(null);
   const alive = useRef(false);
   useEffect(() => {
@@ -179,7 +179,7 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch, draft
   const resynchronize = useRef(null);
   const controller = useRef(null);
   const messagesEnd = useRef(null);
-  const pending = useRef(false);
+  const pending = useRef(null);
   const composing = useRef(false);
   const applySnapshot = (value, requestedAt, authoritative = false) => {
     if (!alive.current || !validSnapshot(value) || (connection.current.synchronizing && !authoritative)) return false;
@@ -194,7 +194,7 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch, draft
     version.current = value.version;
     applied.current++;
     currentThread.current = value.thread_id;
-    if (retry.current && retry.current.thread_id !== value.thread_id) retry.current = null;
+    if (sameEpoch && retry.current && retry.current.thread_id !== value.thread_id) retry.current = null;
     setState(value);
     return true;
   };
@@ -237,6 +237,11 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch, draft
       link.synchronizing = true; setSynchronizing(true);
       const generation = ++link.generation;
       link.source?.close(); link.source = null;
+      controller.current.abort(); controller.current = new AbortController();
+      if (pending.current?.name === 'message') setSendNotice('서버가 다시 시작되어 질문이 '
+        + '전달되지 않았을 수 있습니다. 다시 보내 주세요.');
+      pending.current = null; paging.current = null;
+      setBusy(false); setLocalTransition('');
       applied.current++; threadGeneration.current++; setThreadBusy(false);
       void synchronize(generation);
     };
@@ -256,27 +261,29 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch, draft
   }, [state.messages]);
   const action = async (name, body) => {
     if (pending.current || !controller.current || connection.current.synchronizing) return;
-    const actionGeneration = connection.current.generation;
-    pending.current = true;
+    const lock = { generation: connection.current.generation, name, controller: controller.current };
+    pending.current = lock;
+    const current = () => alive.current && pending.current === lock
+      && lock.generation === connection.current.generation;
     const requestedInputGeneration = inputGeneration.current;
     setBusy(true); setError('');
     const autoStart = name === 'message' && state.state !== 'running';
     if (autoStart || name === 'start') setLocalTransition('starting');
     const request = async (operation, payload) => {
+      if (!current()) return null;
       const requestedAt = applied.current;
-      const generation = connection.current.generation;
       const value = await apiFetch(`/api/session-hub/chat/${operation}`, { method: 'POST',
-        body: JSON.stringify(payload || {}), signal: controller.current.signal, allowAppForbidden: true });
-      if (!alive.current || generation !== connection.current.generation) return null;
+        body: JSON.stringify(payload || {}), signal: lock.controller.signal, allowAppForbidden: true });
+      if (!current()) return null;
       applySnapshot(value, requestedAt);
-      return generation === connection.current.generation ? value : null;
+      return current() ? value : null;
     };
     try {
       let thread = state.thread_id;
       const originalEpoch = epoch.current;
       if (autoStart) {
         const started = await request('start');
-        if (!started || !alive.current || controller.current.signal.aborted
+        if (!started || !current() || lock.controller.signal.aborted
           || started.epoch !== epoch.current || started.version !== version.current) return;
         if (originalEpoch && started.epoch !== originalEpoch) return;
         if (thread && thread !== started.thread_id) {
@@ -293,18 +300,13 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch, draft
         if (!thread || thread !== currentThread.current) {
           setError('대화가 바뀌었습니다. 다시 보내 주세요.'); return;
         }
-        if (!retry.current || retry.current.thread_id !== thread || retry.current.text !== body.text) {
+        if (!retry.current || retry.current.text !== body.text) {
           retry.current = { thread_id: thread, request_id: createClientMessageKey(), text: body.text };
-        }
+        } else retry.current = { ...retry.current, thread_id: thread };
         body = retry.current;
       }
       const value = await request(name, body);
-      if (!alive.current) return;
-      if (!value) {
-        if (name === 'message') setSendNotice('서버가 다시 시작되어 질문이 '
-          + '전달되지 않았을 수 있습니다. 다시 보내 주세요.');
-        return;
-      }
+      if (!current() || !value) return;
       if (name === 'message') {
         if (value.epoch === sentEpoch && value.epoch === epoch.current
           && value.thread_id === body.thread_id && currentThread.current === body.thread_id) {
@@ -321,12 +323,13 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch, draft
         setNotice('새 대화를 시작했습니다.');
       }
     } catch (err) {
-      if (alive.current && actionGeneration === connection.current.generation) {
+      if (current()) {
         setError(sessionHubErrorText(err.data?.error || err.code || err.message));
       }
     } finally {
-      pending.current = false;
-      if (alive.current) { setBusy(false); setLocalTransition(''); }
+      if (current()) {
+        pending.current = null; setBusy(false); setLocalTransition('');
+      }
     }
   };
   const listThreads = async () => {
@@ -359,12 +362,13 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch, draft
     const sequence = ++threadGeneration.current;
     setThreadBusy(true); setError('');
     try {
-      await apiFetch(`/api/session-hub/chat/threads/${encodeURIComponent(item.id)}`,
+      const value = await apiFetch(`/api/session-hub/chat/threads/${encodeURIComponent(item.id)}`,
         { method: 'DELETE', signal: controller.current.signal, allowAppForbidden: true });
       if (!alive.current || sequence !== threadGeneration.current) return;
       if (viewedThread?.id === item.id) setViewedThread(null);
       setThreadList(current => current?.filter(value => value.id !== item.id) || null);
-      setNotice('이전 대화를 삭제했습니다.');
+      setNotice(value.result === 'incomplete'
+        ? `일부 기록 삭제 대기(잔여 ${value.remaining}개)` : '이전 대화를 삭제했습니다.');
     } catch { if (alive.current && sequence === threadGeneration.current) setError('대화를 삭제하지 못했습니다.'); }
     finally { if (alive.current && sequence === threadGeneration.current) setThreadBusy(false); }
   };
@@ -375,9 +379,10 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch, draft
     const older = history.thread === thread && history.epoch === state.epoch ? history.messages : [];
     const before = Math.min(...[...older, ...windowMessages].map(message => message.seq));
     if (!Number.isSafeInteger(before) || before <= 1) return;
-    paging.current = true;
     const requestedEpoch = epoch.current;
     const generation = connection.current.generation;
+    const lock = { generation };
+    paging.current = lock;
     const requestedVersion = version.current;
     const scroller = scrollRef.current, height = scroller?.scrollHeight || 0;
     try {
@@ -399,7 +404,9 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch, draft
         setError('이전 메시지를 읽지 못했습니다.');
       }
     }
-    finally { paging.current = false; }
+    finally {
+      if (paging.current === lock && generation === connection.current.generation) paging.current = null;
+    }
   };
   const showFull = async message => {
     if (connection.current.synchronizing) return;
@@ -443,7 +450,8 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch, draft
     }
     for (const row of candidates.values()) {
       if (windowMessages.some(item => item.id === row.id && item.status !== 'partial')) continue;
-      const key = `${state.epoch}:${thread}:${row.id}`, flight = `${key}:${state.version}`;
+      const key = `${state.epoch}:${thread}:${row.id}`;
+      const flight = `${connection.current.generation}:${key}:${state.version}`;
       if (refreshingRows.current.has(flight)) continue;
       refreshingRows.current.add(flight);
       const requestedAt = applied.current;

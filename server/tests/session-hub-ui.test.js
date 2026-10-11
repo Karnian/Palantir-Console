@@ -1874,3 +1874,172 @@ for (const outcome of ['recover', 'unmount']) test(`R5 failed state resynchroniz
       assert.equal(env.root.querySelector('[role="alert"]'), null);
     }
   });
+
+for (const operation of ['message', 'threads', 'start', 'stop']) test(
+  `R6 resynchronization aborts ${operation} and retired finally preserves the new lock`, async t => {
+    const env = setup(t), sources = r5Sources(env), oldReply = deferred(), newReply = deferred(), posts = [];
+    const initial = { epoch: 'A', version: 1, thread_id: 'current', state: operation === 'start' ? 'idle' : 'running',
+      messages: [], turnInProgress: false };
+    let server = initial;
+    env.context.fetch = async (url, options = {}) => {
+      assert.match(url, /^\/api\/session-hub\/chat\//);
+      if (options.method === 'POST') {
+        posts.push({ url, options, body: JSON.parse(options.body) });
+        return posts.length === 1 ? oldReply.promise : newReply.promise;
+      }
+      return response(server);
+    };
+    env.render(env.h(env.context.SessionHubChat), env.root); await flushEffects(); await flushEffects();
+    const input = env.root.querySelector('textarea'); input.value = '보존할 초안';
+    input.dispatchEvent(new env.window.Event('input', { bubbles: true })); await flushEffects();
+    const act = () => (operation === 'message' ? env.root.querySelector('[type="submit"]')
+      : operation === 'threads' ? Array.from(env.root.querySelectorAll('button'))
+        .find(node => node.textContent === '새 대화')
+        : env.root.querySelector(`[data-action="${operation}"]`) || Array.from(env.root.querySelectorAll('button'))
+          .find(node => node.textContent === '중지')).click();
+    act(); await flushEffects(); assert.equal(posts.length, 1); assert.equal(input.disabled, true);
+    server = { ...initial, epoch: 'B', version: 0 };
+    sources[0].emit(server); await flushEffects(); await flushEffects();
+    assert.equal(posts[0].options.signal.aborted, true, 'retired HTTP must be aborted');
+    assert.equal(input.disabled, false, 'canonical state must unlock without waiting for the old reply');
+    assert.equal(input.value, '보존할 초안');
+    assert.equal(env.root.querySelector('.manager-status-badge').textContent,
+      operation === 'start' ? '중지됨' : '조회 준비됨');
+    act(); await flushEffects(); assert.equal(posts.length, 2); assert.equal(input.disabled, true);
+    if (operation === 'message') assert.equal(posts[0].body.request_id, posts[1].body.request_id);
+    oldReply.resolve(response({ ...initial, version: 100 })); await flushEffects(); await flushEffects();
+    assert.equal(input.disabled, true, 'retired finally must never release the current action');
+    assert.equal(input.value, '보존할 초안'); act(); await flushEffects(); assert.equal(posts.length, 2);
+    newReply.resolve(response({ ...server, version: 2, state: operation === 'stop' ? 'idle' : 'running' }));
+    await flushEffects(); await flushEffects(); assert.equal(input.disabled, false);
+    assert.equal(input.value, ['message', 'threads'].includes(operation) ? '' : '보존할 초안');
+    assert.equal(env.root.querySelector('[role="alert"]'), null);
+  });
+
+for (const sameThread of [true, false]) test(`R6 retry keeps its request id with ${sameThread ? 'same' : 'new'} thread`,
+  async t => {
+    const env = setup(t), sources = r5Sources(env), requests = [], held = deferred();
+    let server = { epoch: 'A', version: 1, thread_id: 'current', state: 'running', messages: [], turnInProgress: false };
+    env.context.fetch = async (url, options = {}) => {
+      assert.match(url, /^\/api\/session-hub\/chat\//);
+      if (url.endsWith('/message')) {
+        requests.push({ body: JSON.parse(options.body), signal: options.signal });
+        if (requests.length === 1) return held.promise;
+        return response({ ...server, version: 1 });
+      }
+      return response(server);
+    };
+    env.render(env.h(env.context.SessionHubChat), env.root); await flushEffects(); await flushEffects();
+    const input = env.root.querySelector('textarea'); input.value = '같은 질문';
+    input.dispatchEvent(new env.window.Event('input', { bubbles: true })); await flushEffects();
+    env.root.querySelector('[type="submit"]').click(); await flushEffects();
+    server = { ...server, epoch: 'B', version: 0, thread_id: sameThread ? 'current' : 'new-current' };
+    sources[0].emit(server); await flushEffects(); await flushEffects();
+    assert.equal(input.disabled, false); assert.equal(requests[0].signal.aborted, true);
+    env.root.querySelector('[type="submit"]').click(); await flushEffects(); await flushEffects();
+    assert.equal(requests.length, 2); assert.equal(requests[1].body.request_id, requests[0].body.request_id);
+    assert.equal(requests[1].body.thread_id, server.thread_id); assert.equal(input.value, '');
+    held.resolve(response({ ...server, epoch: 'A', version: 100 })); await flushEffects();
+    assert.equal(input.value, ''); assert.equal(env.root.querySelector('[role="alert"]'), null);
+    assert.equal(env.root.querySelector('.session-hub-note[role="status"]'), null);
+  });
+
+test('R6 retired page aborts and its finally cannot unlock the next page', async t => {
+  const env = setup(t), sources = r5Sources(env), pages = [], oldPage = deferred(), newPage = deferred();
+  let server = { epoch: 'A', version: 1, thread_id: 'current', state: 'running', turnInProgress: false,
+    messages: [{ id: 'recent', seq: 12, role: 'assistant', content: '최근 답변', status: 'complete' }] };
+  env.context.fetch = async (url, options = {}) => {
+    assert.match(url, /^\/api\/session-hub\/chat\//);
+    if (url.includes('before=')) { pages.push(options); return pages.length === 1 ? oldPage.promise : newPage.promise; }
+    return response(server);
+  };
+  env.render(env.h(env.context.SessionHubChat), env.root); await flushEffects(); await flushEffects();
+  const scroll = async () => {
+    env.root.querySelector('[role="log"]').dispatchEvent(new env.window.Event('scroll')); await flushEffects();
+  };
+  await scroll(); server = { ...server, epoch: 'B', version: 0 };
+  sources[0].emit(server); await flushEffects(); await flushEffects();
+  assert.equal(pages[0].signal.aborted, true); await scroll(); assert.equal(pages.length, 2);
+  oldPage.resolve(response({ messages: [{ id: 'old', seq: 1, role: 'user', content: '폐기된 페이지' }] }));
+  await flushEffects(); await scroll(); assert.equal(pages.length, 2, 'current page must remain locked');
+  assert.ok(!env.root.textContent.includes('폐기된 페이지'));
+  newPage.resolve(response({ messages: [{ id: 'new', seq: 8, role: 'user', content: '새 페이지' }] }));
+  await flushEffects(); assert.ok(env.root.textContent.includes('새 페이지'));
+});
+
+for (const remaining of [1, 3]) test(`R6 incomplete deletion reports ${remaining} remaining records`, async t => {
+  const env = setup(t), calls = []; let deleted = false;
+  env.context.EventSource = class { addEventListener() {} close() {} };
+  const current = { epoch: 'A', version: 1, thread_id: 'current', state: 'running',
+    messages: [], turnInProgress: false };
+  env.context.fetch = async (url, options = {}) => {
+    calls.push({ url, options }); assert.match(url, /^\/api\/session-hub\/chat\//);
+    if (options.method === 'DELETE') { deleted = true; return response({ result: 'incomplete', remaining }); }
+    if (url.endsWith('/threads')) return response({ threads: [
+      { id: 'current', title: '현재' }, ...deleted ? [] : [{ id: 'old', title: '이전 질문' }],
+    ] });
+    return response(current);
+  };
+  env.render(env.h(env.context.SessionHubChat), env.root); await flushEffects(); await flushEffects();
+  const input = env.root.querySelector('textarea'); input.value = '남길 초안';
+  input.dispatchEvent(new env.window.Event('input', { bubbles: true })); await flushEffects();
+  const click = async label => {
+    Array.from(env.root.querySelectorAll('button')).find(node => node.textContent.trim() === label).click();
+    await flushEffects();
+  };
+  await click('이전 대화'); env.root.querySelector('[aria-label="이전 질문 삭제"]').click(); await flushEffects();
+  assert.ok(env.root.textContent.includes(`일부 기록 삭제 대기(잔여 ${remaining}개)`));
+  assert.ok(!env.root.textContent.includes('이전 대화를 삭제했습니다.'));
+  assert.equal(env.root.querySelector('[aria-label="이전 질문 삭제"]'), null); assert.equal(input.value, '남길 초안');
+  await click('이전 대화'); assert.ok(!env.root.textContent.includes('이전 질문 · 읽기 전용'));
+  assert.equal(calls.filter(call => call.options.method === 'DELETE').length, 1);
+});
+
+test('R6 abort rejection retires automatic start without sending from the cancelled chain', async t => {
+  const env = setup(t), sources = r5Sources(env), requests = [], started = deferred();
+  let server = { epoch: 'A', version: 1, thread_id: 'current', state: 'idle', messages: [], turnInProgress: false };
+  env.context.fetch = async (url, options = {}) => {
+    assert.match(url, /^\/api\/session-hub\/chat\//);
+    if (url.endsWith('/start')) {
+      requests.push({ url, options });
+      if (requests.length === 1) return new Promise((resolve, reject) => {
+        options.signal.addEventListener('abort', () => reject(new env.window.DOMException('aborted', 'AbortError')));
+      });
+      return started.promise;
+    }
+    if (url.endsWith('/message')) { requests.push({ url, options }); return response({ ...server, version: 2 }); }
+    return response(server);
+  };
+  env.render(env.h(env.context.SessionHubChat), env.root); await flushEffects(); await flushEffects();
+  const input = env.root.querySelector('textarea'); input.value = '자동 시작 뒤 질문';
+  input.dispatchEvent(new env.window.Event('input', { bubbles: true })); await flushEffects();
+  env.root.querySelector('[type="submit"]').click(); await flushEffects();
+  server = { ...server, epoch: 'B', version: 0 };
+  sources[0].emit(server); await flushEffects(); await flushEffects();
+  assert.equal(requests[0].options.signal.aborted, true); assert.equal(input.disabled, false);
+  assert.equal(input.value, '자동 시작 뒤 질문'); assert.equal(env.root.querySelector('[role="alert"]'), null);
+  assert.equal(requests.filter(request => request.url.endsWith('/message')).length, 0);
+  env.root.querySelector('[type="submit"]').click(); await flushEffects(); assert.equal(input.disabled, true);
+  assert.equal(env.root.querySelector('.manager-status-badge').textContent, '시작 중');
+  server = { ...server, version: 1, state: 'running' }; started.resolve(response(server));
+  await flushEffects(); await flushEffects();
+  assert.equal(requests.filter(request => request.url.endsWith('/message')).length, 1);
+  assert.equal(requests.at(-1).options.signal.aborted, false); assert.equal(input.value, '');
+  assert.equal(input.disabled, false);
+});
+
+test('R6 complete deletion retains the completion notice', async t => {
+  const env = setup(t);
+  env.context.EventSource = class { addEventListener() {} close() {} };
+  env.context.fetch = async (url, options = {}) => {
+    assert.match(url, /^\/api\/session-hub\/chat\//);
+    if (options.method === 'DELETE') return response({ result: 'complete', remaining: 0 });
+    if (url.endsWith('/threads')) return response({ threads: [{ id: 'old', title: '이전 질문' }] });
+    return response({ epoch: 'A', version: 1, thread_id: 'current', state: 'running', messages: [] });
+  };
+  env.render(env.h(env.context.SessionHubChat), env.root); await flushEffects(); await flushEffects();
+  Array.from(env.root.querySelectorAll('button')).find(node => node.textContent === '이전 대화').click();
+  await flushEffects(); env.root.querySelector('[aria-label="이전 질문 삭제"]').click(); await flushEffects();
+  assert.ok(env.root.textContent.includes('이전 대화를 삭제했습니다.'));
+  assert.ok(!env.root.textContent.includes('일부 기록 삭제 대기'));
+});
