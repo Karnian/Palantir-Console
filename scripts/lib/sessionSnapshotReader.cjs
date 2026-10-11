@@ -722,6 +722,13 @@ function statusRecord(record) {
   const content = value => Array.isArray(value) ? value.map(block => ({ type: block.type, text: block.text })) : value;
   if (record.message) projected.message = record.type === 'assistant'
     ? { stop_reason: record.message.stop_reason } : { content: content(record.message.content) };
+  if (claudeLocalCommandStdout(record)) {
+    if (record.type === 'user') projected.message = { content: '<local-command-stdout>' };
+    else {
+      projected.subtype = 'local_command';
+      projected.content = '<local-command-stdout>';
+    }
+  }
   if (record.attachment) {
     const value = record.attachment;
     projected.attachment = { type: value.type, origin: value.origin, humanTurn: value.humanTurn,
@@ -765,6 +772,11 @@ function claudeInterrupted(record) {
   const text = typeof content === 'string' ? content : Array.isArray(content)
     ? content.filter(block => block.type === 'text').map(block => block.text).join('') : '';
   return /^\[Request interrupted by user(?: for tool use)?\]$/.test(text);
+}
+function claudeLocalCommandStdout(record) {
+  const content = record.type === 'user' ? record.message?.content
+    : record.type === 'system' && record.subtype === 'local_command' ? record.content : null;
+  return typeof content === 'string' && content.startsWith('<local-command-stdout>');
 }
 // Follow terminal-to-instruction ancestry; scan readable ancestors for cycles, allowing missing earlier parents.
 function claudeStatus(records, windowed = false) {
@@ -815,14 +827,17 @@ function claudeStatus(records, windowed = false) {
   if (remaining.some(record => record.isSidechain !== true
     && ['user', 'assistant'].includes(record.type) && typeof record.uuid !== 'string'))
     return snapshotPolicy.unknownStatus('status_format_unsupported');
-  const implicit = instruction.type === 'attachment' && instruction.parentUuid == null;
-  const after = (implicit ? remaining : records).filter(record => main.has(record));
+  const after = remaining.filter(record => main.has(record));
   const evidence = [instruction];
+  const commandWrapper = /^<(command-name|command-message)>/.test(classifyClaudeRecord(instruction)?.text || '');
   let status = statusAt('working', instruction);
   for (const record of after) {
     if (claudeInterrupted(record)) {
       evidence.push(record);
       status = statusAt('interrupted', record);
+    } else if (commandWrapper && claudeLocalCommandStdout(record)) {
+      evidence.push(record);
+      status = { ...statusAt('ended', record), reason: 'local_command' };
     } else if (record.type === 'assistant') {
       const stop = record.message?.stop_reason;
       const status_format_ok = stop === null || ['end_turn', 'tool_use'].includes(stop);
