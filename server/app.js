@@ -77,6 +77,8 @@ const { createAssistantMemoryService } = require('./services/assistantMemoryServ
 const { createSessionHubMemoryRouter } = require('./routes/sessionHubMemory');
 const { createSessionHubService } = require('./services/sessionHubService');
 const { createSessionHubChatRouter } = require('./routes/sessionHubChat');
+const { createSnapshotRefreshService } = require('./services/snapshotRefreshService');
+const { createSnapshotRefreshRouter } = require('./routes/snapshotRefresh');
 const { createSessionHubOffGate, createSessionHubTokenGate, createSessionHubRouter,
   sessionHubErrorHandler } = require('./routes/sessionHub');
 const { createObserveOffGate, createObserveRouter, observeErrorHandler } = require('./routes/observe');
@@ -1126,6 +1128,10 @@ function createApp(options = {}) {
     observeState, authToken, managedPaths: options.sessionHubManagedPaths,
     resolveBinary: options.sessionHubResolveClaudeBinary,
   }) : options.sessionHubActive === true;
+  const snapshotRefreshService = createSnapshotRefreshService({
+    ...options.snapshotRefreshServiceOptions, observeState,
+  });
+  app.snapshotRefreshService = snapshotRefreshService;
   const actorTokenOptions = {
     actorTokenSource: options.actorTokenSource,
     agentProcessIsolation: options.agentProcessIsolation,
@@ -1824,7 +1830,11 @@ function createApp(options = {}) {
 
   // Middleware
   // Spec §5.2: gate before auth and body parsing, even for malformed POST bodies.
-  app.use('/api/session-hub', createSessionHubOffGate(sessionHubActive));
+  const hubOffGate = createSessionHubOffGate(sessionHubActive);
+  app.use('/api/session-hub', (req, res, next) => {
+    if (req.path === '/snapshots/refresh' || req.path === '/snapshots/status') return next();
+    return hubOffGate(req, res, next);
+  });
   app.use(createSessionHubTokenGate(sessionHubTokenProvider));
   app.use('/api/observe', createObserveOffGate(observeState));
   const parseJson = express.json({ limit: '2mb' });
@@ -1921,6 +1931,7 @@ function createApp(options = {}) {
     },
   });
   app.use('/api', auth);
+  app.use('/api/session-hub/snapshots', createSnapshotRefreshRouter({ service: snapshotRefreshService }));
   if (sessionHubService) {
     app.use('/api/session-hub/chat', createSessionHubChatRouter({ service: sessionHubService }));
     app.use('/api/session-hub/memory', createSessionHubMemoryRouter({
@@ -2349,6 +2360,7 @@ function createApp(options = {}) {
     if (_shuttingDown) return Promise.resolve();
     _shuttingDown = true;
     const hubShutdown = sessionHubService?.shutdown();
+    const snapshotShutdown = snapshotRefreshService.shutdown();
     try { _questionWaiterDrain = questionsRouter.stopWaiters(); }
     catch (err) { console.warn('[app.shutdown] question waiter stop failed:', err && err.message); }
 
@@ -2366,8 +2378,8 @@ function createApp(options = {}) {
       // no-work path remains synchronous and preserves manager shutdown timing.
       _shutdownPromise = Promise.resolve(_sweepWorkersThenFinish());
     }
-    if (hubShutdown) {
-      _shutdownPromise = Promise.allSettled([_shutdownPromise, hubShutdown]).then(results => {
+    if (hubShutdown || snapshotShutdown) {
+      _shutdownPromise = Promise.allSettled([_shutdownPromise, hubShutdown, snapshotShutdown]).then(results => {
         const failed = results.find(result => result.status === 'rejected');
         if (failed) throw failed.reason;
       });
