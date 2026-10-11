@@ -766,7 +766,7 @@ function claudeInterrupted(record) {
     ? content.filter(block => block.type === 'text').map(block => block.text).join('') : '';
   return /^\[Request interrupted by user(?: for tool use)?\]$/.test(text);
 }
-// Validate only terminal-to-last-instruction ancestry; earlier parents may be absent or outside the tail window.
+// Follow terminal-to-instruction ancestry; scan readable ancestors for cycles, allowing missing earlier parents.
 function claudeStatus(records, windowed = false) {
   const traversal = records.filter(record => record.isSidechain !== true && typeof record.uuid === 'string');
   const chain = traversal.filter(record => ['user', 'assistant', 'system'].includes(record.type));
@@ -777,33 +777,34 @@ function claudeStatus(records, windowed = false) {
     const classification = classifyClaudeRecord(record);
     if (classification?.kind && !claudeInterrupted(record)) {
       instruction = record;
-      anchor = record.type === 'attachment'
-        ? record.parentUuid == null ? previousChain : byId.get(record.parentUuid) : record;
+      anchor = record.type === 'attachment' && record.parentUuid == null ? previousChain : record;
     }
     if (byId.get(record.uuid) === record && ['user', 'assistant', 'system'].includes(record.type))
       previousChain = record;
   }
   if (!instruction) return snapshotPolicy.unknownStatus(windowed ? 'truncated' : 'no_instruction');
-  const main = new Set();
+  const main = new Set(), visited = new Set();
   let current = chain.at(-1), bound = false;
   if (!current) return snapshotPolicy.unknownStatus(windowed ? 'truncated' : 'status_format_unsupported');
   while (current) {
-    if (main.has(current)) return snapshotPolicy.unknownStatus('branch_ambiguous');
+    if (visited.has(current)) return snapshotPolicy.unknownStatus('branch_ambiguous');
     if (!current.uuid) return snapshotPolicy.unknownStatus('status_format_unsupported');
-    main.add(current);
-    // Queued instructions may be on the parent path or attached immediately after its last chain record.
-    if (current === instruction || current === anchor) {
-      if (main.has(byId.get(current.parentUuid))) return snapshotPolicy.unknownStatus('branch_ambiguous');
-      main.delete(current); // The instruction and its anchor precede the new turn's transitions.
-      bound = true;
-      break;
+    visited.add(current); // Each readable UUID is visited once; a revisit ends this bounded walk.
+    if (!bound) {
+      if (current === anchor) bound = true;
+      else main.add(current);
     }
-    if (!current.uuid || !Object.hasOwn(current, 'parentUuid')
-      || !(current.parentUuid === null || typeof current.parentUuid === 'string'))
+    if (!Object.hasOwn(current, 'parentUuid')
+      || !(current.parentUuid === null || typeof current.parentUuid === 'string')) {
+      if (bound) break;
       return snapshotPolicy.unknownStatus('status_format_unsupported');
+    }
     if (current.parentUuid === null) break;
     const parent = byId.get(current.parentUuid);
-    if (!parent) return snapshotPolicy.unknownStatus(windowed ? 'truncated' : 'instruction_unbound');
+    if (!parent) {
+      if (bound) break;
+      return snapshotPolicy.unknownStatus(windowed ? 'truncated' : 'instruction_unbound');
+    }
     current = parent;
   }
   if (!bound) return snapshotPolicy.unknownStatus(windowed && !anchor ? 'truncated' : 'instruction_unbound');
@@ -814,7 +815,8 @@ function claudeStatus(records, windowed = false) {
   if (remaining.some(record => record.isSidechain !== true
     && ['user', 'assistant'].includes(record.type) && typeof record.uuid !== 'string'))
     return snapshotPolicy.unknownStatus('status_format_unsupported');
-  const after = records.filter(record => main.has(record));
+  const implicit = instruction.type === 'attachment' && instruction.parentUuid == null;
+  const after = (implicit ? remaining : records).filter(record => main.has(record));
   const evidence = [instruction];
   let status = statusAt('working', instruction);
   for (const record of after) {

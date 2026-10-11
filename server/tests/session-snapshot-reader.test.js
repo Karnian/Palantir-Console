@@ -5788,7 +5788,8 @@ for (const [name, tail, state, reason] of [
     { isSidechain: true })], 'ended', null],
   ['title', [statusAssistant('end_turn'), { type: 'ai-title', timestamp: RECORD_TIMESTAMP,
     title: 'safe title' }], 'ended', null],
-  ['queued parent', [statusAssistant('end_turn'), statusQueued({ parentUuid: 'a' })], 'working', null],
+  ['queued parent off path', [statusAssistant('end_turn'), statusQueued({ parentUuid: 'a' })],
+    'unknown', 'instruction_unbound'],
   ['queued implicit', [statusAssistant('end_turn'), statusQueued()], 'working', null],
   ['queued null parent', [statusAssistant('end_turn'), statusQueued({ parentUuid: null })], 'working', null],
   ['queued other branch', [statusAssistant('end_turn'), statusAssistant('tool_use', 'other', 'u'),
@@ -6069,11 +6070,11 @@ test('PR-S tail metadata count stays bounded without rejecting the collected ses
   assert.equal(snapshot.sessions[0].instruction_total, 2);
 });
 
-test('PR-S queued instruction whose parent is outside the tail window stays truncated', t => {
+test('PR-S explicit queued instruction off the tail branch remains unbound', t => {
   const fx = createFixture(t);
   largeStatusFile(fx, 'claude', [claudeUserRecord('visible instruction'), statusAssistant('end_turn'),
     statusQueued({ parentUuid: 'outside-window' })]);
-  assert.equal(snapshotReader.runSnapshot(fx.options).sessions[0].status.reason, 'truncated');
+  assert.equal(snapshotReader.runSnapshot(fx.options).sessions[0].status.reason, 'instruction_unbound');
 });
 
 test('PR-S a complete instruction exactly at the tail boundary is retained without an extra byte read', t => {
@@ -6156,7 +6157,7 @@ test('PR-S Claude an intermediate transition before the instruction makes order 
 for (const large of [false, true]) {
   for (const queuedFirst of [false, true]) {
     for (const hasResponse of [false, true]) {
-      test(`PR-S queued anchor is not new turn evidence: tail=${large}, queued first=${queuedFirst},`
+      test(`PR-S explicit queued instruction must lie on the branch: tail=${large}, queued first=${queuedFirst},`
         + ` response=${hasResponse}`, t => {
         const fx = createFixture(t);
         fx.options.now = new Date('2026-10-08T08:00:00.000Z');
@@ -6169,8 +6170,9 @@ for (const large of [false, true]) {
         if (large) largeStatusFile(fx, 'claude', rows);
         else fx.file('claude', 'queued-order', rows);
         const snapshot = snapshotReader.runSnapshot(fx.options);
-        assert.deepEqual(snapshot.sessions[0].status, { state: hasResponse ? 'ended' : 'working',
-          source: 'transcript', evidence_at: claudeClockTime(hasResponse ? '37.100' : '36.999'), reason: null });
+        assert.deepEqual(snapshot.sessions[0].status, hasResponse
+          ? { state: 'ended', source: 'transcript', evidence_at: claudeClockTime('37.100'), reason: null }
+          : { state: 'unknown', source: 'none', evidence_at: null, reason: 'instruction_unbound' });
         assert.equal(snapshot.instructions.at(-1).text, 'new instruction');
         assert.equal(JSON.stringify(snapshot).includes('PRIVATE_ASSISTANT_SENTINEL'), false);
       });
@@ -6197,6 +6199,70 @@ for (const large of [false, true]) {
       assert.equal(JSON.stringify(snapshot).includes('PRIVATE_TOOL_SENTINEL'), false);
     });
   }
+}
+
+for (const large of [false, true]) {
+  test(`PR-S queued sibling branch cannot borrow a common parent's end_turn, tail=${large}`, t => {
+    const fx = createFixture(t);
+    fx.options.now = new Date('2026-10-08T08:00:00.000Z');
+    const rows = [claudeUserRecord('old instruction', { timestamp: claudeClockTime('00.000') }),
+      statusAssistant('tool_use', 'a', 'u', { timestamp: claudeClockTime('10.000') }),
+      statusQueued({ uuid: 'q', parentUuid: 'a', timestamp: claudeClockTime('10.999') }),
+      statusAssistant('tool_use', 'c', 'q', { timestamp: claudeClockTime('11.000') }),
+      statusAssistant('end_turn', 'b', 'a', { timestamp: claudeClockTime('11.001') })];
+    if (large) largeStatusFile(fx, 'claude', rows);
+    else fx.file('claude', 'queued-sibling', rows);
+    assert.deepEqual(snapshotReader.runSnapshot(fx.options).sessions[0].status,
+      { state: 'unknown', source: 'none', evidence_at: null, reason: 'instruction_unbound' });
+  });
+
+  test(`PR-S implicit queued instruction ignores branch evidence recorded before it, tail=${large}`, t => {
+    const fx = createFixture(t);
+    fx.options.now = new Date('2026-10-08T08:00:00.000Z');
+    const rows = [claudeUserRecord('old instruction', { timestamp: claudeClockTime('00.000') }),
+      statusAssistant('end_turn', 'early', 'anchor', { timestamp: claudeClockTime('10.000') }),
+      { type: 'system', sessionId: 's', uuid: 'anchor', parentUuid: 'u', timestamp: claudeClockTime('09.999') },
+      statusQueued({ timestamp: claudeClockTime('10.999') }),
+      { type: 'system', sessionId: 's', uuid: 'tip', parentUuid: 'early', timestamp: claudeClockTime('11.000') }];
+    if (large) largeStatusFile(fx, 'claude', rows);
+    else fx.file('claude', 'queued-implicit', rows);
+    assert.deepEqual(snapshotReader.runSnapshot(fx.options).sessions[0].status,
+      { state: 'working', source: 'transcript', evidence_at: claudeClockTime('10.999'), reason: null });
+  });
+
+  test(`PR-S implicit queued instruction still uses branch evidence recorded after it, tail=${large}`, t => {
+    const fx = createFixture(t);
+    const rows = [claudeUserRecord('old instruction'), statusAssistant('end_turn'), statusQueued(),
+      statusAssistant('end_turn', 'new-answer', 'a')];
+    if (large) largeStatusFile(fx, 'claude', rows);
+    else fx.file('claude', 'queued-implicit-response', rows);
+    assert.deepEqual(snapshotReader.runSnapshot(fx.options).sessions[0].status,
+      { state: 'ended', source: 'transcript', evidence_at: RECORD_TIMESTAMP, reason: null });
+  });
+
+  for (const throughTurn of [false, true]) {
+    test(`PR-S readable ancestors are checked for indirect cycles, through turn=${throughTurn}, tail=${large}`, t => {
+      const fx = createFixture(t);
+      const rows = [claudeUserRecord('instruction', { parentUuid: 'h' }),
+        statusAttachment('h', throughTurn ? 'a' : 'older', 'environment'),
+        ...(throughTurn ? [] : [statusAttachment('older', 'h', 'hook_success')]),
+        statusAssistant('end_turn')];
+      if (large) largeStatusFile(fx, 'claude', rows);
+      else fx.file('claude', 'ancestor-cycle', rows);
+      assert.deepEqual(snapshotReader.runSnapshot(fx.options).sessions[0].status,
+        { state: 'unknown', source: 'none', evidence_at: null, reason: 'branch_ambiguous' });
+    });
+  }
+
+  test(`PR-S missing readable ancestor after binding does not truncate the current turn, tail=${large}`, t => {
+    const fx = createFixture(t);
+    const rows = [claudeUserRecord('instruction', { parentUuid: 'h' }),
+      statusAttachment('h', 'missing-older-parent', 'environment'), statusAssistant('end_turn')];
+    if (large) largeStatusFile(fx, 'claude', rows);
+    else fx.file('claude', 'missing-ancestor', rows);
+    assert.deepEqual(snapshotReader.runSnapshot(fx.options).sessions[0].status,
+      { state: 'ended', source: 'transcript', evidence_at: RECORD_TIMESTAMP, reason: null });
+  });
 }
 
 function reorderedAttachmentChain() {
