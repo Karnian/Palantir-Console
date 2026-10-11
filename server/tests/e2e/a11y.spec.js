@@ -352,9 +352,9 @@ test.afterAll(() => {
 
 // C1: populated session assistant, compact panel, and evidence timeline in both themes and sizes.
 for (const theme of THEMES) {
-  for (const vp of VIEWPORTS) {
+  for (const vp of [...VIEWPORTS, { name: 'drawer', width: 1100, height: 900 }]) {
     test(`@a11y session-hub manager [${theme}/${vp.name}]`, async ({ page }) => {
-      const { mockSessionHub, expectNoHorizontalOverflow } = require('./helpers/session-hub');
+      const { mockSessionHub, expectAssistantLayout } = require('./helpers/session-hub');
       await mockSessionHub(page);
       await page.setViewportSize({ width: vp.width, height: vp.height });
       await setTheme(page, theme);
@@ -363,9 +363,9 @@ for (const theme of THEMES) {
       await expect(page.locator('.manager-msg-row-user .manager-msg-content'))
         .toHaveText('지금 각 세션 뭐 하고 있어?');
       await expect(page.locator('.manager-msg-assistant .markdown-body h2')).toHaveText('검토 결과');
-      await expect(page.locator('.session-hub-tools summary')).toContainText('세션 열기:');
+      await expect(page.locator('.session-hub-tools summary')).toContainText('도구 2회 사용');
       const check = async () => {
-        await expectNoHorizontalOverflow(page);
+        await expectAssistantLayout(page);
         const result = await new AxeBuilder({ page }).withTags(WCAG_TAGS)
           .include('[data-view="manager"]').analyze();
         expect(result.violations.filter(item => item.impact !== 'minor')).toEqual([]);
@@ -373,11 +373,12 @@ for (const theme of THEMES) {
       await check();
       await page.locator('button.session-evidence').click();
       await expect(page.locator('.work-event').first()).toBeVisible();
-      await expect(page.getByRole('button', { name: '← 모든 세션', exact: true })).toBeFocused();
+      await expect(page.locator('.session-hub-detail-header')).toBeFocused();
       await check();
-      await page.getByRole('button', { name: '← 모든 세션', exact: true }).click();
+      await page.getByRole('button', { name: '오른쪽 칸 닫기', exact: true }).click();
+      if (vp.width < 900) await page.getByRole('button', { name: '목록', exact: true }).click();
       await expect(page.locator('button.session-row')).toHaveCount(3);
-      await expect(page.locator('button.session-row').first()).toBeFocused();
+      await expect(page.locator('#hub-query')).toBeVisible();
       await expect(page.locator('.session-rows .work-label, .session-rows .work-card-footer')).toHaveCount(0);
       await check();
     });

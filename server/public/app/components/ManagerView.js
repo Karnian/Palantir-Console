@@ -56,6 +56,7 @@ function AssistantLayout({ projects, initialTarget, initialPanel, chat, grid, se
   const cards = snapshots.load.snapshots.flatMap(snapshotCards);
   const data = { ...snapshots, cards };
   const panel = { cards, rev: snapshots.load.rev };
+  const [activeItem, setActiveItem] = useState(initialTarget && initialTarget !== 'hub' ? initialTarget : 'assistant');
   const [right, setRight] = useState(initialTarget && initialTarget !== 'hub' ? 'manager' : null);
   const [mobilePane, setMobilePane] = useState(initialPanel ? 'sidebar' : 'chat');
   const [selection, setSelection] = useState(null);
@@ -65,17 +66,19 @@ function AssistantLayout({ projects, initialTarget, initialPanel, chat, grid, se
     setMobilePane('chat');
     setDraft(value => ({ text, version: (value?.version || 0) + 1 }));
   };
-  const close = () => { setRight(null); focusAssistant(); };
+  const close = () => { setRight(null); setActiveItem('assistant'); focusAssistant(); };
   useEffect(() => {
-    if (initialTarget && initialTarget !== 'hub') { setRight('manager'); setMobilePane('right'); }
+    if (initialTarget && initialTarget !== 'hub') {
+      setActiveItem(initialTarget); setRight('manager'); setMobilePane('right');
+    }
   }, [initialTarget]);
   useEffect(() => {
-    if (initialPanel) { setRight(null); setMobilePane('sidebar'); }
+    if (initialPanel) { setActiveItem('assistant'); setRight(null); setMobilePane('sidebar'); }
   }, [initialPanel]);
   useEffect(() => {
     const syncPanel = () => {
       if (location.hash === '#work' || location.hash === '#manager/all-sessions') {
-        setRight(null); setMobilePane('sidebar');
+        setActiveItem('assistant'); setRight(null); setMobilePane('sidebar');
       }
     };
     const onLink = event => {
@@ -95,10 +98,10 @@ function AssistantLayout({ projects, initialTarget, initialPanel, chat, grid, se
     };
   }, []);
   const openSession = (key, rev, query = '') => {
-    setSelection({ key, rev, query }); setRight('session'); setMobilePane('right');
+    setActiveItem(key); setSelection({ key, rev, query }); setRight('session'); setMobilePane('right');
   };
   const openConversation = target => {
-    setConversationTarget(target); setRight('manager'); setMobilePane('right');
+    setActiveItem(target); setConversationTarget(target); setRight('manager'); setMobilePane('right');
   };
   // SessionHubChat always occupies this slot; pane changes only affect CSS visibility.
   return html`<div class="manager-view session-hub-manager" data-view="manager"
@@ -109,8 +112,10 @@ function AssistantLayout({ projects, initialTarget, initialPanel, chat, grid, se
           onClick=${() => setMobilePane(pane)}>${label}</button>`)}
     </div>
     <${SessionHubSidebar} data=${data} projects=${projects} onAssistant=${close}
-      onConversation=${openConversation} onWork=${() => { setRight('work'); setMobilePane('right'); }}
-      onOpenSession=${openSession} revisionMismatch=${revisionMismatch} />
+      onConversation=${openConversation} onWork=${() => {
+        setActiveItem('work'); setRight('work'); setMobilePane('right');
+      }}
+      activeItem=${activeItem} onOpenSession=${openSession} revisionMismatch=${revisionMismatch} />
     <div class="session-hub-chat-side">
       <${SessionHubChat} panel=${panel} onOpenSession=${openSession} draft=${draft}
         onRevisionMismatch=${setRevisionMismatch} />

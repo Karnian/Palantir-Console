@@ -30,18 +30,31 @@ export function displayInstructionText(text) {
 export function sessionDisplayTitle(card) {
   const first = card.first_instruction === 'recoverable'
     ? displayInstructionText(card.instructions?.[0]?.text) || card.first : card.first;
-  const candidates = [card.ai_title, first, card.recent];
+  const meaningful = card.instructions?.filter(instruction => !instruction.text_missing)
+    .map(instruction => displayInstructionText(instruction.text)) || [];
+  const candidates = [card.ai_title, first, ...meaningful, card.recent];
   if (!card.ai_title && !first && !card.instructions?.length) candidates.unshift(card.title);
-  for (const candidate of candidates) {
-    const line = String(displayInstructionText(candidate) || '').split(/\r?\n/u)
-      .map(value => value.trim()).find(value => value && !/^(?:<?[a-z][a-z0-9+.-]*:\/\/|www\.)/iu.test(value));
-    if (line) return line;
-  }
-  return `세션 ${String(card.key || '').slice(-6)}`;
+  const lines = candidates.map(candidate => String(displayInstructionText(candidate) || '').split(/\r?\n/u)
+    .map(value => value.trim()).find(value => value && !/^(?:<?[a-z][a-z0-9+.-]*:\/\/|www\.)/iu.test(value)))
+    .filter(Boolean);
+  return lines.find(line => !/^\/[A-Za-z][\w-]*(?:\s|$)/u.test(line)) || lines[0]
+    || `세션 ${String(card.key || '').slice(-6)}`;
 }
 
 export function sessionEvidenceLabel(card) {
   return `${card.machine.label} · ${Array.from(sessionDisplayTitle(card)).slice(0, 24).join('')}`;
+}
+
+export function sessionDisplayState(card, now = Date.now()) {
+  const status = card.status || { state: 'unknown' };
+  const evidence = Date.parse(status.evidence_at);
+  return status.state === 'working' && status.source === 'transcript' && Number.isFinite(evidence)
+    && now - evidence > 30 * 60000 ? 'unresponsive' : status.state;
+}
+export function sessionDisplayStatusLabel(card, now = Date.now()) {
+  const labels = { waiting: '입력 대기', working: '작업 중', ended: '응답 끝남',
+    unresponsive: '응답 없음 · 종료 기록 없음', interrupted: '중단됨', unknown: '알 수 없음' };
+  return labels[sessionDisplayState(card, now)] || labels.unknown;
 }
 
 export function normalizeSearch(text) {

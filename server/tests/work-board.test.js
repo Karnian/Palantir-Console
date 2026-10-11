@@ -1256,7 +1256,7 @@ test('snapshot refresh button uses its cookie endpoint and reloads board data af
       cards: data.load.snapshots.flatMap(env.context.snapshotCards) } });
   }
   env.render(env.h(Sidebar), root); await flushEffects(); await flushEffects();
-  const button = [...root.querySelectorAll('button')].find(item => item.textContent === '새로 만들기');
+  const button = [...root.querySelectorAll('button')].find(item => item.getAttribute('aria-label') === '새로 만들기');
   assert.equal(button.disabled, false); button.click(); await flushEffects();
   assert.equal(posts.length, 1);
   assert.equal(posts[0].url, '/api/session-hub/snapshots/refresh');

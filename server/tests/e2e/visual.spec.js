@@ -528,12 +528,13 @@ for (const modal of FORM_MODALS) {
 // Host generates these baselines after reviewing the compact controls and mobile segments.
 const HUB_VIEWPORTS = [
   { name: 'desktop', width: 1440, height: 900 },
+  { name: 'drawer', width: 1100, height: 900 },
   { name: 'mobile', width: 390, height: 844 },
 ];
 for (const theme of THEMES) {
   for (const vp of HUB_VIEWPORTS) {
     test(`@visual session-hub manager [${theme}/${vp.name}]`, async ({ page }) => {
-      const { mockSessionHub, expectNoHorizontalOverflow } = require('./helpers/session-hub');
+      const { mockSessionHub, expectAssistantLayout } = require('./helpers/session-hub');
       await mockSessionHub(page, { longText: true });
       await page.setViewportSize({ width: vp.width, height: vp.height });
       await setTheme(page, theme);
@@ -542,24 +543,25 @@ for (const theme of THEMES) {
       await expect(page.locator('.manager-msg-row-user .manager-msg-content'))
         .toHaveText('지금 각 세션 뭐 하고 있어?');
       await expect(page.locator('.manager-msg-assistant .markdown-body h2')).toHaveText('검토 결과');
-      await expect(page.locator('.session-hub-tools summary')).toContainText('세션 열기:');
+      await expect(page.locator('.session-hub-tools summary')).toContainText('도구 2회 사용');
       await stabilize(page);
-      await expectNoHorizontalOverflow(page);
+      await expectAssistantLayout(page);
       await expect(page).toHaveScreenshot(`session-hub-chat-${theme}-${vp.name}.png`, {
         maxDiffPixels: 100, threshold: 0.2,
       });
       await page.locator('button.session-evidence').click();
       await expect(page.locator('.work-event').first()).toBeVisible();
-      await expect(page.getByRole('button', { name: '← 모든 세션', exact: true })).toBeFocused();
-      await expectNoHorizontalOverflow(page);
+      await expect(page.locator('.session-hub-detail-header')).toBeFocused();
+      await expectAssistantLayout(page);
       await expect(page).toHaveScreenshot(`session-hub-timeline-${theme}-${vp.name}.png`, {
         maxDiffPixels: 100, threshold: 0.2,
       });
-      await page.getByRole('button', { name: '← 모든 세션', exact: true }).click();
+      await page.getByRole('button', { name: '오른쪽 칸 닫기', exact: true }).click();
+      if (vp.width < 900) await page.getByRole('button', { name: '목록', exact: true }).click();
       await expect(page.locator('button.session-row')).toHaveCount(3);
-      await expect(page.locator('button.session-row').first()).toBeFocused();
+      await expect(page.locator('#hub-query')).toBeVisible();
       await expect(page.locator('.session-rows .work-label, .session-rows .work-card-footer')).toHaveCount(0);
-      await expectNoHorizontalOverflow(page);
+      await expectAssistantLayout(page);
       await expect(page).toHaveScreenshot(`session-hub-panel-${theme}-${vp.name}.png`, {
         maxDiffPixels: 100, threshold: 0.2,
       });

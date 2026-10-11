@@ -8923,3 +8923,83 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 }
 .all-sessions-panel .session-selector-copy:hover,
 .all-sessions-panel .session-selector-copy:focus-visible { color: var(--text-primary); background: var(--bg-hover); }
+
+/* Personal assistant: keep sidebar controls in their own normal-flow header. */
+.session-hub-sidebar .session-hub-sidebar-header {
+  display: grid; gap: 6px; padding: 10px 12px 6px; flex: 0 0 auto; min-width: 0;
+  position: static; background: var(--bg-surface); border-bottom: 1px solid var(--border);
+}
+.session-hub-sidebar .session-hub-filters {
+  display: grid; grid-template-columns: 1.1fr 1fr .9fr; gap: 4px; min-width: 0;
+}
+.session-hub-filters .board-filter, .session-hub-filters .dropdown { width: 100%; min-width: 0; }
+.session-hub-filters .dropdown-button {
+  width: 100%; height: 28px; min-height: 28px; padding: 3px 6px; gap: 3px; font-size: 13px;
+}
+.session-hub-filters .dropdown-label { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.session-hub-snapshot-line {
+  display: flex; align-items: center; gap: 4px; min-width: 0; font-size: 11px; color: var(--text-muted);
+}
+.session-hub-snapshot-line > span { flex: 1; min-width: 0; }
+.session-hub-manager .session-hub-icon { width: 28px; height: 28px; padding: 0; border-color: transparent; }
+.session-hub-snapshot-details { flex: 0 0 auto; }
+.session-hub-snapshot-details summary { cursor: pointer; font-size: 11px; }
+.session-hub-snapshot-info { padding: 6px 0; font-size: 11px; overflow-wrap: anywhere; }
+.session-hub-snapshot-details[open] { flex-basis: 100%; }
+.session-hub-snapshot-line:has(details[open]) { flex-wrap: wrap; }
+.session-hub-manager .session-hub-nav {
+  border: 0; border-left: 2px solid transparent; background: transparent; border-radius: var(--radius-sm);
+  padding: 6px 8px; min-height: 30px; font-size: 13px;
+}
+.session-hub-manager .session-hub-nav:hover { background: var(--bg-hover); }
+.session-hub-manager .session-hub-nav[aria-current="page"] {
+  background: var(--accent-muted); border-left-color: var(--accent); color: var(--text-primary);
+}
+.session-hub-manager .session-hub-group-title {
+  display: flex; align-items: center; gap: 4px; border: 0; border-radius: 0; background: transparent;
+  font-size: 11px; line-height: 16px; min-height: 0; padding: 0 8px; margin: 10px 0 4px;
+}
+.session-status-dot.unresponsive { background: var(--text-muted); }
+.session-hub-chat > .manager-chat-header {
+  flex: 0 0 auto; padding: 8px 12px; gap: 8px; min-height: 46px;
+}
+.session-hub-chat-title { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; }
+.session-hub-chat-title .session-status-dot { margin: 0; }
+.session-hub-chat-title .manager-status-badge { font-size: 11px; font-weight: 400; padding: 0; background: none; }
+.session-hub-chat-actions { display: flex; align-items: center; gap: 4px; }
+.session-hub-menu { position: relative; }
+.session-hub-menu > summary { list-style: none; cursor: pointer; text-align: center; line-height: 26px; }
+.session-hub-menu > summary::-webkit-details-marker { display: none; }
+.session-hub-menu-content {
+  position: absolute; right: 0; top: 32px; z-index: 20; width: 150px; padding: 4px;
+  background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  box-shadow: 0 6px 20px var(--bg-overlay);
+}
+.session-hub-menu-content > button { width: 100%; text-align: left; border-color: transparent; }
+.session-hub-detail-header { flex: 0 0 auto; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+.session-hub-detail-header .work-meta { font-size: 12px; }
+.session-hub-proposal, .assistant-memory-item {
+  border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-surface);
+  padding: 10px 12px; margin: 6px 0; font-size: 13px; overflow-wrap: anywhere;
+}
+.session-hub-proposal h3 { font-size: 13px; margin: 0 0 6px; }
+.session-hub-proposal p, .assistant-memory-item p { white-space: pre-wrap; margin: 4px 0; }
+.session-hub-proposal blockquote { margin: 6px 0; padding-left: 8px; border-left: 2px solid var(--border); }
+.session-hub-proposal footer, .assistant-memory-item footer { display: flex; gap: 6px; margin-top: 6px; }
+.session-hub-thread-list {
+  padding: 8px 12px; border-bottom: 1px solid var(--border); max-height: 220px; overflow: auto;
+}
+.session-hub-thread-row { display: flex; align-items: center; gap: 4px; margin: 2px 0; }
+.session-hub-thread-row > button:first-child { flex: 1; min-width: 0; text-align: left; }
+.session-hub-thread-row > button { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-hub-readonly { display: flex; align-items: center; justify-content: space-between; padding: 4px 12px; }
+.assistant-memory-content { padding: 12px 0; }
+.assistant-memory-content .ghost, .assistant-memory-content .primary { min-height: 28px; font-size: 13px; }
+.assistant-memory-content textarea { width: 100%; font: inherit; }
+
+.session-hub-manager .session-row { border-left: 2px solid transparent; }
+.session-hub-manager .session-row[aria-current="true"] {
+  background: var(--accent-muted); border-left-color: var(--accent);
+}
+
+.session-hub-chat .manager-chat-header .session-hub-icon { padding: 0; }

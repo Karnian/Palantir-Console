@@ -2,7 +2,7 @@ import { h } from '../../vendor/preact.module.js';
 import { useEffect, useMemo, useRef, useState } from '../../vendor/hooks.module.js';
 import htm from '../../vendor/htm.module.js';
 import { WORK_BOARD_LABELS as W } from '../lib/copy.js';
-import { rankCards } from '../lib/workBoard.js';
+import { rankCards, sessionDisplayState, sessionDisplayStatusLabel } from '../lib/workBoard.js';
 import { useSnapshotRefresh } from '../lib/hooks/useSnapshotRefresh.js';
 import { Dropdown } from './Dropdown.js';
 import { SnapshotTime, SessionRow, SessionCard, Coverage } from './SessionSnapshotParts.js';
@@ -15,12 +15,15 @@ function readPreference(key, fallback) {
 function writePreference(key, value) {
   try { localStorage.setItem(key, value); } catch { /* Storage may be unavailable. */ }
 }
-export function sessionGroups(cards, grouping) {
+export function sessionGroups(cards, grouping, now = Date.now()) {
   const groups = new Map();
-  const states = ['waiting', 'working', 'ended', 'interrupted', 'unknown'];
-  if (grouping === 'status') for (const state of states) groups.set(state, { label: W.states[state], cards: [] });
+  const states = ['waiting', 'working', 'ended', 'unresponsive', 'interrupted', 'unknown'];
+  if (grouping === 'status') for (const state of states) groups.set(state, {
+    label: state === 'unresponsive' ? '응답 없음 · 종료 기록 없음' : W.states[state], cards: [],
+  });
   for (const card of cards) {
-    const key = grouping === 'status' ? (states.includes(card.status.state) ? card.status.state : 'unknown')
+    const state = sessionDisplayState(card, now);
+    const key = grouping === 'status' ? (states.includes(state) ? state : 'unknown')
       : `${card.machine.id}:${card.repo_label || card.cwd_id || ''}`;
     if (!groups.has(key)) groups.set(key, { label: `${card.machine.label} · ${card.repo_label || W.repoUnknown}`,
       cards: [] });
@@ -32,7 +35,7 @@ export function sessionGroups(cards, grouping) {
   }));
 }
 export function SessionHubSidebar({ data, projects = [], onAssistant, onConversation, onWork, onOpenSession,
-  revisionMismatch = false }) {
+  revisionMismatch = false, activeItem = 'assistant' }) {
   const { load, cards, loading, error, now, reload } = data;
   const [query, setQuery] = useState('');
   const [machine, setMachine] = useState('');
@@ -42,59 +45,74 @@ export function SessionHubSidebar({ data, projects = [], onAssistant, onConversa
   const [palantir, setPalantir] = useState(() => readPreference(PALANTIR_KEY, 'open') !== 'closed');
   const refresh = useSnapshotRefresh({ onComplete: reload });
   const results = useMemo(() => rankCards(cards, query, machine, provider), [cards, query, machine, provider]);
-  const groups = useMemo(() => sessionGroups(results, grouping), [results, grouping]);
+  const groups = useMemo(() => sessionGroups(results, grouping, now), [results, grouping, now]);
   const machines = load.entries.filter(entry => entry.machine_id).map(entry => ({
-    value: entry.machine_id, label: `머신: ${entry.machine_label || entry.machine_id}`,
+    value: entry.machine_id, label: entry.machine_label || entry.machine_id,
   }));
+  const times = load.entries.filter(entry => entry.machine_id).map(entry =>
+    load.snapshots.find(item => item.machine.id === entry.machine_id)?.generated_at || entry.generated_at);
+  const oldest = times.filter(value => Number.isFinite(Date.parse(value)))
+    .sort((a, b) => Date.parse(a) - Date.parse(b))[0];
   return html`<aside class="session-hub-sidebar all-sessions-panel" aria-label="세션 목록">
-    <header class="work-header">
-      <label class="work-label" for="hub-query">검색</label>
+    <header class="session-hub-sidebar-header">
       <input id="hub-query" class="work-search" type="search" value=${query} placeholder="세션 검색"
-        onInput=${event => setQuery(event.target.value)} />
-      <div class="board-filter"><${Dropdown} wide ariaLabel="묶음 선택" value=${grouping}
-        options=${[{ value: 'status', label: '상태별' }, { value: 'repo', label: '머신·repo' }]}
-        onChange=${value => { setGrouping(value); writePreference(GROUP_KEY, value); }} /></div>
-      <div class="work-filter-row">
-        <div class="board-filter"><${Dropdown} wide ariaLabel="머신" value=${machine} onChange=${setMachine}
-          options=${[{ value: '', label: '머신: 전체' }, ...machines]} /></div>
-        <div class="board-filter"><${Dropdown} wide ariaLabel="도구" value=${provider} onChange=${setProvider}
-          options=${[{ value: '', label: '도구: 전체' }, { value: 'claude', label: '도구: Claude' },
-            { value: 'codex', label: '도구: Codex' }]} /></div>
+        aria-label="세션 검색" onInput=${event => setQuery(event.target.value)} />
+      <div class="session-hub-filters">
+        <div class="board-filter"><${Dropdown} ariaLabel="묶음 선택" value=${grouping}
+          options=${[{ value: 'status', label: '상태별' }, { value: 'repo', label: '머신·repo' }]}
+          onChange=${value => { setGrouping(value); writePreference(GROUP_KEY, value); }} /></div>
+        <div class="board-filter"><${Dropdown} ariaLabel="머신" value=${machine} onChange=${setMachine}
+          options=${[{ value: '', label: '머신' }, ...machines]} /></div>
+        <div class="board-filter"><${Dropdown} ariaLabel="도구" value=${provider} onChange=${setProvider}
+          options=${[{ value: '', label: '도구' }, { value: 'claude', label: 'Claude' },
+            { value: 'codex', label: 'Codex' }]} /></div>
       </div>
-      <div class="work-snapshot-times">${load.entries.filter(entry => entry.machine_id).map(entry => html`
-        <span key=${entry.machine_id}><${SnapshotTime}
-          value=${load.snapshots.find(item => item.machine.id === entry.machine_id)?.generated_at
-          || entry.generated_at} now=${now}
-          label=${entry.machine_label} snapshot=${true} /></span>`)}</div>
-      <button class="ghost" type="button" disabled=${refresh.busy || refresh.status?.enabled === false}
-        onClick=${() => refresh.refresh()}>새로 만들기</button>
-      <button class="ghost" type="button" disabled=${loading} onClick=${reload}>스냅샷 새로고침</button>
-      ${refresh.status?.targets.map(target => html`<p class="work-label" role="status" key=${target.name}>
-        ${target.name} · ${target.running ? '수집 중' : target.last_result?.code === 'ok' ? '수집 완료'
-          : target.last_result ? '수집 실패' : '수집 전'}</p>`)}
+      <div class="session-hub-snapshot-line">
+        <span>스냅샷 <${SnapshotTime} value=${oldest} now=${now} relativeOnly=${true} /></span>
+        <button class="ghost session-hub-icon" type="button" aria-label="새로 만들기"
+          title="스냅샷 새로 만들기" disabled=${refresh.busy || refresh.status?.enabled === false}
+          onClick=${() => refresh.refresh()}>${refresh.busy ? '⋯' : '⟳'}</button>
+        <details class="session-hub-snapshot-details">
+          <summary aria-label="스냅샷 상세">상세</summary>
+          <div class="session-hub-snapshot-info">
+            ${load.entries.filter(entry => entry.machine_id).map(entry => html`<p key=${entry.machine_id}>
+              <${SnapshotTime} value=${load.snapshots.find(item => item.machine.id === entry.machine_id)?.generated_at
+                || entry.generated_at} now=${now} label=${entry.machine_label} snapshot=${true} /></p>`)}
+            ${refresh.status?.targets.map(target => html`<p role="status" key=${target.name}>
+              ${target.name} · ${target.running ? '수집 중' : target.last_result?.code === 'ok' ? '수집 완료'
+                : target.last_result ? '수집 실패' : '수집 전'}</p>`)}
+            <button class="ghost" type="button" disabled=${loading} onClick=${reload}>스냅샷 새로고침</button>
+          </div>
+        </details>
+      </div>
       ${refresh.error && html`<p role="alert">수집 상태를 읽지 못했습니다.</p>`}
-      ${!loading && !load.rev && html`<p class="work-label" role="status">스냅샷 rev 미확정 · 확인 불가
+      ${!loading && !load.rev && html`<p class="work-label" role="status">스냅샷 확인 불가
         <button class="ghost" onClick=${reload}>다시 시도</button></p>`}
       ${revisionMismatch && html`<p class="work-label" role="status">답변 뒤 갱신됨</p>`}
     </header>
     <div class="session-hub-sidebar-body">
-      <button class="ghost session-hub-nav" type="button" onClick=${onAssistant}>★ 비서</button>
+      <button class="ghost session-hub-nav" type="button" aria-current=${activeItem === 'assistant' ? 'page' : null}
+        onClick=${onAssistant}>★ 비서</button>
       <button class="ghost session-hub-group-title" type="button" aria-expanded=${palantir}
         onClick=${() => { setPalantir(!palantir); writePreference(PALANTIR_KEY, palantir ? 'closed' : 'open'); }}>
         Palantir ${palantir ? '▾' : '▸'}</button>
       <div hidden=${!palantir}>
-        <button class="ghost session-hub-nav" type="button" onClick=${() => onConversation('top')}>Top</button>
+        <button class="ghost session-hub-nav" type="button" aria-current=${activeItem === 'top' ? 'page' : null}
+          onClick=${() => onConversation('top')}>Top</button>
         ${projects.filter(project => project.pm_enabled).map(project => html`
           <button key=${project.id} class="ghost session-hub-nav" type="button"
+            aria-current=${activeItem === `operator:${project.id}` ? 'page' : null}
             onClick=${() => onConversation(`operator:${project.id}`)}>Operator · ${project.name}</button>`)}
-        <button class="ghost session-hub-nav" type="button" onClick=${onWork}>작업</button>
+        <button class="ghost session-hub-nav" type="button" aria-current=${activeItem === 'work' ? 'page' : null}
+          onClick=${onWork}>작업</button>
       </div>
       ${loading && html`<p role="status">${W.loading(load.done, load.total)}</p>`}
       ${error && html`<p role="alert">${W.error}</p>`}
       ${!loading && !error && !results.length && html`<p>${cards.length ? W.noResults : W.empty}</p>`}
       ${groups.map(group => html`<section key=${group.key} class="session-hub-group">
         <h2 class="session-hub-group-title">${group.label} <span>${group.cards.length}</span></h2>
-        ${group.cards.map(card => html`<${SessionRow} key=${card.key} compact=${true} card=${card}
+        ${group.cards.map(card => html`<${SessionRow} key=${card.key} compact=${true}
+          selected=${activeItem === card.key} card=${card}
           query=${query} now=${now} onOpen=${key => onOpenSession(key, load.rev, query)} />`)}
       </section>`)}
       <details class="session-hub-coverage"><summary>수집 범위</summary><${Coverage} load=${load} /></details>
@@ -110,9 +128,9 @@ export function SessionHubDetail({ data, selection, revisionMismatch, onAsk }) {
   useEffect(() => { header.current?.focus(); }, [selection?.key]);
   const changed = revisionMismatch || (selection?.rev && load.rev && selection.rev !== load.rev);
   return html`<section class="all-sessions-panel session-hub-detail" aria-label="세션 상세">
-    <header class="work-header" ref=${header} tabindex="-1">
+    <header class="session-hub-detail-header" ref=${header} tabindex="-1">
       ${changed && html`<p class="work-label" role="status">답변 뒤 갱신됨 · 현재 스냅샷을 표시합니다.</p>`}
-      ${card && html`<div class="work-meta"><span>${W.states[card.status.state]}</span>
+      ${card && html`<div class="work-meta"><span>${sessionDisplayStatusLabel(card, now)}</span>
         <span>${card.status.source === 'orca' ? 'Orca'
           : card.status.source === 'transcript' ? '기록' : '근거 없음'}</span>
         <${SnapshotTime} value=${card.status.evidence_at} label="근거" now=${now} />
@@ -122,7 +140,7 @@ export function SessionHubDetail({ data, selection, revisionMismatch, onAsk }) {
       </div>`}
     </header>
     <div class="work-body">${card ? html`<${SessionCard} key=${card.key} card=${card}
-      query=${query} now=${now} timeline=${true} />`
+      query=${query} now=${now} timeline=${true} showStatus=${false} />`
       : html`<p>${loading ? '읽는 중' : load.rev ? '현재 스냅샷에 없는 세션' : '세션 확인 불가'}</p>`}</div>
   </section>`;
 }

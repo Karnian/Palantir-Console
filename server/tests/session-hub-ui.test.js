@@ -22,10 +22,11 @@ function setup(t) {
   env.window.marked = require('../public/vendor/marked.min.js');
   env.window.DOMPurify = require('../public/vendor/purify.min.js')(env.window);
   vm.runInContext('this.W = WORK_BOARD_LABELS;', env.context);
-  for (const name of ['useSessionSnapshots', 'useSnapshotRefresh']) {
+  for (const name of ['useSessionSnapshots', 'useSnapshotRefresh', 'useAssistantMemory']) {
     const src = fs.readFileSync(path.join(publicRoot, 'app/lib/hooks', `${name}.js`), 'utf8');
     vm.runInContext(transformComponentSource(src), env.context);
   }
+  env.loadComponent('AssistantMemory');
   env.loadComponent('SessionHubSidebar');
   env.loadComponent('Dropdown'); env.loadComponent('SessionSnapshotParts'); env.loadComponent('AllSessionsPanel');
   env.loadComponent('SessionHubChat');
@@ -185,7 +186,7 @@ for (const [operation, replyEpoch] of [['GET', 'old'], ['POST', 'old'], ['POST',
     env.context.fetch = async (url, opts) => operation === 'GET' || opts.method === 'POST'
       ? delayed.promise : response(old);
     env.render(env.h(env.context.SessionHubChat), env.root); await flushEffects(); await flushEffects();
-    if (operation === 'POST') { env.root.querySelector('button').click(); await flushEffects(); }
+    if (operation === 'POST') { env.root.querySelector('[data-action="start"]').click(); await flushEffects(); }
     source.receive({ data: JSON.stringify(fresh) }); await flushEffects();
     delayed.resolve(response({ ...old, epoch: replyEpoch, state: 'running' })); await flushEffects();
     assert.equal(env.root.querySelector('.manager-status-badge').textContent, '중지됨');
@@ -211,7 +212,7 @@ for (const operation of ['GET', 'POST']) {
     env.context.fetch = async (url, opts) => operation === 'GET' || opts.method === 'POST'
       ? delayed.promise : response(idle);
     env.render(env.h(env.context.SessionHubChat), env.root); await flushEffects(); await flushEffects();
-    if (operation === 'POST') { env.root.querySelector('button').click(); await flushEffects(); }
+    if (operation === 'POST') { env.root.querySelector('[data-action="start"]').click(); await flushEffects(); }
     source.receive({ data: JSON.stringify({ ...idle, version: 1 }) }); await flushEffects();
     delayed.resolve(response({ ...idle, version: 2, state: 'running', messages: [
       { role: 'assistant', content: '더 높은 버전' },
@@ -293,7 +294,7 @@ test('late GET and stale SSE cannot undo newer POST state or messages', async t 
     return url.endsWith('/state') ? get.promise : response(url.endsWith('/start') ? running : answered);
   };
   env.render(env.h(env.context.SessionHubChat), env.root); await flushEffects();
-  env.root.querySelector('button').click(); await flushEffects();
+  env.root.querySelector('[data-action="start"]').click(); await flushEffects();
   const input = env.root.querySelector('textarea');
   input.value = '보존할 질문'; input.dispatchEvent(new env.window.Event('input', { bubbles: true }));
   await flushEffects(); env.root.querySelector('button[type="submit"]').click(); await flushEffects();
@@ -407,7 +408,7 @@ test('a start reply matching the SSE version clears only the local starting indi
   };
   env.context.fetch = async url => url.endsWith('/start') ? start.promise : response(idle);
   env.render(env.h(env.context.SessionHubChat), env.root); await flushEffects(); await flushEffects();
-  env.root.querySelector('button').click(); await flushEffects();
+  env.root.querySelector('[data-action="start"]').click(); await flushEffects();
   source.receive({ data: JSON.stringify(running) }); await flushEffects();
   assert.equal(env.root.querySelector('.manager-status-badge').textContent, '시작 중');
   start.resolve(response(running)); await flushEffects();
@@ -437,7 +438,7 @@ test('evidence uses sanitized text only; malformed tokens, code and attributes s
   assert.ok(env.root.textContent.includes('onclick=alert(4)'));
   assert.equal(env.root.querySelector('.session-evidence.missing').textContent, '현재 스냅샷에 없는 세션');
   assert.equal(env.root.querySelector('.session-evidence.missing').tagName, 'SPAN');
-  env.root.querySelector('button').click();
+  env.root.querySelector('button.session-evidence').click();
   assert.deepEqual(opened, [[key, REV]]);
 });
 
@@ -508,7 +509,8 @@ test('all chat actions share one fetch spy and dedicated SSE; new threads keep m
   assert.ok(env.root.querySelector('.session-hub-messages .session-hub-note[role="status"]'));
   assert.ok(env.root.textContent.includes('정리할 기록 파일 4개'));
   assert.ok(!env.root.textContent.includes('서버 재시작 시 대화가 사라집니다'));
-  assert.deepEqual(calls.map(call => call.url), ['state', 'start', 'message', 'stop', 'threads']
+  assert.deepEqual(calls.filter(call => call.url.includes('/chat/')).map(call => call.url),
+    ['state', 'start', 'message', 'stop', 'threads']
     .map(name => `/api/session-hub/chat/${name}`));
   for (const call of calls) assert.equal(call.opts.credentials, 'same-origin');
   assert.equal(JSON.parse(calls[2].opts.body).text, '모든 세션');
@@ -620,7 +622,7 @@ test('inactive ManagerView preserves original DOM; active defaults to assistant 
   await flushEffects(); await flushEffects();
   assert.ok(env.root.querySelector('.session-hub-chat'));
   assert.equal(env.root.querySelectorAll('.session-hub-segments button').length, 3);
-  assert.ok(env.root.querySelector('.work-header').textContent.includes('답변 뒤 갱신됨'));
+  assert.ok(env.root.querySelector('.session-hub-sidebar-header').textContent.includes('답변 뒤 갱신됨'));
   env.root.querySelector('button.session-evidence').click(); await flushEffects();
   assert.equal(env.root.querySelector('.manager-view').dataset.pane, 'right');
   assert.equal(env.root.querySelectorAll('.work-event').length, 2);
@@ -777,7 +779,8 @@ test('idle questions start once before sending; start failures retain the questi
     await flushEffects();
   };
   await mount(); await ask('모든 세션 알려줘');
-  assert.deepEqual(calls.map(call => call.url), ['state', 'start'].map(name => `/api/session-hub/chat/${name}`));
+  assert.deepEqual(calls.filter(call => call.url.includes('/chat/')).map(call => call.url),
+    ['state', 'start'].map(name => `/api/session-hub/chat/${name}`));
   assert.equal(env.root.querySelector('.manager-status-badge').textContent, '시작 중');
   assert.equal(env.root.querySelector('button[type="submit"]').disabled, true);
   starting.resolve(response(running)); await flushEffects(); await flushEffects();
@@ -1022,12 +1025,12 @@ test('three panes, grouping preferences and Palantir details preserve assistant 
     Array.from(env.root.querySelectorAll('[role="option"]')).find(node => node.textContent === option).click();
     await flushEffects();
   };
-  await choose('머신, 머신: 전체', '머신: codev2');
+  await choose('머신, 머신', 'codev2');
   assert.equal(rows().length, 1); assert.equal(rows()[0].dataset.sessionKey, beta.sessions[0].key);
-  await choose('머신, 머신: codev2', '머신: 전체');
-  await choose('도구, 도구: 전체', '도구: Codex');
+  await choose('머신, codev2', '머신');
+  await choose('도구, 도구', 'Codex');
   assert.equal(rows().length, 1); assert.equal(rows()[0].dataset.sessionKey, beta.sessions[0].key);
-  await choose('도구, 도구: Codex', '도구: 전체');
+  await choose('도구, Codex', '도구');
   env.root.querySelector('button.session-hub-group-title').click(); await flushEffects();
   assert.equal(env.root.querySelector('button.session-hub-group-title').getAttribute('aria-expanded'), 'false');
   assert.equal(env.window.localStorage.getItem('session-hub-palantir'), 'closed');
@@ -1052,4 +1055,204 @@ test('three panes, grouping preferences and Palantir details preserve assistant 
   assert.match(css, /@media \(min-width: 900px\) and \(max-width: 1279px\)/);
   assert.match(css, /@media \(max-width: 899px\)/);
   assert.match(css, /\.session-hub-panel-side\s*\{\s*position: absolute/);
+});
+
+test('stale transcript working is a factual grey group; Orca and the 30-minute boundary stay working', t => {
+  const env = setup(t), now = Date.parse('2026-10-12T12:00:00Z');
+  const card = (key, state, source, age) => ({ key, machine: { id: 'm', label: 'Mac' }, repo_label: 'repo',
+    status: { state, source, evidence_at: new Date(now - age * 60000).toISOString() } });
+  const cards = [card('old', 'working', 'transcript', 31), card('orca', 'working', 'orca', 20000),
+    card('edge', 'working', 'transcript', 30), card('wait', 'waiting', 'orca', 10),
+    card('end', 'ended', 'transcript', 40), card('stop', 'interrupted', 'transcript', 50),
+    card('unknown', 'unknown', 'none', 100)];
+  assert.deepEqual(Array.from(env.context.sessionGroups(cards, 'status', now), group => group.key),
+    ['waiting', 'working', 'ended', 'unresponsive', 'interrupted', 'unknown']);
+  assert.equal(env.context.sessionDisplayState(cards[0], now), 'unresponsive');
+  assert.equal(env.context.sessionDisplayState(cards[1], now), 'working');
+  assert.equal(env.context.sessionDisplayState(cards[2], now), 'working');
+  assert.equal(cards[0].status.state, 'working');
+  assert.equal(env.context.sessionDisplayState({ status: { state: 'working', source: 'transcript' } }, now), 'working');
+  env.render(env.h(env.context.SessionRow, { card: { ...cards[0], instructions: [], ai_title: '오래된 지시' },
+    now, compact: true, onOpen: () => {} }), env.root);
+  assert.ok(env.root.querySelector('.session-status-dot.unresponsive'));
+  assert.equal(env.root.querySelector('.session-status-dot').title, '응답 없음 · 종료 기록 없음');
+  const make = changes => ({ key: 'k', first_instruction: 'recoverable', instructions: [
+    { text: '<command-name>/login</command-name>' }, { text: '인증 흐름을 검토해 주세요.' },
+  ], ...changes });
+  assert.equal(env.context.sessionDisplayTitle(make({ ai_title: '인증 검토' })), '인증 검토');
+  assert.equal(env.context.sessionDisplayTitle(make({ ai_title: '/exit' })), '인증 흐름을 검토해 주세요.');
+  assert.equal(env.context.sessionDisplayTitle(make({ instructions: [{ text: '/login' }] })), '/login');
+});
+
+for (const decision of ['approve', 'reject']) test(
+  `chat memory ${decision} binds displayed revision/hash and rereads 409`,
+  async t => {
+    const env = setup(t), calls = [];
+    let conflict = true;
+    let proposal = { id: 'p1', operation: 'forget', kind: 'fact', status: 'pending', revision: 3,
+      content_hash: 'hash3', content: '<img onerror="alert(1)"> 기억 전체', reason: '이유',
+      source_content: '이 기억을 보관해 줘', source_thread_id: 't1', source_message_id: 'u1' };
+    const snapshot = { thread_id: 't1', epoch: 'boot', version: 1, state: 'running', turnInProgress: false,
+      memory: { pending_count: 1, revision: 1 }, messages: [
+        { id: 'u1', seq: 1, turn_id: 'turn', role: 'user', content: '보관 요청' },
+        { id: 'a1', seq: 2, turn_id: 'turn', role: 'assistant', content: '제안했습니다.' },
+        { id: 'n1', seq: 3, turn_id: 'turn', role: 'tool_note', content: '기억 제안', memory_proposal_id: 'p1' },
+      ] };
+    env.context.EventSource = class { addEventListener() {} close() {} };
+    env.context.fetch = async (url, options) => {
+      calls.push({ url, options }); assert.match(url, /^\/api\/session-hub\/(chat|memory)/);
+      if (url === '/api/session-hub/memory') return response({ proposals: proposal ? [proposal] : [], memories: [],
+        pending_count: proposal ? 1 : 0 });
+      if (url.endsWith('/decision')) {
+        if (conflict) {
+          conflict = false; proposal = { ...proposal, revision: 4, content_hash: 'hash4', content: '갱신된 전체 기억' };
+          return response({ error: 'proposal_conflict' }, 409);
+        }
+        proposal = null; return response({ proposal: { status: decision === 'approve' ? 'approved' : 'rejected' } });
+      }
+      return response(snapshot);
+    };
+    env.render(env.h(env.context.SessionHubChat), env.root); await flushEffects(); await flushEffects();
+    const card = () => env.root.querySelector('.session-hub-proposal');
+    assert.ok(card().textContent.includes('기억 전체')); assert.ok(card().textContent.includes('이 기억을 보관해 줘'));
+    assert.equal(card().querySelectorAll('img, [onerror]').length, 0);
+    assert.equal(card().closest('details'), null);
+    const click = async () => {
+      Array.from(card().querySelectorAll('button'))
+        .find(node => node.textContent === (decision === 'approve' ? '기억' : '거절'))
+        .click(); await flushEffects(); await flushEffects();
+    };
+    await click();
+    assert.ok(card().textContent.includes('갱신된 전체 기억'));
+    assert.ok(env.root.textContent.includes('기억이 바뀌었습니다. 다시 확인해 주세요.'));
+    let posts = calls.filter(call => call.url.endsWith('/decision'));
+    assert.deepEqual(JSON.parse(posts[0].options.body), { decision, revision: 3, content_hash: 'hash3' });
+    await click(); assert.equal(card(), null);
+    posts = calls.filter(call => call.url.endsWith('/decision'));
+    assert.deepEqual(JSON.parse(posts[1].options.body), { decision, revision: 4, content_hash: 'hash4' });
+    assert.ok(!calls.some(call => /router|conversations/.test(call.url)));
+  });
+
+test('previous threads keep read-only paging, full retrieval, deletion and current drafts', async t => {
+  const env = setup(t), calls = [], sources = [];
+  let deleted = false;
+  const snapshot = { thread_id: 'current', epoch: 'boot', version: 1, state: 'running', messages: [
+    { id: 'c', seq: 1, role: 'assistant', content: '현재 답변' },
+  ], turnInProgress: false };
+  env.context.EventSource = class { constructor() { sources.push(this); } addEventListener() {} close() {} };
+  env.context.fetch = async (url, options) => {
+    calls.push({ url, options }); assert.match(url, /^\/api\/session-hub\/chat\//);
+    if (url.endsWith('/threads')) return response({ threads: [{ id: 'current', title: '현재' },
+      ...deleted ? [] : [{ id: 'old', title: '이전 질문' }]] });
+    if (options.method === 'DELETE') { assert.ok(url.endsWith('/threads/old')); deleted = true; return response({}); }
+    if (url.endsWith('/messages/a')) return response({ id: 'a', content: '이전 전체 답변' });
+    if (url.includes('before=10')) return response({ messages: [{ id: 'u', seq: 9, role: 'user', content: '이전 발언' }] });
+    if (url.includes('/threads/old/messages')) return response({ messages: [
+      { id: 'a', seq: 10, role: 'assistant', content: '이전 답변', truncated: true },
+    ] });
+    return response(snapshot);
+  };
+  env.render(env.h(env.context.SessionHubChat), env.root); await flushEffects(); await flushEffects();
+  const input = env.root.querySelector('textarea');
+  input.value = '현재 초안'; input.dispatchEvent(new env.window.Event('input', { bubbles: true })); await flushEffects();
+  const click = async label => {
+    Array.from(env.root.querySelectorAll('button')).find(node => node.textContent.trim() === label).click();
+    await flushEffects();
+  };
+  await click('이전 대화');
+  assert.equal(env.root.querySelector('[aria-label="현재 삭제"]'), null);
+  await click('이전 질문 · 읽기 전용');
+  assert.equal(input.disabled, true); assert.equal(env.root.querySelector('button[type="submit"]').disabled, true);
+  input.dispatchEvent(new env.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await click('전체 보기'); assert.ok(env.root.textContent.includes('이전 전체 답변'));
+  env.root.querySelector('[role="log"]').dispatchEvent(new env.window.Event('scroll')); await flushEffects();
+  assert.ok(env.root.textContent.includes('이전 발언'));
+  await click('현재 대화로'); assert.equal(input.value, '현재 초안'); assert.equal(input.disabled, false);
+  assert.ok(env.root.textContent.includes('현재 답변'));
+  await click('이전 대화'); await click('이전 질문 · 읽기 전용'); await click('삭제');
+  assert.ok(env.root.textContent.includes('현재 답변')); assert.equal(input.value, '현재 초안');
+  assert.equal(calls.filter(call => call.options.method === 'DELETE').length, 1);
+  assert.equal(calls.filter(call => call.options.method === 'POST').length, 0); assert.equal(sources.length, 1);
+});
+
+test('memory scope lists, edits, archives and approves assistant memory using cookie APIs and revisions', async t => {
+  const env = setup(t), calls = [];
+  env.context.addToast = () => {};
+  env.context.sseBroker = { subscribe: () => () => {} };
+  env.loadComponent('EmptyState'); env.loadComponent('Modal'); env.loadComponent('MemoryView');
+  let item = { id: 'm1', kind: 'preference', content: '한국어로 답변', revision: 2, status: 'active' };
+  let proposal = { id: 'p', operation: 'add', kind: 'fact', content: '기억 제안 전체', revision: 1,
+    content_hash: 'h', source_content: '출처 발언', status: 'pending' };
+  let conflict = true;
+  env.context.apiFetch = async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url === '/api/operator/profiles') return { profiles: [] };
+    if (url === '/api/memory/status') return {};
+    if (url.startsWith('/api/master-memory')) return { memory: [] };
+    assert.match(url, /^\/api\/session-hub\/memory/);
+    if (options.method === 'PATCH') {
+      const body = JSON.parse(options.body); assert.equal(body.revision, item.revision);
+      if (conflict) { conflict = false; item = { ...item, revision: 3, content: '서버에서 수정됨' };
+        throw Object.assign(new Error('conflict'), { status: 409 }); }
+      item = { ...item, ...body, revision: 4 }; return item;
+    }
+    if (url.endsWith('/archive')) {
+      assert.equal(JSON.parse(options.body).revision, 4);
+      item = { ...item, status: 'archived', revision: 5 }; return item;
+    }
+    if (url.endsWith('/decision')) {
+      assert.deepEqual(JSON.parse(options.body), { decision: 'approve', revision: 1, content_hash: 'h' });
+      proposal = null; return {};
+    }
+    return { memories: [item], proposals: proposal ? [proposal] : [], pending_count: proposal ? 1 : 0 };
+  };
+  env.render(env.h(env.context.MemoryView), env.root); await flushEffects(); await flushEffects();
+  const click = async label => {
+    Array.from(env.root.querySelectorAll('button')).find(node => node.textContent.trim() === label).click();
+    await flushEffects(); await flushEffects();
+  };
+  await click('비서 기억'); assert.ok(env.root.querySelector('[aria-label="비서 기억"]').textContent.includes('한국어로 답변'));
+  await click('수정');
+  let input = env.root.querySelector('[aria-label="비서 기억 내용"]');
+  input.value = '간단히 답변'; input.dispatchEvent(new env.window.Event('input', { bubbles: true })); await flushEffects();
+  await click('저장'); assert.ok(env.root.textContent.includes('기억이 바뀌었습니다. 다시 확인해 주세요.'));
+  await click('취소'); await click('수정');
+  input = env.root.querySelector('[aria-label="비서 기억 내용"]');
+  input.value = '간단히 답변'; input.dispatchEvent(new env.window.Event('input', { bubbles: true })); await flushEffects();
+  await click('저장');
+  Array.from(env.root.querySelectorAll('.assistant-memory-item button')).find(node => node.textContent.trim() === '보관')
+    .click(); await flushEffects(); await flushEffects(); await click('보관');
+  assert.ok(env.root.textContent.includes('간단히 답변'));
+  await click('승인 대기 1'); await click('기억'); assert.equal(env.root.querySelector('.session-hub-proposal'), null);
+  assert.ok(!calls.some(call => /router|conversations/.test(call.url)));
+});
+
+test('sidebar controls stay in a compact normal-flow header and navigation uses borderless rows', async t => {
+  const env = setup(t), { alpha } = fixture(t);
+  const style = env.document.createElement('style');
+  style.textContent = fs.readFileSync(path.join(publicRoot, 'styles/tokens.css'), 'utf8')
+    + fs.readFileSync(path.join(publicRoot, 'styles.css'), 'utf8');
+  env.document.head.append(style);
+  env.context.apiFetch = async () => ({ enabled: true, targets: [] });
+  const cards = env.context.snapshotCards(alpha), now = Date.parse(alpha.generated_at);
+  const data = { cards, now, loading: false, reload: () => {}, load: { rev: REV, snapshots: [alpha], failures: [],
+    entries: [{ machine_id: 'alpha', machine_label: 'Mac', generated_at: alpha.generated_at }] } };
+  env.render(env.h('div', { class: 'session-hub-manager' },
+    env.h(env.context.SessionHubSidebar, { data, onAssistant: () => {}, onConversation: () => {},
+      onWork: () => {}, onOpenSession: () => {} })), env.root); await flushEffects();
+  const computed = selector => env.window.getComputedStyle(env.root.querySelector(selector));
+  assert.equal(computed('.session-hub-sidebar-header').position, 'static');
+  assert.equal(computed('.session-hub-sidebar-header').display, 'grid');
+  assert.equal(computed('.session-hub-filters').display, 'grid');
+  assert.equal(computed('.session-hub-filters .dropdown-button').height, '28px');
+  assert.equal(env.root.querySelectorAll('.session-hub-filters .dropdown-button').length, 3);
+  assert.equal(env.root.querySelectorAll('.session-hub-sidebar-header > button').length, 0);
+  assert.equal(env.root.querySelectorAll('.work-header, .work-snapshot-times').length, 0);
+  assert.equal(computed('.session-hub-nav').borderTopStyle, 'none');
+  assert.equal(env.root.querySelector('.session-hub-nav').getAttribute('aria-current'), 'page');
+  assert.equal(computed('.session-hub-group-title').fontSize, '11px');
+  env.render(env.h(env.context.SessionHubDetail, { data, selection: { key: cards[0].key } }), env.root);
+  await flushEffects();
+  assert.equal(env.root.querySelectorAll('.work-orca').length, 0);
+  assert.equal(env.root.querySelectorAll('.session-hub-detail-header .work-meta').length, 1);
 });

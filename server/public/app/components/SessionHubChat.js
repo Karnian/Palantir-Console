@@ -1,6 +1,8 @@
 import { h } from '../../vendor/preact.module.js';
 import { useEffect, useMemo, useRef, useState } from '../../vendor/hooks.module.js';
 import htm from '../../vendor/htm.module.js';
+import { useAssistantMemory } from '../lib/hooks/useAssistantMemory.js';
+import { AssistantMemoryProposal } from './AssistantMemory.js';
 import { apiFetch } from '../lib/api.js';
 import { renderMarkdown } from '../lib/markdown.js';
 import { sessionEvidenceLabel } from '../lib/workBoard.js';
@@ -127,6 +129,19 @@ const statusLabels = { idle: '중지됨', starting: '시작 중', running: '조�
   closed: '종료됨', error: '오류' };
 export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch, draft }) {
   const [state, setState] = useState(initialState);
+  const [threadList, setThreadList] = useState(null);
+  const [viewedThread, setViewedThread] = useState(null);
+  const [threadBusy, setThreadBusy] = useState(false);
+  const threadGeneration = useRef(0);
+  const displayThread = useRef(null);
+  displayThread.current = viewedThread?.id || state.thread_id;
+  const readOnly = !!viewedThread;
+  const thread = viewedThread?.id || state.thread_id;
+  const windowMessages = viewedThread?.messages || state.messages;
+  const proposalIds = windowMessages.filter(message => message.memory_proposal_id)
+    .map(message => message.memory_proposal_id);
+  const memory = useAssistantMemory({ enabled: !!state.memory?.pending_count || !!proposalIds.length,
+    refreshKey: `${state.epoch}:${state.memory?.revision}:${state.memory?.pending_count}:${proposalIds.join(',')}` });
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
   const [localTransition, setLocalTransition] = useState('');
@@ -144,9 +159,10 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch, draft
   const alive = useRef(false);
   useEffect(() => {
     if (!draft) return;
+    threadGeneration.current++; setViewedThread(null); setThreadBusy(false);
     if (draft.text !== undefined) setText(draft.text);
-    inputRef.current?.focus();
   }, [draft]);
+  useEffect(() => { if (draft && !readOnly) inputRef.current?.focus(); }, [draft, readOnly]);
   const epoch = useRef(null);
   const version = useRef(-1);
   const applied = useRef(0);
@@ -243,7 +259,8 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch, draft
           + '전달되지 않았을 수 있습니다. 다시 보내 주세요.');
       }
       if (name === 'threads' && value.thread_id === currentThread.current && value.epoch === epoch.current) {
-        retry.current = null; setText(''); setNotice('새 대화를 시작했습니다.');
+        retry.current = null; threadGeneration.current++; setViewedThread(null); setThreadList(null);
+        setThreadBusy(false); setText(''); setNotice('새 대화를 시작했습니다.');
       }
     } catch (err) {
       if (alive.current) {
@@ -254,44 +271,83 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch, draft
       if (alive.current) { setBusy(false); setLocalTransition(''); }
     }
   };
+  const listThreads = async () => {
+    const sequence = ++threadGeneration.current;
+    setThreadBusy(true); setError('');
+    try {
+      const value = await apiFetch('/api/session-hub/chat/threads',
+        { signal: controller.current.signal, allowAppForbidden: true });
+      if (alive.current && sequence === threadGeneration.current) setThreadList(value.threads);
+    } catch { if (alive.current && sequence === threadGeneration.current) setError('대화 목록을 읽지 못했습니다.'); }
+    finally { if (alive.current && sequence === threadGeneration.current) setThreadBusy(false); }
+  };
+  const openThread = async item => {
+    if (item.id === currentThread.current) {
+      threadGeneration.current++; setViewedThread(null); setThreadBusy(false); return;
+    }
+    const sequence = ++threadGeneration.current;
+    setThreadBusy(true); setError('');
+    try {
+      const value = await apiFetch(`/api/session-hub/chat/threads/${encodeURIComponent(item.id)}/messages?limit=50`,
+        { signal: controller.current.signal, allowAppForbidden: true });
+      if (alive.current && sequence === threadGeneration.current && item.id !== currentThread.current) {
+        setViewedThread({ ...item, messages: value.messages }); setThreadList(null);
+      }
+    } catch { if (alive.current && sequence === threadGeneration.current) setError('이전 대화를 읽지 못했습니다.'); }
+    finally { if (alive.current && sequence === threadGeneration.current) setThreadBusy(false); }
+  };
+  const deleteThread = async item => {
+    if (threadBusy || item.id === currentThread.current) return;
+    const sequence = ++threadGeneration.current;
+    setThreadBusy(true); setError('');
+    try {
+      await apiFetch(`/api/session-hub/chat/threads/${encodeURIComponent(item.id)}`,
+        { method: 'DELETE', signal: controller.current.signal, allowAppForbidden: true });
+      if (!alive.current || sequence !== threadGeneration.current) return;
+      if (viewedThread?.id === item.id) setViewedThread(null);
+      setThreadList(current => current?.filter(value => value.id !== item.id) || null);
+      setNotice('이전 대화를 삭제했습니다.');
+    } catch { if (alive.current && sequence === threadGeneration.current) setError('대화를 삭제하지 못했습니다.'); }
+    finally { if (alive.current && sequence === threadGeneration.current) setThreadBusy(false); }
+  };
   const loadOlder = async () => {
-    if (paging.current || !state.thread_id || (history.thread === state.thread_id && history.exhausted)) return;
-    const older = history.thread === state.thread_id ? history.messages : [];
-    const before = Math.min(...[...older, ...state.messages].map(message => message.seq));
+    if (paging.current || !thread || (history.thread === thread && history.exhausted)) return;
+    const older = history.thread === thread ? history.messages : [];
+    const before = Math.min(...[...older, ...windowMessages].map(message => message.seq));
     if (!Number.isSafeInteger(before) || before <= 1) return;
     paging.current = true;
-    const thread = state.thread_id, requestedEpoch = epoch.current;
+    const requestedEpoch = epoch.current;
     const scroller = scrollRef.current, height = scroller?.scrollHeight || 0;
     try {
       const value = await apiFetch(`/api/session-hub/chat/threads/${encodeURIComponent(thread)}/messages`
         + `?before=${before}&limit=50`, { signal: controller.current.signal, allowAppForbidden: true });
-      if (!alive.current || thread !== currentThread.current || requestedEpoch !== epoch.current) return;
+      if (!alive.current || thread !== displayThread.current || requestedEpoch !== epoch.current) return;
       setHistory({ thread, messages: [...value.messages, ...older], exhausted: !value.messages.length });
       requestAnimationFrame(() => {
-        if (alive.current && currentThread.current === thread && scroller) {
+        if (alive.current && displayThread.current === thread && scroller) {
           scroller.scrollTop += scroller.scrollHeight - height;
         }
       });
-    } catch { if (alive.current) setError('이전 메시지를 읽지 못했습니다.'); }
+    } catch { if (alive.current && displayThread.current === thread) setError('이전 메시지를 읽지 못했습니다.'); }
     finally { paging.current = false; }
   };
   const showFull = async message => {
-    const thread = state.thread_id, requestedEpoch = epoch.current;
+    const requestedEpoch = epoch.current;
     try {
       const value = await apiFetch(`/api/session-hub/chat/threads/${encodeURIComponent(thread)}/messages/`
         + encodeURIComponent(message.id), { signal: controller.current.signal, allowAppForbidden: true });
-      if (alive.current && currentThread.current === thread && requestedEpoch === epoch.current) {
+      if (alive.current && displayThread.current === thread && requestedEpoch === epoch.current) {
         setFullMessages(current => ({ ...current, [`${thread}:${message.id}`]: value.content }));
       }
-    } catch { if (alive.current) setError('메시지를 읽지 못했습니다.'); }
+    } catch { if (alive.current && displayThread.current === thread) setError('메시지를 읽지 못했습니다.'); }
   };
   const rendered = useMemo(() => {
     const evidence = [];
-    const recentIds = new Set(state.messages.map(message => message.id));
-    const previous = history.thread === state.thread_id
+    const recentIds = new Set(windowMessages.map(message => message.id));
+    const previous = history.thread === thread
       ? history.messages.filter(message => !recentIds.has(message.id)) : [];
-    const messages = [...previous, ...state.messages].map(message => {
-      const full = fullMessages[`${state.thread_id}:${message.id}`];
+    const messages = [...previous, ...windowMessages].map(message => {
+      const full = fullMessages[`${thread}:${message.id}`];
       const text = full ?? message.content;
       return { ...message, text, truncated: message.truncated && full === undefined,
         rendered: message.role === 'assistant'
@@ -300,7 +356,7 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch, draft
     const mismatch = !!panel?.rev && evidence.some(item => item.rev !== panel.rev
       && panel.cards.some(card => card.key === item.key));
     return { messages: groupHubMessages(messages), mismatch };
-  }, [state.messages, state.thread_id, history, fullMessages, panel, onOpenSession]);
+  }, [windowMessages, thread, history, fullMessages, panel, onOpenSession]);
   useEffect(() => {
     onRevisionMismatch?.(rendered.mismatch);
     return () => onRevisionMismatch?.(false);
@@ -308,7 +364,7 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch, draft
   const running = state.state === 'running';
   const transitioning = ['starting', 'closing', 'closed'].includes(state.state);
   const disabled = busy || transitioning || !!state.disabled;
-  const canSend = !disabled && (running || state.state === 'idle' || state.state.startsWith('error'))
+  const canSend = !readOnly && !disabled && (running || state.state === 'idle' || state.state.startsWith('error'))
     && !state.turnInProgress && !!text.trim();
   const send = () => { if (canSend) action('message', { text }); };
   const handleKeyDown = event => {
@@ -317,19 +373,55 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch, draft
   };
   return html`<section class="session-hub-chat" aria-label="세션 비서 채팅">
     <header class="manager-chat-header">
-      <div class="manager-panel-title">
-      <span class="manager-status-badge ${state.turnInProgress ? 'running' : 'idle'}"
-        role="status">${state.turnInProgress ? '답변 중'
-          : statusLabels[localTransition || state.state] || '오류'}</span></div>
-      <div class="manager-panel-actions">
-        <button type="button" class="ghost" disabled=${disabled || running}
-          onClick=${() => action('start')}>시작</button>
-        <button type="button" class="ghost" disabled=${busy || !running}
-          onClick=${() => action('stop')}>중지</button>
+      <div class="session-hub-chat-title">
+        <span class="session-status-dot ${state.turnInProgress || localTransition
+          ? 'working' : running ? 'ended' : 'unknown'}"
+          aria-hidden="true" />
+        <span>세션 비서</span>
+        <span class="manager-status-badge ${state.turnInProgress ? 'running' : 'idle'}" role="status">
+          ${state.turnInProgress ? '답변 중' : statusLabels[localTransition || state.state] || '오류'}</span>
+      </div>
+      <div class="session-hub-chat-actions">
         <button type="button" class="ghost" disabled=${busy || transitioning || state.turnInProgress}
           onClick=${() => action('threads')}>새 대화</button>
+        <details class="session-hub-menu" onKeyDown=${event => {
+          if (event.key === 'Escape') {
+            event.currentTarget.open = false; event.currentTarget.querySelector('summary').focus();
+          }
+        }}>
+          <summary class="ghost session-hub-icon" aria-label="대화 메뉴">⋯</summary>
+          <div class="session-hub-menu-content">
+            <button type="button" class="ghost" disabled=${threadBusy} onClick=${event => {
+              event.currentTarget.closest('details').open = false; void listThreads();
+            }}>이전 대화</button>
+            <button type="button" data-action="start" class="ghost" disabled=${disabled || running}
+              onClick=${() => action('start')}>시작</button>
+            <button type="button" class="ghost" disabled=${busy || !running}
+              onClick=${() => action('stop')}>중지</button>
+          </div>
+        </details>
       </div>
     </header>
+    ${threadList && html`<section class="session-hub-thread-list" aria-label="이전 대화 목록">
+      <button class="ghost" type="button" onClick=${() => {
+        threadGeneration.current++; setThreadList(null); setThreadBusy(false);
+      }}>닫기</button>
+      ${threadList.map(item => html`<div key=${item.id} class="session-hub-thread-row">
+        <button class="ghost" type="button" disabled=${threadBusy} onClick=${() => openThread(item)}>
+          ${item.title}${item.id === state.thread_id ? ' · 현재' : ' · 읽기 전용'}</button>
+        ${item.id !== state.thread_id && html`<button class="ghost" type="button" disabled=${threadBusy}
+          aria-label=${`${item.title} 삭제`} onClick=${() => deleteThread(item)}>삭제</button>`}
+      </div>`)}
+      ${!threadList.length && html`<p>이전 대화가 없습니다.</p>`}
+    </section>`}
+    ${threadBusy && html`<p class="session-hub-note" role="status">대화 읽는 중</p>`}
+    ${viewedThread && html`<div class="session-hub-readonly"><span>${viewedThread.title} · 읽기 전용</span>
+      <button class="ghost" type="button" onClick=${() => {
+        threadGeneration.current++; setViewedThread(null); setThreadBusy(false);
+      }}>
+        현재 대화로</button>
+      <button class="ghost" type="button" disabled=${threadBusy} onClick=${() => deleteThread(viewedThread)}>삭제</button>
+    </div>`}
     ${state.transcripts_remaining > 0 && html`<p class="session-hub-note" role="status">
       정리할 기록 파일 ${state.transcripts_remaining}개</p>`}
     ${error && html`<p class="session-hub-error" role="alert">${error}</p>`}
@@ -342,14 +434,19 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch, draft
       }} tabindex="0" role="log" aria-label="세션 비서 대화">
       ${notice && html`<p class="session-hub-note" role="status">${notice}</p>`}
       ${sendNotice && html`<p class="session-hub-note" role="status">${sendNotice}</p>`}
-      ${!state.messages.length && html`<p class="session-hub-empty">
+      ${!windowMessages.length && html`<p class="session-hub-empty">
         여러 머신의 세션을 물어보세요 — '아까 orca 상위 레이어 얘기한 세션 어디야?'</p>`}
       ${rendered.messages.map((message, index) => message.role === 'tools' ? html`
-        <details key=${message.id || index} class="session-hub-tools">
+        <div key=${message.id || index}><details class="session-hub-tools">
           <summary>도구 ${message.tools.length}회 사용 ▸</summary>
           <ul>${message.tools.map((tool, toolIndex) => html`<li key=${toolIndex}>
             ${tool.content}</li>`)}</ul>
-        </details>` : message.role === 'system_note' && message.status === 'error' ? html`
+        </details>
+        ${message.tools.filter(tool => tool.memory_proposal_id).map(tool => {
+          const proposal = memory.data.proposals.find(item => item.id === tool.memory_proposal_id);
+          return proposal && html`<${AssistantMemoryProposal} key=${proposal.id} proposal=${proposal}
+            busy=${memory.busy} readOnly=${readOnly} onDecision=${memory.decide} />`;
+        })}</div>` : message.role === 'system_note' && message.status === 'error' ? html`
           <p key=${message.id || index} class="session-hub-error"
             role="alert">${hubErrorLabels[message.text] || message.text}</p>` : html`
           <div key=${message.id || index}
@@ -363,10 +460,16 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch, draft
                 onClick=${() => showFull(message)}>전체 보기</button>`}
             </div>
           </div>`)}
+      ${memory.data.proposals.filter(proposal => proposal.source_thread_id === thread
+        && !proposalIds.includes(proposal.id)).map(proposal => html`<${AssistantMemoryProposal}
+          key=${proposal.id} proposal=${proposal} busy=${memory.busy}
+          readOnly=${readOnly} onDecision=${memory.decide} />`)}
+      ${memory.notice && html`<p class="session-hub-note" role="status">${memory.notice}</p>`}
+      ${memory.error && html`<p class="session-hub-error" role="alert">${memory.error}</p>`}
       <div ref=${messagesEnd} />
     </div>
     <form class="session-hub-input" onSubmit=${event => { event.preventDefault(); send(); }}>
-      <textarea ref=${inputRef} aria-label="세션 비서에게 질문" value=${text} rows="2" disabled=${disabled}
+      <textarea ref=${inputRef} aria-label="세션 비서에게 질문" value=${text} rows="2" disabled=${disabled || readOnly}
         onKeyDown=${handleKeyDown} oncompositionstart=${() => { composing.current = true; }}
         oncompositionend=${() => { composing.current = false; }}
         placeholder="모든 세션에 대해 물어보세요" onInput=${event => setText(event.target.value)} />

@@ -19,15 +19,25 @@ async function mockSessionHub(page, { observe = true, clock = true, longText = f
     }
     for (const instruction of alpha.instructions) instruction.text += ` ${'긴지시본문'.repeat(200)}`;
   }
+  alpha.sessions[0].status = { state: 'working', source: 'orca', evidence_at: alpha.generated_at, reason: null };
+  alpha.sessions[1].status = { state: 'working', source: 'transcript',
+    evidence_at: '2026-10-01T00:00:00Z', reason: 'turn_open' };
+  beta.sessions[0].status = { state: 'ended', source: 'transcript', evidence_at: beta.generated_at, reason: null };
   const key = alpha.sessions[0].key;
-  let state = { epoch: 'visual-boot', version: 1, state: 'running', generation: 1, turnInProgress: false, messages: [
-    { role: 'user', text: '지금 각 세션 뭐 하고 있어?' },
-    { role: 'tool', name: 'mcp__session_hub__search_instructions', text: '{"q":"인증","cursor":"next"}' },
-    { role: 'tool', name: 'mcp__session_hub__get_session', text: JSON.stringify({ key }) },
-    { role: 'assistant', text: '## 검토 결과\n\n- Mac에서 인증 흐름을 검토했습니다. '
-      + `[[session:${key}@${REV}]]`
-      + (longText ? `\n\n${'긴답변'.repeat(20)}\n\n\`\`\`\n${'long-code-'.repeat(100)}\n\`\`\`` : '') },
-  ] };
+  let proposals = [{ id: 'proposal-1', operation: 'add', kind: 'preference', content: '한국어로 간단히 답변',
+    reason: '사용자 요청', revision: 1, content_hash: HASH, source_content: '한국어로 간단히 답해 줘',
+    source_thread_id: 'thread-1', source_message_id: 'user-1', status: 'pending' }];
+  let state = { thread_id: 'thread-1', epoch: 'visual-boot', version: 1, state: 'running', generation: 1,
+    memory: { pending_count: 1, revision: 0 }, turnInProgress: false, messages: [
+      { id: 'user-1', seq: 1, turn_id: 'turn-1', role: 'user', content: '지금 각 세션 뭐 하고 있어?' },
+      { id: 'answer-1', seq: 2, turn_id: 'turn-1', role: 'assistant', status: 'complete',
+        content: '## 검토 결과\n\n- Mac에서 인증 흐름을 검토했습니다. ' + `[[session:${key}@${REV}]]`
+          + (longText ? `\n\n${'긴답변'.repeat(20)}\n\n\`\`\`\n${'long-code-'.repeat(100)}\n\`\`\`` : '') },
+      { id: 'tool-1', seq: 3, turn_id: 'turn-1', role: 'tool_note', content: '검색: 인증' },
+      { id: 'tool-2', seq: 4, turn_id: 'turn-1', role: 'tool_note', content: '세션 열기: 인증 검토',
+        memory_proposal_id: 'proposal-1' },
+    ] };
+  let threads = [{ id: 'thread-1', title: '현재 대화' }, { id: 'thread-old', title: '이전 검토' }];
   if (clock) await page.clock.install({ time: new Date('2026-10-10T03:10:00.000Z') });
   await page.route('**/api/health', route => route.fulfill({ json: { sessionHubActive: true } }));
   if (observe) await page.route('**/api/observe/snapshots**', route => {
@@ -39,29 +49,44 @@ async function mockSessionHub(page, { observe = true, clock = true, longText = f
     ] } });
     return route.fulfill({ json: url.pathname.endsWith('/alpha') ? alpha : beta });
   });
-  await page.route('**/api/session-hub/chat/*', route => {
-    const name = new URL(route.request().url()).pathname.split('/').at(-1);
+  await page.route('**/api/session-hub/snapshots/**', route => route.fulfill({ json: {
+    enabled: true, targets: [
+      { name: 'mac', running: false, last_success_at: alpha.generated_at, last_result: { code: 'ok' } },
+      { name: 'codev2', running: false, last_success_at: beta.generated_at, last_result: { code: 'ok' } }],
+  }, status: route.request().method() === 'POST' ? 202 : 200 }));
+  await page.route('**/api/session-hub/memory**', route => {
+    if (route.request().method() === 'POST') proposals = [];
+    return route.fulfill({ json: { memories: [], proposals, pending_count: proposals.length, revision: 0 } });
+  });
+  await page.route('**/api/session-hub/chat/**', route => {
+    const url = new URL(route.request().url()), name = url.pathname.split('/').at(-1);
+    const method = route.request().method();
     if (name === 'stream') return route.fulfill({ status: 200, contentType: 'text/event-stream',
       body: `event: snapshot\ndata: ${JSON.stringify(state)}\n\n` });
-    if (name === 'clear') state = { ...state, messages: [], result: 'incomplete', remaining: 2 };
+    if (name === 'threads' && method === 'GET') return route.fulfill({ json: { threads } });
+    if (method === 'DELETE') {
+      threads = threads.filter(thread => !url.pathname.endsWith(`/${thread.id}`));
+      return route.fulfill({ json: {} });
+    }
+    if (name === 'messages') return route.fulfill({ json: { thread_id: 'thread-old', messages: [
+      { id: 'old-answer', seq: 1, role: 'assistant', content: '이전 대화 기록입니다.', status: 'complete' },
+    ] } });
+    if (name === 'threads') state = { ...state, thread_id: 'thread-2', messages: [] };
     if (name === 'stop') state = { ...state, state: 'idle' };
     if (name === 'start') state = { ...state, state: 'running' };
     if (name === 'message') state = { ...state, messages: [...state.messages,
-      { role: 'user', text: route.request().postDataJSON().text },
-      { role: 'assistant', text: `인증 세션입니다. [[session:${key}@${REV}]]` }] };
-    if (route.request().method() === 'POST') state = { ...state, version: state.version + 1 };
+      { id: 'user-next', seq: 5, role: 'user', content: route.request().postDataJSON().text },
+      { id: 'answer-next', seq: 6, role: 'assistant', content: `인증 세션입니다. [[session:${key}@${REV}]]` }] };
+    if (method === 'POST') state = { ...state, version: state.version + 1 };
     return route.fulfill({ json: state });
   });
 }
 
 async function expectNoHorizontalOverflow(page) {
   const { expect } = require('@playwright/test');
-  await expect.poll(() => page.evaluate(() => {
-    const root = document.documentElement;
-    return root.scrollWidth <= root.clientWidth;
-  })).toBe(true);
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth
+    <= document.documentElement.clientWidth)).toBe(true);
   const clientWidth = await page.evaluate(() => document.documentElement.clientWidth);
-  // The app shell clips overflow; also guard against a panel extending beyond the viewport.
   for (const selector of ['.session-hub-chat', '.all-sessions-panel', '.work-search', '.session-row']) {
     for (const element of await page.locator(selector).all()) {
       if (!await element.isVisible()) continue;
@@ -71,4 +96,35 @@ async function expectNoHorizontalOverflow(page) {
     }
   }
 }
-module.exports = { mockSessionHub, expectNoHorizontalOverflow };
+async function expectAssistantLayout(page) {
+  const { expect } = require('@playwright/test');
+  await expectNoHorizontalOverflow(page);
+  const sidebar = page.locator('.session-hub-sidebar');
+  if (await sidebar.isVisible()) {
+    const box = await sidebar.boundingBox(), header = await page.locator('.session-hub-sidebar-header').boundingBox();
+    expect(header.x).toBeGreaterThanOrEqual(box.x);
+    expect(header.x + header.width).toBeLessThanOrEqual(box.x + box.width + 1);
+    expect(header.height).toBeLessThan(145);
+    const filters = await page.locator('.session-hub-filters .dropdown-button').all();
+    const boxes = await Promise.all(filters.map(button => button.boundingBox()));
+    expect(boxes).toHaveLength(3);
+    for (const filter of boxes) {
+      expect(Math.abs(filter.y - boxes[0].y)).toBeLessThan(2);
+      expect(filter.height).toBe(28);
+      expect(filter.x + filter.width).toBeLessThanOrEqual(box.x + box.width + 1);
+    }
+    if (page.viewportSize().width >= 900) {
+      expect(box.width).toBeGreaterThanOrEqual(260); expect(box.width).toBeLessThanOrEqual(300);
+      const chat = await page.locator('.session-hub-chat').boundingBox();
+      expect(box.x + box.width).toBeLessThanOrEqual(chat.x + 1);
+      expect(header.y + header.height).toBeLessThanOrEqual(box.y + box.height);
+      if (page.viewportSize().width >= 1280) {
+        const right = await page.locator('.session-hub-panel-side').boundingBox();
+        expect(chat.x + chat.width).toBeLessThanOrEqual(right.x + 1);
+      }
+    }
+  }
+  await expect(page.locator('.session-hub-chat .session-hub-snapshot-line')).toHaveCount(0);
+  await expect(page.locator('.session-hub-chat .work-header')).toHaveCount(0);
+}
+module.exports = { mockSessionHub, expectNoHorizontalOverflow, expectAssistantLayout };

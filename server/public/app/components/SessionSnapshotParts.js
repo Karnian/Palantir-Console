@@ -4,7 +4,8 @@ import htm from '../../vendor/htm.module.js';
 import { WORK_BOARD_LABELS as W } from '../lib/copy.js';
 import { snapshotCards, rankCards, highlightParts, matchedLines,
   coverageCounts, formatLocalSnapshotTime, cardLineVisibility,
-  displayInstructionText, sessionDisplayTitle } from '../lib/workBoard.js';
+  displayInstructionText, sessionDisplayTitle, sessionDisplayState, sessionDisplayStatusLabel
+} from '../lib/workBoard.js';
 
 const html = htm.bind(h);
 
@@ -64,15 +65,15 @@ export function Instruction({ instruction, query, now }) {
   </li>`;
 }
 
-export function SessionRow({ card, query, now, onOpen, compact = false }) {
+export function SessionRow({ card, query, now, onOpen, compact = false, selected = false }) {
   const title = sessionDisplayTitle(card);
   const recent = card.recent || (card.instructions.length ? W.missing : W.noInstruction);
-  const status = card.status || { state: 'unknown' };
-  const stateLabel = W.states[status.state] || W.states.unknown;
+  const displayState = sessionDisplayState(card, now);
+  const stateLabel = sessionDisplayStatusLabel(card, now);
   return html`<button class="ghost work-card session-row" type="button"
-    data-session-key=${card.key}
+    data-session-key=${card.key} aria-current=${selected ? 'true' : null}
     aria-label=${`${card.machine.label} · ${title} · ${stateLabel}`} onClick=${() => onOpen(card.key)}>
-    <span class="work-title"><span class="session-status-dot ${status.state}"
+    <span class="work-title"><span class="session-status-dot ${displayState}"
       title=${stateLabel} aria-label=${stateLabel} /><${Highlight} text=${title} query=${query}
       transformed=${card.titleTransformed} /></span>
     <span class="work-meta">${`${card.machine.label} · ${card.repo_label || W.repoUnknown} · `}
@@ -84,7 +85,7 @@ export function SessionRow({ card, query, now, onOpen, compact = false }) {
   </button>`;
 }
 
-export function SessionCard({ card, query, rank, now, onOpen, timeline = false }) {
+export function SessionCard({ card, query, rank, now, onOpen, timeline = false, showStatus = true }) {
   const [expanded, setExpanded] = useState(timeline);
   const first = card.first_instruction === 'unrecoverable' ? W.unrecoverable
     : card.first_instruction === 'unknown' ? W.unknownFirst : card.first || W.missing;
@@ -121,8 +122,8 @@ export function SessionCard({ card, query, rank, now, onOpen, timeline = false }
     </div>`}
     <div class="work-meta"><span>${W.lastObserved}</span>
       <${SnapshotTime} value=${card.last_record_at} now=${now} /></div>
-    <div class="work-meta work-orca"><span>${W.states[card.status.state]}</span>
-      <${SnapshotTime} value=${card.status.evidence_at} now=${now} label="근거" /></div>
+    ${showStatus && html`<div class="work-meta work-orca"><span>${W.states[card.status.state]}</span>
+      <${SnapshotTime} value=${card.status.evidence_at} now=${now} label="근거" /></div>`}
     ${(card.compact_only_history || card.unknown_count > 0) && html`<div class="work-meta">
       ${card.compact_only_history && html`<span class="work-warning">${W.compact}</span>`}
       ${card.unknown_count > 0 && html`<span class="work-warning">
