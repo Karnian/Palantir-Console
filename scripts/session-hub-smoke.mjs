@@ -4,7 +4,6 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
-import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createRequire } from 'node:module';
@@ -19,12 +18,7 @@ const exec = promisify(execFile);
 const result = { ok: false, checks: {}, diagnostics: {}, errors: [] };
 let service;
 let server;
-let markerFile;
-let original;
-let planted;
-let originalMode;
 let temporary;
-let backupFile;
 const abort = new AbortController();
 const interrupt = () => {
   abort.abort();
@@ -35,10 +29,11 @@ process.on('SIGTERM', interrupt);
 
 async function waitFor(check, timeoutMs = 180000) {
   const deadline = Date.now() + timeoutMs;
-  while (!check()) {
+  while (true) {
     if (abort.signal.aborted) throw new Error('smoke_interrupted');
-    if (Date.now() >= deadline) throw new Error('smoke_timeout');
     if (service.state().error) throw new Error(service.state().error);
+    if (check()) return;
+    if (Date.now() >= deadline) throw new Error('smoke_timeout');
     await new Promise(resolve => setTimeout(resolve, 50));
   }
 }
@@ -71,22 +66,15 @@ try {
   await fs.chmod(temporary, 0o700);
   const root = process.env.PALANTIR_SESSION_HUB_DIR || path.join(temporary, 'session-hub');
   const home = process.env.HOME || os.homedir();
-  // Add an unpredictable marker to user instructions and restore exact prior bytes in finally.
-  markerFile = path.join(home, '.claude/CLAUDE.md');
-  await fs.mkdir(path.dirname(markerFile), { recursive: true });
-  if (!await missing(markerFile)) {
-    const info = await fs.lstat(markerFile);
-    if (!info.isFile() || info.isSymbolicLink()) throw new Error('unsafe_user_claude_md');
-    original = await fs.readFile(markerFile);
-    originalMode = info.mode & 0o777;
-    backupFile = path.join(temporary, 'claude-md.original');
-    await fs.writeFile(backupFile, original, { mode: 0o600 });
-    result.diagnostics.userInstructionsBackup = backupFile;
-  }
+  // Read existing instructions without writing, creating, backing up or restoring the user's file.
+  let userInstructionLines = null;
+  try {
+    const instructions = await fs.readFile(path.join(home, '.claude/CLAUDE.md'), 'utf8');
+    userInstructionLines = instructions.split(/\r?\n/).map(line => line.trim())
+      .filter(line => [...line].length >= 20);
+  } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  result.diagnostics.userInstructionLineCount = userInstructionLines?.length ?? 0;
   if (abort.signal.aborted) throw new Error('smoke_interrupted');
-  const sentinel = `HUB_SENTINEL_${crypto.randomBytes(16).toString('hex')}`;
-  planted = Buffer.concat([original || Buffer.alloc(0), Buffer.from(`\nStartup smoke marker: ${sentinel}\n`)]);
-  await fs.writeFile(markerFile, planted, { mode: originalMode || 0o600 });
   let broker;
   if (process.env.PALANTIR_OBSERVE_SNAPSHOT_DIR) {
     const state = sealObserveState({ dir: process.env.PALANTIR_OBSERVE_SNAPSHOT_DIR, authToken: 'smoke-only' });
@@ -125,10 +113,10 @@ try {
   await service.start();
   const leader = service.diagnostics().pgid;
   service.message('list_sessions를 limit 1로 정확히 한 번 호출해 결과를 짧게 말해라. ' +
-    '파일이나 검색 도구는 사용하지 마라. 시작 지침에서 ' +
-    'HUB_SENTINEL_로 시작하는 문자열을 ' +
-    '기억하면 전체를 답하고, 없으면 "센티넬 없음"이라고 답해라.');
-  await waitFor(() => raw.some(event => event.type === 'result'));
+    '파일이나 검색 도구는 사용하지 마라. ' +
+    (userInstructionLines === null ? '' : '시작 지침(CLAUDE.md 등)에 있는 문장을 ' +
+      '아는 대로 3개 그대로 인용하라, 없으면 "센티넬 없음"'));
+  await waitFor(() => raw.some(event => event.type === 'result') && !service.state().turnInProgress);
   await waitFor(() => mcpProcesses.some(info => info.kind === 'mcp'), 10000);
   const init = raw.find(event => event.type === 'system' && event.subtype === 'init');
   if (!init) throw new Error('init_missing');
@@ -144,11 +132,20 @@ try {
   result.checks.noSlashCommands = Array.isArray(init.slash_commands) && init.slash_commands.length === 0;
   result.checks.noSkills = Array.isArray(init.skills) && init.skills.length === 0;
   const answer = service.state().messages.filter(row => row.role === 'assistant').map(row => row.text).join('\n');
-  result.checks.userInstructionsNotInjected = !answer.includes(sentinel) && answer.includes('센티넬 없음');
+  result.checks.userInstructionsNotInjected = userInstructionLines === null ? 'skipped'
+    : !userInstructionLines.some(line => answer.includes(line)) && answer.includes('센티넬 없음');
   result.checks.mcpSharesProcessGroup = mcpProcesses.every(info => info.pgid === leader);
   result.diagnostics.mcpProcesses = mcpProcesses;
   const { cwd, transcriptDir } = service.diagnostics();
-  result.checks.expectedMemoryPath = init.memory_paths?.auto === `${transcriptDir}/memory/`;
+  if (Object.hasOwn(init, 'memory_paths')) {
+    result.checks.expectedMemoryPath = init.memory_paths?.auto === `${transcriptDir}/memory/`;
+    result.diagnostics.pathVerification = 'memory_paths';
+  } else {
+    const info = await fs.lstat(path.join(transcriptDir, `${init.session_id}.jsonl`));
+    result.checks.expectedMemoryPath = service.diagnostics().transcriptVerified
+      && info.isFile() && !info.isSymbolicLink();
+    result.diagnostics.pathVerification = 'transcript_file';
+  }
   const hooks = raw.filter(event => event.type === 'system' && String(event.subtype).toLowerCase().includes('hook'));
   result.checks.noHooks = hooks.length === 0;
   result.diagnostics.hookSubtypes = hooks.map(event => event.subtype);
@@ -169,7 +166,7 @@ try {
   result.diagnostics.init = init;
   const cleared = await service.clear();
   result.checks.clearComplete = cleared.result === 'complete' && cleared.remaining === 0;
-  result.ok = Object.values(result.checks).every(Boolean);
+  result.ok = Object.values(result.checks).every(value => value === true || value === 'skipped');
 } catch (error) {
   result.errors.push(error.message);
 } finally {
@@ -177,19 +174,6 @@ try {
     try { await service.shutdown(); } catch (error) { result.errors.push(error.message); result.ok = false; }
   }
   if (server) await new Promise(resolve => server.close(resolve));
-  if (planted) {
-    try {
-      const current = await fs.readFile(markerFile);
-      if (current.equals(planted)) {
-        if (original) await fs.writeFile(markerFile, original, { mode: originalMode });
-        else await fs.unlink(markerFile);
-      } else if (!original || !current.equals(original)) {
-        throw new Error('user_claude_md_changed_restore_manually');
-      }
-      if (backupFile) await fs.unlink(backupFile);
-      delete result.diagnostics.userInstructionsBackup;
-    } catch (error) { result.errors.push(error.message); result.ok = false; }
-  }
   // Preserve artifacts on failed reaping or incomplete clear for inspection/retry.
   if (temporary && result.checks.clearComplete && result.errors.length === 0) {
     await fs.rm(temporary, { recursive: true, force: true });

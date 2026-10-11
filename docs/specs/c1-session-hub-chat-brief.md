@@ -47,7 +47,18 @@ C1 은 **채팅 에이전트가 Mac·codev2 의 모든 세션(Claude Code·Codex
   2026-10-11 실측(claude 2.1.296, 이 Mac): `--tools "" --setting-sources "" --disable-slash-commands --strict-mcp-config` 에서 init 의 tools·mcp_servers·slash_commands·skills 가 비고, plugins 는 builtin 3개뿐, 사용자 `~/.claude/CLAUDE.md` 가 주입되지 않았고(모델 응답으로 확인), keychain 인증은 동작했다.
 - **저장 namespace (부팅과 무관하게 고정)**: 루트 `PALANTIR_SESSION_HUB_DIR`(기본 `~/.palantir/session-hub`), 0700, 서버 사용자 소유, symlink 아님(lstat). 그 아래 `cwd-<16 hex>/`(빈 디렉터리, claude 의 cwd — 접미사는 처음 만들 때 난수로 정해 `id` 파일에 저장하고 이후 고정)와 `mcp.json`(0600). cwd 는 매 부팅 같으므로 transcript 도 한 곳에 모인다. 난수 접미사로 다른 경로와 transcript 디렉터리 이름이 겹칠 가능성을 없앤다(아래 소유권 확인이 최종 방어).
   - repo 밖이어야 한다(repo 안이면 상위 탐색으로 repo `CLAUDE.md` 가 들어갈 수 있음). 시작 전에 canonical cwd 의 모든 조상에 `CLAUDE.md`·`CLAUDE.local.md`·`.claude/` 가 없음을 검사하고, 있으면 시작 거부(`session_hub_unsafe_cwd`). (홈 디렉터리의 `~/.claude/` 는 Claude 설정 디렉터리이므로 조상 검사에서 `~` 자체의 `.claude/` 는 예외로 하되, `--setting-sources ""` 로 로드되지 않음을 smoke 로 확인한다.)
-  - **transcript 위치**: `~/.claude/projects/<인코딩>/` — 인코딩 = canonical(realpath) cwd 의 영숫자가 아닌 문자를 `-` 로 바꾼 것(2026-10-11 실측: `/private/tmp/claude-504/...` → `-private-tmp-claude-504-...`). 첫 init 이벤트의 `memory_paths.auto` 가 정확히 `<그 디렉터리>/memory/` 가 아니면 즉시 종료하고 `session_hub_unexpected_paths` 오류(삭제 대상을 확신할 수 없는 CLI 버전).
+  - **transcript 위치**: `~/.claude/projects/<인코딩>/`.
+    인코딩은 canonical(realpath) cwd 의 영숫자가 아닌 문자를 `-` 로 바꾼 것이다.
+    첫 init 에 `memory_paths` 가 있으면 `memory_paths.auto` 는
+    정확히 `<그 디렉터리>/memory/` 여야 한다.
+    다르면 즉시 종료하고 `session_hub_unexpected_paths` 오류를 낸다.
+    `memory_paths` 가 없으면 첫 `result` 뒤
+    `<그 디렉터리>/<session_id>.jsonl` 을 lstat 한다.
+    regular file 이고 symlink 가 아니어야 transcript 위치 검증이 통과한다.
+    부재·검증 실패 시 종료하고 같은 오류를 낸다.
+    검증이 끝날 때까지 턴을 유지하며 다음 메시지는 409 `turn_in_progress` 로 거부한다.
+    실측(claude 2.1.296): `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` 이면
+    init 의 `memory_paths` 필드가 아예 없으므로 이 대체 검증을 쓴다.
 - **env**: 최소 env 만 — `PATH`, `HOME`, `USER`, `LANG`, `TMPDIR`, 그리고 기존 `authResolver` 가 Claude 인증으로 허용하는 키만. `PALANTIR_TOKEN`·`PALANTIR_PM_TOKEN`·manager capability·기타 서버 env 는 넣지 않는다. `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`(지원 시). MCP 서버 env 에는 hub 토큰과 broker base URL 만.
 - **MCP 서버** = `scripts/session-hub-mcp.cjs`(stdio). 도구 3개(`list_sessions`, `search_instructions`, `get_session`)는 broker GET 을 그대로 감싼다. 인자는 스키마 검증 후 쿼리 문자열로만 쓴다. 응답은 broker JSON 그대로. 임시 MCP 설정 JSON 은 cwd 옆에 0600 으로 만들고 프로세스 종료 시 지운다.
 - **수신자**: 사람 cookie 뿐. 라우트는 모두 cookie-only. **POST 는 `Origin` 헤더 필수**이고 scheme·host·port 가 서버 origin 과 정확히 같아야 한다(없거나 다르면 403, Referer 로 구제하지 않음 — 기존 `assertSameOrigin` 은 Origin 누락을 허용하므로 쓰지 않는다). **GET·SSE 는 cookie 만** 요구하고, `Sec-Fetch-Site` 가 있으면 `same-origin` 또는 `none` 이어야 한다(서버가 `Referrer-Policy: no-referrer` 를 쓰고 EventSource 는 헤더를 못 붙이므로 Origin/Referer 를 요구하지 않는다; CORS 헤더가 없어 cross-origin 읽기는 브라우저가 막는다). 서버 origin 은 요청의 Host 와 서버가 실제 듣는 scheme 으로 만든다. 라우트:
@@ -60,7 +71,11 @@ C1 은 **채팅 에이전트가 Mac·codev2 의 모든 세션(Claude Code·Codex
 - **준비 I/O 와 종료의 순서**: start 의 준비(디렉터리 생성·`mcp.json` 쓰기·조상 검사)는 하나의 Promise 로 추적한다. close/clear 는 ① 상태를 `closing` 으로 바꾼 뒤 ② **그 준비 Promise 가 끝나기를 기다리고**(준비는 끝나도 상태가 `starting` 이 아니면 spawn 하지 않음) ③ 그다음에 회수·삭제를 한다. `closing` 동안 새 start 는 409 `session_hub_busy`. 따라서 지연된 준비 쓰기가 삭제 뒤에 파일을 되살리거나 다음 세대의 설정을 덮어쓸 수 없다.
 - **프로세스 그룹 회수**: claude 를 `detached:true` 로 띄워 자기 그룹의 리더로 만들고 PGID 를 회수 완료까지 보관한다. 회수 = ① `kill(-pgid, SIGTERM)` ② 5초 뒤 그룹이 살아 있으면(`kill(-pgid, 0)` 성공) `kill(-pgid, SIGKILL)` — 부모가 먼저 exit 해도 이 escalation 은 취소하지 않는다 ③ `kill(-pgid, 0)` 이 ESRCH 일 때 회수 완료. 10초 안에 완료되지 않으면 상태를 `error:reap_failed` 로 두고 삭제·`idle` 선언을 하지 않는다. spawn `error`·자연 종료·명시 종료 모두 같은 cleanup 을 정확히 한 번 실행한다. MCP 서버가 claude 그룹을 상속하는지 실 CLI smoke 에서 확인하고, 상속하지 않으면 시작 거부.
 - **종료·지우기**: `stop`·`clear`·서버 shutdown 은 같은 절차 — ① 상태 `closing`(shutdown 은 `closed`) — `app.shutdown()` 진입 시 **동기적으로** 먼저 설정 ② hub 토큰 폐기 ③ 프로세스 그룹 회수(위) ④ 출력 핸들러 분리(늦은 출력 무시) ⑤ `clear` 면 메시지 배열 비우기 + transcript 삭제(저장 namespace 고정이므로 이전 부팅의 대화까지 같은 디렉터리) + `cwd-*/` 비우기 + `mcp.json` 삭제. transcript 삭제는 **소유권을 확인한 파일만**: 서비스는 init 이벤트의 `session_id` 를 저장 namespace 의 `owned-sessions` 파일(0600, 줄당 하나)에 spawn 직후 기록한다. 기대 이름 디렉터리(`~/.claude/projects/` 바로 아래, lstat 으로 symlink 아님) 안에서 ⓐ 파일명이 `<owned session_id>.jsonl` 이고 regular file 이면 **크기와 무관하게** 지운다 ⓑ 그 밖의 `*.jsonl` 은 `cwd` 필드가 있는 레코드가 1개 이상이고 그 모든 `cwd` 가 세션 비서의 canonical cwd 와 같을 때만 지운다(줄 단위 bounded 파싱, 상한 초과는 남김). 남은 파일·하위 항목은 `remaining` 개수로 보고한다. auto-memory 는 env 로 끈다(`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`). memory 디렉터리의 파일은 소유권을 증명할 수 없으므로 지우지 않고 `remaining` 에 넣는다. 디렉터리는 비었을 때만 지운다. **`remaining>0` 이면 clear 는 `incomplete` 를 반환**하고 화면에 남은 개수를 보이며, 측정 종료 절차는 `complete` 일 때만 성공이다. `owned-sessions` 에서는 **파일 삭제 또는 부재를 확인한 ID 만** 지우고, 남은 ID 는 유지해 다음 clear 재시도에 쓴다 ⑥ 상태 `idle`(shutdown 은 `closed` 유지). `app.shutdown()` 이 이 close 를 await 한다.
-- **auto-memory 경로**: init 의 `memory_paths.auto` 가 transcript 디렉터리 아래임을 확인한다. auto-memory 는 env 로 끄므로 파일이 생기지 않아야 하고(smoke 확인), 생겼다면 ⑤ 에서 지우지 않고 `remaining` 으로 보고된다.
+- **auto-memory 경로**: init 에 `memory_paths` 가 있으면
+  `memory_paths.auto` 가 기대 경로와 정확히 일치해야 한다.
+  없으면 위의 첫 result 후 transcript 파일 검증으로 대체한다.
+  auto-memory 는 env 로 끄므로 파일이 생기지 않아야 한다(smoke 확인).
+  생겼다면 ⑤ 에서 지우지 않고 `remaining` 으로 보고한다.
 
 ### 1.4 기존 결함 수정 (hub on/off 무관, 영구)
 - 지금 Operator capability 가 `GET /api/conversations/top/events` 를 읽을 수 있다. manager capability 는 `top` 대화 이벤트를 **layer==='top' 일 때만** 읽도록 좁힌다. Top 이 Operator 이벤트를 읽는 기존 동작은 유지한다. (C1 의 데이터와 무관한 기존 노출이지만 R1 에서 발견되어 같이 고친다.)
@@ -186,7 +201,25 @@ C1 의 A~C 는 기존 수동 CLI 로 만든 스냅샷을 쓴다. 사람이 버�
 - **transcript 소유권**: 기대 디렉터리 안에 (a) owned session 의 대용량 파일(상한 초과) (b) 모든 cwd 가 hub cwd 인 비소유 파일 (c) 다른 cwd 레코드가 섞인 파일 (d) cwd 레코드 없는 파일 (e) 상한 초과 비소유 파일 (f) owned 이름의 symlink 를 두고 clear → (a)(b) 삭제, (c)(d)(e)(f) 보존, `remaining`=4, 결과 `incomplete`. 남는 것이 없으면 `complete`. memory 디렉터리 파일 보존·`remaining` 포함.
 - **준비 I/O 순서**: 준비 쓰기를 지연시킨 fake fs 로 start → clear → 지연 해제: 삭제 뒤 `mcp.json` 이 되살아나지 않음, spawn 0. clear 진행 중 새 start 409. A 준비 지연 중 clear 후 B start 가 409 로 막히고, clear 완료 뒤 B 의 설정을 A 가 덮어쓰지 않음.
 - **종료·지우기**: stop/clear/shutdown 이 ① 새 요청 거부 → ② 토큰 폐기(이후 broker 403) → ③ 그룹 회수(부모가 먼저 exit 하고 SIGTERM 을 무시하는 자식이 남는 fixture 에서도 SIGKILL 로 회수, 회수 실패 시 `reap_failed`·삭제 안 함) → ④ 늦은 stdout 무시 → ⑤ clear 시 메시지·transcript 디렉터리(임시 HOME, 이전 부팅 것 포함)·cwd·MCP 설정 삭제, symlink 로 바꿔 둔 transcript 디렉터리는 따라가지 않음. shutdown 후 start 거부(`closed`), start 준비 중 clear 가 오면 spawn 0, 이전 세대의 늦은 타이머·출력이 새 세대를 바꾸지 않음, close 중복 호출 같은 Promise. `app.shutdown()` 이 close 를 await.
-- **실 CLI smoke 1회**(수동 스크립트, spawnGuard 해제는 이 smoke 에만, 서버가 실제로 쓰는 binary 해석 함수로): init 의 mcp_servers = session_hub 하나, MCP 도구 = 정확히 3개, 실행·파일·네트워크·하위 에이전트 도구(Bash, Read, Write, Edit, Glob, Grep, WebFetch, WebSearch, Task/Agent, NotebookEdit 등) 없음(무해한 대화 제어 도구는 허용 목록으로 기록), slash_commands·skills 비어 있음, 사용자 CLAUDE.md 미주입(센티넬 문자열 질문), MCP 서버 프로세스의 PGID = claude PGID, `memory_paths.auto` = 기대 경로, hook 이벤트 0, auto-memory 파일 0, transcript 레코드의 cwd = hub cwd, 도구 호출 1회 성공. 결과를 PR 본문에 기록.
+- **실 CLI smoke 1회**: 수동 스크립트로 실행한다.
+  spawnGuard 해제는 이 smoke 에만, 실제 서버의 binary 해석 함수를 쓴다.
+  init 의 mcp_servers = session_hub 하나, MCP 도구 = 정확히 3개.
+  실행·파일·네트워크·하위 에이전트 도구는 없어야 한다.
+  Bash, Read, Write, Edit, Glob, Grep, WebFetch, WebSearch,
+  Task/Agent, NotebookEdit 등은 금지한다.
+  무해한 대화 제어 도구는 허용 목록으로 기록한다.
+  slash_commands·skills 는 비어 있어야 한다.
+  사용자 `~/.claude/CLAUDE.md` 는 절대 수정하지 않는다.
+  파일이 있으면 읽기만 하고 20자 이상인 줄들을 수집한다.
+  모델에게 시작 지침(CLAUDE.md 등)의 문장을 아는 대로 3개 그대로 인용하라고 묻고,
+  없으면 "센티넬 없음"이라고 답하게 한다. 수집한 줄을 질문에 넣지 않는다.
+  답에 수집한 줄이 하나도 없고 "센티넬 없음"이 포함됨을 단언한다.
+  파일이 없으면 이 검사를 `skipped` 로 기록한다.
+  MCP 서버 PGID = claude PGID, hook 이벤트 0, auto-memory 파일 0.
+  `memory_paths` 가 있으면 auto 경로가 기대 경로와 일치해야 한다.
+  없으면 첫 result 뒤 기대 transcript 파일 검증이 통과해야 한다.
+  transcript 레코드의 cwd = hub cwd, 도구 호출 1회 성공.
+  결과를 PR 본문에 기록한다.
 - **이벤트 봉쇄 (on/off 모두)**: Operator capability 의 `/api/conversations/top/events`(literal·encoded) 403, Operator 자기 대화 200, Top 의 Operator 이벤트 읽기 200, 사람 cookie 200.
 - **필드 allowlist**: 금지 필드가 모든 broker 응답에 없음 — 재귀 키 검사.
 - **불완전성**: first_status 3종, compact_only_history, format_unverified, 닫힌 키 목록의 각 키가 meta 에 반영(의도된 제외 키는 미반영), records_unverified, 지시 flags 가 요약·검색·상세에서 동일, 읽을 수 없는 스냅샷 → `unreadable`, 미확정 연결은 state null.

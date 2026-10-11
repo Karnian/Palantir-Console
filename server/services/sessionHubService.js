@@ -71,6 +71,10 @@ function createSessionHubService(options = {}) {
   let socketDir = null;
   let mcpReady = false;
   let initSeen = false;
+  let initSessionId = null;
+  let requiresTranscript = false;
+  let transcriptVerified = false;
+  let transcriptCheck = null;
   let namespaceReady = false;
   const sockets = new Set();
   const configPath = path.join(root, 'mcp.json');
@@ -234,6 +238,24 @@ function createSessionHubService(options = {}) {
       void close().catch(() => {});
     });
   }
+  function finishTurn(gen) {
+    if (!live(gen)) return;
+    clearTimeout(timer); timer = null; turn = null; publish();
+  }
+  function verifyTranscript(gen) {
+    if (transcriptCheck) return;
+    transcriptCheck = (async () => {
+      const info = await stat(path.join(transcriptDir, `${initSessionId}.jsonl`));
+      if (!live(gen)) return;
+      if (!info?.isFile() || info.isSymbolicLink()) throw fail('session_hub_unexpected_paths', 503);
+      transcriptVerified = true;
+      finishTurn(gen);
+    })().catch(() => {
+      if (!live(gen)) return;
+      setError('session_hub_unexpected_paths');
+      void close().catch(() => {});
+    });
+  }
   function protocol(event, gen) {
     if (!live(gen)) return;
     options.onProtocolEvent?.(event);
@@ -245,11 +267,14 @@ function createSessionHubService(options = {}) {
     }
     if (event.type === 'system' && event.subtype === 'init') {
       try { recordOwned(event.session_id); } catch { setError('session_hub_unexpected_paths'); }
-      if (error || event.memory_paths?.auto !== `${transcriptDir}/memory/`) {
+      const hasMemoryPaths = Object.hasOwn(event, 'memory_paths');
+      if (error || (hasMemoryPaths && event.memory_paths?.auto !== `${transcriptDir}/memory/`)) {
         setError('session_hub_unexpected_paths');
         void close().catch(() => {});
         return;
       }
+      initSessionId = event.session_id;
+      requiresTranscript = !hasMemoryPaths;
       initSeen = true;
     }
     if (event.type === 'assistant') {
@@ -262,7 +287,8 @@ function createSessionHubService(options = {}) {
     }
     if (event.type === 'result') {
       if (event.is_error) append('error', 'session_hub_turn_failed');
-      clearTimeout(timer); timer = null; turn = null; publish();
+      if (requiresTranscript && !transcriptVerified) verifyTranscript(gen);
+      else finishTurn(gen);
     }
   }
   function start() {
@@ -273,6 +299,7 @@ function createSessionHubService(options = {}) {
     if (state !== 'idle') return Promise.reject(fail('session_hub_busy'));
     state = 'starting'; error = null; clearRequested = false;
     closePromise = null; writeQueue = Promise.resolve(); initSeen = false; mcpReady = false;
+    initSessionId = null; requiresTranscript = false; transcriptVerified = false; transcriptCheck = null;
     const gen = ++generation;
     preparation = prepare(gen);
     startPromise = preparation.then(() => {
@@ -496,6 +523,7 @@ function createSessionHubService(options = {}) {
       if (stdoutHandler && child) child.stdout.removeListener('data', stdoutHandler);
       stdoutHandler = null; child = null;
       await writeQueue.catch(() => {});
+      await transcriptCheck;
       await removeConfig();
       let result = { result: 'complete', remaining: 0 };
       if (clearRequested) { messages = []; result = await clearFiles(); }
@@ -523,7 +551,7 @@ function createSessionHubService(options = {}) {
   function shutdown() { return close({ shutdown: true }); }
   return { start, message, stop, close, clear, shutdown, state: snapshot, current: () => token,
     subscribe(fn) { subscribers.add(fn); return () => subscribers.delete(fn); },
-    diagnostics: () => ({ cwd, transcriptDir, pgid, initSeen, mcpReady }),
+    diagnostics: () => ({ cwd, transcriptDir, pgid, initSeen, mcpReady, transcriptVerified }),
   };
 }
 

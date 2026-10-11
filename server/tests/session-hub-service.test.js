@@ -89,6 +89,136 @@ test('unexpected init memory path revokes token, reaps group and records owned s
   assert.equal(fx.signals[0][1], 'SIGTERM');
 });
 
+for (const mode of ['--fixture-no-memory-paths', '--fixture-no-transcript']) {
+  test(`real fake CLI ${mode}: validates transcript after first result`, async t => {
+    const events = [];
+    const fx = serviceFixture(t, { onProtocolEvent: event => events.push(event), reapMs: 1500,
+      spawn: (command, argv, opts) => childProcess.spawn(command, [...argv, mode], opts),
+      kill: (...args) => process.kill(...args),
+    });
+    await fx.service.start();
+    await until(() => events.some(event => event.subtype === 'init'));
+    assert.equal(fx.service.state().error, null);
+    assert.equal(fx.service.diagnostics().initSeen, true);
+    fx.service.message('first turn');
+    await until(() => events.some(event => event.type === 'result'));
+    await until(() => !fx.service.state().turnInProgress);
+    if (mode === '--fixture-no-transcript') {
+      await fx.service.close();
+      assert.equal(fx.service.state().error, 'session_hub_unexpected_paths');
+      assert.equal(fx.service.current(), null);
+      assert.equal(fx.service.state().state, 'idle');
+    } else {
+      assert.equal(fx.service.state().state, 'running');
+      assert.equal(fx.service.state().error, null);
+      const filename = path.join(fx.service.diagnostics().transcriptDir, 'fixture-session.jsonl');
+      assert.equal(fs.lstatSync(filename).isFile(), true);
+      assert.equal(fx.service.diagnostics().transcriptVerified, true);
+      fx.service.message('second turn');
+      await until(() => events.filter(event => event.type === 'result').length === 2);
+      await fx.service.stop();
+    }
+    assert.equal(fs.readFileSync(path.join(fx.root, 'owned-sessions'), 'utf8'), 'fixture-session\n');
+  });
+}
+
+test('missing memory_paths holds the turn during transcript lstat and accepts next turn only after verification',
+  async t => {
+    let release;
+    let entered;
+    const held = new Promise(resolve => { release = resolve; });
+    const arrived = new Promise(resolve => { entered = resolve; });
+    let probes = 0;
+    t.after(() => release());
+    const fx = serviceFixture(t, { fs: { ...fsp, async lstat(filename) {
+      if (filename.endsWith('/owned.jsonl')) { probes++; entered(); await held; }
+      return fsp.lstat(filename);
+    } } });
+    await fx.service.start();
+    fx.event({ type: 'system', subtype: 'init', session_id: 'owned' });
+    assert.equal(fx.service.diagnostics().initSeen, true);
+    const { transcriptDir } = fx.service.diagnostics();
+    fs.mkdirSync(transcriptDir, { recursive: true });
+    fs.writeFileSync(path.join(transcriptDir, 'owned.jsonl'), '{}\n');
+    fx.service.message('first'); fx.event({ type: 'result' });
+    await arrived;
+    assert.equal(fx.service.state().turnInProgress, true);
+    assert.throws(() => fx.service.message('too early'), code('turn_in_progress'));
+    release(); await until(() => !fx.service.state().turnInProgress);
+    fx.service.message('next'); fx.event({ type: 'result' });
+    assert.equal(fx.service.state().turnInProgress, false);
+    assert.equal(probes, 1);
+  });
+
+for (const kind of ['missing', 'directory', 'symlink', 'io-error']) {
+  test(`missing memory_paths rejects ${kind} transcript after result and revokes token`, async t => {
+    const fx = serviceFixture(t, kind === 'io-error' ? { fs: { ...fsp, async lstat(filename) {
+      if (filename.endsWith('/owned.jsonl')) throw Object.assign(new Error('unreadable'), { code: 'EACCES' });
+      return fsp.lstat(filename);
+    } } } : {});
+    await fx.service.start();
+    fx.event({ type: 'system', subtype: 'init', session_id: 'owned' });
+    assert.equal(fx.service.diagnostics().initSeen, true);
+    const { transcriptDir } = fx.service.diagnostics();
+    fs.mkdirSync(transcriptDir, { recursive: true });
+    const filename = path.join(transcriptDir, 'owned.jsonl');
+    if (kind === 'directory') fs.mkdirSync(filename);
+    if (kind === 'symlink') {
+      const target = path.join(fx.temp, 'other-session'); fs.writeFileSync(target, 'keep');
+      fs.symlinkSync(target, filename);
+    }
+    fx.service.message('first'); fx.event({ type: 'result' });
+    await until(() => fx.service.state().error === 'session_hub_unexpected_paths');
+    await fx.service.close();
+    assert.equal(fx.service.current(), null);
+    assert.equal(fx.service.state().state, 'idle');
+    assert.throws(() => fx.service.message('next'), code('session_hub_not_running'));
+  });
+}
+
+test('close waits for delayed transcript verification and its completion cannot change the next generation',
+  async t => {
+    let release;
+    let entered;
+    const held = new Promise(resolve => { release = resolve; });
+    const arrived = new Promise(resolve => { entered = resolve; });
+    t.after(() => release());
+    const fx = serviceFixture(t, { fs: { ...fsp, async lstat(filename) {
+      if (filename.endsWith('/owned.jsonl')) { entered(); await held; }
+      return fsp.lstat(filename);
+    } } });
+    await fx.service.start();
+    fx.event({ type: 'system', subtype: 'init', session_id: 'owned' });
+    fx.service.message('first'); fx.event({ type: 'result' });
+    await arrived;
+    let closed = false;
+    const closing = fx.service.clear();
+    closing.then(() => { closed = true; });
+    await tick();
+    assert.equal(closed, false);
+    assert.equal(fs.existsSync(path.join(fx.root, 'mcp.json')), true);
+    await assert.rejects(fx.service.start(), code('session_hub_busy'));
+    release(); await closing;
+    assert.equal(fx.service.state().error, null);
+    await fx.service.start(); fx.init('next');
+    fx.service.message('new turn');
+    await tick();
+    assert.equal(fx.service.state().turnInProgress, true);
+    assert.equal(fx.service.state().error, null);
+    fx.event({ type: 'result' });
+  });
+
+for (const memory_paths of [null, {}, { auto: '/other/memory/' }]) {
+  test(`present invalid memory_paths ${JSON.stringify(memory_paths)} is rejected without fallback`, async t => {
+    const fx = serviceFixture(t);
+    await fx.service.start();
+    fx.event({ type: 'system', subtype: 'init', session_id: 'owned', memory_paths });
+    await fx.service.close();
+    assert.equal(fx.service.state().error, 'session_hub_unexpected_paths');
+    assert.equal(fx.service.current(), null);
+  });
+}
+
 test('hook subtype disables every later start in this boot and ignores late output', async t => {
   const fx = serviceFixture(t);
   await fx.service.start(); fx.init();
