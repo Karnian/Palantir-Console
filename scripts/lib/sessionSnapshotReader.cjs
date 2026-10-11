@@ -766,6 +766,7 @@ function claudeInterrupted(record) {
     ? content.filter(block => block.type === 'text').map(block => block.text).join('') : '';
   return /^\[Request interrupted by user(?: for tool use)?\]$/.test(text);
 }
+// Validate only terminal-to-last-instruction ancestry; earlier parents may be absent or outside the tail window.
 function claudeStatus(records, windowed = false) {
   const traversal = records.filter(record => record.isSidechain !== true && typeof record.uuid === 'string');
   const chain = traversal.filter(record => ['user', 'assistant', 'system'].includes(record.type));
@@ -793,6 +794,7 @@ function claudeStatus(records, windowed = false) {
     // Queued instructions may be on the parent path or attached immediately after its last chain record.
     if (current === instruction || current === anchor) {
       if (main.has(byId.get(current.parentUuid))) return snapshotPolicy.unknownStatus('branch_ambiguous');
+      main.delete(current); // The instruction and its anchor precede the new turn's transitions.
       bound = true;
       break;
     }
@@ -812,21 +814,27 @@ function claudeStatus(records, windowed = false) {
   if (remaining.some(record => record.isSidechain !== true
     && ['user', 'assistant'].includes(record.type) && typeof record.uuid !== 'string'))
     return snapshotPolicy.unknownStatus('status_format_unsupported');
-  const after = remaining.filter(record => main.has(record));
+  const after = records.filter(record => main.has(record));
+  const evidence = [instruction];
   let status = statusAt('working', instruction);
   for (const record of after) {
-    if (claudeInterrupted(record)) status = statusAt('interrupted', record);
-    else if (record.type === 'assistant') {
+    if (claudeInterrupted(record)) {
+      evidence.push(record);
+      status = statusAt('interrupted', record);
+    } else if (record.type === 'assistant') {
       const stop = record.message?.stop_reason;
       const status_format_ok = stop === null || ['end_turn', 'tool_use'].includes(stop);
       if (!status_format_ok) return snapshotPolicy.unknownStatus('status_format_unsupported');
+      evidence.push(record);
       status = statusAt(stop === 'end_turn' ? 'ended' : 'working', record);
     } else if (record.type === 'user' && Array.isArray(record.message?.content)
-      && record.message.content.some(block => block.type === 'tool_result')) status = statusAt('working', record);
+      && record.message.content.some(block => block.type === 'tool_result')) {
+      evidence.push(record);
+      status = statusAt('working', record);
+    }
   }
-  // Parent links select the branch; transitions keep file order. Final evidence must not predate the instruction.
-  const instructionAt = toIsoTimestamp(instruction.timestamp);
-  if (!instructionAt || !status.evidence_at || status.evidence_at < instructionAt)
+  // Attachment clocks do not order transitions; actual state evidence must be monotonic in file order.
+  if (!orderedStatusRecords(evidence))
     return snapshotPolicy.unknownStatus('order_unknown');
   return status;
 }
@@ -2128,6 +2136,12 @@ function readOrca(readerOptions, config, all, coverage, outputBudget) {
       }
     }
   }
+  // Compose only after inventory validation, terminal validation and all confirmation cancellations.
+  for (const session of all) {
+    if (!session.output?.orca_link.confirmed) continue;
+    const edge = edges.bySession.get(session)?.find(value => value.agent.pane === session.output.orca_link.pane_key);
+    if (edge) session.output.status = snapshotPolicy.composeStatus(session.output.status, edge.agent.status);
+  }
   return out;
 }
 
@@ -2343,8 +2357,6 @@ function applyOrcaLinks(all, edges, coverage) {
     const paneCount = edges.paneMatches?.get(edge.agent.pane)
       ?? (byPane.get(edge.agent.pane) || []).filter(value => value.eligible).length;
     const ambiguous = candidates.length > 1 || (edge.eligible && paneCount > 1);
-    if (!ambiguous && edge.eligible) parsedSession.output.status = snapshotPolicy.composeStatus(
-      parsedSession.output.status, edge.agent.status);
     parsedSession.output.orca_link = {
       evidence: ambiguous ? 'ambiguous' : edge.evidence,
       confirmed: !ambiguous && edge.eligible,

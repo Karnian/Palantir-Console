@@ -5904,6 +5904,45 @@ test('PR-S Orca updated_at cannot supply state evidence or beat newer transcript
   assert.equal(snapshot.sessions[0].status.reason, 'conflict');
 });
 
+for (const cancelledBy of ['worktree inventory', 'terminal inventory', 'invalid terminal']) {
+  test(`PR-S ${cancelledBy} cancellation preserves transcript status`, t => {
+    const fx = createFixture(t);
+    const prompt = 'unique instruction with a newer done Orca agent';
+    fx.file('claude', 'status', [claudeUserRecord(prompt), statusAssistant('tool_use')]);
+    const tree = orcaWorktree(prompt, 'p:leaf',
+      { state: 'done', stateStartedAt: Date.parse(RECORD_TIMESTAMP) + 60000 });
+    const responses = { worktree: orcaResponse('worktrees', [tree]),
+      terminal: orcaResponse('terminals', [orcaTerminal()]) };
+    fx.options.runOrca = args => JSON.stringify(responses[args[0]]);
+    const confirmed = snapshotReader.runSnapshot(fx.options).sessions[0];
+    assert.equal(confirmed.orca_link.confirmed, true);
+    assert.equal(confirmed.status.state, 'ended');
+    assert.equal(confirmed.status.source, 'orca');
+    if (cancelledBy === 'invalid terminal') responses.terminal.result.terminals.push({ handle: 'invalid' });
+    else responses[cancelledBy === 'worktree inventory' ? 'worktree' : 'terminal'].result.truncated = true;
+    const cancelled = snapshotReader.runSnapshot(fx.options).sessions[0];
+    assert.equal(cancelled.orca_link.confirmed, false);
+    assert.equal(cancelled.orca_link.terminal_handle, null);
+    assert.deepEqual(cancelled.status,
+      { state: 'working', source: 'transcript', evidence_at: RECORD_TIMESTAMP, reason: null });
+  });
+}
+
+test('PR-S scoped terminal cancellation preserves transcript while unrelated confirmed status still composes', t => {
+  const { fixture, worktrees } = orcaTerminalPartialFixture(t);
+  for (const tree of worktrees) Object.assign(tree.agents[0],
+    { state: 'done', stateStartedAt: Date.parse(RECORD_TIMESTAMP) + 60000 });
+  const snapshot = snapshotReader.runSnapshot(fixture.options);
+  const cancelled = snapshot.sessions.find(session => session.session_id === 'orphan');
+  const confirmed = snapshot.sessions.find(session => session.session_id === 's');
+  assert.equal(cancelled.orca_link.confirmed, false);
+  assert.deepEqual(cancelled.status,
+    { state: 'working', source: 'transcript', evidence_at: RECORD_TIMESTAMP, reason: null });
+  assert.equal(confirmed.orca_link.confirmed, true);
+  assert.equal(confirmed.status.state, 'ended');
+  assert.equal(confirmed.status.source, 'orca');
+});
+
 const statusAttachment = (uuid, parentUuid, type) => ({
   type: 'attachment', sessionId: 's', uuid, parentUuid, timestamp: RECORD_TIMESTAMP,
   attachment: { type, content: 'PRIVATE_ATTACHMENT_SENTINEL' }
@@ -6080,12 +6119,14 @@ for (const streamed of [false, true]) {
 }
 
 for (const [stop, finalTime, expected, reason] of [
-  ['end_turn', '36.500', 'ended', null],
-  ['tool_use', '36.500', 'working', null],
+  ['end_turn', '36.601', 'ended', null],
+  ['tool_use', '36.601', 'working', null],
+  ['end_turn', '36.500', 'unknown', 'order_unknown'],
+  ['tool_use', '36.500', 'unknown', 'order_unknown'],
   ['end_turn', '36.478', 'unknown', 'order_unknown'],
   ['tool_use', '36.478', 'unknown', 'order_unknown'],
 ]) {
-  test(`PR-S Claude final ${stop} at ${finalTime} is compared only with the instruction time`, t => {
+  test(`PR-S Claude final ${stop} at ${finalTime} must follow earlier transition times`, t => {
     const fx = createFixture(t);
     fx.options.now = new Date('2026-10-08T08:00:00.000Z');
     fx.file('claude', 'clock-order', [
@@ -6100,7 +6141,7 @@ for (const [stop, finalTime, expected, reason] of [
   });
 }
 
-test('PR-S Claude an earlier intermediate transition does not override later valid evidence', t => {
+test('PR-S Claude an intermediate transition before the instruction makes order unknown', t => {
   const fx = createFixture(t);
   fx.options.now = new Date('2026-10-08T08:00:00.000Z');
   fx.file('claude', 'clock-order', [
@@ -6109,10 +6150,54 @@ test('PR-S Claude an earlier intermediate transition does not override later val
     statusAssistant('end_turn', 'a2', 'a', { timestamp: claudeClockTime('36.500') }),
   ]);
   const status = snapshotReader.runSnapshot(fx.options).sessions[0].status;
-  assert.equal(status.state, 'ended');
-  assert.equal(status.evidence_at, claudeClockTime('36.500'));
-  assert.equal(status.reason, null);
+  assert.deepEqual(status, { state: 'unknown', source: 'none', evidence_at: null, reason: 'order_unknown' });
 });
+
+for (const large of [false, true]) {
+  for (const queuedFirst of [false, true]) {
+    for (const hasResponse of [false, true]) {
+      test(`PR-S queued anchor is not new turn evidence: tail=${large}, queued first=${queuedFirst},`
+        + ` response=${hasResponse}`, t => {
+        const fx = createFixture(t);
+        fx.options.now = new Date('2026-10-08T08:00:00.000Z');
+        const user = claudeUserRecord('old instruction', { timestamp: claudeClockTime('36.000') });
+        const prior = statusAssistant('end_turn', 'a', 'u', { timestamp: claudeClockTime('37.000') });
+        const queued = statusQueued({ parentUuid: 'a', timestamp: claudeClockTime('36.999') });
+        const rows = [user, ...(queuedFirst ? [queued, prior] : [prior, queued])];
+        if (hasResponse) rows.push(statusAssistant('end_turn', 'new-answer', 'queued',
+          { timestamp: claudeClockTime('37.100') }));
+        if (large) largeStatusFile(fx, 'claude', rows);
+        else fx.file('claude', 'queued-order', rows);
+        const snapshot = snapshotReader.runSnapshot(fx.options);
+        assert.deepEqual(snapshot.sessions[0].status, { state: hasResponse ? 'ended' : 'working',
+          source: 'transcript', evidence_at: claudeClockTime(hasResponse ? '37.100' : '36.999'), reason: null });
+        assert.equal(snapshot.instructions.at(-1).text, 'new instruction');
+        assert.equal(JSON.stringify(snapshot).includes('PRIVATE_ASSISTANT_SENTINEL'), false);
+      });
+    }
+  }
+}
+
+for (const large of [false, true]) {
+  for (const kind of ['tool_result', 'interrupted']) {
+    test(`PR-S ${kind} state evidence with reversed time is unknown, tail=${large}`, t => {
+      const fx = createFixture(t);
+      fx.options.now = new Date('2026-10-08T08:00:00.000Z');
+      const content = kind === 'tool_result' ? [{ type: 'tool_result', content: 'PRIVATE_TOOL_SENTINEL' }]
+        : '[Request interrupted by user]';
+      const rows = [claudeUserRecord('instruction', { timestamp: claudeClockTime('36.479') }),
+        statusAssistant('tool_use', 'a', 'u', { timestamp: claudeClockTime('36.600') }),
+        claudeUserRecord(content, { uuid: 'state-user', parentUuid: 'a', timestamp: claudeClockTime('36.500') }),
+        statusAssistant('end_turn', 'answer', 'state-user', { timestamp: claudeClockTime('36.700') })];
+      if (large) largeStatusFile(fx, 'claude', rows);
+      else fx.file('claude', 'clock-order', rows);
+      const snapshot = snapshotReader.runSnapshot(fx.options);
+      assert.deepEqual(snapshot.sessions[0].status,
+        { state: 'unknown', source: 'none', evidence_at: null, reason: 'order_unknown' });
+      assert.equal(JSON.stringify(snapshot).includes('PRIVATE_TOOL_SENTINEL'), false);
+    });
+  }
+}
 
 function reorderedAttachmentChain() {
   return [
