@@ -254,6 +254,43 @@ test('reap failure preserves PGID/config/messages and refuses idle/start', async
   await assert.rejects(fx.service.start(), code('session_hub_busy'));
 });
 
+test('zombie-only EPERM keeps files until event-loop reaping and an ESRCH group probe', async t => {
+  let reaped = false;
+  let probes = 0;
+  const fx = serviceFixture(t, { kill(pid, signal) {
+    if (signal === 'SIGTERM') {
+      setImmediate(() => { reaped = true; fx.children[0].emit('exit', 0); });
+      throw Object.assign(new Error('zombie'), { code: 'EPERM' });
+    }
+    if (signal === 0) {
+      probes++;
+      assert.equal(fs.existsSync(path.join(fx.root, 'mcp.json')), true);
+      throw Object.assign(new Error(reaped ? 'gone' : 'zombie'), { code: reaped ? 'ESRCH' : 'EPERM' });
+    }
+  } });
+  await fx.service.start();
+  await fx.service.clear();
+  assert.ok(probes >= 2);
+  assert.equal(fx.service.diagnostics().pgid, null);
+  assert.equal(fs.existsSync(path.join(fx.root, 'mcp.json')), false);
+});
+
+test('persistent EPERM still escalates and fails without deleting files or declaring idle', async t => {
+  const signals = [];
+  const fx = serviceFixture(t, { termMs: 2, reapMs: 15, kill(pid, signal) {
+    signals.push(signal);
+    throw Object.assign(new Error('permission denied'), { code: 'EPERM' });
+  } });
+  await fx.service.start(); fx.service.message('preserve');
+  await assert.rejects(fx.service.clear(), code('reap_failed'));
+  assert.ok(signals.includes('SIGTERM')); assert.ok(signals.includes('SIGKILL'));
+  assert.equal(fx.service.state().state, 'error:reap_failed');
+  assert.equal(fx.service.state().messages[0].text, 'preserve');
+  assert.ok(fx.service.diagnostics().pgid);
+  assert.equal(fs.existsSync(path.join(fx.root, 'mcp.json')), true);
+  await assert.rejects(fx.service.start(), code('session_hub_busy'));
+});
+
 test('spawn error and natural exit use the single cleanup Promise', async t => {
   for (const event of ['error', 'exit']) {
     const fx = serviceFixture(t);
@@ -380,11 +417,32 @@ test('a subscriber stopping on user text cannot leave a new timer or write after
 });
 
 test('real fake CLI hook output closes and disables the service for this boot', async t => {
-  const fx = serviceFixture(t, { spawn: (...args) => childProcess.spawn(...args),
-    kill: (...args) => {
-      try { return process.kill(...args); }
+  const probes = [];
+  let leaderExited = false;
+  let firstProbe = true;
+  let leader;
+  const fx = serviceFixture(t, { spawn: (...args) => {
+    assert.equal(args[2].detached, true);
+    leader = childProcess.spawn(...args);
+    leader.once('exit', () => { leaderExited = true; });
+    return leader;
+  }, kill: (pid, signal) => {
+      try {
+        // Hold JS before libuv's waitpid to expose the real Darwin zombie-only group race deterministically.
+        if (signal === 0 && firstProbe && process.platform === 'darwin') {
+          firstProbe = false;
+          const deadline = Date.now() + 200;
+          while (Date.now() < deadline) process.kill(pid, signal);
+        }
+        return process.kill(pid, signal);
+      }
       catch (err) {
-        if (err.code !== 'ESRCH') t.diagnostic(`${err.message}; signal=${args[1]}`);
+        if (signal === 0) probes.push(err.code);
+        if (err.code === 'EPERM') {
+          assert.equal(pid, -leader.pid);
+          assert.equal(leaderExited, false);
+          assert.doesNotThrow(() => process.kill(leader.pid, 0));
+        }
         throw err;
       }
     }, reapMs: 1500 });
@@ -393,6 +451,9 @@ test('real fake CLI hook output closes and disables the service for this boot', 
   fx.service.message('hook');
   await until(() => fx.service.state().disabled === 'session_hub_hooks_detected', 5000);
   await fx.service.close();
+  if (process.platform === 'darwin') assert.ok(probes.includes('EPERM'));
+  assert.equal(probes.at(-1), 'ESRCH');
+  assert.equal(leaderExited, true);
   assert.equal(fx.service.state().state, 'idle');
   assert.equal(fx.service.state().disabled, 'session_hub_hooks_detected');
   assert.equal(fx.service.current(), null);

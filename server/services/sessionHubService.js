@@ -348,7 +348,13 @@ function createSessionHubService(options = {}) {
   function groupAlive() {
     if (!pgid) return false;
     try { kill(-pgid, 0); return true; }
-    catch (err) { if (err.code === 'ESRCH') return false; throw err; }
+    catch (err) {
+      if (err.code === 'ESRCH') return false;
+      // Darwin excludes zombies from killpg: before libuv's waitpid, a zombie-only group yields EPERM.
+      // It still exists. Yield to the event loop and require a later ESRCH, never infer successful reaping.
+      if (err.code === 'EPERM') return true;
+      throw err;
+    }
   }
   async function reap() {
     if (!pgid) return;
@@ -357,7 +363,11 @@ function createSessionHubService(options = {}) {
     const reapMs = options.reapMs ?? 10000;
     let escalated = false;
     const signal = name => {
-      try { kill(-pgid, name); } catch (err) { if (err.code !== 'ESRCH') throw err; }
+      try { kill(-pgid, name); }
+      catch (err) {
+        // A zombie-only group can also deny TERM/KILL. A persistent denial must reach reap_failed.
+        if (err.code !== 'ESRCH' && err.code !== 'EPERM') throw err;
+      }
     };
     signal('SIGTERM');
     while (groupAlive()) {
