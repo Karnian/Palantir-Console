@@ -49,7 +49,9 @@ function createSessionHubService(options = {}) {
     '/etc/claude-code/',
   ];
   const subscribers = new Set();
+  const epoch = crypto.randomBytes(16).toString('hex');
   let state = 'idle';
+  let version = 0;
   let generation = 0;
   let token = null;
   let disabled = null;
@@ -84,10 +86,11 @@ function createSessionHubService(options = {}) {
   const ownedPath = path.join(root, 'owned-sessions');
 
   function snapshot() {
-    return { state, generation, error, disabled, turnInProgress: !!turn,
+    return { state, epoch, version, generation, error, disabled, turnInProgress: !!turn,
       promptVersion: SESSION_HUB_PROMPT_VERSION, messages: messages.map(row => ({ ...row })) };
   }
   function publish() {
+    version++;
     const value = snapshot();
     for (const subscriber of subscribers) {
       try { subscriber(value); } catch { /* a disconnected subscriber cannot interrupt cleanup */ }
@@ -158,8 +161,23 @@ function createSessionHubService(options = {}) {
   }
   async function credentialSocket(gen) {
     socketDir = await io.mkdtemp(path.join(options.tmpDir || os.tmpdir(), 'hub-mcp-'));
-    await io.chmod(socketDir, 0o700);
-    const socketPath = path.join(socketDir, 'broker.sock');
+    const checkDirectory = async () => {
+      const info = await io.lstat(socketDir);
+      if (!info.isDirectory() || info.isSymbolicLink() || (uid !== undefined && info.uid !== uid)) {
+        throw fail('session_hub_unsafe_storage', 503);
+      }
+      await io.chmod(socketDir, 0o700);
+    };
+    await checkDirectory();
+    let socketPath = path.join(socketDir, 'broker.sock');
+    if (Buffer.byteLength(socketPath) > 100) {
+      await io.rm(socketDir, { recursive: true, force: true });
+      socketDir = null;
+      socketDir = await io.mkdtemp('/tmp/phub-');
+      await checkDirectory();
+      socketPath = path.join(socketDir, 'broker.sock');
+    }
+    if (Buffer.byteLength(socketPath) > 100) throw fail('session_hub_socket_path_too_long', 503);
     let checking = false;
     // Same-UID local processes are outside the threat model: they can read observe-snapshots directly.
     // PGID lookup is defense in depth, not authentication of the socket peer or its self-reported PID.
@@ -561,7 +579,10 @@ function createSessionHubService(options = {}) {
     if (clear) clearRequested = true;
     token = null;
     clearTimeout(mcpLossTimer); mcpLossTimer = null; mcpLossPending = false;
-    if (closePromise) return closePromise;
+    if (closePromise) {
+      if (shutdown) publish();
+      return closePromise;
+    }
     if (!permanent) state = 'closing';
     clearTimeout(timer); timer = null; turn = null;
     closePromise = (async () => {
@@ -580,11 +601,10 @@ function createSessionHubService(options = {}) {
       await transcriptCheck;
       await removeConfig();
       let result = { result: 'complete', remaining: 0 };
-      if (clearRequested) { messages = []; result = await clearFiles(); }
+      if (clearRequested) { messages = []; publish(); result = await clearFiles(); }
       if (!permanent) state = 'idle';
-      const finished = { ...snapshot(), ...result };
       publish();
-      return finished;
+      return { ...snapshot(), ...result };
     })().catch(err => {
       if (err.code !== 'reap_failed') {
         error ||= 'session_hub_cleanup_failed';
