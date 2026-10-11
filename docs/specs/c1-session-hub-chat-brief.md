@@ -37,6 +37,12 @@ C1 은 **채팅 에이전트가 Mac·codev2 의 모든 세션(Claude Code·Codex
   실제 PGID 가 현재 claude PGID 와 같을 때만 자격을 전달한다.
   hello 의 pgid 는 무시하고, 자격 전달은 세대당 1회만 허용한다.
   전달 뒤 socket listener 를 닫고 후속 연결을 거부한다.
+  자격 전달 연결은 MCP 생존 확인을 위해 유지하며 idle timeout 을 해제한다.
+  MCP 연결이 끊기면 `session_hub_mcp_lost` 로 그 세대 전체를 종료한다.
+  토큰 폐기·회수는 기존 close 와 같으며 다시 start 하면 새 세대가 된다.
+  PGID 조회는 timeout 1초와 `killSignal: 'SIGKILL'` 을 사용한다.
+  close·clear·shutdown 은 진행 중 조회를 기다리지 않는다.
+  늦은 결과는 해당 세대가 running 이 아니면 버리고 자격을 전달하지 않는다.
 - **현재 살아 있는 세션 비서 프로세스의 토큰**: 세션 비서 서비스가 프로세스를 띄울 때마다 32바이트 난수 토큰을 만들어 메모리에만 두고 MCP 서버 env 로 넘긴다. 프로세스가 끝나면(정상·비정상·대화 지우기) 즉시 폐기한다. 기존 manager capability 서비스(실행 증명·conversation/layer 검증)를 **쓰지 않는다**.
 - **hub 게이트**: `app.js` 에서 `/api/health`·`/api/auth`·body parser 를 장착하기 **전에** 좁은 미들웨어 하나를 둔다. 하는 일은 하나뿐 — `Authorization: Bearer <값>` 이 현재 hub 토큰과 같으면(상수 시간 비교) 요청이 broker GET 경로일 때만 `req.auth = {method:'bearer', actor:'session_hub'}` 를 표시하고 다음으로, 아니면 즉시 403. 값이 다르거나 헤더가 없거나 hub 토큰이 없으면 **아무것도 하지 않고** 그대로 넘긴다(기존 health/login/logout 무인증 계약, auth 비활성 모드, manager/worker/PM bearer, 잘못된 bearer 의 cookie fallback 금지 모두 불변). 기존 auth 미들웨어는 `req.auth.actor==='session_hub'` 가 이미 표시된 요청을 통과시킨다. broker off 게이트(404)는 hub 게이트보다도 앞이다.
 - 사람 cookie 도 broker 를 읽을 수 있다(디버깅·DoD 대조용, 화면은 쓰지 않음).

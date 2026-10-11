@@ -460,9 +460,10 @@ function credentialFixture(t, execFile) {
   const fx = serviceFixture(t, { net, execFile });
   function connect(pid, pgid) {
     const socket = new EventEmitter();
-    socket.setTimeout = () => {};
+    socket.setTimeout = delay => { socket.timeout = delay; };
     socket.destroy = () => { socket.destroyed = true; socket.emit('close'); };
-    socket.end = value => { socket.payload = value; };
+    socket.write = value => { socket.payload = value; };
+    socket.end = value => { if (value) socket.payload = value; socket.ended = true; };
     server.connect(socket);
     socket.emit('data', JSON.stringify({ pid, pgid }) + '\n');
     return socket;
@@ -549,25 +550,71 @@ test('failed server PGID lookup refuses credentials and terminates the hub', asy
   assert.equal(fx.service.state().error, 'session_hub_unexpected_pgid');
 });
 
-test('close during server PGID lookup waits and revokes credentials before a new generation can start', async t => {
-  let resolveLookup;
-  const fx = credentialFixture(t, (command, argv, opts, callback) => { resolveLookup = callback; });
-  await fx.service.start();
-  const previousGroup = fx.service.diagnostics().pgid;
-  const socket = fx.connect(42, previousGroup);
-  const closing = fx.service.stop();
-  assert.equal(fx.service.current(), null);
-  await assert.rejects(fx.service.start(), code('session_hub_busy'));
-  resolveLookup(null, String(previousGroup));
-  await closing;
-  assert.equal(socket.payload, undefined);
-  assert.equal(fx.service.state().error, null);
-  await fx.service.start();
-  const next = fx.connect(43, previousGroup);
-  resolveLookup(null, String(fx.service.diagnostics().pgid));
-  await tick();
-  assert.ok(next.payload);
-});
+for (const action of ['stop', 'clear', 'shutdown']) {
+  test(`${action} settles with a hung PGID lookup and ignores its late result`, async t => {
+    const lookups = [];
+    const fx = credentialFixture(t, (command, argv, opts, callback) => { lookups.push({ opts, callback }); });
+    await fx.service.start();
+    const previousGroup = fx.service.diagnostics().pgid;
+    const socket = fx.connect(42, previousGroup);
+    assert.equal(lookups[0].opts.timeout, 1000);
+    const closing = fx.service[action]();
+    assert.equal(fx.service.current(), null);
+    const completed = await Promise.race([closing.then(() => true),
+      new Promise(resolve => setTimeout(() => resolve(false), 200))]);
+    if (!completed) lookups[0].callback(null, String(previousGroup)); // release only to clean up the RED run
+    await closing;
+    assert.equal(completed, true);
+    assert.equal(fs.existsSync(path.join(fx.root, 'mcp.json')), false);
+    assert.equal(lookups[0].opts.killSignal, 'SIGKILL');
+    let next;
+    let token;
+    if (action !== 'shutdown') {
+      await fx.service.start();
+      next = fx.connect(43, previousGroup);
+      lookups[1].callback(null, String(fx.service.diagnostics().pgid));
+      await tick();
+      token = fx.service.current(); assert.ok(next.payload);
+    }
+    lookups[0].callback(null, String(previousGroup));
+    await tick();
+    assert.equal(socket.payload, undefined);
+    assert.equal(fx.service.state().error, null);
+    if (next) { assert.equal(fx.service.current(), token); assert.equal(fx.service.state().state, 'running'); }
+    else assert.equal(fx.service.state().state, 'closed');
+  });
+}
+
+for (const event of ['close', 'end', 'error']) {
+  test(`MCP ${event} closes its generation, revokes token and permits a fresh start only`, async t => {
+    const fx = credentialFixture(t, (command, argv, opts, callback) => {
+      callback(null, String(fx.service.diagnostics().pgid));
+    });
+    await fx.service.start();
+    const socket = fx.connect(42, 0);
+    await tick();
+    const oldToken = fx.service.current();
+    assert.ok(socket.payload);
+    socket.emit(event, event === 'error' ? new Error('MCP died') : undefined);
+    assert.equal(fx.service.state().error, 'session_hub_mcp_lost');
+    assert.equal(fx.service.current(), null);
+    assert.throws(() => fx.service.message('unavailable'), code('session_hub_not_running'));
+    await fx.service.close();
+    assert.equal(fx.service.state().state, 'idle');
+    assert.equal(fs.existsSync(path.join(fx.root, 'mcp.json')), false);
+    await fx.service.start();
+    const next = fx.connect(43, 0);
+    await tick();
+    assert.ok(next.payload); assert.notEqual(fx.service.current(), oldToken);
+    assert.equal(next.ended, undefined); assert.equal(next.timeout, 0);
+    socket.emit('close'); // an old MCP disconnect cannot affect the new generation
+    assert.equal(fx.service.state().error, null);
+    fx.service.message('new generation'); fx.event({ type: 'result' });
+    assert.equal(fx.service.state().state, 'running');
+    await fx.service.stop();
+    assert.equal(fx.service.state().error, null); // server-initiated disposal is not MCP loss
+  });
+}
 
 for (const ancestor of ['transcript', 'projects', '.claude']) {
   test(`missing memory_paths rejects symlink ${ancestor} ancestor even with a regular owned transcript`, async t => {

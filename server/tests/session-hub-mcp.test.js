@@ -103,14 +103,15 @@ test('bootstrap tolerates fragments, starts MCP once in the verified process and
   const sockets = [];
   const started = [];
   const exited = [];
+  const input = new EventEmitter();
   const source = fs.readFileSync(path.resolve(__dirname, '../../scripts/session-hub-mcp-bootstrap.cjs'), 'utf8');
   const modules = {
     'node:net': { connect() {
       const socket = new EventEmitter(); socket.setEncoding = () => {};
-      socket.write = value => { socket.sent = value; }; socket.end = value => { socket.sent = value; };
+      socket.write = value => { socket.sent = value; }; socket.end = () => { socket.ended = true; };
       sockets.push(socket); return socket;
     } },
-    './session-hub-mcp.cjs': { runStdio: options => started.push(options) },
+    './session-hub-mcp.cjs': { runStdio: options => { started.push(options); return input; } },
   };
   const env = { ANTHROPIC_API_KEY: 'claude-only', HOME: '/home', PALANTIR_TOKEN: 'human' };
   vm.runInNewContext(source, { require: name => modules[name], __dirname: '/fixture/scripts',
@@ -129,4 +130,9 @@ test('bootstrap tolerates fragments, starts MCP once in the verified process and
     PALANTIR_SESSION_HUB_BASE_URL: 'http://127.0.0.1:3000' });
   assert.deepEqual(env, JSON.parse(JSON.stringify(started[0].env)));
   assert.equal(sockets.length, 1);
+  assert.equal(sockets[0].ended, undefined);
+  input.emit('close');
+  assert.equal(sockets[0].ended, true);
+  sockets[0].emit('end');
+  assert.deepEqual(exited, [1]);
 });

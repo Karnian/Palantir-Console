@@ -103,6 +103,7 @@ function runStdio(options = {}) {
       if (response) process.stdout.write(`${JSON.stringify(response)}\n`);
     });
   });
+  return input;
 }
 if (require.main === module) runStdio();
 module.exports = { TOOLS, valid, dispatch, brokerGet, runStdio };

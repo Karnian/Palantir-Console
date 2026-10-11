@@ -76,7 +76,6 @@ function createSessionHubService(options = {}) {
   let requiresTranscript = false;
   let transcriptVerified = false;
   let transcriptCheck = null;
-  let credentialCheck = null;
   let namespaceReady = false;
   const sockets = new Set();
   const configPath = path.join(root, 'mcp.json');
@@ -165,8 +164,20 @@ function createSessionHubService(options = {}) {
     socketServer = (options.net || net).createServer(socket => {
       if (!live(gen) || mcpReady || checking) return socket.destroy();
       sockets.add(socket);
-      socket.on('close', () => sockets.delete(socket));
-      socket.on('error', () => {});
+      let credentialGranted = false;
+      let disconnected = false;
+      const lost = () => {
+        disconnected = true;
+        if (!credentialGranted || !live(gen)) return;
+        mcpReady = false;
+        error = 'session_hub_mcp_lost';
+        // close synchronously revokes the token and rejects new turns before publishing the error.
+        void close().catch(() => {});
+        append('error', error);
+      };
+      socket.on('close', () => { sockets.delete(socket); lost(); });
+      socket.on('end', lost);
+      socket.on('error', lost);
       socket.setTimeout(5000, () => socket.destroy());
       let buffer = '';
       let handled = false;
@@ -185,21 +196,25 @@ function createSessionHubService(options = {}) {
           return socket.destroy();
         }
         checking = true;
-        credentialCheck = new Promise((resolve, reject) => {
+        // Detached from cleanup: even a stuck query callback cannot delay close or a later generation.
+        void new Promise((resolve, reject) => {
           execFile('/bin/ps', ['-o', 'pgid=', '-p', String(hello.pid)],
-            { encoding: 'utf8', timeout: 1000, maxBuffer: 1024 }, (err, stdout) => {
+            { encoding: 'utf8', timeout: 1000, killSignal: 'SIGKILL', maxBuffer: 1024 }, (err, stdout) => {
               if (err) reject(err);
               else resolve(String(stdout).trim());
             });
         }).then(actual => {
-          if (!live(gen) || !token || socket.destroyed || mcpReady) return socket.destroy();
+          if (!live(gen) || !token || disconnected || socket.destroyed || mcpReady) return socket.destroy();
           if (!/^[1-9][0-9]*$/.test(actual) || Number(actual) !== pgid) {
             throw fail('session_hub_unexpected_pgid', 503);
           }
           mcpReady = true;
+          credentialGranted = true;
+          socket.setTimeout(0);
           options.onMcpProcess?.({ pid: hello.pid, pgid: Number(actual), kind: 'mcp' });
-          socket.end(`${JSON.stringify({ PALANTIR_SESSION_HUB_TOKEN: token,
+          socket.write(`${JSON.stringify({ PALANTIR_SESSION_HUB_TOKEN: token,
             PALANTIR_SESSION_HUB_BASE_URL: getBaseUrl() })}\n`);
+          // Keep this one connection as MCP liveness evidence; close only the listener to forbid reconnection.
           socketServer.close(() => {});
         }).catch(() => {
           if (live(gen)) { setError('session_hub_unexpected_pgid'); void close().catch(() => {}); }
@@ -327,7 +342,6 @@ function createSessionHubService(options = {}) {
     state = 'starting'; error = null; clearRequested = false;
     closePromise = null; writeQueue = Promise.resolve(); initSeen = false; mcpReady = false;
     initSessionId = null; requiresTranscript = false; transcriptVerified = false; transcriptCheck = null;
-    credentialCheck = null;
     const gen = ++generation;
     preparation = prepare(gen);
     startPromise = preparation.then(() => {
@@ -554,7 +568,6 @@ function createSessionHubService(options = {}) {
       stdoutHandler = null; child = null;
       await writeQueue.catch(() => {});
       await transcriptCheck;
-      await credentialCheck;
       await removeConfig();
       let result = { result: 'complete', remaining: 0 };
       if (clearRequested) { messages = []; result = await clearFiles(); }
