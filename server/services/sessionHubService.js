@@ -17,7 +17,8 @@ const { SESSION_HUB_PROMPT, SESSION_HUB_PROMPT_VERSION } = require('./sessionHub
 const { buildAssistantContext } = require('./assistantContext');
 const { utf8Prefix } = require('./assistantStore');
 const { redactSecrets, normalizeForScan } = require('./memorySanitize');
-const TOOL_NAMES = ['list_sessions', 'search_instructions', 'get_session', 'search_assistant_history'];
+const TOOL_NAMES = ['list_sessions', 'search_instructions', 'get_session', 'search_assistant_history',
+  'propose_memory', 'propose_forget'];
 const fail = (code, status = 409) => Object.assign(new Error(code), { code, status });
 const PRIVATE_BYTES = 1024 * 1024;
 const LINE_LIMIT = 1024 * 1024;
@@ -70,7 +71,9 @@ function createSessionHubService(options = {}) {
   let contextFresh = true;
   let rotateContext = false;
   let invalidationVersion = 0;
+  let memoryStateInitialized = false;
   let memoryProvider = null;
+  let memoryState = { pending_count: 0, revision: 0 };
   let mutex = Promise.resolve();
   let transitioning = false;
   const serialize = fn => {
@@ -117,6 +120,8 @@ function createSessionHubService(options = {}) {
   const configPath = path.join(root, 'mcp.json');
   const ownedPath = path.join(root, 'owned-sessions');
 
+  function invalidateContext() { invalidationVersion++; rotateContext = true; }
+
   function snapshot() {
     if (!closedComplete) {
       try { activeThread = store.active(); cachedMessages = store.window(activeThread); }
@@ -124,7 +129,7 @@ function createSessionHubService(options = {}) {
     }
     return { state, epoch, version, generation, error, disabled, turnInProgress: !!turn,
       promptVersion: SESSION_HUB_PROMPT_VERSION, thread_id: activeThread,
-      transcripts_remaining: transcriptsRemaining, messages: cachedMessages };
+      transcripts_remaining: transcriptsRemaining, messages: cachedMessages, memory: memoryState };
   }
   function publish() {
     version++;
@@ -822,7 +827,33 @@ function createSessionHubService(options = {}) {
     searchHistory: query => store.search(boundThread, query.q, query.limit === undefined ? 10 : Number(query.limit)),
     tokenThread: () => token ? boundThread : null,
     setMemoryProvider(fn) { memoryProvider = fn; },
-    invalidateContext() { invalidationVersion++; rotateContext = true; }, state: snapshot, current: () => token,
+    setMemoryState(value) {
+      if (memoryStateInitialized && memoryState.revision !== value.revision) invalidateContext();
+      const notify = memoryStateInitialized;
+      memoryStateInitialized = true;
+      memoryState = value;
+      if (notify) publish();
+    },
+    captureMemoryProposalSource(expectedToken) {
+      if (!token || token !== expectedToken) throw fail('forbidden', 403);
+      if (!turn || turn.generation !== generation || turn.user.thread_id !== boundThread) {
+        throw fail('memory_turn_required');
+      }
+      return Object.freeze({ generation, source_thread_id: boundThread,
+        turn_id: turn.user.turn_id, source_message_id: turn.user.id });
+    },
+    proposeMemory(memory, input, expectedToken, source) {
+      if (!source || !token || token !== expectedToken || !turn || source.generation !== generation
+        || turn.generation !== source.generation || boundThread !== source.source_thread_id
+        || turn.user.thread_id !== source.source_thread_id || turn.user.turn_id !== source.turn_id
+        || turn.user.id !== source.source_message_id) throw fail('proposal_turn_changed');
+      return memory.propose(input, source, row => {
+        append('tool_note', '기억 제안을 올렸어요 — 승인하면 저장됩니다', {
+          memory_proposal_id: row.id, turn_id: turn.user.turn_id, model_session_id: initSessionId,
+        }, false);
+      });
+    },
+    invalidateContext, state: snapshot, current: () => token,
     subscribe(fn) { subscribers.add(fn); return () => subscribers.delete(fn); },
     diagnostics: () => ({ cwd, transcriptDir, pgid, initSeen, mcpReady, transcriptVerified,
       storageErrorCode: persistenceFailure?.code || null }),

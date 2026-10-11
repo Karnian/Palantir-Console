@@ -71,7 +71,8 @@ test('fixed argv, guard immediately before spawn, minimal Claude env and disk-fr
     '{"disableAllHooks":true}', '--disable-slash-commands', '--strict-mcp-config', '--mcp-config',
     path.join(fx.root, 'mcp.json'), '--allowedTools',
     ['mcp__session_hub__list_sessions', 'mcp__session_hub__search_instructions',
-      'mcp__session_hub__get_session', 'mcp__session_hub__search_assistant_history'].join(','),
+      'mcp__session_hub__get_session', 'mcp__session_hub__search_assistant_history',
+      'mcp__session_hub__propose_memory', 'mcp__session_hub__propose_forget'].join(','),
     '--permission-mode', 'default',
     '--append-system-prompt', SESSION_HUB_PROMPT]);
   assert.deepEqual(order, [{ command: call.command, source: 'session-hub' }, 'spawn']);

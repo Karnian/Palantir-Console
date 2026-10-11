@@ -73,6 +73,8 @@ const { createAuthRouter } = require('./routes/auth');
 const { sealObserveState } = require('./services/observeSnapshotStore');
 const { sessionHubActive: computeSessionHubActive } = require('./services/sessionHubActivation');
 const { createAssistantStore } = require('./services/assistantStore');
+const { createAssistantMemoryService } = require('./services/assistantMemoryService');
+const { createSessionHubMemoryRouter } = require('./routes/sessionHubMemory');
 const { createSessionHubService } = require('./services/sessionHubService');
 const { createSessionHubChatRouter } = require('./routes/sessionHubChat');
 const { createSnapshotRefreshService } = require('./services/snapshotRefreshService');
@@ -1211,6 +1213,13 @@ function createApp(options = {}) {
     ...(options.sessionHubResolveClaudeBinary ? { resolveBinary: options.sessionHubResolveClaudeBinary } : {}),
   }) : null;
   const sessionHubTokenProvider = options.sessionHubTokenProvider || sessionHubService || { current: () => null };
+  const assistantMemory = sessionHubActive ? createAssistantMemoryService(db) : null;
+  if (sessionHubService) {
+    sessionHubService.setMemoryProvider(() => assistantMemory.active());
+    sessionHubService.setMemoryState(assistantMemory.state());
+    assistantMemory.subscribe(value => sessionHubService.setMemoryState(value));
+  }
+  app.assistantMemory = assistantMemory;
   app.sessionHubService = sessionHubService;
   app.sessionHubActive = sessionHubActive;
 
@@ -1925,6 +1934,10 @@ function createApp(options = {}) {
   app.use('/api/session-hub/snapshots', createSnapshotRefreshRouter({ service: snapshotRefreshService }));
   if (sessionHubService) {
     app.use('/api/session-hub/chat', createSessionHubChatRouter({ service: sessionHubService }));
+    app.use('/api/session-hub/memory', createSessionHubMemoryRouter({
+      memory: assistantMemory, service: sessionHubService, provider: sessionHubTokenProvider,
+      clock: options.sessionHubClock,
+    }));
   }
   app.use('/api/session-hub', createSessionHubRouter({
     state: observeState, store: options.observeSnapshotStore, provider: sessionHubTokenProvider,
