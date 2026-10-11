@@ -89,13 +89,14 @@ export function buildBundle({ request, sourceOverrides = {} }) {
   return { code: `const REQUEST = ${JSON.stringify(request)};\n${runtime}`, readerBuild };
 }
 export function runExecutor({ target, bundle, sshBin = 'ssh', env = process.env,
-  maxStdoutBytes = 16 * 1024 * 1024, timeoutMs = 120000, spawnImpl = spawn, outDir }) {
+  maxStdoutBytes = 16 * 1024 * 1024, timeoutMs = 120000, spawnImpl = spawn }) {
+  const detached = env.PALANTIR_SNAPSHOT_EXECUTOR_GROUP !== 'inherit';
   const command = target.kind === 'local' ? process.execPath : resolveExecutable(sshBin, env);
   const args = target.kind === 'local' ? ['--no-warnings', '-']
     : ['-o', 'BatchMode=yes', '--', target.host, target.remoteNode || 'node', '--no-warnings', '-'];
   spawnGuard.assertSpawnAllowed({ command, source: 'session-snapshot:executor' });
   return new Promise((resolve, reject) => {
-    const child = spawnImpl(command, args, { shell: false, detached: true, env, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawnImpl(command, args, { shell: false, detached, env, stdio: ['pipe', 'pipe', 'pipe'] });
     const chunks = [];
     let bytes = 0;
     let stderrBytes = 0;
@@ -109,8 +110,8 @@ export function runExecutor({ target, bundle, sshBin = 'ssh', env = process.env,
       killedReason = 'cancelled';
       if (finalCleanup) return;
       clearTimeout(timer);
-      // The outer CLI group cannot reach its detached executor. Kill it before exiting on a signal.
-      if (child.pid) {
+      // In inherited mode the server owns the whole CLI group; the CLI must never signal its own group.
+      if (detached && child.pid) {
         signalCleanup = reapProcessGroup(child.pid, { termMs: 0, reapMs: 4000 })
           .then(() => finish(null, 'SIGTERM'), () => finish(null, 'reap_failed'));
       } else { child.kill('SIGKILL'); finish(null, 'SIGTERM'); }
@@ -121,7 +122,7 @@ export function runExecutor({ target, bundle, sshBin = 'ssh', env = process.env,
     }
     function finish(exitCode, signal) {
       if (settled) return;
-      if (child.pid && !signalCleanup && !finalCleanup) {
+      if (detached && child.pid && !signalCleanup && !finalCleanup) {
         clearTimeout(timer); clearTimeout(backstop);
         finalCleanup = reapProcessGroup(child.pid, { termMs: 0, reapMs: 4000 }).then(
           () => finish(exitCode, signal),
@@ -139,10 +140,10 @@ export function runExecutor({ target, bundle, sshBin = 'ssh', env = process.env,
       killedReason = reason;
       clearTimeout(timer);
       backstop = setTimeout(() => finish(null, 'SIGKILL'), 2000);
-      if (child.pid) {
+      if (detached && child.pid) {
         try { process.kill(-child.pid, 'SIGKILL'); }
         catch { child.kill('SIGKILL'); }
-      }
+      } else if (!detached) { child.kill('SIGKILL'); }
       for (const stream of [child.stdout, child.stderr, child.stdin]) stream.destroy();
     }
     const timer = setTimeout(() => kill('timeout'), timeoutMs);
@@ -164,17 +165,7 @@ export function runExecutor({ target, bundle, sshBin = 'ssh', env = process.env,
       if (!signalCleanup) finish(exitCode, signal);
     });
     child.stdin.on('error', function ignorePipeError() {});
-    try {
-      if (outDir && child.pid) {
-        fs.mkdirSync(outDir, { recursive: true, mode: 0o700 });
-        const temporary = path.join(outDir, `.executor-${crypto.randomBytes(8).toString('hex')}.tmp`);
-        try {
-          fs.writeFileSync(temporary, String(child.pid), { flag: 'wx', mode: 0o600 });
-          fs.renameSync(temporary, path.join(outDir, 'executor.pgid'));
-        } finally { fs.rmSync(temporary, { force: true }); }
-      }
-      child.stdin.end(typeof bundle === 'string' ? bundle : bundle.code);
-    } catch { kill('pgid_record_failed'); }
+    child.stdin.end(typeof bundle === 'string' ? bundle : bundle.code);
   });
 }
 function resolveExecutable(command, env) {

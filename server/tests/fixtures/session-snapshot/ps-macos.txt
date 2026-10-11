@@ -1,9 +1,0 @@
-   67    67    -2
- 1856  1856    -2
-malformed unrelated row
-  777   777   nobody
-    0   888   501
-  889     0   501
-  -90   -90   501
-{{server_pid}} {{server_pgid}} {{uid}}
-{{target_pgid}} {{target_pgid}} {{uid}}

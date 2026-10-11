@@ -46,6 +46,7 @@ test('single-flight, success rename, private clean staging, bounded output and f
   assert.deepEqual(fx.result(), { code: 'ok' });
   const calls = fs.readFileSync(fx.log, 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(calls.length, 1); assert.equal(calls[0].blocked, '1'); assert.ok(calls[0].context);
+  assert.equal(calls[0].executorGroup, 'inherit');
   const runDir = calls[0].args[calls[0].args.indexOf('--out-dir') + 1];
   assert.equal(path.dirname(runDir), dir);
   assert.match(path.basename(runDir), /^run-/);
@@ -126,6 +127,7 @@ test('duplicate machine ids and malformed settings disable service with a fixed 
 
 test('test guard requires a fixture script before any real CLI or ssh can spawn', async t => {
   const fx = setup(t); let calls = 0;
+  await fx.service.shutdown();
   const service = createSnapshotRefreshService({ ...fx.options, scriptPath: undefined,
     spawn() { calls++; throw new Error('must not spawn'); } });
   service.refresh(); await service.settled();
@@ -151,6 +153,7 @@ test('fake automatic timer is unrefed, skips running targets, and is stopped at 
 
 test('routes require exact Origin and cookie, forbid bearer/hub tokens, validate body, and return status', async t => {
   const fx = setup(t);
+  await fx.service.shutdown();
   const app = fx.app({ sessionHubActive: false, sessionHubTokenProvider: { current: () => 'live-hub' },
     snapshotRefreshServiceOptions: fx.options });
   for (const origin of [undefined, 'null', 'https://localhost', 'http://other', 'http://localhost:80']) {
@@ -188,6 +191,7 @@ test('routes require exact Origin and cookie, forbid bearer/hub tokens, validate
 
 test('app shutdown cancels refresh synchronously and waits for the fixture descendant', async t => {
   const fx = setup(t, 'descendant', { reapOptions: { termMs: 200, reapMs: 3000, pollMs: 10 } });
+  await fx.service.shutdown();
   const app = fx.app({ snapshotRefreshServiceOptions: fx.options });
   app.snapshotRefreshService.refresh(); await until(() => fs.existsSync(fx.pid));
   const pid = Number(fs.readFileSync(fx.pid, 'utf8'));
@@ -215,6 +219,7 @@ test('SSH argv and target configuration are sealed at boot without executing ssh
   const env = { ...fx.env, PALANTIR_SNAPSHOT_TARGETS: JSON.stringify([{ name: 'codev2', kind: 'ssh',
     machineId: 'alpha', host: 'codev@codev2', label: 'codev2', remoteNode: '/synthetic/node',
     orcaBin: '/synthetic/orca' }]) };
+  await fx.service.shutdown();
   const service = createSnapshotRefreshService({ ...fx.options, env });
   env.PALANTIR_SNAPSHOT_TARGETS = '[]';
   service.refresh(); await service.settled();
@@ -244,160 +249,60 @@ test('boot removes crash remnants, including targets removed from configuration'
   const fx = setup(t);
   await fx.service.shutdown();
   const old = path.join(fx.dir, '.staging', 'removed', 'run-old');
-  fs.mkdirSync(old, { recursive: true }); fs.writeFileSync(path.join(old, 'executor.pgid'), '12345');
+  fs.mkdirSync(old, { recursive: true }); fs.writeFileSync(path.join(old, 'alpha.json'), 'stale');
   const service = createSnapshotRefreshService(fx.options);
   assert.equal(service.state().enabled, true); assert.equal(fs.existsSync(old), false);
   await service.shutdown();
 });
 
-test('timeout reaps a detached executor and grandchild while the fixture CLI is SIGSTOPed', async t => {
+test('timeout reaps the inherited executor and grandchild while the CLI is SIGSTOPed', async t => {
   const fx = setup(t, 'stopped_cli');
   await fx.service.shutdown();
-  let executor;
   const service = createSnapshotRefreshService({ ...fx.options,
     env: { ...fx.env, PALANTIR_SNAPSHOT_TIMEOUT_MS: '1000' },
-    reapOptions: { termMs: 100, reapMs: 3000, pollMs: 10 },
-    psBin: path.resolve(__dirname, 'fixtures/bin/fake-snapshot-ps.cjs'),
-    execFile(command, args, options, callback) {
-      assert.deepEqual(args, ['-axo', 'pid=,pgid=,uid=']);
-      callback(null, `${process.pid} ${process.pid} ${process.getuid()}\n`
-        + `${executor} ${executor} ${process.getuid()}\n`);
-    } });
-  t.after(async () => {
-    if (executor) { try { process.kill(-executor, 'SIGKILL'); } catch {} }
-    await service.shutdown().catch(() => {});
-  });
+    reapOptions: { termMs: 100, reapMs: 3000, pollMs: 10 } });
+  t.after(() => service.shutdown());
   service.refresh(); await until(() => fs.existsSync(fx.pid));
   const grandchild = Number(fs.readFileSync(fx.pid, 'utf8'));
-  const call = JSON.parse(fs.readFileSync(fx.log, 'utf8').trim().split('\n')[0]);
+  const calls = fs.readFileSync(fx.log, 'utf8').trim().split('\n').map(JSON.parse);
+  const call = calls[0];
+  const executor = calls.find(value => value.args.includes('--executor')).pid;
   const dir = call.args[call.args.indexOf('--out-dir') + 1];
-  executor = Number(fs.readFileSync(path.join(dir, 'executor.pgid'), 'utf8'));
+  assert.equal(call.executorGroup, 'inherit');
+  assert.equal(fs.readdirSync(dir).length, 0);
   process.kill(call.pid, 'SIGSTOP');
   await service.settled();
   assert.deepEqual(service.state().targets[0].last_result, { code: 'timeout' });
   for (const pid of [call.pid, executor, grandchild]) {
     assert.throws(() => process.kill(pid, 0), err => err.code === 'ESRCH');
   }
+  assert.throws(() => process.kill(-call.pid, 0), err => err.code === 'ESRCH');
   assert.equal(fs.existsSync(dir), false); fx.unchanged();
 });
 
-test('executor PGID rejects invalid, own-group, symlink and foreign-uid markers before signalling', async t => {
-  const { reapExecutorGroup } = require('../utils/snapshotExecutorGroup');
-  const fx = setup(t);
-  const marker = path.join(fx.root, 'executor.pgid');
-  let signals = 0; let rows = `${process.pid} 5000 ${process.getuid()}\n`;
-  const options = { psBin: path.resolve(__dirname, 'fixtures/bin/fake-snapshot-ps.cjs'),
-    execFile(command, argv, settings, callback) { callback(null, rows); },
-    reapOptions: { kill(pid, signal) { if (signal !== 0) signals++; } } };
-  for (const value of ['0', '1', '-2', '2\n', '2147483648', 'not-a-pid', '5000']) {
-    fs.writeFileSync(marker, value, { mode: 0o600 });
-    await assert.rejects(reapExecutorGroup(fx.root, options), err => err.code === 'reap_failed');
-  }
-  rows += `6000 6000 ${process.getuid() + 1}\n`;
-  fs.writeFileSync(marker, '6000');
-  await assert.rejects(reapExecutorGroup(fx.root, options), err => err.code === 'reap_failed');
-  fs.unlinkSync(marker); fs.symlinkSync(path.join(fx.root, 'input.json'), marker);
-  await assert.rejects(reapExecutorGroup(fx.root, options), err => err.code === 'reap_failed');
-  assert.equal(signals, 0);
-});
-
-function macosPsRows(target = 60284) {
-  return fs.readFileSync(path.join(__dirname, 'fixtures/session-snapshot/ps-macos.txt'), 'utf8')
-    .replaceAll('{{server_pid}}', String(process.pid)).replaceAll('{{server_pgid}}', '5000')
-    .replaceAll('{{uid}}', String(process.getuid())).replaceAll('{{target_pgid}}', String(target));
-}
-
-test('macOS ps signed nobody UIDs and unrelated malformed rows do not prevent owned-group reaping', async t => {
-  const { reapExecutorGroup } = require('../utils/snapshotExecutorGroup');
-  const fx = setup(t);
-  fs.writeFileSync(path.join(fx.root, 'executor.pgid'), '60284', { mode: 0o600 });
-  let alive = true; const signals = [];
-  await reapExecutorGroup(fx.root, {
-    psBin: path.resolve(__dirname, 'fixtures/bin/fake-snapshot-ps.cjs'),
-    execFile(command, args, options, callback) { callback(null, macosPsRows()); },
-    reapOptions: { kill(pid, signal) {
-      assert.equal(pid, -60284);
-      if (signal === 0 && !alive) throw Object.assign(new Error('gone'), { code: 'ESRCH' });
-      if (signal !== 0) { signals.push(signal); alive = false; }
-    } },
-  });
-  assert.deepEqual(signals, ['SIGTERM']);
-});
-
-test('malformed own or target rows and signed foreign target UIDs remain fail-closed', async t => {
-  const { reapExecutorGroup } = require('../utils/snapshotExecutorGroup');
-  const fx = setup(t);
-  fs.writeFileSync(path.join(fx.root, 'executor.pgid'), '60284', { mode: 0o600 });
-  let signals = 0;
-  const base = macosPsRows();
-  for (const rows of [base + `${process.pid} 5000 invalid\n`, base + '60285 60284 invalid\n',
-    base + '60285 60284 -2\n', base.replace(`${process.pid} 5000 ${process.getuid()}\n`, '')]) {
-    await assert.rejects(reapExecutorGroup(fx.root, {
-      psBin: path.resolve(__dirname, 'fixtures/bin/fake-snapshot-ps.cjs'),
-      execFile(command, args, options, callback) { callback(null, rows); },
-      reapOptions: { kill(pid, signal) { if (signal !== 0) signals++; } },
-    }), err => err.code === 'reap_failed');
-  }
-  assert.equal(signals, 0);
-});
-
-test('already absent executor is successful without requiring a ps process or parsing its output', async t => {
-  const { reapExecutorGroup } = require('../utils/snapshotExecutorGroup');
-  const fx = setup(t);
-  fs.writeFileSync(path.join(fx.root, 'executor.pgid'), '60284', { mode: 0o600 });
-  let calls = 0;
-  await reapExecutorGroup(fx.root, {
-    execFile() { calls++; throw new Error('ps must not run for an absent group'); },
-    reapOptions: { kill(pid, signal) {
-      assert.equal(pid, -60284); assert.equal(signal, 0);
-      throw Object.assign(new Error('gone'), { code: 'ESRCH' });
-    } },
-  });
-  assert.equal(calls, 0);
-});
-
-test('executor disappearing between ps and the absence probe is successful with noisy macOS rows', async t => {
-  const { reapExecutorGroup } = require('../utils/snapshotExecutorGroup');
-  const fx = setup(t);
-  fs.writeFileSync(path.join(fx.root, 'executor.pgid'), '60284', { mode: 0o600 });
-  let probes = 0;
-  await reapExecutorGroup(fx.root, {
-    psBin: path.resolve(__dirname, 'fixtures/bin/fake-snapshot-ps.cjs'),
-    execFile(command, args, options, callback) {
-      callback(null, macosPsRows().replace(`60284 60284 ${process.getuid()}\n`, ''));
-    },
-    reapOptions: { kill(pid, signal) {
-      assert.equal(signal, 0);
-      if (++probes === 2) throw Object.assign(new Error('gone'), { code: 'ESRCH' });
-    } },
-  });
-  assert.equal(probes, 2);
-});
-
-test('a target stays locked after a failed attempt but shutdown succeeds once its CLI group is absent', async t => {
+test('a target stays locked but shutdown succeeds and releases ownership once its group is absent', async t => {
   let denied = true;
-  const fx = setup(t, 'ok', { reapOptions: { termMs: 1, reapMs: 10, pollMs: 1, kill(pid, signal) {
-    if (denied) throw Object.assign(new Error('denied'), { code: 'EPERM' });
-    assert.equal(signal, 0);
-    throw Object.assign(new Error('gone'), { code: 'ESRCH' });
+  const fx = setup(t, 'ok', { reapOptions: { termMs: 1, reapMs: 10, pollMs: 1, kill() {
+    throw Object.assign(new Error(denied ? 'denied' : 'gone'), { code: denied ? 'EPERM' : 'ESRCH' });
   } } });
   fx.service.refresh(); await fx.service.settled();
   assert.equal(fx.service.state().targets[0].locked, true);
   assert.throws(() => fx.service.refresh(), err => err.code === 'reap_failed'); fx.unchanged();
+  const blocked = createSnapshotRefreshService(fx.options);
+  assert.equal(blocked.state().code, 'snapshot_refresh_locked'); await blocked.shutdown();
   denied = false;
   const closing = fx.service.shutdown(); assert.equal(fx.service.shutdown(), closing);
   await closing;
   assert.equal(fx.service.state().targets[0].locked, true);
-  assert.equal(fx.service.state().closed, true);
+  assert.equal(fs.existsSync(path.join(fx.dir, '.staging', '.lock')), false);
 });
 
 test('app shutdown succeeds for a locked target when no process groups remain', async t => {
   let denied = true;
-  const fx = setup(t, 'ok', { reapOptions: { termMs: 1, reapMs: 10, pollMs: 1, kill(pid, signal) {
-    if (denied) throw Object.assign(new Error('denied'), { code: 'EPERM' });
-    assert.equal(signal, 0);
-    throw Object.assign(new Error('gone'), { code: 'ESRCH' });
+  const fx = setup(t, 'ok', { reapOptions: { termMs: 1, reapMs: 10, pollMs: 1, kill() {
+    throw Object.assign(new Error(denied ? 'denied' : 'gone'), { code: denied ? 'EPERM' : 'ESRCH' });
   } } });
+  await fx.service.shutdown();
   const app = fx.app({ snapshotRefreshServiceOptions: fx.options });
   app.snapshotRefreshService.refresh(); await app.snapshotRefreshService.settled();
   assert.equal(app.snapshotRefreshService.state().targets[0].locked, true);
@@ -407,51 +312,81 @@ test('app shutdown succeeds for a locked target when no process groups remain', 
   assert.equal(app.snapshotRefreshService.state().closed, true); fx.unchanged();
 });
 
-test('normal completion publishes when its executor marker points to an already absent group', async t => {
-  let marked;
-  const fx = setup(t, 'ok', { spawn(command, args, options) {
-    const child = spawn(command, args, options);
-    const dir = args[args.indexOf('--out-dir') + 1];
-    child.once('exit', () => {
-      marked = child.pid;
-      fs.writeFileSync(path.join(dir, 'executor.pgid'), String(marked), { mode: 0o600 });
-    });
-    return child;
-  }, execFile() { throw new Error('ps must not run for an absent group'); } });
-  fx.service.refresh(); await fx.service.settled();
-  assert.ok(marked);
-  assert.throws(() => process.kill(-marked, 0), err => err.code === 'ESRCH');
-  assert.deepEqual(fx.result(), { code: 'ok' });
-  assert.equal(fx.service.state().targets[0].locked, false);
-  assert.equal(fs.readFileSync(path.join(fx.dir, 'alpha.json'), 'utf8'), fx.original.toString() + '\n');
+test('a second instance cannot clean active staging or publish and cannot release the first lock', async t => {
+  const fx = setup(t, 'hang', { reapOptions: { termMs: 10, reapMs: 1000, pollMs: 1 } });
+  fx.service.refresh(); await until(() => fs.existsSync(fx.log));
+  const call = JSON.parse(fs.readFileSync(fx.log, 'utf8').trim());
+  const dir = call.args[call.args.indexOf('--out-dir') + 1];
+  const proof = path.join(dir, 'active'); fs.writeFileSync(proof, 'keep');
+  const lock = path.join(fx.dir, '.staging', '.lock');
+  const bytes = fs.readFileSync(lock);
+  const owner = JSON.parse(bytes);
+  assert.equal(owner.pid, process.pid); assert.ok(Date.parse(owner.started_at));
+  assert.equal(fs.statSync(lock).mode & 0o777, 0o600);
+  let spawned = 0; let scheduled = 0;
+  const second = createSnapshotRefreshService({ ...fx.options,
+    env: { ...fx.env, PALANTIR_SNAPSHOT_REFRESH_MS: '10' },
+    spawn() { spawned++; }, setInterval() { scheduled++; } });
+  assert.equal(second.state().enabled, false);
+  assert.equal(second.state().code, 'snapshot_refresh_locked');
+  assert.equal(second.state().auto_interval_ms, 0);
+  assert.throws(() => second.refresh(), err => err.code === 'snapshot_refresh_locked');
+  assert.equal(fs.readFileSync(proof, 'utf8'), 'keep');
+  assert.deepEqual(fs.readFileSync(lock), bytes);
+  await second.shutdown(); assert.deepEqual(fs.readFileSync(lock), bytes);
+  assert.equal(spawned, 0); assert.equal(scheduled, 0);
+  await fx.service.shutdown(); fx.unchanged();
+  assert.equal(fs.existsSync(lock), false);
+  const next = createSnapshotRefreshService(fx.options);
+  assert.equal(next.state().enabled, true); await next.shutdown();
 });
 
-test('shutdown remembers the failed executor after staging deletion and accepts its eventual ESRCH', async t => {
-  const fx = setup(t, 'stopped_cli');
+test('a dead PID lock is taken over before crash remnants are cleaned', async t => {
+  const fx = setup(t); await fx.service.shutdown();
+  const base = path.join(fx.dir, '.staging');
+  const lock = path.join(base, '.lock');
+  fs.writeFileSync(lock, JSON.stringify({ pid: 2147483647, started_at: new Date(0).toISOString() }), { mode: 0o600 });
+  const old = path.join(base, 'removed', 'run-old');
+  fs.mkdirSync(old, { recursive: true }); fs.writeFileSync(path.join(old, 'alpha.json'), 'stale');
+  let probes = 0;
+  const service = createSnapshotRefreshService({ ...fx.options, lockKill(pid, signal) {
+    assert.equal(pid, 2147483647); assert.equal(signal, 0); probes++;
+    throw Object.assign(new Error('gone'), { code: 'ESRCH' });
+  } });
+  assert.equal(service.state().enabled, true); assert.equal(fs.existsSync(old), false);
+  assert.equal(JSON.parse(fs.readFileSync(lock, 'utf8')).pid, process.pid);
+  assert.ok(probes >= 1);
+  await service.shutdown(); assert.equal(fs.existsSync(lock), false);
+});
+
+for (const mode of ['EPERM', 'malformed', 'symlink', 'reclaim']) {
+  test(`lock ${mode} disables refresh without cleaning staging`, async t => {
+    const fx = setup(t); await fx.service.shutdown();
+    const base = path.join(fx.dir, '.staging');
+    const lock = path.join(base, '.lock');
+    const old = path.join(base, 'alpha', 'run-old');
+    fs.mkdirSync(old, { recursive: true }); fs.writeFileSync(path.join(old, 'alpha.json'), 'keep');
+    const data = JSON.stringify({ pid: 2147483647, started_at: new Date(0).toISOString() });
+    if (mode === 'symlink') {
+      const external = path.join(fx.root, 'external'); fs.writeFileSync(external, data);
+      fs.symlinkSync(external, lock);
+    } else fs.writeFileSync(lock, mode === 'malformed' ? '{' : data, { mode: 0o600 });
+    if (mode === 'reclaim') fs.writeFileSync(path.join(base, '.lock.reclaim'), data, { mode: 0o600 });
+    const service = createSnapshotRefreshService({ ...fx.options, warn() {}, lockKill() {
+      throw Object.assign(new Error(mode), { code: mode === 'EPERM' ? 'EPERM' : 'ESRCH' });
+    } });
+    assert.equal(service.state().enabled, false);
+    assert.equal(fs.readFileSync(path.join(old, 'alpha.json'), 'utf8'), 'keep');
+    await service.shutdown(); assert.equal(fs.existsSync(lock), true);
+  });
+}
+
+test('shutdown removes only the lock owned by that instance', async t => {
+  const fx = setup(t);
+  const lock = path.join(fx.dir, '.staging', '.lock');
+  fs.unlinkSync(lock);
+  const other = JSON.stringify({ pid: 1, started_at: new Date(0).toISOString() });
+  fs.writeFileSync(lock, other, { mode: 0o600 });
   await fx.service.shutdown();
-  let executor;
-  const service = createSnapshotRefreshService({ ...fx.options,
-    env: { ...fx.env, PALANTIR_SNAPSHOT_TIMEOUT_MS: '1000' },
-    reapOptions: { termMs: 50, reapMs: 1000, pollMs: 10 },
-    psBin: path.resolve(__dirname, 'fixtures/bin/fake-snapshot-ps.cjs'),
-    execFile(command, args, options, callback) { callback(new Error('inspection failed')); },
-  });
-  t.after(async () => {
-    if (executor) { try { process.kill(-executor, 'SIGKILL'); } catch {} }
-    await service.shutdown().catch(() => {});
-  });
-  service.refresh(); await until(() => fs.existsSync(fx.pid));
-  const call = JSON.parse(fs.readFileSync(fx.log, 'utf8').trim().split('\n')[0]);
-  const dir = call.args[call.args.indexOf('--out-dir') + 1];
-  executor = Number(fs.readFileSync(path.join(dir, 'executor.pgid'), 'utf8'));
-  process.kill(call.pid, 'SIGSTOP');
-  await service.settled();
-  assert.equal(service.state().targets[0].locked, true);
-  assert.equal(fs.existsSync(dir), false);
-  process.kill(-executor, 'SIGKILL');
-  await until(() => {
-    try { process.kill(-executor, 0); return false; }
-    catch (err) { return err.code === 'ESRCH'; }
-  });
-  await service.shutdown(); fx.unchanged();
+  assert.equal(fs.readFileSync(lock, 'utf8'), other);
 });

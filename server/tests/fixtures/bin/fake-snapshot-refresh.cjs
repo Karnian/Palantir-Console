@@ -7,12 +7,12 @@ const args = process.argv.slice(2);
 const env = process.env;
 const dir = args[args.indexOf('--out-dir') + 1];
 fs.appendFileSync(env.FAKE_REFRESH_LOG, JSON.stringify({ args, blocked: env.PALANTIR_BLOCK_REAL_SPAWN,
-  context: env.NODE_TEST_CONTEXT, pid: process.pid }) + '\n');
+  context: env.NODE_TEST_CONTEXT, pid: process.pid, executorGroup: env.PALANTIR_SNAPSHOT_EXECUTOR_GROUP }) + '\n');
 const mode = env.FAKE_REFRESH_MODE || 'ok';
 if (mode === 'stopped_cli') {
-  const executor = spawn(process.execPath, [__filename, '--executor'], { detached: true,
+  spawn(process.execPath, [__filename, '--executor'], {
+    detached: env.PALANTIR_SNAPSHOT_EXECUTOR_GROUP !== 'inherit',
     env: { ...env, FAKE_REFRESH_MODE: 'executor' }, stdio: 'ignore' });
-  fs.writeFileSync(path.join(dir, 'executor.pgid'), String(executor.pid), { mode: 0o600 });
   setInterval(() => {}, 1000);
 } else if (mode === 'executor') {
   spawn(process.execPath, [__filename, '--grandchild'], { env: { ...env,

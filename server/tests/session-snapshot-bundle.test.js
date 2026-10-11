@@ -40,6 +40,51 @@ test('remote and local bytes, fixed argv, hash, permissions and atomic replaceme
   assert.equal(fs.statSync(f.out).mode & 0o777, 0o700);
   assert.deepEqual(fs.readdirSync(f.out), [remote.envelope.machine.id + '.json']);
 });
+
+test('local and SSH executors inherit only when requested and never write process metadata', async t => {
+  const { spawn } = require('node:child_process');
+  for (const inherit of [false, true]) {
+    for (const kind of ['local', 'remote']) {
+      await t.test(`${kind}: ${inherit ? 'inherit' : 'detached'}`, async sub => {
+        const f = fixture(sub);
+        const env = { ...f.env };
+        delete env.PALANTIR_SNAPSHOT_EXECUTOR_GROUP;
+        if (inherit) env.PALANTIR_SNAPSHOT_EXECUTOR_GROUP = 'inherit';
+        const target = kind === 'local' ? { kind } : f.target;
+        let detached;
+        const value = await execute(f, f.request, { target, env, outDir: f.out,
+          spawnImpl(command, args, options) { detached = options.detached; return spawn(command, args, options); } });
+        assert.equal(detached, !inherit); assert.equal(value.result.exitCode, 0);
+        exactSnapshot(value.envelope);
+        assert.equal(fs.existsSync(f.out), false);
+      });
+    }
+  }
+});
+
+for (const reason of ['timeout', 'SIGTERM', 'SIGINT', 'stdout_limit']) {
+  test(`inherited executor ${reason} never signals a child PGID or its own group`, async t => {
+    const m = await api;
+    const child = new EventEmitter(); child.pid = 12345;
+    for (const name of ['stdin', 'stdout', 'stderr']) child[name] = new PassThrough();
+    child.stdin.resume();
+    t.after(() => { for (const name of ['stdin', 'stdout', 'stderr']) child[name].destroy(); });
+    const groupKill = t.mock.method(process, 'kill', () => { throw new Error('unexpected group signal'); });
+    const signals = [];
+    child.kill = signal => { signals.push(signal); setImmediate(() => child.emit('close', null, signal)); };
+    const result = await m.runExecutor({ target: { kind: 'local' }, bundle: '', timeoutMs: 20, maxStdoutBytes: 1,
+      env: { ...process.env, PALANTIR_SNAPSHOT_EXECUTOR_GROUP: 'inherit' },
+      spawnImpl(command, args, options) {
+        assert.equal(options.detached, false);
+        if (reason.startsWith('SIG')) setImmediate(() => process.emit(reason));
+        if (reason === 'stdout_limit') setImmediate(() => child.stdout.write('too much'));
+        return child;
+      } });
+    assert.equal(result.killedReason, reason.startsWith('SIG') ? 'cancelled' : reason);
+    assert.deepEqual(signals, ['SIGKILL']); assert.equal(groupKill.mock.callCount(), 0);
+  });
+}
+
 test('executor guard is looked up for each local and remote execution', async t => {
   const f = fixture(t);
   await api;
@@ -658,24 +703,4 @@ test('PR1c D fake Orca executes actual envelopes through the bundle and projects
   assert.equal(envelope.sessions[0].orca_link.pane_key, 'fixture-tab:fixture-leaf');
   assert.equal(envelope.sessions[0].orca_link.terminal_handle, 'term_fixture');
   assert.equal(JSON.stringify(envelope).includes('FAKE_ORCA_PRIVATE_TEXT'), false);
-});
-
-test('executor publishes its detached PGID as digits in a private marker before feeding stdin', async t => {
-  const f = fixture(t);
-  const { spawn } = require('node:child_process');
-  let pgid;
-  const result = await execute(f, f.request, { outDir: f.out, spawnImpl(command, args, options) {
-    const child = spawn(command, args, options);
-    pgid = child.pid;
-    const end = child.stdin.end.bind(child.stdin);
-    child.stdin.end = (...values) => {
-      const marker = path.join(f.out, 'executor.pgid');
-      assert.equal(fs.readFileSync(marker, 'utf8'), String(pgid));
-      assert.equal(fs.statSync(marker).mode & 0o777, 0o600);
-      return end(...values);
-    };
-    return child;
-  } });
-  assert.equal(result.result.exitCode, 0);
-  assert.throws(() => process.kill(pgid, 0), err => err.code === 'ESRCH');
 });
