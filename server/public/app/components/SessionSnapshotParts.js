@@ -4,7 +4,7 @@ import htm from '../../vendor/htm.module.js';
 import { WORK_BOARD_LABELS as W } from '../lib/copy.js';
 import { snapshotCards, rankCards, highlightParts, matchedLines,
   coverageCounts, formatLocalSnapshotTime, cardLineVisibility,
-  displayInstructionText } from '../lib/workBoard.js';
+  displayInstructionText, sessionDisplayTitle } from '../lib/workBoard.js';
 
 const html = htm.bind(h);
 
@@ -62,6 +62,22 @@ export function Instruction({ instruction, query, now }) {
     ${copyState === 'fallback' && html`<input ref=${selectorRef} class="work-selector"
       aria-label=${W.selector} value=${selector} readOnly />`}
   </li>`;
+}
+
+export function SessionRow({ card, query, now, onOpen }) {
+  const title = sessionDisplayTitle(card);
+  const recent = card.recent || (card.instructions.length ? W.missing : W.noInstruction);
+  return html`<button class="ghost work-card session-row" type="button"
+    aria-label=${`${card.machine.label} · ${title}`} onClick=${() => onOpen(card.key)}>
+    <span class="work-title"><${Highlight} text=${title} query=${query} transformed=${card.titleTransformed} /></span>
+    <span class="work-meta">${card.machine.label} · ${card.repo_label || W.repoUnknown} ·
+      <${SnapshotTime} value=${card.last_record_at} now=${now} relativeOnly=${true} />
+      ${card.orca_link.confirmed && html`<span class="work-orca">
+        · Orca ${W.states[card.agent?.state || 'unknown']}</span>`}
+    </span>
+    <span class="work-recent"><${Highlight} text=${recent} query=${query}
+      transformed=${card.recentTransformed} /></span>
+  </button>`;
 }
 
 export function SessionCard({ card, query, rank, now, onOpen, timeline = false }) {

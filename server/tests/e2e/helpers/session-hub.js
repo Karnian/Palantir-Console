@@ -14,7 +14,10 @@ async function mockSessionHub(page, { observe = true, clock = true } = {}) {
   const key = alpha.sessions[0].key;
   let state = { state: 'running', generation: 1, turnInProgress: false, messages: [
     { role: 'user', text: '지금 각 세션 뭐 하고 있어?' },
-    { role: 'assistant', text: `Mac에서 인증 흐름을 검토했습니다. [[session:${key}@${REV}]]` },
+    { role: 'tool', name: 'mcp__session_hub__search_instructions', text: '{"q":"인증","cursor":"next"}' },
+    { role: 'tool', name: 'mcp__session_hub__get_session', text: JSON.stringify({ key }) },
+    { role: 'assistant', text: '## 검토 결과\n\n- Mac에서 인증 흐름을 검토했습니다. '
+      + `[[session:${key}@${REV}]]` },
   ] };
   if (clock) await page.clock.install({ time: new Date('2026-10-10T03:10:00.000Z') });
   await page.route('**/api/health', route => route.fulfill({ json: { sessionHubActive: true } }));

@@ -8797,8 +8797,6 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 .session-hub-note { color: var(--text-secondary); font-size: 13px; margin: 8px 12px; }
 .session-hub-messages { flex: 1; min-height: 0; overflow: auto; padding: 12px 16px; }
 .session-hub-empty { color: var(--text-secondary); font-size: 13px; line-height: 1.6; }
-.session-hub-message { padding: 8px 0; overflow-wrap: anywhere; }
-.session-hub-message .session-hub-note { margin: 0; }
 .session-hub-input { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--border); }
 .session-hub-input textarea {
   flex: 1; min-width: 0; resize: vertical; padding: 8px;
@@ -8817,8 +8815,7 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 .all-sessions-panel .work-card { padding: 10px 0; border: 0; border-bottom: 1px solid var(--border); border-radius: 0; }
 .all-sessions-panel .work-title { font-size: 13px; -webkit-line-clamp: 1; }
 .all-sessions-panel .work-recent { font-size: 13px; -webkit-line-clamp: 1; }
-.all-sessions-panel .session-rows .work-first-block { display: none; }
-.all-sessions-panel .work-search { height: 30px; padding: 4px 8px; }
+.all-sessions-panel .work-search { height: 32px; padding: 4px 8px; }
 .all-sessions-panel .work-pill { border-radius: var(--radius-sm); padding: 2px 4px; }
 .all-sessions-panel .work-coverage h2, .all-sessions-panel .work-coverage h3 { font-size: 13px; }
 @media (max-width: 640px) {
@@ -8829,9 +8826,33 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   .session-hub-manager[data-pane="panel"] .session-hub-chat-side { display: none; }
   .session-hub-chat-side > .manager-chat-side { min-width: 0; }
 }
-.all-sessions-panel .session-rows .work-card { position: relative; gap: 4px; }
-.all-sessions-panel .session-rows .work-card-footer button::after { content: ''; position: absolute; inset: 0; }
-.all-sessions-panel .session-rows .work-card:focus-within { outline: 2px solid var(--accent); outline-offset: -2px; }
-.all-sessions-panel .session-rows .work-card-footer { border: 0; padding-top: 0; }
-.all-sessions-panel .session-rows .work-card-footer button { min-height: 28px; }
 .session-pasted-label { color: var(--text-muted); font-size: 12px; }
+
+/* C1 quality: shared chat bubbles and three-line session rows. */
+.session-hub-chat .manager-chat-header .ghost { min-height: 28px; padding: 3px 8px; font-size: 12px; }
+.session-hub-tools { color: var(--text-muted); font-size: 12px; min-width: 0; }
+.session-hub-tools summary { cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-hub-tools ul { margin: 4px 0; padding-left: 18px; }
+.session-hub-tools li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-hub-error { color: var(--danger); font-size: 13px; margin: 8px 12px; }
+.all-sessions-panel .session-row {
+  display: flex; align-items: stretch; gap: 3px; width: 100%; min-width: 0;
+  text-align: left; white-space: normal; padding: 10px 8px; background: var(--bg-surface);
+}
+.all-sessions-panel .session-row:hover { background: var(--bg-hover); }
+.all-sessions-panel .session-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.all-sessions-panel .session-row .work-title { font-size: 13px; font-weight: 600; }
+.all-sessions-panel .session-row .work-title,
+.all-sessions-panel .session-row .work-meta,
+.all-sessions-panel .session-row .work-recent {
+  display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+}
+.all-sessions-panel .work-snapshot-times {
+  display: flex; align-items: center; width: 100%; min-width: 0; overflow: hidden;
+  white-space: nowrap; color: var(--text-muted); font-size: 12px;
+}
+.all-sessions-panel .work-snapshot-times > span + span::before { content: ' · '; }
+.all-sessions-panel .work-snapshot-times > span {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+}
+.all-sessions-panel .work-snapshot-times .work-observation-note { flex: 0 0 auto; }

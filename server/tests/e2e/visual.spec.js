@@ -534,6 +534,10 @@ for (const theme of THEMES) {
       await setTheme(page, theme);
       await page.goto('/#manager');
       await expect(page.locator('button.session-evidence')).toBeVisible();
+      await expect(page.locator('.manager-msg-row-user .manager-msg-content'))
+        .toHaveText('지금 각 세션 뭐 하고 있어?');
+      await expect(page.locator('.manager-msg-assistant .markdown-body h2')).toHaveText('검토 결과');
+      await expect(page.locator('.session-hub-tools summary')).toContainText('세션 열기:');
       await stabilize(page);
       await expect(page).toHaveScreenshot(`session-hub-chat-${theme}-${vp.name}.png`, {
         maxDiffPixels: 100, threshold: 0.2,
@@ -544,7 +548,8 @@ for (const theme of THEMES) {
         maxDiffPixels: 100, threshold: 0.2,
       });
       await page.getByRole('button', { name: '← 모든 세션', exact: true }).click();
-      await expect(page.locator('.session-rows .work-card')).toHaveCount(3);
+      await expect(page.locator('button.session-row')).toHaveCount(3);
+      await expect(page.locator('.session-rows .work-label, .session-rows .work-card-footer')).toHaveCount(0);
       await expect(page).toHaveScreenshot(`session-hub-panel-${theme}-${vp.name}.png`, {
         maxDiffPixels: 100, threshold: 0.2,
       });

@@ -158,8 +158,23 @@ function createSessionHubService(options = {}) {
   }
   async function credentialSocket(gen) {
     socketDir = await io.mkdtemp(path.join(options.tmpDir || os.tmpdir(), 'hub-mcp-'));
-    await io.chmod(socketDir, 0o700);
-    const socketPath = path.join(socketDir, 'broker.sock');
+    const checkDirectory = async () => {
+      const info = await io.lstat(socketDir);
+      if (!info.isDirectory() || info.isSymbolicLink() || (uid !== undefined && info.uid !== uid)) {
+        throw fail('session_hub_unsafe_storage', 503);
+      }
+      await io.chmod(socketDir, 0o700);
+    };
+    await checkDirectory();
+    let socketPath = path.join(socketDir, 'broker.sock');
+    if (Buffer.byteLength(socketPath) > 100) {
+      await io.rm(socketDir, { recursive: true, force: true });
+      socketDir = null;
+      socketDir = await io.mkdtemp('/tmp/phub-');
+      await checkDirectory();
+      socketPath = path.join(socketDir, 'broker.sock');
+    }
+    if (Buffer.byteLength(socketPath) > 100) throw fail('session_hub_socket_path_too_long', 503);
     let checking = false;
     // Same-UID local processes are outside the threat model: they can read observe-snapshots directly.
     // PGID lookup is defense in depth, not authentication of the socket peer or its self-reported PID.

@@ -26,11 +26,11 @@ async function openBoard(page, theme, viewport) {
     '주간 보고 초안을 작성해 주세요.',
   ]);
   await expect(page.locator('.work-observation-note')).toHaveText('상태는 스냅샷 시점 관측');
-  await expect(page.locator('.work-snapshot-times .work-pill')).toHaveCount(2);
-  expect(await page.locator('.work-snapshot-times .work-pill').allTextContents()).toEqual([
+  await expect(page.locator('.work-snapshot-times > span:not(.work-observation-note)')).toHaveCount(2);
+  expect(await page.locator('.work-snapshot-times > span:not(.work-observation-note)').allTextContents()).toEqual([
     'Mac · 방금 스냅샷 · 10/10 12:00', 'codev2 · 5분 전 스냅샷 · 10/10 11:55',
   ]);
-  await expect(page.locator('.work-orca')).toHaveText('Orca · 응답 대기');
+  await expect(page.locator('.work-orca')).toHaveText(' · Orca 응답 대기');
   await expect(page.locator('.work-card').getByText('형식 미검증', { exact: true })).toHaveCount(0);
   await page.evaluate(() => document.fonts.ready);
 }
@@ -52,7 +52,7 @@ for (const theme of ['light', 'dark']) {
         mask: [page.locator('.nav-status')],
       });
       const cards = page.locator('.work-card');
-      await cards.first().getByRole('button').click();
+      await cards.first().click();
       await expect(page.locator('.work-event')).toHaveCount(2);
       await scan(page);
       await expect(page).toHaveScreenshot(`timeline-${theme}-${viewport.name}.png`, {
@@ -71,7 +71,7 @@ for (const theme of ['light', 'dark']) {
       });
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
       expect(overflow).toBe(false);
-      for (const button of await page.locator('[data-view="all-sessions"] button').all()) {
+      for (const button of await page.locator('[data-view="all-sessions"] button:not(.session-row)').all()) {
         const box = await button.boundingBox();
         if (!box) continue;
         expect(box.height).toBeGreaterThanOrEqual(28);

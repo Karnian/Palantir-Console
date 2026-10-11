@@ -119,7 +119,7 @@ test('panel confirms rev despite failed machine, opens timeline and copies exact
   await flushEffects(); await flushEffects();
   assert.equal(updates.at(-1).rev, REV); assert.equal(updates.at(-1).cards.length, 2);
   assert.ok(env.root.textContent.includes('읽지 못한 스냅샷'));
-  env.root.querySelector('.work-card button').click(); await flushEffects();
+  env.root.querySelector('button.session-row').click(); await flushEffects();
   assert.equal(env.root.querySelectorAll('.work-card').length, 1);
   env.root.querySelector('.work-event button').click(); await flushEffects();
   assert.deepEqual(copied, [`${alpha.instructions[1].id}#${alpha.instructions[1].ref}`]);
@@ -241,4 +241,83 @@ test('boot health feeds active flag to manager and the legacy route feeds panel 
   assert.match(app, /initialPanel=\$\{routeParts\[1\] === 'all-sessions' \? 'all' : undefined\}/);
   env.render(null, env.root);
   for (const call of calls) assert.equal(call.opts.signal.aborted, true);
+});
+
+test('readable labels skip URL lines, follow AI/first/recent priority and cap evidence at 24 characters', t => {
+  const env = setup(t), make = changes => ({ key: 'alpha:claude:abcdef', machine: { label: 'Mac' }, ...changes });
+  const titled = make({ ai_title: 'AI 제목', first: '처음', recent: '최근' });
+  assert.equal(env.context.sessionDisplayTitle(titled), 'AI 제목');
+  assert.equal(env.context.sessionDisplayTitle(make({ ai_title: 'https://example.com', first: '처음' })), '처음');
+  assert.equal(env.context.sessionDisplayTitle(make({ first: 'https://example.com', recent: '최근' })), '최근');
+  assert.equal(env.context.sessionDisplayTitle(make({ ai_title: 'https://example.com\n제목' })), '제목');
+  assert.equal(env.context.sessionDisplayTitle(make({ first: 'https://example.com', recent: 'https://x.test' })),
+    '세션 abcdef');
+  assert.equal(env.context.sessionEvidenceLabel(make({ ai_title: '가'.repeat(30) })), `Mac · ${'가'.repeat(24)}`);
+});
+
+test('chat shares Top bubbles, groups tool calls without JSON, maps errors and honors Enter/IME', async t => {
+  const env = setup(t), calls = [], key = 'alpha:claude:abcdef';
+  const card = { key, machine: { id: 'alpha', label: 'Mac' }, ai_title: '인증 검토' };
+  const snapshot = { state: 'running', turnInProgress: false, messages: [
+    { role: 'user', text: '리뷰해' },
+    { role: 'tool', name: 'mcp__session_hub__search_instructions', text: '{"q":"리뷰해","cursor":"SECRET"}' },
+    { role: 'tool', name: 'mcp__session_hub__list_sessions', text: '{"machine":"alpha","provider":"codex"}' },
+    { role: 'tool', name: 'mcp__session_hub__get_session', text: JSON.stringify({ key }) },
+    { role: 'assistant', text: '## 검토 결과\n\n- 완료' },
+    { role: 'error', text: 'session_hub_socket_path_too_long' },
+  ] };
+  env.context.EventSource = class { addEventListener() {} close() {} };
+  env.context.fetch = async (url, opts) => { calls.push({ url, opts }); return response(snapshot); };
+  env.render(env.h(env.context.SessionHubChat, { panel: { rev: REV, cards: [card] } }), env.root);
+  await flushEffects(); await flushEffects();
+  assert.equal(env.root.querySelector('.manager-msg-row-user .manager-msg-user .manager-msg-content').textContent,
+    '리뷰해');
+  assert.ok(env.root.querySelector('.manager-msg-assistant .markdown-body h2'));
+  assert.ok(env.root.querySelector('.manager-msg-assistant .markdown-body ul li'));
+  assert.equal(env.root.querySelectorAll('.session-hub-tools').length, 1);
+  assert.equal(env.root.querySelectorAll('.session-hub-tools li').length, 3);
+  assert.ok(env.root.textContent.includes('검색: 리뷰해 (다음 페이지)'));
+  assert.ok(env.root.textContent.includes('세션 목록 조회 · Mac · codex'));
+  assert.ok(env.root.textContent.includes('세션 열기: Mac · 인증 검토'));
+  assert.ok(!env.root.textContent.includes('SECRET'));
+  assert.ok(!env.root.textContent.includes('session_hub_socket_path_too_long'));
+  assert.ok(env.root.querySelector('.manager-status-badge.idle'));
+  assert.equal(env.context.sessionHubErrorText('ENOENT'), '세션 비서를 시작하지 못했습니다(ENOENT).');
+  const input = env.root.querySelector('textarea');
+  input.value = '질문'; input.dispatchEvent(new env.window.Event('input', { bubbles: true }));
+  await flushEffects();
+  const keydown = options => input.dispatchEvent(new env.window.KeyboardEvent('keydown', {
+    key: 'Enter', bubbles: true, cancelable: true, ...options,
+  }));
+  keydown({ shiftKey: true }); keydown({ isComposing: true }); keydown({ keyCode: 229 });
+  input.dispatchEvent(new env.window.CompositionEvent('compositionstart', { bubbles: true }));
+  keydown({}); assert.equal(calls.length, 1);
+  input.dispatchEvent(new env.window.CompositionEvent('compositionend', { bubbles: true }));
+  assert.equal(keydown({}), false);
+  await flushEffects(); assert.equal(calls.length, 2);
+  assert.equal(calls[1].url, '/api/session-hub/chat/message');
+});
+
+test('compact panel rows have three lines, searchable content and visibly named filters', async t => {
+  const env = setup(t), { alpha } = fixture(t);
+  env.context.apiFetch = async url => url.endsWith('/snapshots') ? { rev: REV, snapshots: [
+    { machine_id: 'alpha', machine_label: 'Mac', sha256: 'a' },
+  ] } : alpha;
+  env.render(env.h(env.context.AllSessionsPanel), env.root); await flushEffects(); await flushEffects();
+  const row = env.root.querySelector('button.session-row');
+  assert.equal(row.children.length, 3);
+  assert.equal(row.querySelector('.work-title').textContent, '합성 세션 검토');
+  assert.ok(row.querySelector('.work-meta').textContent.includes('Mac · '));
+  assert.equal(row.querySelectorAll('.work-label, .work-card-footer, button, .work-first-block').length, 0);
+  assert.equal(env.root.querySelectorAll('.work-snapshot-times .work-pill').length, 0);
+  assert.ok(env.root.querySelector('.work-snapshot-times').textContent.includes('상태는 스냅샷 시점 관측'));
+  assert.deepEqual(Array.from(env.root.querySelectorAll('.dropdown-label'), node => node.textContent.trim()),
+    ['머신: 전체', '도구: 전체']);
+  const input = env.root.querySelector('#work-query');
+  input.value = '로그인리다'; input.dispatchEvent(new env.window.Event('input', { bubbles: true }));
+  await flushEffects(); assert.equal(env.root.querySelectorAll('button.session-row').length, 1);
+  env.root.querySelector('button.session-row').click(); await flushEffects();
+  assert.equal(env.root.querySelectorAll('button.session-row').length, 0);
+  assert.ok(env.root.querySelector('.work-card-footer'));
+  assert.equal(env.root.querySelectorAll('.work-event').length, 2);
 });

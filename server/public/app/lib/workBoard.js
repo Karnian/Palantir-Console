@@ -26,6 +26,24 @@ export function displayInstructionText(text) {
   return `/${name}${args ? ` ${args}` : ''}`;
 }
 
+// A readable title is shared by compact rows, evidence chips and tool summaries.
+export function sessionDisplayTitle(card) {
+  const first = card.first_instruction === 'recoverable'
+    ? displayInstructionText(card.instructions?.[0]?.text) || card.first : card.first;
+  const candidates = [card.ai_title, first, card.recent];
+  if (!card.ai_title && !first && !card.instructions?.length) candidates.unshift(card.title);
+  for (const candidate of candidates) {
+    const line = String(displayInstructionText(candidate) || '').split(/\r?\n/u)
+      .map(value => value.trim()).find(value => value && !/^(?:<?[a-z][a-z0-9+.-]*:\/\/|www\.)/iu.test(value));
+    if (line) return line;
+  }
+  return `세션 ${String(card.key || '').slice(-6)}`;
+}
+
+export function sessionEvidenceLabel(card) {
+  return `${card.machine.label} · ${Array.from(sessionDisplayTitle(card)).slice(0, 24).join('')}`;
+}
+
 export function normalizeSearch(text) {
   const spaced = String(text || '').normalize('NFC').toLowerCase();
   return { spaced, compact: spaced.replace(/\s/gu, '') };

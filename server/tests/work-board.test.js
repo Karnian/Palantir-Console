@@ -247,7 +247,7 @@ test('DOM displays command cards, timeline and raw search matches as safe litera
   alpha.instructions[1].text = commandText('///review', args);
   const env = boardEnv(t), root = env.document.getElementById('root');
   env.context.apiFetch = async url => url.endsWith('/snapshots') ? { snapshots: [{ machine_id: 'alpha' }] } : alpha;
-  env.render(env.h(env.context.AllSessionsPanel), root); await flushEffects(); await flushEffects();
+  env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
   assert.equal(root.querySelector('.work-title').textContent, '/review scripts/lib');
   assert.equal(root.querySelector('.work-recent').textContent, `/review scripts/lib [REDACTED] ${attack}`);
   assert.equal(root.querySelector('.work-first').textContent, '/deep-research');
@@ -292,7 +292,7 @@ test('DOM command card rows use the existing display deduplication priority', as
     snapshot.instructions[1].text = variant.recent;
     env.context.apiFetch = async url => url.endsWith('/snapshots')
       ? { snapshots: [{ machine_id: 'alpha' }] } : snapshot;
-    env.render(env.h(env.context.AllSessionsPanel), root); await flushEffects(); await flushEffects();
+    env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
     const check = () => {
       assert.equal(root.querySelector('.work-title').textContent, variant.ai || '/review scripts/lib');
       assert.equal(root.querySelectorAll('.work-recent-block').length, variant.omit ? 0 : 1);
@@ -319,7 +319,7 @@ test('DOM search highlights original lines without matching a synthesized comman
   alpha.instructions[1].text = wrapped;
   const env = boardEnv(t), root = env.document.getElementById('root');
   env.context.apiFetch = async url => url.endsWith('/snapshots') ? { snapshots: [{ machine_id: 'alpha' }] } : alpha;
-  env.render(env.h(env.context.AllSessionsPanel), root); await flushEffects(); await flushEffects();
+  env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
   assert.equal(root.querySelector('.work-title').textContent, mismatched);
   assert.equal(root.querySelector('.work-recent').textContent, '/review x');
   root.querySelector('.work-card button').click(); await flushEffects();
@@ -363,7 +363,7 @@ test('DOM highlights original matches before verifying converted card and timeli
     snapshot.instructions[1].text = variant.recent;
     env.context.apiFetch = async url => url.endsWith('/snapshots')
       ? { snapshots: [{ machine_id: 'alpha' }] } : snapshot;
-    env.render(env.h(env.context.AllSessionsPanel), root); await flushEffects(); await flushEffects();
+    env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
     const input = root.querySelector('#work-query');
     input.value = query; input.dispatchEvent(new env.window.Event('input', { bubbles: true }));
     await flushEffects();
@@ -410,7 +410,7 @@ test('recent instruction placeholders distinguish blank text from zero instructi
     assert.equal(card.recentMissing, !!variant.missing);
     env.context.apiFetch = async url => url.endsWith('/snapshots')
       ? { snapshots: [{ machine_id: 'alpha' }] } : snapshot;
-    env.render(env.h(env.context.AllSessionsPanel), root); await flushEffects(); await flushEffects();
+    env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
     assert.equal(root.querySelectorAll('.work-card').length, 1);
     assert.equal(root.querySelector('.work-title').textContent, '합성 세션 검토');
     assert.equal(root.querySelector('.work-recent').textContent, variant.expected);
@@ -459,7 +459,7 @@ test('card line priority compares normalized display strings in normal and searc
     }
     env.context.apiFetch = async url => url.endsWith('/snapshots')
       ? { snapshots: [{ machine_id: 'alpha' }] } : snapshot;
-    env.render(env.h(env.context.AllSessionsPanel), root); await flushEffects(); await flushEffects();
+    env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
     const check = () => {
       assert.equal(root.querySelectorAll('.work-card').length, 1);
       assert.equal(root.querySelector('.work-title').textContent, variant.ai || variant.first);
@@ -491,7 +491,7 @@ test('whitespace-only AI titles fall back to the first text instruction', async 
   assert.equal(card.showFirst, false);
   const env = boardEnv(t), root = env.document.getElementById('root');
   env.context.apiFetch = async url => url.endsWith('/snapshots') ? { snapshots: [{ machine_id: 'alpha' }] } : alpha;
-  env.render(env.h(env.context.AllSessionsPanel), root); await flushEffects(); await flushEffects();
+  env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
   assert.equal(root.querySelectorAll('.work-card').length, 1);
   assert.equal(root.querySelector('.work-title').textContent, '인증 흐름을 검토해 주세요.');
   assert.equal(root.querySelector('.work-title').previousElementSibling.textContent, '처음');
@@ -702,8 +702,8 @@ function boardEnv(t) {
   vm.runInContext('this.W = WORK_BOARD_LABELS;', env.context);
   env.loadComponent('Dropdown');
   env.loadComponent('SessionSnapshotParts');
-  env.loadComponent('AllSessionsPanel');
-  // Existing display contracts now run against the real panel; fixtures predate observe hashes.
+  require('./helpers/session-detail-cards').installDetailCards(env);
+  // Keep rich timeline display contracts intact; compact row contracts live in session-hub-ui.test.js.
   let request;
   Object.defineProperty(env.context, 'apiFetch', {
     configurable: true,
@@ -730,7 +730,7 @@ test('DOM preserves XSS instruction/title/repo as text, timeline flags and selec
     { machine_id: 'alpha', machine_label: 'Mac', generated_at: alpha.generated_at },
     { name_id: 'bad', error_code: 'parse_error' },
   ] } : alpha;
-  env.render(env.h(env.context.AllSessionsPanel), env.document.getElementById('root'));
+  env.render(env.h(env.context.DetailCards), env.document.getElementById('root'));
   await flushEffects(); await flushEffects();
   let cards = env.document.querySelectorAll('.work-card');
   assert.equal(cards.length, 2);
@@ -770,14 +770,14 @@ test('DOM cleanup aborts detail requests and removes data; recovery messages rem
     return url.endsWith('/snapshots') ? Promise.resolve({ snapshots: [{ machine_id: 'alpha' }] }) : pending.promise;
   };
   const root = env.document.getElementById('root');
-  env.render(env.h(env.context.AllSessionsPanel), root); await flushEffects();
+  env.render(env.h(env.context.DetailCards), root); await flushEffects();
   assert.equal(root.querySelector('[role="status"]').textContent, '불러오는 중 (0/1)');
   assert.equal(signal.aborted, false);
   env.render(null, root); assert.equal(signal.aborted, true);
   pending.resolve(alpha); await flushEffects(); assert.equal(root.textContent, '');
   env.context.apiFetch = async url => url.endsWith('/snapshots')
     ? { snapshots: [{ machine_id: 'alpha' }, { machine_id: 'beta' }] } : url.endsWith('alpha') ? alpha : beta;
-  env.render(env.h(env.context.AllSessionsPanel), root); await flushEffects(); await flushEffects();
+  env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
   assert.equal(root.querySelectorAll('.work-card').length, 3);
   assert.deepEqual(Array.from(root.querySelectorAll('.work-title'), node => node.textContent),
     ['합성 세션 검토', '이미지 크기별 결과를 정리해 주세요.',
@@ -801,7 +801,7 @@ test('attachment-first title instruction hides the same recent seq in normal and
   alpha.sessions[0].ai_title = null;
   const env = boardEnv(t), root = env.document.getElementById('root');
   env.context.apiFetch = async url => url.endsWith('/snapshots') ? { snapshots: [{ machine_id: 'alpha' }] } : alpha;
-  env.render(env.h(env.context.AllSessionsPanel), root); await flushEffects(); await flushEffects();
+  env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
   assert.equal(root.querySelector('.work-title').textContent, '검색 가능한 첫 텍스트');
   assert.equal(root.querySelectorAll('.work-recent-block').length, 0);
   const query = root.querySelector('#work-query');
@@ -837,7 +837,7 @@ test('recovery status remains visible with AI titles and text titles, including 
       Object.assign(snapshot.sessions[0], { first_instruction: state, ai_title: title });
       env.context.apiFetch = async url => url.endsWith('/snapshots')
         ? { snapshots: [{ machine_id: 'alpha' }] } : snapshot;
-      env.render(env.h(env.context.AllSessionsPanel), root); await flushEffects(); await flushEffects();
+      env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
       assert.equal(root.querySelectorAll('.work-card').length, 1);
       assert.equal(root.querySelector('.work-title').textContent, title || '인증 흐름을 검토해 주세요.');
       assert.deepEqual(Array.from(root.querySelectorAll('.work-first-status'), node => node.textContent), [message]);
@@ -931,7 +931,7 @@ test('clipboard success receives exact id#ref; total failures never expose raw e
   } });
   env.context.apiFetch = async url => url.endsWith('/snapshots')
     ? { snapshots: [{ machine_id: 'alpha' }] } : alpha;
-  env.render(env.h(env.context.AllSessionsPanel), root); await flushEffects(); await flushEffects();
+  env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
   assert.equal(root.querySelectorAll('.work-card').length, 2);
   root.querySelector('.work-card button').click(); await flushEffects();
   root.querySelector('.work-event button').click(); await flushEffects();
@@ -940,7 +940,7 @@ test('clipboard success receives exact id#ref; total failures never expose raw e
   assert.equal(root.querySelectorAll('.work-selector').length, 0);
   env.render(null, root);
   env.context.apiFetch = async () => { throw new Error('secret English sentinel'); };
-  env.render(env.h(env.context.AllSessionsPanel), root); await flushEffects(); await flushEffects();
+  env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
   assert.equal(root.querySelector('[role="alert"]').textContent,
     '스냅샷을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.');
   assert.equal(root.textContent.includes('secret English sentinel'), false);
@@ -990,7 +990,7 @@ test('coverage aggregates every board counter and renders machine totals with Ko
     machine_id: 'alpha', machine_label: 'Mac', generated_at: '2026-10-10T01:00:00.000Z',
   }] } : alpha;
   const root = env.document.getElementById('root');
-  env.render(env.h(env.context.AllSessionsPanel), root); await flushEffects(); await flushEffects();
+  env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
   assert.equal(root.querySelectorAll('.work-card').length, 2);
   const machines = root.querySelectorAll('.work-coverage-machine');
   assert.equal(machines.length, 1);
@@ -1054,7 +1054,7 @@ test('normal and search cards share title rules, omit duplicate rows and limit w
     env.context.apiFetch = async url => url.endsWith('/snapshots') ? { snapshots: [{
       machine_id: 'alpha', machine_label: 'Mac', generated_at: snapshot.generated_at,
     }] } : snapshot;
-    env.render(env.h(env.context.AllSessionsPanel), root); await flushEffects(); await flushEffects();
+    env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
     const card = root.querySelector('.work-card');
     assert.equal(root.querySelectorAll('.work-card').length, 1);
     assert.equal(card.querySelector('.work-title').textContent, variant.title);
@@ -1151,7 +1151,7 @@ test('attachment-first cards hide empty first rows and fall back only when no te
     Object.assign(snapshot.instructions[1], { text: variant.text, text_missing: false });
     env.context.apiFetch = async url => url.endsWith('/snapshots')
       ? { snapshots: [{ machine_id: 'alpha' }] } : snapshot;
-    env.render(env.h(env.context.AllSessionsPanel), root); await flushEffects(); await flushEffects();
+    env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
     assert.equal(root.querySelectorAll('.work-card').length, 1);
     assert.equal(root.querySelector('.work-title').textContent, variant.title);
     assert.equal(root.querySelectorAll('.work-first-block').length, 0);
@@ -1176,7 +1176,7 @@ test('all composed separators have one space on each side; machine pill uses one
   env.context.apiFetch = async url => url.endsWith('/snapshots') ? { snapshots: [{
     machine_id: 'alpha', machine_label: 'Mac', generated_at: alpha.generated_at,
   }] } : alpha;
-  env.render(env.h(env.context.AllSessionsPanel), root); await flushEffects(); await flushEffects();
+  env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
   assert.equal(root.querySelectorAll('.work-card').length, 2);
   const { formatLocalSnapshotTime } = await logic;
   const absolute = formatLocalSnapshotTime(alpha.generated_at, Date.parse('2026-10-10T03:10:00.000Z'));
@@ -1204,7 +1204,7 @@ test('PR1d footer shows total before retention while unknown ratio keeps the exp
   alpha.sessions[0].unknown_count = 1;
   const env = boardEnv(t), root = env.document.getElementById('root');
   env.context.apiFetch = async url => url.endsWith('/snapshots') ? { snapshots: [{ machine_id: 'alpha' }] } : alpha;
-  env.render(env.h(env.context.AllSessionsPanel), root); await flushEffects(); await flushEffects();
+  env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
   assert.equal(root.querySelector('.work-card-footer span').textContent, env.context.W.instructions(401));
   assert.ok(root.textContent.includes(env.context.W.unknownRatio(1, 3)));
 });

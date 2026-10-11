@@ -835,3 +835,46 @@ test('clear after reboot deletes old owned transcripts without resuming messages
   assert.equal(fs.readFileSync(path.join(fx.root, 'owned-sessions'), 'utf8'), '');
   assert.equal(fx.calls.length, 1);
 });
+
+test('long TMPDIR falls back to a private short socket directory and cleans both directories', async t => {
+  const fx = serviceFixture(t);
+  const longTmp = path.join(fx.temp, '한글'.repeat(40));
+  fs.mkdirSync(longTmp, { mode: 0o700 });
+  const alternate = serviceFixture(t, { tmpDir: longTmp });
+  await alternate.service.start();
+  assert.equal(alternate.service.state().state, 'running');
+  const config = JSON.parse(fs.readFileSync(path.join(alternate.root, 'mcp.json'), 'utf8'));
+  const socket = config.mcpServers.session_hub.args.at(-1);
+  assert.ok(socket.startsWith('/tmp/phub-'), socket);
+  assert.ok(Buffer.byteLength(socket) <= 100);
+  const directory = path.dirname(socket);
+  const info = fs.lstatSync(directory);
+  assert.equal(info.isSymbolicLink(), false);
+  assert.equal(info.mode & 0o777, 0o700);
+  assert.deepEqual(fs.readdirSync(longTmp), []);
+  await alternate.service.stop();
+  assert.equal(fs.existsSync(directory), false);
+});
+
+test('socket fallback rejects a still-overlong path before listening or spawning', async t => {
+  const base = serviceFixture(t);
+  const longTmp = path.join(base.temp, 'x'.repeat(120));
+  fs.mkdirSync(longTmp, { mode: 0o700 });
+  let listened = false;
+  const fx = serviceFixture(t, { tmpDir: longTmp, fs: { ...fsp,
+    mkdtemp: prefix => fsp.mkdtemp(prefix === '/tmp/phub-' ? path.join(longTmp, 'phub-') : prefix),
+  }, net: { createServer() { listened = true; throw new Error('unexpected listen'); } } });
+  await assert.rejects(fx.service.start(), code('session_hub_socket_path_too_long'));
+  assert.equal(listened, false); assert.equal(fx.calls.length, 0);
+  assert.deepEqual(fs.readdirSync(longTmp), []);
+});
+
+test('socket directory symlink is refused before chmod or spawn without touching its target', async t => {
+  const base = serviceFixture(t), target = path.join(base.temp, 'target'), link = path.join(base.temp, 'link');
+  fs.mkdirSync(target, { mode: 0o755 });
+  fs.symlinkSync(target, link);
+  const fx = serviceFixture(t, { fs: { ...fsp, mkdtemp: async () => link } });
+  await assert.rejects(fx.service.start(), code('session_hub_unsafe_storage'));
+  assert.equal(fs.statSync(target).mode & 0o777, 0o755);
+  assert.equal(fx.calls.length, 0);
+});
