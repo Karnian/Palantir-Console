@@ -2043,3 +2043,83 @@ test('R6 complete deletion retains the completion notice', async t => {
   assert.ok(env.root.textContent.includes('이전 대화를 삭제했습니다.'));
   assert.ok(!env.root.textContent.includes('일부 기록 삭제 대기'));
 });
+
+test('R7 send rejects a displayed thread superseded before the next render', async t => {
+  const env = setup(t), sources = r5Sources(env), posts = [];
+  const initial = { epoch: 'A', version: 1, thread_id: 'displayed', state: 'running',
+    messages: [], turnInProgress: false };
+  env.context.fetch = async (url, options = {}) => {
+    assert.match(url, /^\/api\/session-hub\/chat\/(state|message)$/);
+    if (options.method === 'POST') {
+      posts.push(JSON.parse(options.body)); return response({ ...initial, version: 3 });
+    }
+    return response(initial);
+  };
+  env.render(env.h(env.context.SessionHubChat), env.root); await flushEffects(); await flushEffects();
+  const input = env.root.querySelector('textarea'); input.value = '전환 직전 질문';
+  input.dispatchEvent(new env.window.Event('input', { bubbles: true })); await flushEffects();
+  const send = env.root.querySelector('[type="submit"]'); assert.equal(send.disabled, false);
+  // SSE updates the active thread immediately; the visible form still has its previous render's handler.
+  sources[0].emit({ ...initial, version: 2, thread_id: 'active' });
+  send.click(); await flushEffects();
+  assert.equal(posts.length, 0, 'a stale form must not POST to its previous thread');
+  assert.equal(env.root.querySelector('[role="alert"]').textContent, '대화가 바뀌었습니다. 다시 보내 주세요.');
+  assert.equal(input.value, '전환 직전 질문'); assert.equal(input.disabled, false);
+  env.root.querySelector('[type="submit"]').click(); await flushEffects();
+  assert.equal(posts.length, 1); assert.equal(posts[0].thread_id, 'active');
+});
+
+for (const arrival of ['after resynchronization', 'at completion handoff']) test(
+  `R7 retired send response ${arrival} preserves input, canonical state and retry`, async t => {
+    const env = setup(t), sources = r5Sources(env), held = deferred(), posts = [];
+    const initial = { epoch: 'A', version: 1, thread_id: 'current', state: 'running',
+      messages: [], turnInProgress: false };
+    const handoff = arrival === 'at completion handoff';
+    const canonical = { ...initial, epoch: handoff ? 'A' : 'B', version: 3,
+      messages: [{ id: 'canonical', role: 'assistant', content: '현재 서버의 답변', status: 'complete' }] };
+    let reads = 0;
+    env.context.fetch = async (url, options = {}) => {
+      assert.match(url, /^\/api\/session-hub\/chat\/(state|message)$/);
+      if (url.endsWith('/message')) {
+        posts.push({ body: JSON.parse(options.body), signal: options.signal });
+        // Deliberately ignore AbortSignal: a retired request can still deliver its response.
+        return posts.length === 1 ? held.promise : response({ ...canonical, version: 4 });
+      }
+      return response(++reads === 1 ? initial : canonical);
+    };
+    env.render(env.h(env.context.SessionHubChat), env.root); await flushEffects(); await flushEffects();
+    const input = env.root.querySelector('textarea'); input.value = '재전송할 질문';
+    input.dispatchEvent(new env.window.Event('input', { bubbles: true })); await flushEffects();
+    env.root.querySelector('[type="submit"]').click(); await flushEffects();
+    assert.equal(posts.length, 1); assert.equal(input.disabled, true);
+    const foreign = { ...initial, epoch: 'B', version: 0 };
+    let interleaved = false;
+    if (handoff) {
+      const options = env.context.preact.options, previous = options.debounceRendering;
+      t.after(() => { options.debounceRendering = previous; });
+      // Queue SSE between the request's snapshot update and the action's awaited completion.
+      // Ordinary post-abort replies are already rejected inside request(); this covers the next async boundary.
+      options.debounceRendering = flush => queueMicrotask(() => {
+        if (!interleaved) { interleaved = true; sources[0].emit(foreign); }
+        flush();
+      });
+    } else {
+      sources[0].emit(foreign); await flushEffects(); await flushEffects();
+      assert.equal(posts[0].signal.aborted, true); assert.equal(input.disabled, false);
+    }
+    held.resolve(response({ ...initial, version: 2,
+      messages: [{ id: 'retired', role: 'assistant', content: '퇴역 요청의 답변', status: 'complete' }] }));
+    await flushEffects(); await flushEffects();
+    if (handoff) assert.equal(interleaved, true, 'SSE must run before the awaited send completion');
+    assert.equal(posts[0].signal.aborted, true); assert.equal(sources[0].closed, true);
+    assert.equal(sources.length, 2); assert.equal(reads, 2);
+    assert.equal(input.value, '재전송할 질문'); assert.equal(input.disabled, false);
+    assert.ok(env.root.textContent.includes('현재 서버의 답변'));
+    assert.ok(!env.root.textContent.includes('퇴역 요청의 답변'));
+    assert.ok(env.root.textContent.includes('전달되지 않았을 수 있습니다. 다시 보내 주세요.'));
+    assert.equal(env.root.querySelector('[role="alert"]'), null);
+    env.root.querySelector('[type="submit"]').click(); await flushEffects(); await flushEffects();
+    assert.equal(posts.length, 2); assert.equal(posts[1].body.request_id, posts[0].body.request_id);
+    assert.equal(posts[1].body.text, '재전송할 질문'); assert.equal(posts[1].signal.aborted, false);
+    assert.equal(input.value, ''); assert.equal(env.root.querySelector('.session-hub-note[role="status"]'), null);
+  });
