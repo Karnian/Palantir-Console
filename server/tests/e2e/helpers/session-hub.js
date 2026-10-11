@@ -39,6 +39,44 @@ async function mockSessionHub(page, { observe = true, clock = true, longText = f
     ] };
   let threads = [{ id: 'thread-1', title: '현재 대화' }, { id: 'thread-old', title: '이전 검토' }];
   if (clock) await page.clock.install({ time: new Date('2026-10-10T03:10:00.000Z') });
+  // route.fulfill() ends its SSE body. Keep this fixture connected after its snapshot instead of emitting EOF errors.
+  await page.addInitScript(() => {
+    const NativeEventSource = window.EventSource;
+    window.EventSource = class SessionHubSource extends EventTarget {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSED = 2;
+      constructor(url, options = {}) {
+        super();
+        const resolved = new URL(url, location.href);
+        if (resolved.origin !== location.origin || resolved.pathname !== '/api/session-hub/chat/stream') {
+          return new NativeEventSource(url, options);
+        }
+        this.url = resolved.href; this.withCredentials = !!options.withCredentials;
+        this.readyState = SessionHubSource.CONNECTING;
+        this.controller = new AbortController();
+        this.addEventListener('open', event => this.onopen?.(event));
+        this.addEventListener('error', event => this.onerror?.(event));
+        fetch(this.url, { signal: this.controller.signal,
+          credentials: this.withCredentials ? 'include' : 'same-origin' }).then(async response => {
+          if (!response.ok) throw new Error('Fixture stream failed');
+          const frame = await response.text();
+          if (this.readyState === SessionHubSource.CLOSED) return;
+          const data = /^data: (.+)$/m.exec(frame)?.[1];
+          if (!data) throw new Error('Fixture snapshot missing');
+          this.readyState = SessionHubSource.OPEN;
+          this.dispatchEvent(new Event('open'));
+          if (this.readyState !== SessionHubSource.CLOSED) {
+            this.dispatchEvent(new MessageEvent('snapshot', { data, origin: resolved.origin }));
+          }
+        }).catch(() => {
+          if (this.readyState === SessionHubSource.CLOSED) return;
+          this.readyState = SessionHubSource.CLOSED; this.dispatchEvent(new Event('error'));
+        });
+      }
+      close() { this.readyState = SessionHubSource.CLOSED; this.controller.abort(); }
+    };
+  });
   await page.route('**/api/health', route => route.fulfill({ json: { sessionHubActive: true } }));
   if (observe) await page.route('**/api/observe/snapshots**', route => {
     const url = new URL(route.request().url());
@@ -99,6 +137,7 @@ async function expectNoHorizontalOverflow(page) {
 async function expectAssistantLayout(page) {
   const { expect } = require('@playwright/test');
   await expectNoHorizontalOverflow(page);
+  await expect(page.locator('.session-hub-chat .session-hub-error')).toHaveCount(0);
   const manager = page.locator('.session-hub-manager');
   const rightPanel = page.locator('.session-hub-panel-side');
   const closed = await manager.getAttribute('data-right') === 'closed';
