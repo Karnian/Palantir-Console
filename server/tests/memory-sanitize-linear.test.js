@@ -138,6 +138,13 @@ test('oracle: version 3 adds only CLI password argument masking', () => {
     for (const value of ['"correct horse battery staple"', "'private value'", 'hunter2']) {
       equivalent(`review ${flag} ${value} --other keep`);
     }
+    for (const separator of [' ', '  ', '\t', '\n']) {
+      for (const next of ['--host localhost', '-h localhost', '--', '-value']) {
+        const input = `mysql ${flag}${separator}${next}`;
+        equivalent(input);
+        assert.deepEqual(current.redactSecrets(input), { text: input, redacted: false });
+      }
+    }
   }
   for (const input of ['--passwordx hunter2', '--password-extra hunter2', '--password "unclosed']) {
     equivalent(input);
@@ -225,6 +232,23 @@ test('oracle: 12000 fixed-seed structured mixtures and nested assignments', () =
   }
 });
 
+function assertLinearPerformance(sizes, milliseconds, samples) {
+  // Ratios of millisecond-scale samples amplify timer and scheduler noise.
+  if (milliseconds[2] >= 50) {
+    assert.ok(milliseconds[2] <= milliseconds[0] * 6, JSON.stringify({ sizes, milliseconds }));
+  }
+  assert.ok(Math.max(...samples[2]) < 2000, JSON.stringify({ sizes, milliseconds, samples }));
+}
+
+test('linear performance bounds ignore short timing noise but reject slow quadratic growth', () => {
+  const sizes = [200000, 400000, 800000];
+  assert.doesNotThrow(() => assertLinearPerformance(sizes, [2, 6, 14], [[2], [6], [14]]));
+  assert.doesNotThrow(() => assertLinearPerformance(sizes, [2, 10, 49], [[2], [10], [49]]));
+  assert.throws(() => assertLinearPerformance(sizes, [2, 10, 50], [[2], [10], [50]]));
+  assert.throws(() => assertLinearPerformance(sizes, [20, 80, 320], [[20], [80], [320]]));
+  assert.throws(() => assertLinearPerformance(sizes, [2, 6, 14], [[2], [6], [14, 2000]]));
+});
+
 // Measure only the new implementation. A regressed scanner cannot hang the test
 // runner: each family has its own killable process with a finite wall-clock limit.
 const benchmark = `
@@ -234,6 +258,7 @@ const benchmark = `
   const unit = process.argv[2];
   const tail = process.argv[3];
   const masked = process.argv[4] === 'masked';
+  ${assertLinearPerformance.toString()}
   function input(size) { return unit.repeat(Math.ceil(size / unit.length)).slice(0, size - tail.length) + tail; }
   function measure(text) {
     const start = performance.now();
@@ -257,8 +282,7 @@ const benchmark = `
     }
   }
   const milliseconds = samples.map(values => values.sort((a, b) => a - b)[3]);
-  assert.ok(milliseconds[2] <= milliseconds[0] * 6, JSON.stringify({ sizes, milliseconds }));
-  assert.ok(Math.max(...samples[2]) < 2000, JSON.stringify({ sizes, milliseconds, samples }));
+  assertLinearPerformance(sizes, milliseconds, samples);
   process.stdout.write(JSON.stringify({ sizes, milliseconds, ratio: milliseconds[2] / milliseconds[0] }));
 `;
 
@@ -267,7 +291,8 @@ for (const [family, unit, masked = false] of [
   ['PEM without END', '-----BEGIN PRIVATE KEY-----'],
   ['JWT', 'eyJ-'],
   ['connection scheme', 'a-'],
-  ['CLI password repeated arguments', '--password ', true],
+  ['CLI password repeated arguments', '--password '],
+  ['CLI password repeated values', '--password hunter2 ', true],
 ]) {
   for (const [mode, tail] of [['raw', ''], ['normalized backstop', '\u200B']]) {
     test(`linear performance: ${family}, ${mode}, 200K/400K/800K`, { timeout: 15000 }, t => {

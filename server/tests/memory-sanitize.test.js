@@ -74,6 +74,17 @@ test('redactSecrets: quoted multi-word value is fully masked (Codex follow-up BL
   assert.doesNotMatch(text, /horse|battery|staple/, 'trailing words after the first space must not survive');
 });
 
+test('redactSecrets: password CLI options without a value preserve the following option', () => {
+  for (const flag of ['--password', '--passwd', '--pwd', '--PASSWORD']) {
+    for (const next of ['--host localhost', '-h localhost', '--', '-value']) {
+      const text = `mysql ${flag} ${next}`;
+      assert.deepEqual(redactSecrets(text), { text, redacted: false });
+    }
+  }
+  assert.equal(redactSecrets('mysql --password --host localhost --pwd hunter2').text,
+    'mysql --password --host localhost [REDACTED]');
+});
+
 test('redactSecrets: password CLI arguments mask the whole quoted or unquoted value', () => {
   for (const argument of ['--password "correct horse battery staple"', "--passwd 'private value'", '--pwd hunter2']) {
     const result = redactSecrets(`review ${argument} --other keep`);

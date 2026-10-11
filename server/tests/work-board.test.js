@@ -78,6 +78,17 @@ test('inline pasted display separates same-line text by one space and keeps newl
   assert.equal(displayInstructionText(block + '\n인증 구현'), '[붙여넣은 내용] 예제\n인증 구현');
 });
 
+test('pasted display preserves Unicode line boundaries after closing tags', async () => {
+  const { displayInstructionText } = await logic;
+  const block = '<pasted_content id="x">예제</pasted_content>';
+  for (const separator of ['\u2028', '\u2029']) {
+    assert.equal(displayInstructionText(block + separator + '인증 구현'),
+      '[붙여넣은 내용] 예제\n인증 구현');
+    assert.equal(displayInstructionText(block + ' ' + separator + '\t검색 구현'),
+      '[붙여넣은 내용] 예제\n검색 구현');
+  }
+});
+
 test('multiline pasted display keeps both instructions visible in title, first and recent', async t => {
   const { snapshotCards } = await logic;
   const { alpha } = fixtures(t);
