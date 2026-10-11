@@ -29,5 +29,9 @@ export function useRoute(sessionHubActive = false) {
 }
 
 export function navigate(hash) {
+  const previous = location.hash;
   location.hash = hash;
+  if (location.hash === previous && previous === '#manager/all-sessions') {
+    window.dispatchEvent(new Event('hashchange'));
+  }
 }

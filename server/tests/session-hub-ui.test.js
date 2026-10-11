@@ -163,6 +163,80 @@ test('reconnected SSE replaces version 40 with a new epoch at version zero', asy
   assert.ok(env.root.textContent.includes('새 서버 답변'));
 });
 
+for (const [operation, replyEpoch] of [['GET', 'old'], ['POST', 'old'], ['POST', 'unseen']]) {
+  test(`late ${operation} from the ${replyEpoch} epoch cannot replace a restarted server`, async t => {
+    const env = setup(t), delayed = deferred();
+    let source;
+    const old = { epoch: 'old', version: 40, state: 'idle', messages: [], turnInProgress: false };
+    const fresh = { ...old, epoch: 'fresh', version: 0, messages: [{ role: 'assistant', text: '새 서버' }] };
+    env.context.EventSource = class {
+      constructor() { source = this; }
+      addEventListener(name, callback) { this.receive = callback; }
+      close() {}
+    };
+    env.context.fetch = async (url, opts) => operation === 'GET' || opts.method === 'POST'
+      ? delayed.promise : response(old);
+    env.render(env.h(env.context.SessionHubChat), env.root); await flushEffects(); await flushEffects();
+    if (operation === 'POST') { env.root.querySelector('button').click(); await flushEffects(); }
+    source.receive({ data: JSON.stringify(fresh) }); await flushEffects();
+    delayed.resolve(response({ ...old, epoch: replyEpoch, state: 'running' })); await flushEffects();
+    assert.equal(env.root.querySelector('.manager-status-badge').textContent, '중지됨');
+    assert.equal(env.root.querySelector('.manager-msg-assistant').textContent.trim(), '새 서버');
+    // Once accepted, a retired epoch must also be rejected through ordered SSE.
+    source.receive({ data: JSON.stringify({ ...fresh, epoch: 'newest' }) }); await flushEffects();
+    source.receive({ data: JSON.stringify({ ...fresh, version: 100, state: 'running' }) }); await flushEffects();
+    assert.equal(env.root.querySelector('.manager-status-badge').textContent, '중지됨');
+  });
+}
+
+for (const operation of ['GET', 'POST']) {
+  test(`late ${operation} with a higher version in the current epoch is applied`, async t => {
+    const env = setup(t), delayed = deferred();
+    let source;
+    const idle = { epoch: 'same', version: 0, state: 'idle', messages: [], turnInProgress: false };
+    env.context.EventSource = class {
+      constructor() { source = this; }
+      addEventListener(name, callback) { this.receive = callback; }
+      close() {}
+    };
+    env.context.fetch = async (url, opts) => operation === 'GET' || opts.method === 'POST'
+      ? delayed.promise : response(idle);
+    env.render(env.h(env.context.SessionHubChat), env.root); await flushEffects(); await flushEffects();
+    if (operation === 'POST') { env.root.querySelector('button').click(); await flushEffects(); }
+    source.receive({ data: JSON.stringify({ ...idle, version: 1 }) }); await flushEffects();
+    delayed.resolve(response({ ...idle, version: 2, state: 'running', messages: [
+      { role: 'assistant', text: '더 높은 버전' },
+    ] })); await flushEffects();
+    assert.equal(env.root.querySelector('.manager-status-badge').textContent, '조회 준비됨');
+    assert.equal(env.root.querySelector('.manager-msg-assistant').textContent.trim(), '더 높은 버전');
+  });
+}
+
+test('same-route navigation and links restore the all-sessions tab and mobile panel', async t => {
+  const env = setup(t), { alpha } = fixture(t);
+  env.context.EventSource = class { addEventListener() {} close() {} };
+  env.context.fetch = async url => response(url === '/api/health' ? { sessionHubActive: true }
+    : url.endsWith('/chat/state') ? { epoch: 'boot', version: 0, state: 'idle', messages: [] }
+      : url.endsWith('/snapshots') ? { rev: REV, snapshots: [{ machine_id: 'alpha', sha256: 'a' }] }
+        : url.includes('/snapshots/alpha') ? alpha : { nodes: [], queued: [] });
+  loadAppShell(env);
+  env.window.location.hash = 'manager/all-sessions';
+  env.render(env.h(env.context.App), env.root); await flushEffects(); await flushEffects(); await flushEffects();
+  const tab = label => Array.from(env.root.querySelectorAll('.session-hub-tabs button'))
+    .find(node => node.textContent === label);
+  const link = env.document.createElement('a');
+  link.href = '#manager/all-sessions'; link.textContent = '세션 패널로 이동'; env.document.body.append(link);
+  for (const enter of [() => env.context.navigate('manager/all-sessions'), () => link.click()]) {
+    tab('Palantir 작업').click();
+    env.root.querySelector('.session-hub-segments button').click(); await flushEffects();
+    assert.equal(env.root.querySelector('.session-hub-manager').dataset.pane, 'chat');
+    enter(); await flushEffects(); await flushEffects();
+    assert.equal(env.window.location.hash, '#manager/all-sessions');
+    assert.equal(tab('모든 세션').getAttribute('aria-pressed'), 'true');
+    assert.equal(env.root.querySelector('.session-hub-manager').dataset.pane, 'panel');
+  }
+});
+
 test('real app panel clicks preserve the Operator conversation and hash', async t => {
   const env = setup(t), { alpha } = fixture(t), conversations = [];
   env.context.EventSource = class { addEventListener() {} close() {} };

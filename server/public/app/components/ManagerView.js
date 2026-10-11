@@ -54,8 +54,21 @@ export function ManagerView({ manager, runs, tasks, projects, agents, agentsErro
         setPanelTab('all'); setMobilePane('panel');
       }
     };
+    const onLink = event => {
+      if (event.defaultPrevented || event.button > 0 || event.metaKey || event.ctrlKey
+        || event.shiftKey || event.altKey) return;
+      const link = event.target.closest?.('a[href]');
+      if (!link || (link.target && link.target !== '_self') || link.hasAttribute('download')) return;
+      const url = new URL(link.href, location.href);
+      if (url.origin === location.origin && url.pathname === location.pathname && url.search === location.search
+        && url.hash === '#manager/all-sessions' && location.hash === url.hash) syncPanel();
+    };
     window.addEventListener('hashchange', syncPanel);
-    return () => window.removeEventListener('hashchange', syncPanel);
+    document.addEventListener('click', onLink);
+    return () => {
+      window.removeEventListener('hashchange', syncPanel);
+      document.removeEventListener('click', onLink);
+    };
   }, [sessionHubActive]);
   const selectPanel = tab => setPanelTab(tab);
   const openSession = (key, rev) => {

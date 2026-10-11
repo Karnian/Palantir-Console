@@ -121,17 +121,26 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch }) {
   const alive = useRef(false);
   const epoch = useRef(null);
   const version = useRef(-1);
+  const applied = useRef(0);
+  const seenEpochs = useRef(new Set());
   const controller = useRef(null);
   const messagesEnd = useRef(null);
   const pending = useRef(false);
   const composing = useRef(false);
-  const applySnapshot = value => {
+  const applySnapshot = (value, requestedAt) => {
     if (!alive.current || typeof value.epoch !== 'string' || !value.epoch
-      || !Number.isSafeInteger(value.version)) return;
-    if (value.epoch === epoch.current && value.version <= version.current) return;
+      || !Number.isSafeInteger(value.version)) return false;
+    const sameEpoch = value.epoch === epoch.current;
+    if (!sameEpoch && seenEpochs.current.has(value.epoch)) return false;
+    if (requestedAt !== undefined && requestedAt !== applied.current
+      && !(sameEpoch && value.version > version.current)) return false;
+    if (sameEpoch && value.version <= version.current) return false;
     epoch.current = value.epoch;
     version.current = value.version;
+    seenEpochs.current.add(value.epoch);
+    applied.current++;
     setState(value);
+    return true;
   };
   useEffect(() => {
     alive.current = true;
@@ -142,8 +151,9 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch }) {
       catch { setError('대화를 읽지 못했습니다.'); }
     };
     source.addEventListener('snapshot', accept);
+    const requestedAt = applied.current;
     apiFetch('/api/session-hub/chat/state', { signal: controller.current.signal, allowAppForbidden: true })
-      .then(applySnapshot)
+      .then(value => applySnapshot(value, requestedAt))
       .catch(() => { if (alive.current) setError('대화를 읽지 못했습니다.'); });
     source.onopen = () => { setError(''); };
     source.onerror = () => { setError('연결이 끊겼습니다. 다시 연결 중입니다.'); };
@@ -157,22 +167,24 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch }) {
     const autoStart = name === 'message' && state.state === 'idle';
     if (autoStart || name === 'start') setLocalTransition('starting');
     const request = async (operation, payload) => {
+      const requestedAt = applied.current;
       const value = await apiFetch(`/api/session-hub/chat/${operation}`, { method: 'POST',
         body: JSON.stringify(payload || {}), signal: controller.current.signal, allowAppForbidden: true });
-      applySnapshot(value);
+      if (!applySnapshot(value, requestedAt)
+        && (value.epoch !== epoch.current || value.version !== version.current)) return null;
       return value;
     };
     try {
       if (autoStart) {
         const started = await request('start');
-        if (!alive.current || controller.current.signal.aborted) return;
+        if (!started || !alive.current || controller.current.signal.aborted) return;
         if (started.state !== 'running' || started.disabled || started.turnInProgress) {
           setError(sessionHubErrorText(started.error || started.disabled || 'session_hub_not_running'));
           return;
         }
       }
       const value = await request(name, body);
-      if (!alive.current) return;
+      if (!value || !alive.current) return;
       if (name === 'message') setText('');
       if (name === 'clear') setClearNotice(value.result === 'incomplete'
         ? `대화는 지웠지만 파일 ${value.remaining}개가 남았습니다.` : '대화를 지웠습니다.');
