@@ -9,6 +9,7 @@ const MAX_FILES = 10000;
 const LINK_LIMITS = { summaries: MAX_FILES };
 const PARSE_STATES = new WeakMap();
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
+const STATUS_TAIL_BYTES = 8 * 1024 * 1024;
 const STREAM_LIMITS = { lineBytes: 8 * 1024 * 1024, fileBytes: 256 * 1024 * 1024, identities: 100000, smallFileBytes: MAX_FILE_BYTES };
 function streamLimit() { const error = new Error('stream_limit'); error.streamLimit = true; throw error; }
 function checkMetadata(size) { if (size > STREAM_LIMITS.identities) streamLimit(); }
@@ -33,9 +34,12 @@ function* transcriptRecords(fd, observation) {
   const chunk = Buffer.allocUnsafe(256 * 1024);
   let offset = 0, pending = [], pendingBytes = 0;
   const endOffset = observation.size;
+  const tailStart = Math.max(0, endOffset - STATUS_TAIL_BYTES);
   while (offset < endOffset) {
     const count = fs.readSync(fd, chunk, 0, Math.min(chunk.length, endOffset - offset, STREAM_LIMITS.fileBytes + 1 - offset), offset);
     if (!count) streamLimit();
+    if (tailStart > 0 && tailStart - 1 >= offset && tailStart - 1 < offset + count)
+      observation.statusTailStartsLine = chunk[tailStart - 1 - offset] === 10;
     offset += count;
     if (offset > STREAM_LIMITS.fileBytes) streamLimit();
     let start = 0, end;
@@ -61,6 +65,7 @@ function transcriptSource(input, provider, observation) {
   const array = Array.isArray(input);
   const source = array ? input : { streaming: true, limited: true, find(predicate) { return headers.find(predicate); } };
   if (array) source.limited = false;
+  else source.statusRecords = () => readStatusTail(input, observation);
   const analysis = { byUuid: new Map(), firstTime: null, lastTime: null, duplicates: 0, invalidTime: 0,
     mixed: false, queuedDuplicate: false, sidechainOnly: true, singleSession: true, count: 0,
     journalOnly: true, brokenJson: false, hasSessionIdentity: false, instructionCandidates: 0, summaryCandidates: 0 };
@@ -682,14 +687,65 @@ function compareRecordTimes(left, right) {
   return (a < b ? -1 : a > b ? 1 : 0) || left.position - right.position;
 }
 
-// PR-S: evaluate complete records locally; only closed status slots leave this reader.
-function transcriptStatus(provider, records) {
-  if (records.streaming) return snapshotPolicy.unknownStatus('truncated');
-  for (const record of records) {
-    const parseState = PARSE_STATES.get(record);
-    if (parseState?.invalid) return snapshotPolicy.unknownStatus(parseState.pending ? 'truncated' : 'parse_failed');
+// PR-S: a second bounded read uses the original file boundary and the same status evaluator.
+function readStatusTail(fd, observation) {
+  const start = Math.max(0, observation.size - STATUS_TAIL_BYTES);
+  const bytes = Buffer.allocUnsafe(observation.size - start);
+  let offset = 0;
+  while (offset < bytes.length) {
+    const count = fs.readSync(fd, bytes, offset, bytes.length - offset, start + offset);
+    if (!count) streamLimit();
+    offset += count;
   }
-  return provider === 'claude' ? claudeStatus(records) : codexStatus(records);
+  const text = bytes.toString('utf8');
+  const records = [];
+  records.windowed = start > 0;
+  const partialStart = start > 0 && !observation.statusTailStartsLine;
+  let position = partialStart ? text.indexOf('\n') + 1 : 0;
+  if (partialStart && position === 0) return records;
+  while (position < text.length) {
+    const newline = text.indexOf('\n', position);
+    const line = text.slice(position, newline < 0 ? text.length : newline);
+    if (line.trim()) records.push(statusRecord(parseTranscriptRecord(line, newline >= 0)));
+    if (records.length > STREAM_LIMITS.identities) return null;
+    if (newline < 0) break;
+    position = newline + 1;
+  }
+  return records;
+}
+// Keep status fields and instruction classification inputs, dropping assistant and tool bodies immediately.
+function statusRecord(record) {
+  if (PARSE_STATES.get(record)?.invalid) return record;
+  const projected = {};
+  for (const key of ['type', 'uuid', 'parentUuid', 'timestamp', 'isSidechain', 'isMeta', 'isCompactSummary',
+    'origin', 'turnOrigin', 'promptSource']) if (Object.hasOwn(record, key)) projected[key] = record[key];
+  const content = value => Array.isArray(value) ? value.map(block => ({ type: block.type, text: block.text })) : value;
+  if (record.message) projected.message = record.type === 'assistant'
+    ? { stop_reason: record.message.stop_reason } : { content: content(record.message.content) };
+  if (record.attachment) {
+    const value = record.attachment;
+    projected.attachment = { type: value.type, origin: value.origin, humanTurn: value.humanTurn,
+      commandMode: value.commandMode, prompt: value.type === 'queued_command' ? value.prompt : undefined };
+  }
+  if (record.payload) {
+    const value = record.payload;
+    projected.payload = { type: value.type, turn_id: value.turn_id, role: value.role,
+      content: value.role === 'user' ? content(value.content) : undefined };
+  }
+  return projected;
+}
+// Complete JSON without a final newline remains usable; only an unfinished final record is ignored.
+function transcriptStatus(provider, input) {
+  const records = input.streaming ? input.statusRecords() : input;
+  if (!records) return snapshotPolicy.unknownStatus('truncated');
+  const windowed = records.windowed === true;
+  const complete = records.filter((record, index) => {
+    const parseState = PARSE_STATES.get(record);
+    return !(index === records.length - 1 && parseState?.invalid && parseState.pending);
+  });
+  if (complete.some(record => PARSE_STATES.get(record)?.invalid))
+    return snapshotPolicy.unknownStatus('parse_failed');
+  return provider === 'claude' ? claudeStatus(complete, windowed) : codexStatus(complete, windowed);
 }
 function statusAt(state, record) {
   return { state, source: 'transcript', evidence_at: toIsoTimestamp(record.timestamp), reason: null };
@@ -710,42 +766,47 @@ function claudeInterrupted(record) {
     ? content.filter(block => block.type === 'text').map(block => block.text).join('') : '';
   return /^\[Request interrupted by user(?: for tool use)?\]$/.test(text);
 }
-function claudeStatus(records) {
-  const chain = records.filter(record => record.isSidechain !== true
-    && ['user', 'assistant', 'system'].includes(record.type) && typeof record.uuid === 'string');
-  const byId = new Map(chain.map(record => [record.uuid, record]));
-  const main = new Set();
-  const positions = new Map(chain.map((record, index) => [record, index]));
-  if (byId.size !== chain.length) return snapshotPolicy.unknownStatus('branch_ambiguous');
-  let current = chain.at(-1);
-  if (!current) return snapshotPolicy.unknownStatus('status_format_unsupported');
-  while (current) {
-    if (main.has(current)) return snapshotPolicy.unknownStatus('branch_ambiguous');
-    if (!current.uuid || !Object.hasOwn(current, 'parentUuid')
-      || !(current.parentUuid === null || typeof current.parentUuid === 'string'))
-      return snapshotPolicy.unknownStatus('status_format_unsupported');
-    main.add(current);
-    if (current.parentUuid === null) break;
-    const parent = byId.get(current.parentUuid);
-    if (parent && positions.get(parent) >= positions.get(current))
-      return snapshotPolicy.unknownStatus('branch_ambiguous');
-    current = parent;
-    if (!current) return snapshotPolicy.unknownStatus('branch_ambiguous');
-  }
-  let instruction = null, previousChain = null, bound = false;
+function claudeStatus(records, windowed = false) {
+  const traversal = records.filter(record => record.isSidechain !== true && typeof record.uuid === 'string');
+  const chain = traversal.filter(record => ['user', 'assistant', 'system'].includes(record.type));
+  const byId = new Map(traversal.map(record => [record.uuid, record]));
+  const positions = new Map(traversal.map((record, index) => [record, index]));
+  if (byId.size !== traversal.length) return snapshotPolicy.unknownStatus('branch_ambiguous');
+  let instruction = null, previousChain = null, anchor = null;
   for (const record of records) {
     const classification = classifyClaudeRecord(record);
     if (classification?.kind && !claudeInterrupted(record)) {
       instruction = record;
-      if (record.type === 'attachment') {
-        const parent = record.parentUuid == null ? previousChain : byId.get(record.parentUuid);
-        bound = main.has(parent);
-      } else bound = main.has(record);
+      anchor = record.type === 'attachment'
+        ? record.parentUuid == null ? previousChain : byId.get(record.parentUuid) : record;
     }
-    if (byId.get(record.uuid) === record) previousChain = record;
+    if (byId.get(record.uuid) === record && ['user', 'assistant', 'system'].includes(record.type))
+      previousChain = record;
   }
-  if (!instruction) return snapshotPolicy.unknownStatus('no_instruction');
-  if (!bound) return snapshotPolicy.unknownStatus('instruction_unbound');
+  if (!instruction) return snapshotPolicy.unknownStatus(windowed ? 'truncated' : 'no_instruction');
+  const main = new Set();
+  let current = chain.at(-1), bound = false;
+  if (!current) return snapshotPolicy.unknownStatus(windowed ? 'truncated' : 'status_format_unsupported');
+  while (current) {
+    if (main.has(current)) return snapshotPolicy.unknownStatus('branch_ambiguous');
+    if (!current.uuid) return snapshotPolicy.unknownStatus('status_format_unsupported');
+    main.add(current);
+    // Queued instructions may be on the parent path or attached immediately after its last chain record.
+    if (current === instruction || current === anchor) { bound = true; break; }
+    if (!current.uuid || !Object.hasOwn(current, 'parentUuid')
+      || !(current.parentUuid === null || typeof current.parentUuid === 'string'))
+      return snapshotPolicy.unknownStatus('status_format_unsupported');
+    if (current.parentUuid === null) break;
+    const parent = byId.get(current.parentUuid);
+    if (!parent) return snapshotPolicy.unknownStatus(windowed ? 'truncated' : 'branch_ambiguous');
+    if (positions.get(parent) >= positions.get(current))
+      return snapshotPolicy.unknownStatus('branch_ambiguous');
+    current = parent;
+  }
+  if (!bound) return snapshotPolicy.unknownStatus(windowed && !anchor ? 'truncated' : 'instruction_unbound');
+  if (instruction.type === 'user' && (!Object.hasOwn(instruction, 'parentUuid')
+    || !(instruction.parentUuid === null || typeof instruction.parentUuid === 'string')))
+    return snapshotPolicy.unknownStatus('status_format_unsupported');
   const remaining = records.slice(records.indexOf(instruction) + 1);
   if (remaining.some(record => record.isSidechain !== true
     && ['user', 'assistant'].includes(record.type) && typeof record.uuid !== 'string'))
@@ -766,7 +827,7 @@ function claudeStatus(records) {
   }
   return status;
 }
-function codexStatus(records) {
+function codexStatus(records, windowed = false) {
   let instruction = null, started = null, turn = null;
   for (const record of records) {
     if (record.type === 'event_msg' && record.payload?.type === 'task_started') started = record;
@@ -776,8 +837,8 @@ function codexStatus(records) {
     const messageUser = classification?.kind && !classification.empty;
     if (eventUser || messageUser) { instruction = record; turn = started; }
   }
-  if (!instruction) return snapshotPolicy.unknownStatus('no_instruction');
-  if (!turn) return snapshotPolicy.unknownStatus('turn_unbound');
+  if (!instruction) return snapshotPolicy.unknownStatus(windowed ? 'truncated' : 'no_instruction');
+  if (!turn) return snapshotPolicy.unknownStatus(windowed ? 'truncated' : 'turn_unbound');
   const status_format_ok = typeof turn.payload.turn_id === 'string' && turn.payload.turn_id.length > 0;
   if (!status_format_ok) return snapshotPolicy.unknownStatus('status_format_unsupported');
   const events = records.slice(records.indexOf(instruction) + 1).filter(record => record.type === 'event_msg'
@@ -2572,5 +2633,6 @@ module.exports = {
   STREAM_LIMITS,
   orcaPromptForm,
   MAX_FILES,
-  MAX_FILE_BYTES
+  MAX_FILE_BYTES,
+  STATUS_TAIL_BYTES
 };

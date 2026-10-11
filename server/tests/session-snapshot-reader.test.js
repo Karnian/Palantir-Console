@@ -5482,9 +5482,8 @@ test('PR1d R5-A workflow condition failure uses one buffer read rather than a fu
   assert.equal(totals.bytes, fs.statSync(file).size);
   forceLargeFileLimits(t);
   totals.bytes = 0;
-  snapshot.sessions[0].status = snapshotPolicy.unknownStatus('truncated');
   assert.deepEqual(snapshotReader.runSnapshot(fixture.options), snapshot);
-  assert.equal(totals.bytes, fs.statSync(file).size);
+  assert.equal(totals.bytes, fs.statSync(file).size * 2);
 });
 
 test('PR1d R5-C1 small files cannot combine lookahead identity with a replacement body', t => {
@@ -5553,9 +5552,9 @@ for (const mutation of ['append', 'truncate', 'replace', 'early-eof']) {
     });
     const snapshot = snapshotReader.runSnapshot(fixture.options);
     assert.equal(mutated, true);
-    assert.equal(starts, 1);
+    assert.equal(starts, ['append', 'replace'].includes(mutation) ? 2 : 1);
     if (mutation === 'append') {
-      assert.equal(bytes, initialSize);
+      assert.equal(bytes, initialSize * 2);
       assert.equal(snapshot.coverage.claude.link_blocked, 0);
       assert.equal(snapshot.sessions[0].instruction_total, 1);
       assert.equal(snapshot.instructions[0].text, 'initial instruction');
@@ -5581,9 +5580,8 @@ for (const provider of ['claude', 'codex']) {
     forceLargeFileLimits(t);
     const reads = trackTranscriptReads(t, file);
     const actual = snapshotReader.runSnapshot(fixture.options);
-    expected.sessions[0].status = snapshotPolicy.unknownStatus('truncated');
     assert.deepEqual(actual, expected);
-    assert.equal(reads.bytes, fs.statSync(file).size);
+    assert.equal(reads.bytes, fs.statSync(file).size * 2);
   });
 }
 
@@ -5742,7 +5740,7 @@ test('PR1d mutation coverage large-file shrink after all S0 bytes were read is w
   });
   t.mock.method(fs, 'fstatSync', function(fd, ...args) {
     if (fd === descriptor && ++statsRead === 2) {
-      assert.equal(bytes, initial.size, 'truncate must occur after the complete initial boundary was consumed');
+      assert.equal(bytes, initial.size * 2, 'truncate occurs after S0 and the bounded status tail read');
       fs.truncateSync(file, initial.size - 1);
       truncated = true;
     }
@@ -5752,7 +5750,7 @@ test('PR1d mutation coverage large-file shrink after all S0 bytes were read is w
   const final = fs.statSync(file);
   assert.equal(truncated, true);
   assert.equal(statsRead, 2);
-  assert.equal(bytes, initial.size);
+  assert.equal(bytes, initial.size * 2);
   assert.equal(final.dev, initial.dev);
   assert.equal(final.ino, initial.ino);
   assert.equal(final.size, initial.size - 1);
@@ -5834,7 +5832,7 @@ for (const [name, start, tail, state, reason] of [
   });
 }
 
-test('PR-S large-file streaming deliberately reports unknown truncated for both providers', t => {
+test('PR-S large-file streaming reports truncated when the instruction is outside the tail window', t => {
   for (const provider of ['claude', 'codex']) {
     const fx = createFixture(t);
     const rows = provider === 'claude' ? [claudeUserRecord('instruction'), statusAssistant('end_turn')]
@@ -5867,8 +5865,8 @@ test('PR-S Orca states are projected and synthesized only through a confirmed li
   }
 });
 
-test('PR-S incomplete and malformed JSON refuse transcript state; metadata has no turn evidence', t => {
-  for (const [tail, reason] of [['\n{"type":', 'truncated'], ['\ninvalid\n', 'parse_failed']]) {
+test('PR-S pending final JSON is ignored; malformed complete JSON refuses transcript state', t => {
+  for (const [tail, reason] of [['\n{"type":', null], ['\ninvalid\n', 'parse_failed']]) {
     const fx = createFixture(t);
     const file = fx.file('claude', 'broken', [claudeUserRecord('instruction'), statusAssistant('end_turn')]);
     fs.appendFileSync(file, tail);
@@ -5904,4 +5902,154 @@ test('PR-S Orca updated_at cannot supply state evidence or beat newer transcript
   assert.equal(snapshot.sessions[0].status.source, 'transcript');
   assert.equal(snapshot.sessions[0].status.state, 'ended');
   assert.equal(snapshot.sessions[0].status.reason, 'conflict');
+});
+
+const statusAttachment = (uuid, parentUuid, type) => ({
+  type: 'attachment', sessionId: 's', uuid, parentUuid, timestamp: RECORD_TIMESTAMP,
+  attachment: { type, content: 'PRIVATE_ATTACHMENT_SENTINEL' }
+});
+function statusHookChain(stop) {
+  return [claudeUserRecord('latest instruction', { parentUuid: 'history-outside-window' }),
+    statusAttachment('reminder', 'u', 'total_tokens_reminder'), statusAssistant(stop, 'a', 'reminder'),
+    statusAttachment('hook', 'a', 'hook_success'),
+    { type: 'system', subtype: 'stop_hook_summary', sessionId: 's', uuid: 'summary', parentUuid: 'hook',
+      timestamp: RECORD_TIMESTAMP },
+    // An attachment is a traversal member, but never replaces the last user/assistant/system terminal.
+    statusAttachment('other-attachment', 'history-outside-window', 'hook_success')];
+}
+
+for (const stop of ['end_turn', 'tool_use']) {
+  test(`PR-S attachment parent chain reaches latest instruction for ${stop}`, t => {
+    const fx = createFixture(t);
+    fx.file('claude', 'hook-chain', statusHookChain(stop));
+    const snapshot = snapshotReader.runSnapshot(fx.options);
+    assert.equal(snapshot.sessions[0].status.state, stop === 'end_turn' ? 'ended' : 'working');
+    assert.equal(snapshot.sessions[0].status.reason, null);
+    assert.equal(JSON.stringify(snapshot).includes('PRIVATE_ATTACHMENT_SENTINEL'), false);
+  });
+}
+
+test('PR-S null compaction parent before instruction is unbound; logical parents are not followed', t => {
+  const fx = createFixture(t);
+  fx.file('claude', 'compact', [claudeUserRecord('instruction'),
+    statusAttachment('boundary', null, 'hook_success'),
+    statusAssistant('end_turn', 'a', 'boundary', { logicalParentUuid: 'u' })]);
+  assert.equal(snapshotReader.runSnapshot(fx.options).sessions[0].status.reason, 'instruction_unbound');
+});
+
+test('PR-S duplicate attachment UUIDs are ambiguous across the whole traversal set', t => {
+  const fx = createFixture(t);
+  fx.file('claude', 'duplicate', [claudeUserRecord('instruction'),
+    statusAttachment('reminder', 'u', 'total_tokens_reminder'),
+    statusAttachment('reminder', 'u', 'hook_success'), statusAssistant('end_turn', 'a', 'reminder')]);
+  assert.equal(snapshotReader.runSnapshot(fx.options).sessions[0].status.reason, 'branch_ambiguous');
+});
+
+function largeStatusFile(fx, provider, tail) {
+  const initial = provider === 'claude'
+    ? [claudeUserRecord('old instruction', { uuid: 'old' })] : [codexSessionMeta()];
+  const file = fx.file(provider, 'status-tail', initial);
+  const filler = JSON.stringify({ type: 'metadata', padding: 'x'.repeat(1024 * 1024) }) + '\n';
+  fs.appendFileSync(file, '\n' + filler.repeat(17) + tail.map(JSON.stringify).join('\n') + '\n');
+  return file;
+}
+
+for (const provider of ['claude', 'codex']) {
+  for (const state of ['ended', 'working']) {
+    test(`PR-S ${provider} tail window evaluates ${state} with bounded reads and complete or pending final JSON`, t => {
+      const fx = createFixture(t);
+      const rows = provider === 'claude' ? statusHookChain(state === 'ended' ? 'end_turn' : 'tool_use')
+        : [statusEvent('task_started'), codexMessage('latest instruction'),
+          ...(state === 'ended' ? [statusEvent('task_complete')] : [])];
+      const file = largeStatusFile(fx, provider, rows);
+      if (state === 'working') fs.appendFileSync(file, '{"type":"unfinished');
+      const reads = trackTranscriptReads(t, file);
+      const size = fs.statSync(file).size;
+      const originalRead = fs.readSync;
+      let tailBytes = 0, tailReads = 0;
+      t.mock.method(fs, 'readSync', function(fd, buffer, ...args) {
+        if (buffer.length === snapshotReader.STATUS_TAIL_BYTES) {
+          tailReads++;
+          assert.equal(args[2], size - snapshotReader.STATUS_TAIL_BYTES);
+          assert.ok(args[1] <= snapshotReader.STATUS_TAIL_BYTES);
+        }
+        const count = originalRead(fd, buffer, ...args);
+        if (buffer.length === snapshotReader.STATUS_TAIL_BYTES) tailBytes += count;
+        return count;
+      });
+      const snapshot = snapshotReader.runSnapshot(fx.options);
+      assert.equal(snapshot.sessions[0].status.state, state);
+      assert.equal(snapshot.sessions[0].status.reason, null);
+      assert.equal(tailReads, 1);
+      assert.equal(tailBytes, 8 * 1024 * 1024);
+      assert.equal(reads.bytes, size + snapshotReader.STATUS_TAIL_BYTES);
+      assert.equal(reads.fullReads, 1); // The tracker counts the first 256KB S0 chunk as one head read.
+      for (const sentinel of ['PRIVATE_ASSISTANT_SENTINEL', 'PRIVATE_COMPLETION_SENTINEL',
+        'PRIVATE_ATTACHMENT_SENTINEL']) assert.equal(JSON.stringify(snapshot).includes(sentinel), false);
+    });
+  }
+}
+
+test('PR-S tail chain leaving the window before a visible instruction is truncated', t => {
+  const fx = createFixture(t);
+  largeStatusFile(fx, 'claude', [claudeUserRecord('visible instruction'),
+    statusAssistant('end_turn', 'a', 'outside-window')]);
+  assert.equal(snapshotReader.runSnapshot(fx.options).sessions[0].status.reason, 'truncated');
+});
+
+test('PR-S Codex instruction with task_started outside the tail window is truncated', t => {
+  const fx = createFixture(t);
+  const file = fx.file('codex', 'status-tail', [codexSessionMeta(), statusEvent('task_started')]);
+  const filler = JSON.stringify({ type: 'metadata', padding: 'x'.repeat(1024 * 1024) }) + '\n';
+  fs.appendFileSync(file, '\n' + filler.repeat(17)
+    + [codexMessage('visible instruction'), statusEvent('task_complete')].map(JSON.stringify).join('\n') + '\n');
+  assert.equal(snapshotReader.runSnapshot(fx.options).sessions[0].status.reason, 'truncated');
+});
+
+for (const provider of ['claude', 'codex']) {
+  test(`PR-S ${provider} small-file pending last record preserves ended status`, t => {
+    const fx = createFixture(t);
+    const rows = provider === 'claude' ? statusHookChain('end_turn')
+      : [codexSessionMeta(), statusEvent('task_started'), codexMessage('instruction'), statusEvent('task_complete')];
+    const file = fx.file(provider, 'pending', rows);
+    fs.appendFileSync(file, '\n{"type":"unfinished');
+    assert.equal(snapshotReader.runSnapshot(fx.options).sessions[0].status.state, 'ended');
+  });
+}
+
+test('PR-S tail metadata count stays bounded without rejecting the collected session', t => {
+  const previous = snapshotReader.STREAM_LIMITS.identities;
+  t.after(() => { snapshotReader.STREAM_LIMITS.identities = previous; });
+  snapshotReader.STREAM_LIMITS.identities = 20;
+  const fx = createFixture(t);
+  largeStatusFile(fx, 'claude', [...Array.from({ length: 30 }, () => ({ type: 'metadata' })),
+    claudeUserRecord('recent instruction'), statusAssistant('end_turn')]);
+  const snapshot = snapshotReader.runSnapshot(fx.options);
+  assert.equal(snapshot.sessions[0].status.reason, 'truncated');
+  assert.equal(snapshot.coverage.claude.files_failed, 0);
+  assert.equal(snapshot.sessions[0].instruction_total, 2);
+});
+
+test('PR-S queued instruction whose parent is outside the tail window stays truncated', t => {
+  const fx = createFixture(t);
+  largeStatusFile(fx, 'claude', [claudeUserRecord('visible instruction'), statusAssistant('end_turn'),
+    statusQueued({ parentUuid: 'outside-window' })]);
+  assert.equal(snapshotReader.runSnapshot(fx.options).sessions[0].status.reason, 'truncated');
+});
+
+test('PR-S a complete instruction exactly at the tail boundary is retained without an extra byte read', t => {
+  const fx = createFixture(t);
+  const rows = [claudeUserRecord('boundary instruction', { parentUuid: 'outside-window' }),
+    statusAssistant('end_turn')];
+  const body = rows.map(JSON.stringify).join('\n') + '\n';
+  const emptyFiller = JSON.stringify({ type: 'metadata', padding: '' }) + '\n';
+  const padding = 'x'.repeat(snapshotReader.STATUS_TAIL_BYTES - Buffer.byteLength(body + emptyFiller));
+  const tail = body + JSON.stringify({ type: 'metadata', padding }) + '\n';
+  assert.equal(Buffer.byteLength(tail), snapshotReader.STATUS_TAIL_BYTES);
+  const file = largeStatusFile(fx, 'claude', []);
+  fs.appendFileSync(file, tail);
+  const reads = trackTranscriptReads(t, file);
+  const snapshot = snapshotReader.runSnapshot(fx.options);
+  assert.equal(snapshot.sessions[0].status.state, 'ended');
+  assert.equal(reads.bytes, fs.statSync(file).size + snapshotReader.STATUS_TAIL_BYTES);
 });
