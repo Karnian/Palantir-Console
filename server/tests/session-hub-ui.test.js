@@ -957,6 +957,71 @@ test('scroll pages and full messages stay bound to the active thread and render 
   assert.ok(!calls.some(call => /router|conversations/.test(call.url)));
 });
 
+test('right pane starts closed and every selection opens it without remounting the assistant', async t => {
+  const env = setup(t), { alpha } = fixture(t), streams = [], calls = [];
+  const style = env.document.createElement('style');
+  style.textContent = fs.readFileSync(path.join(publicRoot, 'styles.css'), 'utf8');
+  env.document.head.append(style);
+  env.context.EventSource = class {
+    constructor() { streams.push(this); } addEventListener() {} close() { this.closed = true; }
+  };
+  env.context.fetch = async (url, options) => {
+    calls.push({ url, options });
+    assert.match(url, /^\/api\/(session-hub|observe)\//);
+    return response(url.endsWith('/chat/state') ? { thread_id: 'current', epoch: 'boot', version: 1,
+      state: 'running', turnInProgress: true, messages: [{ id: 'a', seq: 1, role: 'assistant',
+        status: 'partial', content: `답변 중 [[session:${alpha.sessions[0].key}@${REV}]]` }] }
+      : url.endsWith('/snapshots/status') ? { enabled: true, targets: [] }
+        : url === '/api/observe/snapshots' ? { rev: REV, snapshots: [{ machine_id: 'alpha', sha256: 'a' }] }
+          : alpha);
+  };
+  env.context.ManagerChat = props => env.h('div', { class: 'manager-chat-side',
+    'data-target': props.conversationTarget });
+  env.context.SessionGrid = () => env.h('div', { class: 'manager-grid-side' });
+  env.context.managerProfileAuthState = () => 'ok';
+  const source = fs.readFileSync(path.join(publicRoot, 'app/components/ManagerView.js'), 'utf8');
+  vm.runInContext(transformComponentSource(source).replace(/^export\s+\{[^}]+\};?\s*$/gm, ''), env.context);
+  env.render(env.h(env.context.ManagerView, { manager: { status: {} }, projects: [], runs: [], tasks: [],
+    nodeSummary: {}, sessionHubActive: true }), env.root); await flushEffects(); await flushEffects();
+  const manager = env.root.querySelector('.session-hub-manager');
+  const panel = manager.querySelector('.session-hub-panel-side'), chat = manager.querySelector('.session-hub-chat');
+  const input = chat.querySelector('textarea');
+  input.value = '작성 중인 질문'; input.dispatchEvent(new env.window.Event('input', { bubbles: true }));
+  await flushEffects();
+  const assertClosed = () => {
+    assert.equal(manager.dataset.right, 'closed'); assert.equal(panel.hidden, true);
+    assert.equal(env.window.getComputedStyle(panel).display, 'none');
+    assert.equal(manager.querySelector('.session-hub-segments button:last-child').disabled, true);
+    assert.ok(!panel.textContent.includes('세션을 선택하세요.'));
+  };
+  const choices = [
+    ['.session-row', 'session', '.session-hub-detail'],
+    ['.session-evidence', 'session', '.session-hub-detail'],
+    ['Top', 'manager', '[data-target="top"]'],
+    ['작업', 'work', '.manager-grid-side'],
+  ];
+  for (const width of [1440, 1100, 390]) {
+    env.window.innerWidth = width; env.window.dispatchEvent(new env.window.Event('resize'));
+    assertClosed();
+    for (const [selector, right, content] of choices) {
+      const node = selector.startsWith('.') ? manager.querySelector(selector)
+        : Array.from(manager.querySelectorAll('.session-hub-nav')).find(item => item.textContent === selector);
+      node.click(); await flushEffects();
+      assert.equal(manager.dataset.right, right); assert.equal(panel.hidden, false);
+      assert.equal(env.window.getComputedStyle(panel).display, 'flex'); assert.ok(panel.querySelector(content));
+      assert.equal(manager.querySelector('.session-hub-segments button:last-child').disabled, false);
+      manager.querySelector('[aria-label="오른쪽 칸 닫기"]').click(); await flushEffects();
+      assertClosed(); assert.equal(manager.dataset.pane, 'chat');
+      assert.equal(manager.querySelector('.session-hub-chat'), chat);
+      assert.equal(chat.querySelector('textarea'), input); assert.equal(input.value, '작성 중인 질문');
+      assert.equal(env.document.activeElement, input);
+      assert.ok(chat.querySelector('.manager-status-badge').textContent.includes('답변 중'));
+    }
+  }
+  assert.equal(streams.length, 1); assert.ok(!streams[0].closed);
+  assert.ok(!calls.some(call => /router|conversations/.test(call.url)));
+});
+
 test('three panes, grouping preferences and Palantir details preserve assistant DOM and SSE', async t => {
   const env = setup(t), { alpha, beta } = fixture(t), streams = [], calls = [];
   alpha.sessions[0].status = { state: 'working', source: 'orca', evidence_at: alpha.generated_at, reason: null };

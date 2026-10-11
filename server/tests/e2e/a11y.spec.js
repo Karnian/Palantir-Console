@@ -364,6 +364,7 @@ for (const theme of THEMES) {
         .toHaveText('지금 각 세션 뭐 하고 있어?');
       await expect(page.locator('.manager-msg-assistant .markdown-body h2')).toHaveText('검토 결과');
       await expect(page.locator('.session-hub-tools summary')).toContainText('도구 2회 사용');
+      await expect(page.locator('.session-hub-manager')).toHaveAttribute('data-right', 'closed');
       const check = async () => {
         await expectAssistantLayout(page);
         const result = await new AxeBuilder({ page }).withTags(WCAG_TAGS)
@@ -376,6 +377,8 @@ for (const theme of THEMES) {
       await expect(page.locator('.session-hub-detail-header')).toBeFocused();
       await check();
       await page.getByRole('button', { name: '오른쪽 칸 닫기', exact: true }).click();
+      await expect(page.locator('.session-hub-manager')).toHaveAttribute('data-right', 'closed');
+      await expect(page.getByRole('textbox', { name: '세션 비서에게 질문', exact: true })).toBeFocused();
       if (vp.width < 900) await page.getByRole('button', { name: '목록', exact: true }).click();
       await expect(page.locator('button.session-row')).toHaveCount(3);
       await expect(page.locator('#hub-query')).toBeVisible();

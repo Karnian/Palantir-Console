@@ -544,6 +544,7 @@ for (const theme of THEMES) {
         .toHaveText('지금 각 세션 뭐 하고 있어?');
       await expect(page.locator('.manager-msg-assistant .markdown-body h2')).toHaveText('검토 결과');
       await expect(page.locator('.session-hub-tools summary')).toContainText('도구 2회 사용');
+      await expect(page.locator('.session-hub-manager')).toHaveAttribute('data-right', 'closed');
       await stabilize(page);
       await expectAssistantLayout(page);
       await expect(page).toHaveScreenshot(`session-hub-chat-${theme}-${vp.name}.png`, {
@@ -557,6 +558,7 @@ for (const theme of THEMES) {
         maxDiffPixels: 100, threshold: 0.2,
       });
       await page.getByRole('button', { name: '오른쪽 칸 닫기', exact: true }).click();
+      await expect(page.locator('.session-hub-manager')).toHaveAttribute('data-right', 'closed');
       if (vp.width < 900) await page.getByRole('button', { name: '목록', exact: true }).click();
       await expect(page.locator('button.session-row')).toHaveCount(3);
       await expect(page.locator('#hub-query')).toBeVisible();

@@ -99,6 +99,14 @@ async function expectNoHorizontalOverflow(page) {
 async function expectAssistantLayout(page) {
   const { expect } = require('@playwright/test');
   await expectNoHorizontalOverflow(page);
+  const manager = page.locator('.session-hub-manager');
+  const rightPanel = page.locator('.session-hub-panel-side');
+  const closed = await manager.getAttribute('data-right') === 'closed';
+  if (closed) {
+    await expect(rightPanel).toBeHidden();
+    await expect(rightPanel).toHaveAttribute('hidden', '');
+    await expect(manager.locator('.session-hub-segments button').filter({ hasText: /^상세$/ })).toBeDisabled();
+  } else if (page.viewportSize().width >= 900) await expect(rightPanel).toBeVisible();
   const sidebar = page.locator('.session-hub-sidebar');
   if (await sidebar.isVisible()) {
     const box = await sidebar.boundingBox(), header = await page.locator('.session-hub-sidebar-header').boundingBox();
@@ -118,8 +126,11 @@ async function expectAssistantLayout(page) {
       const chat = await page.locator('.session-hub-chat').boundingBox();
       expect(box.x + box.width).toBeLessThanOrEqual(chat.x + 1);
       expect(header.y + header.height).toBeLessThanOrEqual(box.y + box.height);
-      if (page.viewportSize().width >= 1280) {
-        const right = await page.locator('.session-hub-panel-side').boundingBox();
+      if (closed) {
+        const layout = await manager.boundingBox();
+        expect(Math.abs(chat.x + chat.width - layout.x - layout.width)).toBeLessThan(2);
+      } else if (page.viewportSize().width >= 1280) {
+        const right = await rightPanel.boundingBox();
         expect(chat.x + chat.width).toBeLessThanOrEqual(right.x + 1);
       }
     }

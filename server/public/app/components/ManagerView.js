@@ -109,6 +109,7 @@ function AssistantLayout({ projects, initialTarget, initialPanel, chat, grid, se
     <div class="session-hub-segments" role="group" aria-label="매니저 화면">
       ${[['sidebar', '목록'], ['chat', '비서'], ['right', '상세']].map(([pane, label]) => html`
         <button key=${pane} class="ghost" type="button" aria-pressed=${mobilePane === pane}
+          disabled=${pane === 'right' && !right}
           onClick=${() => setMobilePane(pane)}>${label}</button>`)}
     </div>
     <${SessionHubSidebar} data=${data} projects=${projects} onAssistant=${close}
@@ -120,7 +121,7 @@ function AssistantLayout({ projects, initialTarget, initialPanel, chat, grid, se
       <${SessionHubChat} panel=${panel} onOpenSession=${openSession} draft=${draft}
         onRevisionMismatch=${setRevisionMismatch} />
     </div>
-    <div class="session-hub-panel-side">
+    <div class="session-hub-panel-side" hidden=${!right}>
       <header class="session-hub-right-header">
         <span>${right === 'session' ? '세션 상세'
           : right === 'manager' ? 'Palantir' : right === 'work' ? '작업' : '상세'}</span>
@@ -131,7 +132,6 @@ function AssistantLayout({ projects, initialTarget, initialPanel, chat, grid, se
           focusAssistant(`이 세션 [[session:${key}@${rev}]] 지금 상태와 원래 목적 알려줘`)} />`}
       ${right === 'manager' && chat}
       ${right === 'work' && cloneElement(grid, { onSelectConversation: openConversation })}
-      ${!right && html`<p class="session-hub-note">세션을 선택하세요.</p>`}
     </div>
   </div>`;
 }

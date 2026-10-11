@@ -8813,6 +8813,7 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   flex: 0 0 36%; min-width: 0; display: flex; flex-direction: column; border-left: 1px solid var(--border);
   background: var(--bg-surface); min-height: 0;
 }
+.session-hub-panel-side[hidden] { display: none; }
 .session-hub-panel-side > .manager-chat-side,
 .session-hub-panel-side > .manager-grid-side {
   width: 100%; min-width: 0; flex: 1; min-height: 0; max-height: none;
@@ -8864,7 +8865,6 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 .all-sessions-panel .work-pill { border-radius: var(--radius-sm); padding: 2px 4px; }
 .all-sessions-panel .work-coverage h2, .all-sessions-panel .work-coverage h3 { font-size: 13px; }
 @media (min-width: 900px) and (max-width: 1279px) {
-  .session-hub-manager[data-right="closed"] .session-hub-panel-side { display: none; }
   .session-hub-panel-side {
     position: absolute; top: 0; right: 0; bottom: 0; width: min(480px, 60%); z-index: 10;
     box-shadow: -8px 0 24px var(--bg-overlay);
