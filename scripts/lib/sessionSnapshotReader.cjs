@@ -682,6 +682,119 @@ function compareRecordTimes(left, right) {
   return (a < b ? -1 : a > b ? 1 : 0) || left.position - right.position;
 }
 
+// PR-S: evaluate complete records locally; only closed status slots leave this reader.
+function transcriptStatus(provider, records) {
+  if (records.streaming) return snapshotPolicy.unknownStatus('truncated');
+  for (const record of records) {
+    const parseState = PARSE_STATES.get(record);
+    if (parseState?.invalid) return snapshotPolicy.unknownStatus(parseState.pending ? 'truncated' : 'parse_failed');
+  }
+  return provider === 'claude' ? claudeStatus(records) : codexStatus(records);
+}
+function statusAt(state, record) {
+  return { state, source: 'transcript', evidence_at: toIsoTimestamp(record.timestamp), reason: null };
+}
+function orderedStatusRecords(records) {
+  let previous = null;
+  for (const record of records) {
+    const ts = toIsoTimestamp(record.timestamp);
+    if (!ts || previous && ts < previous) return false;
+    previous = ts;
+  }
+  return true;
+}
+function claudeInterrupted(record) {
+  if (record.type !== 'user') return false;
+  const content = record.message?.content;
+  const text = typeof content === 'string' ? content : Array.isArray(content)
+    ? content.filter(block => block.type === 'text').map(block => block.text).join('') : '';
+  return /^\[Request interrupted by user(?: for tool use)?\]$/.test(text);
+}
+function claudeStatus(records) {
+  const chain = records.filter(record => record.isSidechain !== true
+    && ['user', 'assistant', 'system'].includes(record.type) && typeof record.uuid === 'string');
+  const byId = new Map(chain.map(record => [record.uuid, record]));
+  const main = new Set();
+  const positions = new Map(chain.map((record, index) => [record, index]));
+  if (byId.size !== chain.length) return snapshotPolicy.unknownStatus('branch_ambiguous');
+  let current = chain.at(-1);
+  if (!current) return snapshotPolicy.unknownStatus('status_format_unsupported');
+  while (current) {
+    if (main.has(current)) return snapshotPolicy.unknownStatus('branch_ambiguous');
+    if (!current.uuid || !Object.hasOwn(current, 'parentUuid')
+      || !(current.parentUuid === null || typeof current.parentUuid === 'string'))
+      return snapshotPolicy.unknownStatus('status_format_unsupported');
+    main.add(current);
+    if (current.parentUuid === null) break;
+    const parent = byId.get(current.parentUuid);
+    if (parent && positions.get(parent) >= positions.get(current))
+      return snapshotPolicy.unknownStatus('branch_ambiguous');
+    current = parent;
+    if (!current) return snapshotPolicy.unknownStatus('branch_ambiguous');
+  }
+  let instruction = null, previousChain = null, bound = false;
+  for (const record of records) {
+    const classification = classifyClaudeRecord(record);
+    if (classification?.kind && !claudeInterrupted(record)) {
+      instruction = record;
+      if (record.type === 'attachment') {
+        const parent = record.parentUuid == null ? previousChain : byId.get(record.parentUuid);
+        bound = main.has(parent);
+      } else bound = main.has(record);
+    }
+    if (byId.get(record.uuid) === record) previousChain = record;
+  }
+  if (!instruction) return snapshotPolicy.unknownStatus('no_instruction');
+  if (!bound) return snapshotPolicy.unknownStatus('instruction_unbound');
+  const remaining = records.slice(records.indexOf(instruction) + 1);
+  if (remaining.some(record => record.isSidechain !== true
+    && ['user', 'assistant'].includes(record.type) && typeof record.uuid !== 'string'))
+    return snapshotPolicy.unknownStatus('status_format_unsupported');
+  const after = remaining.filter(record => main.has(record));
+  const ordered = records.filter(record => main.has(record) || record === instruction);
+  if (!orderedStatusRecords(ordered)) return snapshotPolicy.unknownStatus('order_unknown');
+  let status = statusAt('working', instruction);
+  for (const record of after) {
+    if (claudeInterrupted(record)) status = statusAt('interrupted', record);
+    else if (record.type === 'assistant') {
+      const stop = record.message?.stop_reason;
+      const status_format_ok = stop === null || ['end_turn', 'tool_use'].includes(stop);
+      if (!status_format_ok) return snapshotPolicy.unknownStatus('status_format_unsupported');
+      status = statusAt(stop === 'end_turn' ? 'ended' : 'working', record);
+    } else if (record.type === 'user' && Array.isArray(record.message?.content)
+      && record.message.content.some(block => block.type === 'tool_result')) status = statusAt('working', record);
+  }
+  return status;
+}
+function codexStatus(records) {
+  let instruction = null, started = null, turn = null;
+  for (const record of records) {
+    if (record.type === 'event_msg' && record.payload?.type === 'task_started') started = record;
+    const eventUser = record.type === 'event_msg' && record.payload?.type === 'user_message';
+    const classification = record.type === 'response_item' && record.payload?.type === 'message'
+      && record.payload.role === 'user' ? classifyCodexMessage(record.payload) : null;
+    const messageUser = classification?.kind && !classification.empty;
+    if (eventUser || messageUser) { instruction = record; turn = started; }
+  }
+  if (!instruction) return snapshotPolicy.unknownStatus('no_instruction');
+  if (!turn) return snapshotPolicy.unknownStatus('turn_unbound');
+  const status_format_ok = typeof turn.payload.turn_id === 'string' && turn.payload.turn_id.length > 0;
+  if (!status_format_ok) return snapshotPolicy.unknownStatus('status_format_unsupported');
+  const events = records.slice(records.indexOf(instruction) + 1).filter(record => record.type === 'event_msg'
+    && ['task_started', 'task_complete', 'turn_aborted'].includes(record.payload?.type));
+  if (!orderedStatusRecords([turn, instruction, ...events]))
+    return snapshotPolicy.unknownStatus('order_unknown');
+  let status = statusAt('working', instruction);
+  for (const record of events) {
+    if (typeof record.payload.turn_id !== 'string' || !record.payload.turn_id)
+      return snapshotPolicy.unknownStatus('status_format_unsupported');
+    if (record.payload.turn_id !== turn.payload.turn_id) return snapshotPolicy.unknownStatus('turn_unbound');
+    status = statusAt(record.payload.type === 'task_complete' ? 'ended'
+      : record.payload.type === 'turn_aborted' ? 'interrupted' : 'working', record);
+  }
+  return status;
+}
+
 function parseFile(provider, records, providerCoverage, config = {}, retainAllInstructions = false,
   displayOptions = {}) {
   // Spec §1.2/§1.4: parse a nonwithheld file in original order before timestamp display sorting.
@@ -931,6 +1044,7 @@ function parseFile(provider, records, providerCoverage, config = {}, retainAllIn
     providerCoverage.records_unverified++;
   }
   return {
+    status: transcriptStatus(provider, records),
     provider: retainString(provider, 32),
     sid: retainString(sessionId, 64),
     cwd: retainString(cwd, 4096),
@@ -1727,6 +1841,7 @@ function buildSnapshotSession(config, parsedSession, key, kept) {
       .value : null,
     cli_version: retainString('unverified', 32),
     format_unverified: true,
+    status: parsedSession.status,
     first_record_at: parsedSession.firstAt,
     last_record_at: parsedSession.lastAt,
     first_instruction: parsedSession.first,
@@ -2023,7 +2138,7 @@ function parseOrcaWorktrees(worktrees, config, out, orcaCoverage, outputBudget) 
         pane_key: agent.paneKey,
         state: mapOrcaEnum('agent_state', agent.state),
         agent_type: mapOrcaEnum('agent_type', agent.agentType),
-        state_started_at: stateStartedAt || updatedAt,
+        state_started_at: stateStartedAt,
         updated_at: updatedAt || stateStartedAt,
         interrupted: agent.interrupted === true
       };
@@ -2034,6 +2149,7 @@ function parseOrcaWorktrees(worktrees, config, out, orcaCoverage, outputBudget) 
       exportedAgents.push(projectedAgent);
       localAgents.push({
         pane: agent.paneKey,
+        status: snapshotPolicy.orcaStatus(projectedAgent),
         prompt: typeof agent.prompt === 'string' ? summarizeLinkText(agent.prompt, true) : null,
         provider: agent.agentType,
         cwd: rawPath,
@@ -2163,6 +2279,8 @@ function applyOrcaLinks(all, edges, coverage) {
     const paneCount = edges.paneMatches?.get(edge.agent.pane)
       ?? (byPane.get(edge.agent.pane) || []).filter(value => value.eligible).length;
     const ambiguous = candidates.length > 1 || (edge.eligible && paneCount > 1);
+    if (!ambiguous && edge.eligible) parsedSession.output.status = snapshotPolicy.composeStatus(
+      parsedSession.output.status, edge.agent.status);
     parsedSession.output.orca_link = {
       evidence: ambiguous ? 'ambiguous' : edge.evidence,
       confirmed: !ambiguous && edge.eligible,
