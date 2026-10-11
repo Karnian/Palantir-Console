@@ -313,6 +313,41 @@ test('live service token reaches broker only and close immediately retires it', 
   await closing;
 });
 
+test('MCP EOF revokes broker access immediately while final stdout remains accepted during grace', async t => {
+  const { fakeNet } = require('./helpers/session-hub-service-fixture.cjs');
+  const { EventEmitter } = require('node:events');
+  const net = fakeNet();
+  let server;
+  const create = net.createServer;
+  net.createServer = handler => { server = create(handler); return server; };
+  const { app, hub, process } = integrated(t, { net, execFile(command, argv, opts, callback) {
+    callback(null, String(hub.diagnostics().pgid));
+  } });
+  await hub.start();
+  process.event({ type: 'system', subtype: 'init', session_id: 'owned',
+    memory_paths: { auto: `${hub.diagnostics().transcriptDir}/memory/` } });
+  const socket = new EventEmitter();
+  socket.setTimeout = () => {};
+  socket.write = () => {};
+  socket.destroy = () => { socket.destroyed = true; socket.emit('close'); };
+  server.connect(socket); socket.emit('data', '{"pid":42}\n');
+  await tick();
+  const token = hub.current();
+  const broker = () => request(app).get('/api/session-hub/sessions').set('Authorization', `Bearer ${token}`);
+  assert.equal((await broker()).status, 200);
+  hub.message('final');
+  socket.emit('end');
+  assert.equal(hub.current(), null);
+  assert.equal(hub.state().state, 'running');
+  assert.equal((await broker()).status, 403);
+  process.event({ type: 'assistant', message: { content: [{ type: 'text', text: 'preserved final answer' }] } });
+  process.event({ type: 'result' });
+  process.children[0].emit('exit', 0);
+  await hub.close();
+  assert.equal(hub.state().error, null);
+  assert.equal(hub.state().messages.some(row => row.text === 'preserved final answer'), true);
+});
+
 test('SSE without a cookie is refused and malformed POST cannot bypass the Origin check', async t => {
   const { app, process } = integrated(t);
   const denied = stream(app, `${BASE}/stream`, { cookie: undefined });

@@ -596,9 +596,11 @@ for (const event of ['close', 'end', 'error']) {
     const oldToken = fx.service.current();
     assert.ok(socket.payload);
     socket.emit(event, event === 'error' ? new Error('MCP died') : undefined);
-    assert.equal(fx.service.state().error, 'session_hub_mcp_lost');
+    assert.equal(fx.service.state().error, null);
+    assert.equal(fx.service.state().state, 'running');
     assert.equal(fx.service.current(), null);
     assert.throws(() => fx.service.message('unavailable'), code('session_hub_not_running'));
+    await until(() => fx.service.state().error === 'session_hub_mcp_lost', 3000);
     await fx.service.close();
     assert.equal(fx.service.state().state, 'idle');
     assert.equal(fs.existsSync(path.join(fx.root, 'mcp.json')), false);
@@ -613,6 +615,71 @@ for (const event of ['close', 'end', 'error']) {
     assert.equal(fx.service.state().state, 'running');
     await fx.service.stop();
     assert.equal(fx.service.state().error, null); // server-initiated disposal is not MCP loss
+  });
+}
+
+function captureMcpGrace(t) {
+  const callbacks = [];
+  const original = global.setTimeout;
+  t.mock.method(global, 'setTimeout', (fn, delay, ...args) => {
+    if (delay === 2000) { callbacks.push(fn); return { unref() {} }; }
+    return original(fn, delay, ...args);
+  });
+  return callbacks;
+}
+
+for (const exitCode of [0, 7]) {
+  test(`MCP EOF then final assistant/result then parent exit(${exitCode}) preserves the parent's outcome`, async t => {
+    const timers = captureMcpGrace(t);
+    const fx = credentialFixture(t, (command, argv, opts, callback) => {
+      callback(null, String(fx.service.diagnostics().pgid));
+    });
+    await fx.service.start(); fx.init();
+    const socket = fx.connect(42, 0);
+    await tick();
+    fx.service.message('last turn');
+    socket.emit('end'); socket.emit('close');
+    assert.equal(fx.service.current(), null);
+    assert.equal(fx.service.state().state, 'running');
+    assert.equal(fx.service.state().error, null);
+    assert.equal(timers.length, 1); // duplicate socket events must not restart the 2-second grace
+    fx.event({ type: 'assistant', message: { content: [{ type: 'text', text: 'last answer' }] } });
+    fx.event({ type: 'result' });
+    fx.children[0].emit('exit', exitCode);
+    await fx.service.close();
+    assert.equal(fx.service.state().error, exitCode === 0 ? null : 'session_hub_process_exited');
+    assert.equal(fx.service.state().messages.some(row => row.text === 'last answer'), true);
+    timers[0]();
+    assert.equal(fx.service.state().error, exitCode === 0 ? null : 'session_hub_process_exited');
+  });
+}
+
+for (const action of ['stop', 'clear', 'shutdown']) {
+  test(`${action} during MCP grace takes precedence over cancelled callbacks in a later generation`, async t => {
+    const timers = captureMcpGrace(t);
+    const fx = credentialFixture(t, (command, argv, opts, callback) => {
+      callback(null, String(fx.service.diagnostics().pgid));
+    });
+    await fx.service.start();
+    const socket = fx.connect(42, 0);
+    await tick();
+    socket.emit('end');
+    assert.equal(fx.service.state().state, 'running');
+    assert.equal(timers.length, 1);
+    await fx.service[action]();
+    assert.equal(fx.service.state().error, null);
+    assert.equal(fs.existsSync(path.join(fx.root, 'mcp.json')), false);
+    if (action !== 'shutdown') {
+      await fx.service.start();
+      const next = fx.connect(43, 0); await tick(); assert.ok(next.payload);
+      const token = fx.service.current();
+      timers[0]();
+      assert.equal(fx.service.current(), token); assert.equal(fx.service.state().state, 'running');
+    } else {
+      timers[0]();
+      assert.equal(fx.service.state().state, 'closed');
+    }
+    assert.equal(fx.service.state().error, null);
   });
 }
 

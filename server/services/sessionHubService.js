@@ -66,6 +66,8 @@ function createSessionHubService(options = {}) {
   let permanent = false;
   let turn = null;
   let timer = null;
+  let mcpLossTimer = null;
+  let mcpLossPending = false;
   let stdoutHandler = null;
   let writeQueue = Promise.resolve();
   let socketServer = null;
@@ -167,13 +169,19 @@ function createSessionHubService(options = {}) {
       let credentialGranted = false;
       let disconnected = false;
       const lost = () => {
+        const alreadyDisconnected = disconnected;
         disconnected = true;
-        if (!credentialGranted || !live(gen)) return;
+        if (alreadyDisconnected || !credentialGranted || !live(gen)) return;
+        token = null;
         mcpReady = false;
-        error = 'session_hub_mcp_lost';
-        // close synchronously revokes the token and rejects new turns before publishing the error.
-        void close().catch(() => {});
-        append('error', error);
+        mcpLossPending = true;
+        // MCP stdin EOF can precede the parent's final stdout/exit. Revoke access now but keep parsing stdout.
+        mcpLossTimer = setTimeout(() => {
+          if (!live(gen) || !mcpLossPending) return;
+          error = 'session_hub_mcp_lost';
+          void close().catch(() => {});
+          append('error', error);
+        }, 2000);
       };
       socket.on('close', () => { sockets.delete(socket); lost(); });
       socket.on('end', lost);
@@ -340,6 +348,7 @@ function createSessionHubService(options = {}) {
     if (state === 'running') return Promise.resolve(snapshot());
     if (state !== 'idle') return Promise.reject(fail('session_hub_busy'));
     state = 'starting'; error = null; clearRequested = false;
+    mcpLossPending = false;
     closePromise = null; writeQueue = Promise.resolve(); initSeen = false; mcpReady = false;
     initSessionId = null; requiresTranscript = false; transcriptVerified = false; transcriptCheck = null;
     const gen = ++generation;
@@ -397,7 +406,7 @@ function createSessionHubService(options = {}) {
   }
   function message(text) {
     if (permanent) throw fail('session_hub_closed');
-    if (state !== 'running') throw fail('session_hub_not_running');
+    if (state !== 'running' || mcpLossPending) throw fail('session_hub_not_running');
     if (turn) throw fail('turn_in_progress');
     if (typeof text !== 'string' || !text.trim() || Buffer.byteLength(text) > MAX_BYTES / 2) {
       throw fail('invalid_message', 400);
@@ -551,6 +560,7 @@ function createSessionHubService(options = {}) {
     if (shutdown) { permanent = true; state = 'closed'; }
     if (clear) clearRequested = true;
     token = null;
+    clearTimeout(mcpLossTimer); mcpLossTimer = null; mcpLossPending = false;
     if (closePromise) return closePromise;
     if (!permanent) state = 'closing';
     clearTimeout(timer); timer = null; turn = null;

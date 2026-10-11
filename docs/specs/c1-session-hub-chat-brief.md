@@ -38,8 +38,12 @@ C1 은 **채팅 에이전트가 Mac·codev2 의 모든 세션(Claude Code·Codex
   hello 의 pgid 는 무시하고, 자격 전달은 세대당 1회만 허용한다.
   전달 뒤 socket listener 를 닫고 후속 연결을 거부한다.
   자격 전달 연결은 MCP 생존 확인을 위해 유지하며 idle timeout 을 해제한다.
-  MCP 연결이 끊기면 `session_hub_mcp_lost` 로 그 세대 전체를 종료한다.
-  토큰 폐기·회수는 기존 close 와 같으며 다시 start 하면 새 세대가 된다.
+  MCP 연결이 끊기면 토큰만 즉시 폐기해 broker 접근을 차단한다.
+  2초 동안 running 을 유지하며 부모의 마지막 assistant/result 출력을 처리한다.
+  유예 중 새 턴은 거부하고, 부모가 exit 하면 기존 부모 종료 규칙으로 정리한다.
+  유예 뒤에도 부모가 종료하지 않았으면 `session_hub_mcp_lost` 로 세대를 종료한다.
+  close·clear·shutdown 은 유예 타이머를 취소하고 우선한다.
+  회수는 기존 close 와 같으며 다시 start 하면 새 세대가 된다.
   PGID 조회는 timeout 1초와 `killSignal: 'SIGKILL'` 을 사용한다.
   close·clear·shutdown 은 진행 중 조회를 기다리지 않는다.
   늦은 결과는 해당 세대가 running 이 아니면 버리고 자격을 전달하지 않는다.
