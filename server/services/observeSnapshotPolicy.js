@@ -3,7 +3,7 @@
 const { redactSecrets, REDACTION_VERSION } = require('./memorySanitize');
 const { createHmac } = require('node:crypto');
 const SNAPSHOT_SCHEMA = 'palantir.session-snapshot/1';
-const POLICY_VERSION = 1;
+const POLICY_VERSION = 2;
 const INSTR_ID_RE = /^(claude|codex):[A-Za-z0-9_-]{1,64}:[uin][A-Za-z0-9_-]{1,64}$/;
 const ID_RE = /^[A-Za-z0-9:_-]{1,128}$/;
 const READER_BUILD_RE = /^[0-9a-f]{16}$/;
@@ -16,12 +16,35 @@ const ENUMS = Object.freeze({
   first_instruction: ['recoverable', 'unrecoverable', 'unknown'],
   evidence: ['prompt_exact', 'prompt_trunc', 'prompt_prefix', 'cwd_only', 'ambiguous', 'none'],
   state: ['ok', 'unavailable', 'partial'],
-  agent_state: ['idle', 'running', 'busy', 'waiting', 'completed', 'error', 'stopped', 'unknown'],
+  agent_state: ['working', 'blocked', 'waiting', 'done', 'unknown'],
   status: ['active', 'idle', 'archived', 'running', 'stopped', 'unknown'],
   agent_type: ['claude', 'codex', 'unknown'],
   cli_version: ['unverified'],
   reader_version: ['1']
 });
+const LEGACY_AGENT_STATES = ['idle', 'running', 'busy', 'completed', 'error', 'stopped'];
+const ORCA_STATUS_MAP = Object.freeze({
+  working: 'working', blocked: 'waiting', waiting: 'waiting', done: 'ended'
+});
+const STATUS_STATES = ['working', 'waiting', 'ended', 'interrupted', 'unknown'];
+const STATUS_REASONS = ['orca_blocked', 'conflict', 'status_format_unsupported', 'branch_ambiguous',
+  'instruction_unbound', 'turn_unbound', 'truncated', 'parse_failed', 'order_unknown', 'no_instruction'];
+function unknownStatus(reason = null) {
+  return { state: 'unknown', source: 'none', evidence_at: null, reason };
+}
+function orcaStatus(agent) {
+  const mapped = Object.hasOwn(ORCA_STATUS_MAP, agent.state) ? ORCA_STATUS_MAP[agent.state] : 'unknown';
+  return { state: agent.interrupted === true ? 'interrupted' : mapped,
+    source: 'orca', evidence_at: agent.state_started_at || null,
+    reason: !agent.interrupted && agent.state === 'blocked' ? 'orca_blocked' : null };
+}
+function composeStatus(transcript, orca) {
+  if (!orca) return transcript;
+  if (transcript.source === 'none') return orca;
+  const chosen = transcript.evidence_at && (!orca.evidence_at || transcript.evidence_at > orca.evidence_at)
+    ? transcript : orca;
+  return { ...chosen, reason: transcript.state !== orca.state ? 'conflict' : chosen.reason };
+}
 const COVERAGE_KEYS = Object.freeze({
   claude: ['files_scanned', 'files_skipped', 'files_failed', 'records_unknown', 'records_unverified',
     'excluded_sessions', 'deleted_instructions', 'queued_enqueued', 'queued_dequeued', 'queued_removed', 'queued_delivered_attachment', 'queued_duplicate_withheld',
@@ -104,6 +127,12 @@ const linkSchema = {
   pane_key: nullable(idSlot),
   terminal_handle: nullable(idSlot)
 };
+const statusSchema = {
+  state: value => STATUS_STATES.includes(value),
+  source: value => ['orca', 'transcript', 'none'].includes(value),
+  evidence_at: nullable(timeSlot),
+  reason: nullable(value => STATUS_REASONS.includes(value))
+};
 const sessionSchema = {
   key: idSlot,
   provider: enumSlot('provider'),
@@ -123,7 +152,8 @@ const sessionSchema = {
   instruction_count: integerSlot,
   instruction_total: integerSlot,
   unknown_count: integerSlot,
-  orca_link: linkSchema
+  orca_link: linkSchema,
+  status: statusSchema
 };
 const instructionSchema = {
   id: instructionIdSlot,
@@ -141,9 +171,9 @@ const instructionSchema = {
 };
 const agentSchema = {
   pane_key: idSlot,
-  state: enumSlot('agent_state'),
+  state: value => enumSlot('agent_state')(value) || LEGACY_AGENT_STATES.includes(value),
   agent_type: enumSlot('agent_type'),
-  state_started_at: timeSlot,
+  state_started_at: nullable(timeSlot),
   updated_at: timeSlot,
   interrupted: booleanSlot
 };
@@ -183,7 +213,7 @@ const snapshotSchema = {
   reader_version: enumSlot('reader_version'),
   reader_build: hexSlot(16),
   redaction_version: value => integerSlot(value) && value >= REDACTION_VERSION,
-  policy_version: value => integerSlot(value) && value >= POLICY_VERSION,
+  policy_version: value => integerSlot(value) && value >= 1,
   coverage: {
     claude: { ...countSlots(COVERAGE_KEYS.claude), link_blocked: value => value === 0 || value === 1 },
     codex: { ...countSlots(COVERAGE_KEYS.codex), link_blocked: value => value === 0 || value === 1 },
@@ -246,7 +276,10 @@ function validate(object, schema) {
 }
 
 function validateSnapshot(object) {
-  const validation = validate(object, snapshotSchema);
+  const { status, ...legacySessionSchema } = sessionSchema;
+  const schema = object?.policy_version === 1
+    ? { ...snapshotSchema, sessions: [legacySessionSchema, SNAPSHOT_LIMITS.sessions] } : snapshotSchema;
+  const validation = validate(object, schema);
   if (!validation.ok) {
     return validation;
   }
@@ -301,6 +334,11 @@ module.exports = {
   validateOrcaWorktree: object => validate(object, worktreeSchema),
   validateOrcaAgent: object => validate(object, agentSchema),
   validateOrcaTerminal: object => validate(object, terminalSchema),
+  ORCA_STATUS_MAP,
+  STATUS_REASONS,
+  unknownStatus,
+  orcaStatus,
+  composeStatus,
   SNAPSHOT_LIMITS,
   isSafeId: idSlot,
   isSafeInstructionId: instructionIdSlot,

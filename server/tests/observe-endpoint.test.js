@@ -1005,3 +1005,15 @@ test('endpoint: R3 body errors preserve cookie 400 and reject other credentials 
     spy.restore();
   }
 });
+
+test('store: PR-S reads policy v1 without status and policy v2 with a closed status slot', t => {
+  const fx = fixture(t);
+  const state = sealObserveState({ dir: fx.dir, authToken: TOKEN });
+  assert.equal(readSnapshot(state, 'alpha').snapshot.sessions[0].status.state, 'working');
+  fx.snapshot.policy_version = 1;
+  for (const session of fx.snapshot.sessions) delete session.status;
+  writeSnapshot(fx);
+  const legacy = readSnapshot(state, 'alpha');
+  assert.equal(legacy.ok, true);
+  assert.equal(Object.hasOwn(legacy.snapshot.sessions[0], 'status'), false);
+});
