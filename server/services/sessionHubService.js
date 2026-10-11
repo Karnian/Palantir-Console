@@ -14,11 +14,12 @@ const { resolveClaudeAuth, CLAUDE_AUTH_KEYS, CLAUDE_PROVIDER_AUTH_ENV_KEYS } = r
 const { assertSpawnAllowed } = require('../utils/spawnGuard');
 const { SESSION_HUB_PROMPT, SESSION_HUB_PROMPT_VERSION } = require('./sessionHubPrompt');
 
-const TOOL_NAMES = ['list_sessions', 'search_instructions', 'get_session'];
+const { buildAssistantContext } = require('./assistantContext');
+const { utf8Prefix } = require('./assistantStore');
+const { redactSecrets, normalizeForScan } = require('./memorySanitize');
+const TOOL_NAMES = ['list_sessions', 'search_instructions', 'get_session', 'search_assistant_history'];
 const fail = (code, status = 409) => Object.assign(new Error(code), { code, status });
-const MAX_MESSAGES = 200;
-const MAX_BYTES = 1024 * 1024;
-const TRANSCRIPT_LIMIT = 8 * 1024 * 1024;
+const PRIVATE_BYTES = 1024 * 1024;
 const LINE_LIMIT = 1024 * 1024;
 const repoRoot = path.resolve(__dirname, '../..');
 
@@ -56,7 +57,27 @@ function createSessionHubService(options = {}) {
   let token = null;
   let disabled = null;
   let error = null;
-  let messages = [];
+  const store = options.store;
+  if (!store) throw new Error('assistant_store_required');
+  store.recover();
+  let boundThread = null;
+  let transcriptsRemaining = 0;
+  let cachedMessages = [];
+  let activeThread = store.active();
+  let closedComplete = false;
+  let cleanupComplete = false;
+  let partialTimer = null;
+  let contextFresh = true;
+  let rotateContext = false;
+  let invalidationVersion = 0;
+  let memoryProvider = null;
+  let mutex = Promise.resolve();
+  let transitioning = false;
+  const serialize = fn => {
+    const result = mutex.then(fn);
+    mutex = result.catch(() => {});
+    return result;
+  };
   let child = null;
   let pgid = null;
   let cwd = null;
@@ -64,7 +85,6 @@ function createSessionHubService(options = {}) {
   let preparation = null;
   let startPromise = null;
   let closePromise = null;
-  let clearRequested = false;
   let permanent = false;
   let turn = null;
   let timer = null;
@@ -72,6 +92,18 @@ function createSessionHubService(options = {}) {
   let mcpLossPending = false;
   let stdoutHandler = null;
   let writeQueue = Promise.resolve();
+  let bootCleanup = null;
+  let bootCleanupFailure = null;
+  let persistenceFailure = null;
+  const enqueueLedger = fn => {
+    const result = writeQueue.then(fn);
+    writeQueue = result.catch(() => {});
+    return result;
+  };
+  function storageFailed(err) {
+    persistenceFailure ||= err;
+    error = 'assistant_storage_failed';
+  }
   let socketServer = null;
   let socketDir = null;
   let mcpReady = false;
@@ -86,8 +118,13 @@ function createSessionHubService(options = {}) {
   const ownedPath = path.join(root, 'owned-sessions');
 
   function snapshot() {
+    if (!closedComplete) {
+      try { activeThread = store.active(); cachedMessages = store.window(activeThread); }
+      catch (err) { storageFailed(err); }
+    }
     return { state, epoch, version, generation, error, disabled, turnInProgress: !!turn,
-      promptVersion: SESSION_HUB_PROMPT_VERSION, messages: messages.map(row => ({ ...row })) };
+      promptVersion: SESSION_HUB_PROMPT_VERSION, thread_id: activeThread,
+      transcripts_remaining: transcriptsRemaining, messages: cachedMessages };
   }
   function publish() {
     version++;
@@ -97,11 +134,36 @@ function createSessionHubService(options = {}) {
     }
   }
   function append(role, text, extra = {}, notify = true) {
-    messages.push({ role, text: String(text), ...extra });
-    while (messages.length > MAX_MESSAGES || Buffer.byteLength(JSON.stringify(messages)) > MAX_BYTES) messages.shift();
+    const id = boundThread || store.active();
+    store.append(id, role === 'error' ? 'system_note' : role, text, extra);
     if (notify) publish();
   }
-  function setError(code) { error = code; append('error', code); }
+  function commitTurn(status) {
+    if (!turn) return;
+    // Keep raw text only in this turn. Every commit re-scans the entire stream across chunk boundaries.
+    let content = redactSecrets(turn.raw).text;
+    const scan = normalizeForScan(content);
+    const unfinishedPem = /-----BEGIN[A-Z ]*PRIVATE KEY-----/.test(scan)
+      && scan.lastIndexOf('-----BEGIN') > scan.lastIndexOf('-----END');
+    const unfinishedAssignment = /\b[\w-]*(?:key|token|secret|password|passwd|pwd)\s*[:=]\s*(?:"[^"]*$|'[^']*$)/i
+      .test(scan);
+    const unfinishedCli = /--(?:password|passwd|pwd)\b\s+(?:"[^"]*$|'[^']*$)/i.test(scan);
+    if (unfinishedPem || unfinishedAssignment || unfinishedCli) content = '[REDACTED]';
+    if (status === 'partial') {
+      const openPem = normalizeForScan(content).lastIndexOf('-----BEGIN');
+      const endPem = normalizeForScan(content).lastIndexOf('-----END');
+      const openQuote = ["'", '"'].some(quote => content.split(quote).length % 2 === 0);
+      if (openPem > endPem || openQuote) content = '';
+      else content = content.slice(0, content.lastIndexOf('\n') + 1);
+    }
+    turn.content = utf8Prefix(content, 65536);
+    store.update(turn.assistant.id, turn.content, status, initSessionId);
+    turn.lastCommit = Date.now();
+  }
+  function setError(code) {
+    error = code;
+    try { append('system_note', code); } catch (err) { storageFailed(err); }
+  }
   async function stat(filename) {
     try { return await io.lstat(filename); }
     catch (err) { if (err.code === 'ENOENT') return null; throw err; }
@@ -129,7 +191,7 @@ function createSessionHubService(options = {}) {
     const info = await stat(filename);
     if (!info) return '';
     if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o777) !== 0o600
-      || (uid !== undefined && info.uid !== uid) || info.size > MAX_BYTES) {
+      || (uid !== undefined && info.uid !== uid) || info.size > PRIVATE_BYTES) {
       throw fail('session_hub_unsafe_storage', 503);
     }
     const file = await io.open(filename, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
@@ -196,9 +258,8 @@ function createSessionHubService(options = {}) {
         // MCP stdin EOF can precede the parent's final stdout/exit. Revoke access now but keep parsing stdout.
         mcpLossTimer = setTimeout(() => {
           if (!live(gen) || !mcpLossPending) return;
-          error = 'session_hub_mcp_lost';
+          setError('session_hub_mcp_lost');
           void close().catch(() => {});
-          append('error', error);
         }, 2000);
       };
       socket.on('close', () => { sockets.delete(socket); lost(); });
@@ -265,6 +326,7 @@ function createSessionHubService(options = {}) {
     return url.origin;
   }
   async function prepare(gen) {
+    await ensureBootCleanup();
     if (managedSettingsPresent(managedPaths, options.managedFs || fs)) {
       disabled = 'session_hub_managed_settings';
       throw fail(disabled, 503);
@@ -295,19 +357,23 @@ function createSessionHubService(options = {}) {
     if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) {
       throw fail('session_hub_unexpected_paths', 503);
     }
-    writeQueue = writeQueue.then(async () => {
+    const owner = boundThread;
+    enqueueLedger(async () => {
       const owned = new Set((await readPrivate(ownedPath)).split('\n').filter(Boolean));
-      owned.add(id);
+      owned.add(`${id}\t${owner}`);
       await privateFile(ownedPath, `${[...owned].join('\n')}\n`);
-    });
-    writeQueue.catch(() => {
+    }).catch(() => {
       setError('session_hub_storage_failed');
       void close().catch(() => {});
     });
   }
   function finishTurn(gen) {
     if (!live(gen)) return;
+    try { commitTurn(turn?.failed ? 'error' : 'complete'); }
+    catch (err) { storageFailed(err); }
+    clearInterval(partialTimer); partialTimer = null;
     clearTimeout(timer); timer = null; turn = null; publish();
+    if (persistenceFailure) void close().catch(() => {});
   }
   function verifyTranscript(gen) {
     if (transcriptCheck) return;
@@ -347,27 +413,41 @@ function createSessionHubService(options = {}) {
     }
     if (event.type === 'assistant') {
       for (const block of event.message?.content || []) {
-        if (block.type === 'text') append('assistant', block.text);
-        if (block.type === 'tool_use') append('tool', JSON.stringify(block.input || {}).slice(0, 1000), {
-          name: String(block.name).slice(0, 150),
+        if (!turn) continue;
+        if (block.type === 'text') {
+          turn.raw += String(block.text);
+          if (Buffer.byteLength(turn.raw) > 4 * LINE_LIMIT) {
+            setError('session_hub_output_too_large'); void close().catch(() => {}); return;
+          }
+          if (Date.now() - turn.lastCommit >= 2000) persistPartial();
+        }
+        if (block.type === 'tool_use') append('tool_note', String(block.name).slice(0, 150), {
+          turn_id: turn.user.turn_id, model_session_id: initSessionId,
         });
       }
     }
     if (event.type === 'result') {
-      if (event.is_error) append('error', 'session_hub_turn_failed');
+      const usage = event.usage || {};
+      const input = Number(usage.input_tokens || 0) + Number(usage.cache_read_input_tokens || 0)
+        + Number(usage.cache_creation_input_tokens || 0);
+      if (input > (options.contextTokenLimit ?? 120000)) rotateContext = true;
+      if (event.is_error && turn) { turn.failed = true; turn.raw += '\nsession_hub_turn_failed'; }
       if (requiresTranscript && !transcriptVerified) verifyTranscript(gen);
       else finishTurn(gen);
     }
   }
   function start() {
     if (permanent) return Promise.reject(fail('session_hub_closed'));
-    if (state !== 'idle' && state !== 'running') return Promise.reject(fail('session_hub_busy'));
+    if (transitioning) return Promise.reject(fail('session_hub_busy'));
+    const retryCleanup = state === 'error:cleanup_failed' && bootCleanupFailure && !persistenceFailure && !pgid;
+    if (state !== 'idle' && state !== 'running' && !retryCleanup) return Promise.reject(fail('session_hub_busy'));
     if (disabled) return Promise.reject(fail(disabled, 503));
     if (state === 'running') return Promise.resolve(snapshot());
-    if (state !== 'idle') return Promise.reject(fail('session_hub_busy'));
-    state = 'starting'; error = null; clearRequested = false;
+    if (state !== 'idle' && !retryCleanup) return Promise.reject(fail('session_hub_busy'));
+    state = 'starting'; error = null;
+    boundThread = store.active(); contextFresh = true;
     mcpLossPending = false;
-    closePromise = null; writeQueue = Promise.resolve(); initSeen = false; mcpReady = false;
+    closePromise = null; cleanupComplete = false; persistenceFailure = null; initSeen = false; mcpReady = false;
     initSessionId = null; requiresTranscript = false; transcriptVerified = false; transcriptCheck = null;
     const gen = ++generation;
     preparation = prepare(gen);
@@ -393,7 +473,10 @@ function createSessionHubService(options = {}) {
         let newline;
         while ((newline = buffer.indexOf('\n')) !== -1) {
           const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1);
-          try { protocol(JSON.parse(line), gen); } catch { /* ignore non-protocol output */ }
+          let event;
+          try { event = JSON.parse(line); } catch { continue; }
+          try { protocol(event, gen); }
+          catch (err) { storageFailed(err); void close().catch(() => {}); }
         }
       };
       child.stdout.on('data', stdoutHandler);
@@ -422,24 +505,83 @@ function createSessionHubService(options = {}) {
     publish();
     return startPromise;
   }
-  function message(text) {
-    if (permanent) throw fail('session_hub_closed');
-    if (state !== 'running' || mcpLossPending) throw fail('session_hub_not_running');
-    if (turn) throw fail('turn_in_progress');
-    if (typeof text !== 'string' || !text.trim() || Buffer.byteLength(text) > MAX_BYTES / 2) {
-      throw fail('invalid_message', 400);
-    }
-    const gen = generation;
-    turn = { generation: gen };
-    append('user', text, {}, false);
-    timer = setTimeout(() => {
-      if (!live(gen) || !turn) return;
-      setError('session_hub_turn_timeout');
-      void close().catch(() => {});
-    }, options.turnTimeoutMs ?? 180000);
-    child.stdin.write(`${JSON.stringify({ type: 'user', message: { role: 'user', content: text } })}\n`);
-    publish();
-    return snapshot();
+  function message(payload) {
+    return serialize(async () => {
+      if (permanent) throw fail('session_hub_closed');
+      const { thread_id, request_id, text } = payload || {};
+      if (typeof text !== 'string' || !text.trim() || Buffer.byteLength(text) > 65536
+        || typeof thread_id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(thread_id)
+        || typeof request_id !== 'string'
+        || !/^[A-Za-z0-9_-]{1,128}$/.test(request_id)) throw fail('invalid_message', 400);
+      const prior = store.findRequest(thread_id, request_id);
+      if (prior) {
+        if (prior.receipt.content_hash !== store.contentHash(text)) throw fail('request_conflict');
+        return { ...snapshot(), ...prior, replayed: true };
+      }
+      if (store.active() !== thread_id) throw fail('thread_not_active');
+      if (transitioning || turn) throw fail('turn_in_progress');
+      if (state !== 'running' || mcpLossPending) throw fail('session_hub_not_running');
+      if (rotateContext) {
+        const invalidation = invalidationVersion;
+        await close();
+        if (permanent) throw fail('session_hub_closed');
+        append('system_note', '맥락을 새로 정리함');
+        await start();
+        rotateContext = invalidation !== invalidationVersion;
+      }
+      if (permanent || state !== 'running') throw fail('session_hub_not_running');
+      const reserved = store.reserve(payload);
+      const gen = generation;
+      turn = { ...reserved, generation: gen, raw: '', content: '', lastCommit: Date.now() - 2000 };
+      partialTimer = setInterval(() => {
+        if (live(gen) && turn?.generation === gen) persistPartial();
+      }, 2000);
+      let content = reserved.user.content;
+      try {
+        if (contextFresh) {
+          content = buildAssistantContext(store, boundThread, reserved.user.seq, memoryProvider) + '\n\n' + content;
+          contextFresh = false;
+        }
+      } catch (err) { await close(); throw err; }
+      timer = setTimeout(() => {
+        if (!live(gen) || !turn) return;
+        setError('session_hub_turn_timeout');
+        void close().catch(() => {});
+      }, options.turnTimeoutMs ?? 180000);
+      try { child.stdin.write(`${JSON.stringify({ type: 'user', message: { role: 'user', content } })}\n`); }
+      catch (err) { await close(); throw err; }
+      publish();
+      return { ...snapshot(), ...reserved };
+    });
+  }
+  function newThread() {
+    return serialize(async () => {
+      if (permanent) throw fail('session_hub_closed');
+      if (turn) throw fail('turn_in_progress');
+      transitioning = true;
+      if (state === 'idle') closePromise = null;
+      try {
+        await close();
+        if (permanent) throw fail('session_hub_closed');
+        const thread = store.newThread();
+        boundThread = null; rotateContext = false;
+        publish();
+        return { ...snapshot(), thread };
+      } finally { transitioning = false; }
+    });
+  }
+  function deleteThread(id) {
+    return serialize(async () => {
+      if (permanent) throw fail('session_hub_closed');
+      if (id === store.active()) throw fail('thread_active');
+      store.markDeleting(id);
+      if (permanent) throw fail('session_hub_closed');
+      const result = await cleanupTranscripts({ threadId: id });
+      if (permanent) throw fail('session_hub_closed');
+      if (result.result === 'complete') store.delete(id);
+      publish();
+      return { thread_id: id, ...result };
+    });
   }
   function groupAlive() {
     if (!pgid) return false;
@@ -490,48 +632,6 @@ function createSessionHubService(options = {}) {
       if (socketDir) { await io.rm(socketDir, { recursive: true, force: true }); socketDir = null; }
     }
   }
-  async function matchingTranscript(filename, info) {
-    if (info.size > TRANSCRIPT_LIMIT) return false;
-    const file = await io.open(filename, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-    try {
-      const actual = await file.stat();
-      if (!actual.isFile() || actual.size > TRANSCRIPT_LIMIT) return false;
-      // Bounded both by stat and by reads, including a file growing during clear.
-      const data = Buffer.alloc(TRANSCRIPT_LIMIT + 1);
-      let bytesRead = 0;
-      while (bytesRead < data.length) {
-        const read = await file.read(data, bytesRead, data.length - bytesRead, bytesRead);
-        if (!read.bytesRead) break;
-        bytesRead += read.bytesRead;
-      }
-      if (bytesRead > TRANSCRIPT_LIMIT) return false;
-      let found = false;
-      for (const line of data.subarray(0, bytesRead).toString('utf8').split('\n')) {
-        if (!line.trim()) continue;
-        if (Buffer.byteLength(line) > LINE_LIMIT) return false;
-        let record;
-        try { record = JSON.parse(line); } catch { return false; }
-        if (Object.hasOwn(record, 'cwd')) {
-          if (record.cwd !== cwd) return false;
-          found = true;
-        }
-      }
-      return found;
-    } finally { await file.close(); }
-  }
-  async function residual(filename, info) {
-    if (!info.isDirectory() || info.isSymbolicLink()) return 1;
-    const names = await io.readdir(filename);
-    if (!names.length) { await io.rmdir(filename); return 0; }
-    let count = 0;
-    for (const name of names) {
-      const item = path.join(filename, name);
-      const entry = await stat(item);
-      if (entry) count += await residual(item, entry);
-    }
-    if (!count) await io.rmdir(filename);
-    return count;
-  }
   async function safeTranscriptDirectory() {
     // Both result validation and clear reject symlinks in every component, including projects and its parents.
     for (let parent = transcriptDir; ; parent = path.dirname(parent)) {
@@ -540,54 +640,133 @@ function createSessionHubService(options = {}) {
       if (parent === path.dirname(parent)) return true;
     }
   }
-  async function clearFiles() {
-    // A clear before the first start also handles prior boots, without spawning.
+  function cleanupTranscripts(query = {}) {
+    return enqueueLedger(() => cleanupTranscriptsLocked(query)).then(result => {
+      if (query.processCleanup) {
+        if (bootCleanupFailure && (error === 'session_hub_cleanup_failed' || error === bootCleanupFailure.code)) {
+          error = null;
+        }
+        bootCleanupFailure = null;
+      }
+      return result;
+    }, err => {
+      if (query.processCleanup) bootCleanupFailure = err;
+      throw err;
+    });
+  }
+  function ensureBootCleanup() {
+    if (!bootCleanup) {
+      bootCleanup = cleanupTranscripts({ processCleanup: true }).catch(err => {
+        // Only an in-flight or successful attempt is reusable. Filesystem failures can recover in this process.
+        bootCleanup = null;
+        if (!persistenceFailure) error = 'session_hub_cleanup_failed';
+        publish();
+        throw err;
+      });
+    }
+    return bootCleanup;
+  }
+  async function residual(filename, info, removeEmpty = false) {
+    if (!info.isDirectory() || info.isSymbolicLink()) return 1;
+    try {
+      const names = await io.readdir(filename);
+      let count = 0;
+      for (const name of names) {
+        const item = path.join(filename, name);
+        const entry = await stat(item);
+        if (entry) count += await residual(item, entry, removeEmpty);
+      }
+      if (!count && removeEmpty) await io.rmdir(filename);
+      return count;
+    } catch (err) { return err.code === 'ENOENT' ? 0 : 1; }
+  }
+  function persistPartial() {
+    try { commitTurn('partial'); publish(); }
+    catch (err) { storageFailed(err); void close().catch(() => {}); }
+  }
+  async function countTranscripts(entries, safe, removeEmpty) {
+    const accounted = new Set();
+    let count = 0;
+    for (const entry of entries) {
+      const id = entry.split('\t')[0];
+      if (!safe || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) { count++; continue; }
+      const name = `${id}.jsonl`;
+      accounted.add(name);
+      try { if (await stat(path.join(transcriptDir, name))) count++; }
+      catch { count++; }
+    }
+    if (!safe) return Math.max(count, 1);
+    if (await stat(transcriptDir)) {
+      for (const name of await io.readdir(transcriptDir)) {
+        if (accounted.has(name)) continue;
+        const filename = path.join(transcriptDir, name);
+        const info = await stat(filename);
+        if (info) count += await residual(filename, info, removeEmpty);
+      }
+    }
+    return count;
+  }
+  async function cleanupTranscriptsLocked({ threadId, processCleanup = false } = {}) {
+    if (!namespaceReady && !await stat(root)) {
+      if (processCleanup) for (const row of store.deletingThreads()) store.delete(row.id);
+      transcriptsRemaining = 0;
+      return { result: 'complete', remaining: 0 };
+    }
     if (!namespaceReady) await namespace();
     await privateDir(root);
-    const owned = new Set((await readPrivate(ownedPath)).split('\n').filter(Boolean));
+    const entries = (await readPrivate(ownedPath)).split('\n').filter(Boolean);
+    const retained = [];
+    const safe = await safeTranscriptDirectory().catch(() => false);
     let remaining = 0;
-    const safe = await safeTranscriptDirectory();
-    if (!safe) remaining = 1;
-    const directory = safe ? await stat(transcriptDir) : null;
-    const names = directory ? await io.readdir(transcriptDir) : [];
-    for (const name of names) {
-      const filename = path.join(transcriptDir, name);
-      const info = await stat(filename);
+    for (const entry of entries) {
+      const [id, owner] = entry.split('\t');
+      // DELETE touches exactly the requested owner. Legacy IDs belong only to process cleanup.
+      if (!processCleanup && owner !== threadId) { retained.push(entry); continue; }
+      if (!safe || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) {
+        retained.push(entry); remaining++; continue;
+      }
+      const filename = path.join(transcriptDir, `${id}.jsonl`);
+      let info;
+      try { info = await stat(filename); }
+      catch { retained.push(entry); remaining++; continue; }
       if (!info) continue;
-      const id = name.endsWith('.jsonl') ? name.slice(0, -6) : null;
-      if (id && info.isFile() && !info.isSymbolicLink()
-        && (owned.has(id) || await matchingTranscript(filename, info).catch(() => false))) {
-        try { await io.unlink(filename); }
-        catch (err) { if (err.code !== 'ENOENT') remaining++; }
-      } else remaining += await residual(filename, info);
+      if (!info.isFile() || info.isSymbolicLink()) { retained.push(entry); remaining++; continue; }
+      try { await io.unlink(filename); }
+      catch (err) { if (err.code !== 'ENOENT') { retained.push(entry); remaining++; } }
     }
-    for (const id of owned) {
-      if (!safe || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) continue;
-      if (!await stat(path.join(transcriptDir, `${id}.jsonl`))) owned.delete(id);
+    await privateFile(ownedPath, retained.length ? `${retained.join('\n')}\n` : '');
+    if (processCleanup) {
+      // Failed owned files remain in the ledger across thread changes and server restarts.
+      const pendingOwners = new Set(retained.map(entry => entry.split('\t')[1]));
+      for (const row of store.deletingThreads()) {
+        if (!pendingOwners.has(row.id)) store.delete(row.id);
+      }
     }
-    if (safe) await privateFile(ownedPath, owned.size ? `${[...owned].join('\n')}\n` : '');
-    if (directory && remaining === 0) await io.rmdir(transcriptDir);
-    // Only the fixed namespace's cwd is ours; never follow a replaced symlink.
-    const cwdInfo = await stat(cwd);
-    if (cwdInfo?.isDirectory() && !cwdInfo.isSymbolicLink()) {
-      await io.rm(cwd, { recursive: true, force: true });
-    } else if (cwdInfo) remaining++;
+    // DELETE's result covers only its owner; state always counts every residual without expanding that deletion.
+    transcriptsRemaining = await countTranscripts(retained, safe, processCleanup);
+    if (processCleanup) remaining = transcriptsRemaining;
     return { result: remaining ? 'incomplete' : 'complete', remaining };
   }
-  function close({ clear = false, shutdown = false } = {}) {
+  function close({ shutdown = false } = {}) {
+    if (closedComplete && closePromise) return closePromise;
     if (shutdown) { permanent = true; state = 'closed'; }
-    if (clear) clearRequested = true;
     token = null;
     clearTimeout(mcpLossTimer); mcpLossTimer = null; mcpLossPending = false;
     if (closePromise) {
-      if (shutdown) publish();
+      if (shutdown) { publish(); if (cleanupComplete) closedComplete = true; }
       return closePromise;
     }
     if (!permanent) state = 'closing';
+    if (turn) {
+      turn.raw += '\n' + (error || '응답이 중단됨');
+      try { commitTurn('error'); } catch (err) { storageFailed(err); }
+    }
+    clearInterval(partialTimer); partialTimer = null;
     clearTimeout(timer); timer = null; turn = null;
     closePromise = (async () => {
       // start's continuation checks state; delayed writes cannot resurrect files.
       await preparation?.catch(() => {});
+      await bootCleanup?.catch(() => {});
       try { await reap(); }
       catch {
         error = 'reap_failed';
@@ -599,13 +778,28 @@ function createSessionHubService(options = {}) {
       stdoutHandler = null; child = null;
       await writeQueue.catch(() => {});
       await transcriptCheck;
-      await removeConfig();
-      let result = { result: 'complete', remaining: 0 };
-      if (clearRequested) { messages = []; publish(); result = await clearFiles(); }
+      let cleanupFailure = null;
+      try { await removeConfig(); } catch (err) { cleanupFailure = err; }
+      let result = { result: 'incomplete', remaining: transcriptsRemaining };
+      try {
+        result = await cleanupTranscripts({ processCleanup: true });
+        bootCleanup = Promise.resolve(result);
+      } catch (err) { cleanupFailure ||= err; }
+      if (persistenceFailure || cleanupFailure) {
+        if (persistenceFailure) throw fail('assistant_storage_failed', 503);
+        throw cleanupFailure;
+      }
       if (!permanent) state = 'idle';
       publish();
-      return { ...snapshot(), ...result };
+      const value = { ...snapshot(), ...result };
+      cleanupComplete = true;
+      closedComplete = permanent;
+      return value;
     })().catch(err => {
+      if (bootCleanupFailure && !persistenceFailure && err.code !== 'reap_failed') {
+        bootCleanup = null;
+        closePromise = null;
+      }
       if (err.code !== 'reap_failed') {
         error ||= 'session_hub_cleanup_failed';
         if (!permanent) state = 'error:cleanup_failed';
@@ -616,16 +810,22 @@ function createSessionHubService(options = {}) {
     publish();
     return closePromise;
   }
-  function stop() { return close(); }
-  function clear() {
-    // A completed stop does not satisfy a subsequent clear.
+  function stop() {
     if (state === 'idle') closePromise = null;
-    return close({ clear: true });
+    return close();
   }
   function shutdown() { return close({ shutdown: true }); }
-  return { start, message, stop, close, clear, shutdown, state: snapshot, current: () => token,
+  ensureBootCleanup().catch(() => {});
+  return { start, message, stop, close, shutdown, newThread, deleteThread,
+    listThreads: () => store.list(), messages: (id, query) => store.messages(id, query),
+    getMessage: (id, mid) => store.get(id, mid),
+    searchHistory: query => store.search(boundThread, query.q, query.limit === undefined ? 10 : Number(query.limit)),
+    tokenThread: () => token ? boundThread : null,
+    setMemoryProvider(fn) { memoryProvider = fn; },
+    invalidateContext() { invalidationVersion++; rotateContext = true; }, state: snapshot, current: () => token,
     subscribe(fn) { subscribers.add(fn); return () => subscribers.delete(fn); },
-    diagnostics: () => ({ cwd, transcriptDir, pgid, initSeen, mcpReady, transcriptVerified }),
+    diagnostics: () => ({ cwd, transcriptDir, pgid, initSeen, mcpReady, transcriptVerified,
+      storageErrorCode: persistenceFailure?.code || null }),
   };
 }
 

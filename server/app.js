@@ -72,6 +72,7 @@ const { createRouterRouter } = require('./routes/router');
 const { createAuthRouter } = require('./routes/auth');
 const { sealObserveState } = require('./services/observeSnapshotStore');
 const { sessionHubActive: computeSessionHubActive } = require('./services/sessionHubActivation');
+const { createAssistantStore } = require('./services/assistantStore');
 const { createSessionHubService } = require('./services/sessionHubService');
 const { createSessionHubChatRouter } = require('./routes/sessionHubChat');
 const { createSnapshotRefreshService } = require('./services/snapshotRefreshService');
@@ -1125,20 +1126,6 @@ function createApp(options = {}) {
     observeState, authToken, managedPaths: options.sessionHubManagedPaths,
     resolveBinary: options.sessionHubResolveClaudeBinary,
   }) : options.sessionHubActive === true;
-  const sessionHubService = sessionHubActive ? createSessionHubService({
-    baseUrl: () => {
-      const address = lastServer?.address();
-      if (!address || typeof address === 'string') return null;
-      const host = ['::', '0.0.0.0'].includes(address.address) ? '127.0.0.1' : address.address;
-      return `http://${host.includes(':') ? `[${host}]` : host}:${address.port}`;
-    },
-    ...options.sessionHubServiceOptions,
-    ...(options.sessionHubManagedPaths ? { managedPaths: options.sessionHubManagedPaths } : {}),
-    ...(options.sessionHubResolveClaudeBinary ? { resolveBinary: options.sessionHubResolveClaudeBinary } : {}),
-  }) : null;
-  const sessionHubTokenProvider = options.sessionHubTokenProvider || sessionHubService || { current: () => null };
-  app.sessionHubService = sessionHubService;
-  app.sessionHubActive = sessionHubActive;
   const snapshotRefreshService = createSnapshotRefreshService({
     ...options.snapshotRefreshServiceOptions, observeState,
   });
@@ -1211,6 +1198,22 @@ function createApp(options = {}) {
   const dbPath = options.dbPath || process.env.PALANTIR_DB || path.join(__dirname, 'palantir.db');
   const { db, migrate, close: closeDb } = createDatabase(dbPath);
   migrate();
+  const sessionHubService = sessionHubActive ? createSessionHubService({
+    baseUrl: () => {
+      const address = lastServer?.address();
+      if (!address || typeof address === 'string') return null;
+      const host = ['::', '0.0.0.0'].includes(address.address) ? '127.0.0.1' : address.address;
+      return `http://${host.includes(':') ? `[${host}]` : host}:${address.port}`;
+    },
+    ...options.sessionHubServiceOptions,
+    store: options.sessionHubServiceOptions?.store || createAssistantStore(db),
+    ...(options.sessionHubManagedPaths ? { managedPaths: options.sessionHubManagedPaths } : {}),
+    ...(options.sessionHubResolveClaudeBinary ? { resolveBinary: options.sessionHubResolveClaudeBinary } : {}),
+  }) : null;
+  const sessionHubTokenProvider = options.sessionHubTokenProvider || sessionHubService || { current: () => null };
+  app.sessionHubService = sessionHubService;
+  app.sessionHubActive = sessionHubActive;
+
   if (!warnedComposerFlags && (
     process.env.PALANTIR_MEMORY_COMPOSER === '0'
     || process.env.PALANTIR_MEMORY_COMPOSER_SHADOW === '1'
@@ -1925,7 +1928,7 @@ function createApp(options = {}) {
   }
   app.use('/api/session-hub', createSessionHubRouter({
     state: observeState, store: options.observeSnapshotStore, provider: sessionHubTokenProvider,
-    clock: options.sessionHubClock,
+    clock: options.sessionHubClock, history: sessionHubService,
   }));
   app.use('/api/session-hub', sessionHubErrorHandler);
   app.use('/api/observe', parseJson);
@@ -2317,6 +2320,7 @@ function createApp(options = {}) {
       const schedulerInflight = operatorScheduler && operatorScheduler.awaitDrain ? operatorScheduler.awaitDrain() : null;
       if (schedulerInflight && typeof schedulerInflight.then === 'function') disposeWaits.push(Promise.resolve(schedulerInflight));
     } catch { /* ignore */ }
+    if (sessionHubService) disposeWaits.push(sessionHubService.shutdown());
     if (disposeWaits.length > 0) {
       return Promise.allSettled(disposeWaits).then(_closeDbOnce);
     }

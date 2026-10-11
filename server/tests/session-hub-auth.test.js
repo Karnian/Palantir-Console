@@ -290,3 +290,44 @@ test('route resolver aliases to Top receive a second scope check before events a
   const response = await auth(app, 'operator', '/api/conversations/alias/events');
   assert.equal(response.status, 403); assert.equal(reads, 0);
 });
+
+test('history token route is exact, generation-bound, byte capped and has its own 30/minute bucket', async t => {
+  const { serviceFixture } = require('./helpers/session-hub-service-fixture.cjs');
+  const fx = fixture(t);
+  const processFixture = serviceFixture(t);
+  let time = 100000;
+  const app = fx.app({ sessionHubServiceOptions: { ...processFixture.options, store: undefined },
+    sessionHubClock: () => time });
+  const hub = app.sessionHubService;
+  await hub.start();
+  const oldThread = hub.state().thread_id;
+  await hub.message({ thread_id: oldThread, request_id: 'first', text: 'needle old-thread' });
+  processFixture.children[0].stdout.write('{"type":"result"}\n');
+  const retired = hub.current();
+  await hub.newThread(); await hub.start();
+  const token = hub.current();
+  const active = hub.state().thread_id;
+  await hub.message({ thread_id: active, request_id: 'second', text: 'needle active-thread' });
+  processFixture.children[1].stdout.write('{"type":"result"}\n');
+  const search = '/api/session-hub/history/search?q=needle';
+  const bearer = call => call.set('Authorization', `Bearer ${token}`);
+  const result = await bearer(request(app).get(search));
+  assert.equal(result.status, 200); assert.equal(result.body.thread_id, active);
+  assert.equal(result.body.results[0].snippet, 'needle active-thread');
+  assert.ok(Buffer.byteLength(result.text) <= 65536);
+  assert.equal((await request(app).get(search).set('Authorization', `Bearer ${retired}`)).status, 403);
+  for (let i = 0; i < 30; i++) assert.equal((await bearer(request(app).get('/api/session-hub/sessions'))).status, 200);
+  assert.equal((await bearer(request(app).get('/api/session-hub/sessions'))).status, 429);
+  for (let i = 1; i < 30; i++) assert.equal((await bearer(request(app).get(search))).status, 200);
+  assert.equal((await bearer(request(app).get(search))).status, 429);
+  time += 60000;
+  assert.equal((await bearer(request(app).get(search))).status, 200);
+  for (const url of ['/api/session-hub/history/search/', '/api/session-hub/History/search',
+    '/api/session-hub/history/search/extra', '/api/session-hub/history/%73earch', `${search}&thread_id=${oldThread}`]) {
+    const response = await bearer(request(app).get(url));
+    assert.equal(response.status, url.includes('thread_id=') ? 400 : 403);
+  }
+  for (const method of ['post', 'delete', 'put']) {
+    assert.equal((await bearer(request(app)[method](search))).status, 403);
+  }
+});

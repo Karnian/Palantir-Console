@@ -19,6 +19,9 @@ const TOOLS = [
   { name: 'search_instructions', description: 'Search past instructions', inputSchema: schema({
     q: string(), ...filters, limit: { type: 'integer', minimum: 1, maximum: 15 },
   }, ['q']) },
+  { name: 'search_assistant_history', description: 'Search active assistant conversation', inputSchema: schema({
+    q: string(), limit: { type: 'integer', minimum: 1, maximum: 50 },
+  }, ['q']) },
   { name: 'get_session', description: 'Read a snapshot session timeline', inputSchema: schema({
     key: string(ID, 128),
     rev: string('^[0-9a-f]{16}$', 16), around: string(instruction, 140),
@@ -48,7 +51,8 @@ function brokerGet(name, args, env) {
     throw new Error('invalid_base_url');
   }
   const endpoint = name === 'get_session' ? `sessions/${encodeURIComponent(args.key)}`
-    : name === 'search_instructions' ? 'search' : 'sessions';
+    : name === 'search_assistant_history' ? 'history/search'
+      : name === 'search_instructions' ? 'search' : 'sessions';
   const url = new URL(`/api/session-hub/${endpoint}`, base);
   for (const [key, value] of Object.entries(args)) if (key !== 'key') url.searchParams.set(key, String(value));
   return new Promise((resolve, reject) => {

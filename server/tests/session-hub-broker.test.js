@@ -700,7 +700,7 @@ test('PR-S reader to broker byte search excludes assistant, tool and completion 
 
 test('PR-S assistant prompt distinguishes response end from completion and names both times', () => {
   const { SESSION_HUB_PROMPT, SESSION_HUB_PROMPT_VERSION } = require('../services/sessionHubPrompt');
-  assert.equal(SESSION_HUB_PROMPT_VERSION, 'c1-v5-pr-s-2');
+  assert.equal(SESSION_HUB_PROMPT_VERSION, 'c1-pa-pr-p-3');
   for (const phrase of ['응답 끝남을 일 완료라고 말하지 않는다', 'status.evidence_at',
     'meta.machines[].generated_at', 'unknown=알 수 없음']) assert.ok(SESSION_HUB_PROMPT.includes(phrase));
 });

@@ -24,7 +24,8 @@ function brokerGet(req) {
   const raw = String(req.originalUrl || req.url).split('?')[0];
   // Express also accepts a trailing slash and case-insensitive route literals.
   return req.method === 'GET'
-    && /^\/api\/session-hub\/(?:sessions(?:\/[^/]+)?|search)\/?$/i.test(raw);
+    && (raw === '/api/session-hub/history/search'
+      || /^\/api\/session-hub\/(?:sessions(?:\/[^/]+)?|search)\/?$/i.test(raw));
 }
 
 function createSessionHubTokenGate(provider = noToken) {
@@ -38,20 +39,23 @@ function createSessionHubTokenGate(provider = noToken) {
   };
 }
 
-function createSessionHubRouter({ state, store, provider = noToken, clock = Date.now, broker }) {
+function createSessionHubRouter({ state, store, provider = noToken, clock = Date.now, broker, history }) {
   const router = express.Router();
   const service = broker || createSessionHubBroker({ state, store });
-  let token = null;
-  let started = 0;
-  let calls = 0;
+  const buckets = { broker: {}, history: {} };
   router.use((req, res, next) => {
     res.set('Cache-Control', 'no-store');
     if (req.auth?.method !== 'cookie' && req.auth?.actor !== 'session_hub') return fail(res, 'forbidden');
     if (req.auth.actor === 'session_hub') {
       const current = provider.current();
       const time = clock();
-      if (current !== token || time - started >= 60000) { token = current; started = time; calls = 0; }
-      if (++calls > 30) return fail(res, 'session_hub_rate_limited');
+      const isHistory = String(req.originalUrl).split('?')[0] === '/api/session-hub/history/search';
+      const bucket = isHistory ? buckets.history : buckets.broker;
+      if (current !== bucket.token || time - bucket.started >= 60000) {
+        bucket.token = current; bucket.started = time; bucket.calls = 0;
+      }
+      const used = ++bucket.calls;
+      if (used > 30) return fail(res, 'session_hub_rate_limited');
     }
     return next();
   });
@@ -59,6 +63,11 @@ function createSessionHubRouter({ state, store, provider = noToken, clock = Date
     if (req.method !== 'GET') return fail(res, 'not_found');
     try { return res.json(await handler(req)); } catch (error) { return next(error); }
   };
+  router.get('/history/search', get(req => {
+    if (req.auth?.actor !== 'session_hub' || !history) throw new Error('forbidden');
+    if (Object.keys(req.query).some(key => !['q', 'limit'].includes(key))) throw new Error('invalid_query');
+    return history.searchHistory(req.query);
+  }));
   router.get('/sessions', get(req => service.list(req.query)));
   router.get('/search', get(req => service.search(req.query)));
   router.get('/sessions/:key', get(req => service.detail(req.params.key, req.query)));

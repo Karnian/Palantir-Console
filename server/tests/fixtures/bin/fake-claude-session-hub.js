@@ -24,7 +24,7 @@ if (!noMemoryPaths) init.memory_paths = { auto: `${directory}/memory/` };
 send(init);
 input.on('line', line => {
   const request = JSON.parse(line);
-  const text = request.message.content;
+  const text = request.message.content.split('\n\n').at(-1);
   if (text === 'hook') return send({ type: 'system', subtype: 'hook_started' });
   if (text === 'timeout') return;
   if (!noTranscript) {
@@ -35,7 +35,7 @@ input.on('line', line => {
     { type: 'tool_use', name: 'mcp__session_hub__list_sessions', input: { limit: 1 } },
     { type: 'text', text: 'fixture answer' },
   ] } });
-  send({ type: 'result', is_error: false });
+  send({ type: 'result', is_error: false, usage: { input_tokens: text === 'rotate' ? 120001 : 1 } });
   if (text === 'late') setTimeout(() => send({ type: 'assistant', message: {
     content: [{ type: 'text', text: 'late output' }],
   } }), 30);

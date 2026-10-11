@@ -8,7 +8,7 @@ function chatError(res, code, status = 403) {
 function requireSessionHubCookie(req, res, next) {
     res.set('Cache-Control', 'no-store');
     if (req.auth?.method !== 'cookie') return chatError(res, 'forbidden');
-    if (req.method === 'POST') {
+    if (req.method === 'POST' || req.method === 'DELETE') {
       const origin = req.headers.origin;
       const scheme = req.socket.encrypted ? 'https' : 'http';
       // Compare the serialized origin exactly. Neither proxy headers nor Referer grant access.
@@ -30,9 +30,18 @@ function createSessionHubChatRouter({ service }) {
     try { res.json(await handler(req)); } catch (err) { next(err); }
   };
   router.post('/start', post(() => service.start()));
-  router.post('/message', post(req => service.message(req.body?.text)));
+  router.post('/message', post(req => service.message(req.body)));
   router.post('/stop', post(() => service.stop()));
-  router.post('/clear', post(() => service.clear()));
+  router.post('/threads', post(() => service.newThread()));
+  router.get('/threads', post(() => ({ threads: service.listThreads() })));
+  router.get('/threads/:id/messages', post(req => ({ thread_id: req.params.id,
+    messages: service.messages(req.params.id, {
+      before: req.query.before === undefined ? undefined : Number(req.query.before),
+      limit: req.query.limit === undefined ? 50 : Number(req.query.limit),
+    }),
+  })));
+  router.get('/threads/:id/messages/:mid', post(req => service.getMessage(req.params.id, req.params.mid)));
+  router.delete('/threads/:id', post(req => service.deleteThread(req.params.id)));
   router.get('/state', (req, res) => res.json(service.state()));
   router.get('/stream', (req, res) => {
     res.set({ 'Content-Type': 'text/event-stream', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
