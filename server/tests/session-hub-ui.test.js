@@ -426,6 +426,39 @@ test('evidence uses sanitized text only; malformed tokens, code and attributes s
   assert.deepEqual(opened, [[key, REV]]);
 });
 
+test('evidence links become spans without link attributes or nested interactive elements', t => {
+  const env = setup(t), key = 'k', token = `[[session:${key}@${REV}]]`, opened = [];
+  const panel = { rev: REV, cards: [{ key, machine: { label: 'Mac' }, ai_title: 'Evidence' }] };
+  // Keep safe target attributes through sanitization so their removal is tested explicitly.
+  env.window.DOMPurify.setConfig({ ADD_ATTR: ['target'] });
+  // Escaped brackets keep the evidence token inside a markdown link's text.
+  const linkedToken = token.replaceAll('[', '\\[').replaceAll(']', '\\]');
+  const texts = [`[보기 ${linkedToken}](https://x "Evidence link")`,
+    `<a href="https://x" target="_blank" rel="noopener noreferrer">보기 ${token}</a>`];
+  for (const [index, text] of texts.entries()) {
+    const sanitized = env.document.createElement('div');
+    sanitized.innerHTML = env.context.renderMarkdown(text);
+    const original = sanitized.querySelector('a');
+    assert.equal(original.getAttribute('href'), 'https://x');
+    assert.ok(original.textContent.includes(token));
+    if (index === 1) {
+      assert.equal(original.getAttribute('target'), '_blank');
+      assert.equal(original.getAttribute('rel'), 'noopener noreferrer');
+    }
+    const rendered = env.context.renderSessionMarkdown(text, panel, (...args) => opened.push(args));
+    env.render(env.h('div', {}, rendered), env.root);
+    const chip = env.root.querySelector('button.session-evidence'), wrapper = chip.parentElement;
+    assert.equal(wrapper.tagName, 'SPAN');
+    assert.ok(wrapper.textContent.startsWith('보기 '));
+    for (const attr of ['href', 'target', 'rel']) assert.equal(wrapper.hasAttribute(attr), false);
+    assert.equal(env.root.querySelector('a'), null);
+    assert.equal(env.root.querySelector('a button'), null);
+    assert.equal(chip.closest('a'), null);
+    chip.click();
+    assert.deepEqual(opened.at(-1), [key, REV]);
+  }
+});
+
 test('all chat actions share one fetch spy and dedicated SSE; incomplete clear shows remaining', async t => {
   const env = setup(t), calls = [], streams = [];
   let snapshot = { epoch: 'boot', version: 0, state: 'idle', generation: 0, messages: [], turnInProgress: false };
