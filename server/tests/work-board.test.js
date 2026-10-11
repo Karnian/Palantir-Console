@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const vm = require('node:vm');
-const { createPreactEnv, flushEffects } = require('./helpers/jsdom-preact');
+const { createPreactEnv, flushEffects, transformComponentSource } = require('./helpers/jsdom-preact');
 const { createSnapshots } = require('./helpers/work-board-fixture.cjs');
 const source = fs.readFileSync(path.join(__dirname, '../public/app/lib/workBoard.js'), 'utf8');
 const logic = import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
@@ -696,18 +696,17 @@ async function backToList(root) {
   if (back) { back.click(); await flushEffects(); }
 }
 
-function boardEnv(t) {
+function boardEnv(t, snapshotRequest = async () => ({ enabled: true, targets: [] })) {
   const env = createPreactEnv();
-  let requestApi;
-  Object.defineProperty(env.context, 'apiFetch', { configurable: true,
-    get: () => (url, options) => url.startsWith('/api/session-hub/snapshots')
-      ? snapshotRequest(url, options) : requestApi(url, options),
-    set: value => { requestApi = value; },
-  });
   vm.runInContext(source.replace(/\bexport /g, ''), env.context);
   vm.runInContext('this.W = WORK_BOARD_LABELS;', env.context);
+  for (const name of ['useSessionSnapshots', 'useSnapshotRefresh']) {
+    const src = fs.readFileSync(path.join(__dirname, '../public/app/lib/hooks', `${name}.js`), 'utf8');
+    vm.runInContext(transformComponentSource(src), env.context);
+  }
   env.loadComponent('Dropdown');
   env.loadComponent('SessionSnapshotParts');
+  env.loadComponent('SessionHubSidebar');
   require('./helpers/session-detail-cards').installDetailCards(env);
   // Keep rich timeline display contracts intact; compact row contracts live in session-hub-ui.test.js.
   let request;
@@ -715,6 +714,7 @@ function boardEnv(t) {
     configurable: true,
     set(value) { request = value; },
     get() { return async (url, options) => {
+      if (url.startsWith('/api/session-hub/snapshots')) return snapshotRequest(url, options);
       const data = await request(url.split('?')[0], options);
       return url.endsWith('/snapshots') ? { ...data, rev: '0123456789abcdef',
         snapshots: data.snapshots.map(entry => entry.machine_id ? { ...entry, sha256: 'a'.repeat(64) } : entry) }
@@ -1250,7 +1250,12 @@ test('snapshot refresh button uses its cookie endpoint and reloads board data af
     return alpha;
   };
   const root = env.document.getElementById('root');
-  env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
+  function Sidebar() {
+    const data = env.context.useSessionSnapshots();
+    return env.h(env.context.SessionHubSidebar, { data: { ...data,
+      cards: data.load.snapshots.flatMap(env.context.snapshotCards) } });
+  }
+  env.render(env.h(Sidebar), root); await flushEffects(); await flushEffects();
   const button = [...root.querySelectorAll('button')].find(item => item.textContent === '새로 만들기');
   assert.equal(button.disabled, false); button.click(); await flushEffects();
   assert.equal(posts.length, 1);

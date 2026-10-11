@@ -22,6 +22,11 @@ function setup(t) {
   env.window.marked = require('../public/vendor/marked.min.js');
   env.window.DOMPurify = require('../public/vendor/purify.min.js')(env.window);
   vm.runInContext('this.W = WORK_BOARD_LABELS;', env.context);
+  for (const name of ['useSessionSnapshots', 'useSnapshotRefresh']) {
+    const src = fs.readFileSync(path.join(publicRoot, 'app/lib/hooks', `${name}.js`), 'utf8');
+    vm.runInContext(transformComponentSource(src), env.context);
+  }
+  env.loadComponent('SessionHubSidebar');
   env.loadComponent('Dropdown'); env.loadComponent('SessionSnapshotParts'); env.loadComponent('AllSessionsPanel');
   env.loadComponent('SessionHubChat');
   t.after(() => { env.render(null, root); env.cleanup(); });
@@ -74,7 +79,7 @@ test('real app preserves the off work board and navigation; active hub redirects
   let active = false;
   env.context.EventSource = class { addEventListener() {} close() {} };
   env.context.fetch = async url => response(url === '/api/health' ? { sessionHubActive: active }
-    : url.endsWith('/chat/state') ? { epoch: 'boot', version: 0, state: 'idle', messages: [] }
+    : url.endsWith('/chat/state') ? { thread_id: 'thread-1', epoch: 'boot', version: 0, state: 'idle', messages: [] }
       : url.endsWith('/snapshots') ? { rev: REV, snapshots: [{ machine_id: 'alpha', sha256: 'a' }] }
         : url.includes('/snapshots/alpha') ? alpha : { nodes: [], queued: [] });
   loadAppShell(env);
@@ -89,20 +94,20 @@ test('real app preserves the off work board and navigation; active hub redirects
   assert.equal(env.window.location.hash, '#manager/all-sessions');
   assert.equal(env.root.querySelector('.nav-work'), null);
   assert.ok(env.root.querySelector('.session-hub-chat'));
-  assert.equal(env.root.querySelectorAll('.session-hub-panel-content button.session-row').length, 2);
-  const tab = label => Array.from(env.root.querySelectorAll('.session-hub-tabs button'))
-    .find(node => node.textContent === label);
-  tab('Palantir 작업').click(); await flushEffects();
+  assert.equal(env.root.querySelectorAll('.session-hub-sidebar button.session-row').length, 2);
+  const chat = env.root.querySelector('.session-hub-chat');
+  const work = () => Array.from(env.root.querySelectorAll('.session-hub-nav')).find(node => node.textContent === '작업');
+  work().click(); await flushEffects();
   assert.equal(env.window.location.hash, '#manager/all-sessions');
-  assert.equal(tab('Palantir 작업').getAttribute('aria-pressed'), 'true');
   assert.ok(env.root.querySelector('.manager-grid-side'));
-  env.window.location.hash = 'work'; await flushEffects(); await flushEffects();
-  assert.equal(env.window.location.hash, '#manager/all-sessions');
-  assert.equal(tab('모든 세션').getAttribute('aria-pressed'), 'true');
-  tab('Palantir 작업').click(); await flushEffects();
-  env.window.location.hash = 'work'; await flushEffects(); await flushEffects();
-  assert.equal(env.window.location.hash, '#manager/all-sessions');
-  assert.equal(tab('모든 세션').getAttribute('aria-pressed'), 'true');
+  for (let i = 0; i < 2; i++) {
+    env.window.location.hash = 'work'; await flushEffects(); await flushEffects();
+    assert.equal(env.window.location.hash, '#manager/all-sessions');
+    assert.equal(env.root.querySelector('.session-hub-manager').dataset.pane, 'sidebar');
+    assert.equal(env.root.querySelector('.session-hub-manager').dataset.right, 'closed');
+    assert.equal(env.root.querySelector('.session-hub-chat'), chat);
+    work().click(); await flushEffects();
+  }
 });
 
 test('detail 503 leaves rev unconfirmed, evidence clickable and retry available', async t => {
@@ -139,9 +144,11 @@ test('detail 503 leaves rev unconfirmed, evidence clickable and retry available'
 test('reconnected SSE replaces version 40 with a new epoch at version zero', async t => {
   const env = setup(t);
   let source;
-  const previous = { epoch: 'previous-boot', version: 40, state: 'running', turnInProgress: false,
-    messages: [{ role: 'assistant', text: '이전 서버 답변' }] };
-  const restarted = { epoch: 'next-boot', version: 0, state: 'idle', messages: [], turnInProgress: false };
+  const previous = { thread_id: 'thread-1', epoch: 'previous-boot', version: 40,
+    state: 'running', turnInProgress: false,
+    messages: [{ role: 'assistant', content: '이전 서버 답변' }] };
+  const restarted = { thread_id: 'thread-1', epoch: 'next-boot', version: 0,
+    state: 'idle', messages: [], turnInProgress: false };
   env.context.EventSource = class {
     constructor() { source = this; }
     addEventListener(name, callback) { this.receive = callback; }
@@ -156,7 +163,7 @@ test('reconnected SSE replaces version 40 with a new epoch at version zero', asy
   assert.equal(env.root.querySelector('.manager-status-badge').textContent, '중지됨');
   assert.equal(env.root.querySelector('.manager-msg-assistant'), null);
   source.receive({ data: JSON.stringify({ ...restarted, version: 2, state: 'running', messages: [
-    { role: 'assistant', text: '새 서버 답변' },
+    { role: 'assistant', content: '새 서버 답변' },
   ] }) }); await flushEffects();
   source.receive({ data: JSON.stringify(restarted) }); await flushEffects();
   assert.equal(env.root.querySelector('.manager-status-badge').textContent, '조회 준비됨');
@@ -167,8 +174,9 @@ for (const [operation, replyEpoch] of [['GET', 'old'], ['POST', 'old'], ['POST',
   test(`late ${operation} from the ${replyEpoch} epoch cannot replace a restarted server`, async t => {
     const env = setup(t), delayed = deferred();
     let source;
-    const old = { epoch: 'old', version: 40, state: 'idle', messages: [], turnInProgress: false };
-    const fresh = { ...old, epoch: 'fresh', version: 0, messages: [{ role: 'assistant', text: '새 서버' }] };
+    const old = { thread_id: 'thread-1', epoch: 'old', version: 40,
+      state: 'idle', messages: [], turnInProgress: false };
+    const fresh = { ...old, epoch: 'fresh', version: 0, messages: [{ role: 'assistant', content: '새 서버' }] };
     env.context.EventSource = class {
       constructor() { source = this; }
       addEventListener(name, callback) { this.receive = callback; }
@@ -193,7 +201,8 @@ for (const operation of ['GET', 'POST']) {
   test(`late ${operation} with a higher version in the current epoch is applied`, async t => {
     const env = setup(t), delayed = deferred();
     let source;
-    const idle = { epoch: 'same', version: 0, state: 'idle', messages: [], turnInProgress: false };
+    const idle = { thread_id: 'thread-1', epoch: 'same', version: 0,
+      state: 'idle', messages: [], turnInProgress: false };
     env.context.EventSource = class {
       constructor() { source = this; }
       addEventListener(name, callback) { this.receive = callback; }
@@ -205,35 +214,34 @@ for (const operation of ['GET', 'POST']) {
     if (operation === 'POST') { env.root.querySelector('button').click(); await flushEffects(); }
     source.receive({ data: JSON.stringify({ ...idle, version: 1 }) }); await flushEffects();
     delayed.resolve(response({ ...idle, version: 2, state: 'running', messages: [
-      { role: 'assistant', text: '더 높은 버전' },
+      { role: 'assistant', content: '더 높은 버전' },
     ] })); await flushEffects();
     assert.equal(env.root.querySelector('.manager-status-badge').textContent, '조회 준비됨');
     assert.equal(env.root.querySelector('.manager-msg-assistant').textContent.trim(), '더 높은 버전');
   });
 }
 
-test('same-route navigation and links restore the all-sessions tab and mobile panel', async t => {
+test('same-route navigation and links restore the session sidebar', async t => {
   const env = setup(t), { alpha } = fixture(t);
   env.context.EventSource = class { addEventListener() {} close() {} };
   env.context.fetch = async url => response(url === '/api/health' ? { sessionHubActive: true }
-    : url.endsWith('/chat/state') ? { epoch: 'boot', version: 0, state: 'idle', messages: [] }
+    : url.endsWith('/chat/state') ? { thread_id: 'thread-1', epoch: 'boot', version: 0, state: 'idle', messages: [] }
       : url.endsWith('/snapshots') ? { rev: REV, snapshots: [{ machine_id: 'alpha', sha256: 'a' }] }
         : url.includes('/snapshots/alpha') ? alpha : { nodes: [], queued: [] });
   loadAppShell(env);
   env.window.location.hash = 'manager/all-sessions';
   env.render(env.h(env.context.App), env.root); await flushEffects(); await flushEffects(); await flushEffects();
-  const tab = label => Array.from(env.root.querySelectorAll('.session-hub-tabs button'))
-    .find(node => node.textContent === label);
+  const work = () => Array.from(env.root.querySelectorAll('.session-hub-nav')).find(node => node.textContent === '작업');
   const link = env.document.createElement('a');
-  link.href = '#manager/all-sessions'; link.textContent = '세션 패널로 이동'; env.document.body.append(link);
+  link.href = '#manager/all-sessions'; link.textContent = '목록으로 이동'; env.document.body.append(link);
   for (const enter of [() => env.context.navigate('manager/all-sessions'), () => link.click()]) {
-    tab('Palantir 작업').click();
-    env.root.querySelector('.session-hub-segments button').click(); await flushEffects();
+    work().click();
+    env.root.querySelectorAll('.session-hub-segments button')[1].click(); await flushEffects();
     assert.equal(env.root.querySelector('.session-hub-manager').dataset.pane, 'chat');
     enter(); await flushEffects(); await flushEffects();
     assert.equal(env.window.location.hash, '#manager/all-sessions');
-    assert.equal(tab('모든 세션').getAttribute('aria-pressed'), 'true');
-    assert.equal(env.root.querySelector('.session-hub-manager').dataset.pane, 'panel');
+    assert.equal(env.root.querySelector('.session-hub-manager').dataset.right, 'closed');
+    assert.equal(env.root.querySelector('.session-hub-manager').dataset.pane, 'sidebar');
   }
 });
 
@@ -241,7 +249,7 @@ test('real app panel clicks preserve the Operator conversation and hash', async 
   const env = setup(t), { alpha } = fixture(t), conversations = [];
   env.context.EventSource = class { addEventListener() {} close() {} };
   env.context.fetch = async url => response(url === '/api/health' ? { sessionHubActive: true }
-    : url.endsWith('/chat/state') ? { epoch: 'boot', version: 0, state: 'idle', messages: [] }
+    : url.endsWith('/chat/state') ? { thread_id: 'thread-1', epoch: 'boot', version: 0, state: 'idle', messages: [] }
       : url.endsWith('/snapshots') ? { rev: REV, snapshots: [{ machine_id: 'alpha', sha256: 'a' }] }
         : url.includes('/snapshots/alpha') ? alpha : { nodes: [], queued: [] });
   loadAppShell(env);
@@ -251,25 +259,30 @@ test('real app panel clicks preserve the Operator conversation and hash', async 
   };
   env.window.location.hash = 'manager/operator/p1';
   env.render(env.h(env.context.App), env.root); await flushEffects(); await flushEffects(); await flushEffects();
-  const tab = label => Array.from(env.root.querySelectorAll('.session-hub-tabs button'))
-    .find(node => node.textContent === label);
   assert.ok(conversations.includes('operator:p1'));
-  for (const label of ['Palantir 작업', '모든 세션', 'Palantir 작업']) {
-    tab(label).click(); await flushEffects(); await flushEffects();
-    assert.equal(env.window.location.hash, '#manager/operator/p1');
-    assert.equal(env.root.querySelector('.session-hub-picker .dropdown-button').dataset.value, 'operator:p1');
-    assert.equal(env.root.querySelector('.session-hub-chat'), null);
-    assert.ok(env.root.querySelector('.manager-panel-title').textContent.includes('Project 1'));
-    assert.equal(conversations.at(-1), 'operator:p1');
-  }
+  const chat = env.root.querySelector('.session-hub-chat');
+  const input = chat.querySelector('textarea');
+  input.value = '유지할 질문'; input.dispatchEvent(new env.window.Event('input', { bubbles: true }));
+  await flushEffects();
+  env.root.querySelector('button.session-row').click(); await flushEffects();
+  assert.equal(env.window.location.hash, '#manager/operator/p1');
+  assert.ok(env.root.querySelector('.session-hub-detail'));
+  const operator = Array.from(env.root.querySelectorAll('.session-hub-nav'))
+    .find(node => node.textContent.includes('Operator'));
+  operator.click(); await flushEffects(); await flushEffects();
+  assert.equal(env.window.location.hash, '#manager/operator/p1');
+  assert.equal(env.root.querySelector('.session-hub-chat'), chat);
+  assert.equal(input.value, '유지할 질문');
+  assert.ok(env.root.querySelector('.session-hub-panel-side .manager-panel-title').textContent.includes('Project 1'));
+  assert.equal(conversations.at(-1), 'operator:p1');
 });
 
 test('late GET and stale SSE cannot undo newer POST state or messages', async t => {
   const env = setup(t), get = deferred(), calls = [];
   let source;
-  const idle = { epoch: 'boot', version: 0, state: 'idle', messages: [], turnInProgress: false };
+  const idle = { thread_id: 'thread-1', epoch: 'boot', version: 0, state: 'idle', messages: [], turnInProgress: false };
   const running = { ...idle, version: 2, state: 'running' };
-  const answered = { ...running, version: 4, messages: [{ role: 'user', text: '보존할 질문' }] };
+  const answered = { ...running, version: 4, messages: [{ role: 'user', content: '보존할 질문' }] };
   env.context.EventSource = class {
     constructor() { source = this; }
     addEventListener(name, callback) { this.receive = callback; }
@@ -290,7 +303,7 @@ test('late GET and stale SSE cannot undo newer POST state or messages', async t 
   source.receive({ data: JSON.stringify({ ...idle, version: 1 }) }); await flushEffects();
   assert.ok(env.root.querySelector('.manager-msg-user'));
   source.receive({ data: JSON.stringify({ ...answered, version: 5, messages: [
-    ...answered.messages, { role: 'assistant', text: '최신 답변' },
+    ...answered.messages, { role: 'assistant', content: '최신 답변' },
   ] }) }); await flushEffects();
   source.receive({ data: JSON.stringify({ ...idle, version: 5 }) }); await flushEffects();
   assert.equal(env.root.querySelector('.manager-msg-assistant').textContent.trim(), '최신 답변');
@@ -301,11 +314,12 @@ for (const success of [true, false]) {
   test(`message completion after newer SSE ${success ? 'clears input once' : 'preserves failed input'}`, async t => {
     const env = setup(t), post = deferred(), calls = [];
     let source;
-    const running = { epoch: 'boot', version: 2, state: 'running', messages: [], turnInProgress: false };
+    const running = { thread_id: 'thread-1', epoch: 'boot', version: 2,
+      state: 'running', messages: [], turnInProgress: false };
     const sent = { ...running, version: 3, turnInProgress: true,
-      messages: [{ role: 'user', text: '한 번만 보낼 질문' }] };
+      messages: [{ role: 'user', content: '한 번만 보낼 질문' }] };
     const answered = { ...sent, version: 5, turnInProgress: false,
-      messages: [...sent.messages, { role: 'assistant', text: '최신 답변' }] };
+      messages: [...sent.messages, { role: 'assistant', content: '최신 답변' }] };
     env.context.EventSource = class {
       constructor() { source = this; }
       addEventListener(name, callback) { this.receive = callback; }
@@ -344,7 +358,8 @@ for (const replyEpoch of ['old', 'fresh']) {
     const env = setup(t), post = deferred(), calls = [];
     let source, messages = 0;
     const question = '재시작 뒤 다시 보낼 질문';
-    const old = { epoch: 'old', version: 2, state: 'running', messages: [], turnInProgress: false };
+    const old = { thread_id: 'thread-1', epoch: 'old', version: 2,
+      state: 'running', messages: [], turnInProgress: false };
     const fresh = { ...old, epoch: 'fresh', version: 0, state: 'idle' };
     const notice = '서버가 다시 시작되어 질문이 '
       + '전달되지 않았을 수 있습니다. 다시 보내 주세요.';
@@ -356,7 +371,7 @@ for (const replyEpoch of ['old', 'fresh']) {
     env.context.fetch = async (url, opts) => {
       calls.push({ url, opts });
       if (url.endsWith('/message')) return ++messages === 1 ? post.promise
-        : response({ ...fresh, version: 5, state: 'running', messages: [{ role: 'user', text: question }] });
+        : response({ ...fresh, version: 5, state: 'running', messages: [{ role: 'user', content: question }] });
       return response(url.endsWith('/start') ? { ...fresh, version: 1, state: 'running' } : old);
     };
     env.render(env.h(env.context.SessionHubChat), env.root); await flushEffects(); await flushEffects();
@@ -383,7 +398,7 @@ for (const replyEpoch of ['old', 'fresh']) {
 test('a start reply matching the SSE version clears only the local starting indicator', async t => {
   const env = setup(t), start = deferred();
   let source;
-  const idle = { epoch: 'boot', version: 0, state: 'idle', messages: [], turnInProgress: false };
+  const idle = { thread_id: 'thread-1', epoch: 'boot', version: 0, state: 'idle', messages: [], turnInProgress: false };
   const running = { ...idle, version: 1, state: 'running' };
   env.context.EventSource = class {
     constructor() { source = this; }
@@ -459,9 +474,10 @@ test('evidence links become spans without link attributes or nested interactive 
   }
 });
 
-test('all chat actions share one fetch spy and dedicated SSE; incomplete clear shows remaining', async t => {
+test('all chat actions share one fetch spy and dedicated SSE; new threads keep memory and cleanup notice', async t => {
   const env = setup(t), calls = [], streams = [];
-  let snapshot = { epoch: 'boot', version: 0, state: 'idle', generation: 0, messages: [], turnInProgress: false };
+  let snapshot = { thread_id: 'thread-1', epoch: 'boot', version: 0,
+    state: 'idle', generation: 0, messages: [], turnInProgress: false };
   class Source {
     constructor(url) { this.url = url; streams.push(this); }
     addEventListener(name, callback) { assert.equal(name, 'snapshot'); this.receive = callback; }
@@ -473,8 +489,9 @@ test('all chat actions share one fetch spy and dedicated SSE; incomplete clear s
     if (opts.method === 'POST') snapshot = { ...snapshot, version: snapshot.version + 1 };
     if (url.endsWith('/start')) snapshot = { ...snapshot, state: 'running' };
     if (url.endsWith('/stop')) snapshot = { ...snapshot, state: 'idle' };
-    if (url.endsWith('/message')) snapshot = { ...snapshot, messages: [{ role: 'user', text: '모든 세션' }] };
-    return response(url.endsWith('/clear') ? { ...snapshot, messages: [], result: 'incomplete', remaining: 4 }
+    if (url.endsWith('/message')) snapshot = { ...snapshot, messages: [{ role: 'user', content: '모든 세션' }] };
+    return response(url.endsWith('/threads') ? { ...snapshot, thread_id: 'thread-2', messages: [],
+      transcripts_remaining: 4, memory: { pending_count: 2 } }
       : snapshot);
   };
   env.render(env.h(env.context.SessionHubChat, { panel: { cards: [], rev: REV } }), env.root);
@@ -487,17 +504,17 @@ test('all chat actions share one fetch spy and dedicated SSE; incomplete clear s
   const input = env.root.querySelector('textarea');
   input.value = '모든 세션'; input.dispatchEvent(new env.window.Event('input', { bubbles: true }));
   await flushEffects(); await click('전송');
-  await click('중지'); await click('대화 지우기');
+  await click('중지'); await click('새 대화');
   assert.ok(env.root.querySelector('.session-hub-messages .session-hub-note[role="status"]'));
-  assert.ok(env.root.textContent.includes('파일 4개가 남았습니다'));
-  assert.ok(env.root.textContent.includes('서버 재시작 시 대화가 사라집니다'));
-  assert.deepEqual(calls.map(call => call.url), ['state', 'start', 'message', 'stop', 'clear']
+  assert.ok(env.root.textContent.includes('정리할 기록 파일 4개'));
+  assert.ok(!env.root.textContent.includes('서버 재시작 시 대화가 사라집니다'));
+  assert.deepEqual(calls.map(call => call.url), ['state', 'start', 'message', 'stop', 'threads']
     .map(name => `/api/session-hub/chat/${name}`));
   for (const call of calls) assert.equal(call.opts.credentials, 'same-origin');
   assert.equal(JSON.parse(calls[2].opts.body).text, '모든 세션');
   assert.equal(streams[0].url, '/api/session-hub/chat/stream');
   const streamed = { ...snapshot, version: snapshot.version + 1, messages: [
-    { role: 'assistant', text: '스트림 답' },
+    { role: 'assistant', content: '스트림 답' },
   ] };
   streams[0].receive({ data: JSON.stringify(streamed) });
   await flushEffects(); assert.ok(env.root.textContent.includes('스트림 답'));
@@ -582,8 +599,8 @@ test('inactive ManagerView preserves original DOM; active defaults to assistant 
   env.context.managerProfileAuthState = () => 'ok';
   env.context.operatorConversationId = id => `operator:${id}`;
   env.context.apiFetch = async url => url.includes('/chat/')
-    ? { epoch: 'boot', version: 0, state: 'running', messages: [
-      { role: 'assistant', text: `[[session:${alpha.sessions[0].key}@${NEXT}]]` },
+    ? { thread_id: 'thread-1', epoch: 'boot', version: 0, state: 'running', messages: [
+      { role: 'assistant', content: `[[session:${alpha.sessions[0].key}@${NEXT}]]` },
     ] }
     : url.endsWith('/snapshots') ? { rev: REV, snapshots: [{ machine_id: 'alpha', sha256: 'a' }] } : alpha;
   env.context.EventSource = class { addEventListener() {} close() {} };
@@ -602,12 +619,12 @@ test('inactive ManagerView preserves original DOM; active defaults to assistant 
   env.render(env.h(env.context.ManagerView, { ...props, sessionHubActive: true }), env.root);
   await flushEffects(); await flushEffects();
   assert.ok(env.root.querySelector('.session-hub-chat'));
-  assert.equal(env.root.querySelector('[aria-label="대화 선택, 세션 비서"]').dataset.value, 'hub');
+  assert.equal(env.root.querySelectorAll('.session-hub-segments button').length, 3);
   assert.ok(env.root.querySelector('.work-header').textContent.includes('답변 뒤 갱신됨'));
   env.root.querySelector('button.session-evidence').click(); await flushEffects();
-  assert.equal(env.root.querySelector('.manager-view').dataset.pane, 'panel');
+  assert.equal(env.root.querySelector('.manager-view').dataset.pane, 'right');
   assert.equal(env.root.querySelectorAll('.work-event').length, 2);
-  Array.from(env.root.querySelectorAll('button')).find(button => button.textContent === 'Palantir 작업').click();
+  Array.from(env.root.querySelectorAll('button')).find(button => button.textContent === '작업').click();
   await flushEffects(); assert.ok(env.root.querySelector('.manager-grid-side'));
 });
 
@@ -659,13 +676,14 @@ test('readable labels skip URL lines, follow AI/first/recent priority and cap ev
 test('chat shares Top bubbles, groups tool calls without JSON, maps errors and honors Enter/IME', async t => {
   const env = setup(t), calls = [], key = 'alpha:claude:abcdef';
   const card = { key, machine: { id: 'alpha', label: 'Mac' }, ai_title: '인증 검토' };
-  const snapshot = { epoch: 'boot', version: 0, state: 'running', turnInProgress: false, messages: [
-    { role: 'user', text: '리뷰해' },
-    { role: 'tool', name: 'mcp__session_hub__search_instructions', text: '{"q":"리뷰해","cursor":"SECRET"}' },
-    { role: 'tool', name: 'mcp__session_hub__list_sessions', text: '{"machine":"alpha","provider":"codex"}' },
-    { role: 'tool', name: 'mcp__session_hub__get_session', text: JSON.stringify({ key }) },
-    { role: 'assistant', text: '## 검토 결과\n\n- 완료' },
-    { role: 'error', text: 'session_hub_socket_path_too_long' },
+  const snapshot = { thread_id: 'thread-1', epoch: 'boot', version: 0,
+    state: 'running', turnInProgress: false, messages: [
+    { id: 'u', seq: 1, turn_id: 't1', role: 'user', content: '리뷰해', request_id: 'r1' },
+    { id: 'a', seq: 2, turn_id: 't1', role: 'assistant', content: '## 검토 결과\n\n- 응답 끝남' },
+    { id: 'n1', seq: 3, turn_id: 't1', role: 'tool_note', content: '검색: 리뷰해 (다음 페이지)' },
+    { id: 'n2', seq: 4, turn_id: 't1', role: 'tool_note', content: '세션 목록 조회 · Mac · codex' },
+    { id: 'n3', seq: 5, turn_id: 't1', role: 'tool_note', content: '세션 열기: Mac · 인증 검토' },
+    { id: 'err', seq: 6, role: 'system_note', status: 'error', content: 'session_hub_socket_path_too_long' },
   ] };
   env.context.EventSource = class { addEventListener() {} close() {} };
   env.context.fetch = async (url, opts) => { calls.push({ url, opts }); return response(snapshot); };
@@ -677,6 +695,10 @@ test('chat shares Top bubbles, groups tool calls without JSON, maps errors and h
   assert.ok(env.root.querySelector('.manager-msg-assistant .markdown-body ul li'));
   assert.equal(env.root.querySelectorAll('.session-hub-tools').length, 1);
   assert.equal(env.root.querySelectorAll('.session-hub-tools li').length, 3);
+  const tools = env.root.querySelector('.session-hub-tools');
+  assert.equal(tools.open, false); assert.equal(tools.querySelector('summary').textContent, '도구 3회 사용 ▸');
+  assert.ok(tools.compareDocumentPosition(env.root.querySelector('.manager-msg-assistant'))
+    & env.window.Node.DOCUMENT_POSITION_FOLLOWING);
   assert.ok(env.root.textContent.includes('검색: 리뷰해 (다음 페이지)'));
   assert.ok(env.root.textContent.includes('세션 목록 조회 · Mac · codex'));
   assert.ok(env.root.textContent.includes('세션 열기: Mac · 인증 검토'));
@@ -725,7 +747,7 @@ test('compact panel rows have three lines, searchable content and visibly named 
 
 test('idle questions start once before sending; start failures retain the question and never send', async t => {
   const env = setup(t), calls = [], starting = deferred();
-  const idle = { epoch: 'boot', version: 0, state: 'idle', messages: [], turnInProgress: false };
+  const idle = { thread_id: 'thread-1', epoch: 'boot', version: 0, state: 'idle', messages: [], turnInProgress: false };
   const running = { ...idle, version: 1, state: 'running' };
   env.context.EventSource = class { addEventListener() {} close() {} };
   let failStart = false;
@@ -734,7 +756,7 @@ test('idle questions start once before sending; start failures retain the questi
     if (url.endsWith('/start')) return failStart
       ? response({ error: 'session_hub_binary_unavailable' }, 503) : starting.promise;
     if (url.endsWith('/message')) return response({ ...running, version: 2, messages: [
-      { role: 'user', text: JSON.parse(opts.body).text },
+      { role: 'user', content: JSON.parse(opts.body).text },
     ] });
     return response(idle);
   };
@@ -772,28 +794,31 @@ test('idle questions start once before sending; start failures retain the questi
   for (const call of calls) assert.match(call.url, /^\/api\/session-hub\/chat\//);
 });
 
-test('row metadata has exact separator spacing and omits unknown Orca while detail retains it', t => {
+test('sidebar rows use status evidence, exact metadata spacing and two lines', t => {
   const env = setup(t), { alpha } = fixture(t);
   const card = env.context.snapshotCards(alpha)[0];
   const now = Date.parse(card.last_record_at) + 2 * 3600000;
-  const props = { card, now, query: '', onOpen: () => {} };
+  const props = { card, now, query: '', compact: true, onOpen: () => {} };
   card.machine.label = 'codev2'; card.repo_label = 'c2'; card.agent = { state: 'running' };
+  card.status = { state: 'ended', source: 'transcript', evidence_at: card.last_record_at, reason: 'conflict' };
   env.render(env.h(env.context.SessionRow, props), env.root);
-  assert.equal(env.root.querySelector('.work-meta').textContent, 'codev2 · c2 · 2시간 전 · Orca 실행 중');
-  card.agent = { state: 'unknown' };
-  env.render(env.h(env.context.SessionRow, { ...props }), env.root);
   assert.equal(env.root.querySelector('.work-meta').textContent, 'codev2 · c2 · 2시간 전');
-  assert.equal(env.root.querySelector('.work-orca'), null);
-  env.render(env.h(env.context.SessionCard, { ...props, timeline: true }), env.root);
-  assert.match(env.root.querySelector('.work-orca').textContent, /Orca · 불명/);
-  card.orca_link.confirmed = false; card.agent = { state: 'running' };
+  assert.equal(env.root.querySelector('.session-row').children.length, 2);
+  assert.equal(env.root.querySelector('.session-status-dot').title, '응답 끝남');
+  card.status.state = 'unknown';
   env.render(env.h(env.context.SessionRow, { ...props }), env.root);
+  assert.equal(env.root.querySelector('.session-status-dot').title, '알 수 없음');
   assert.equal(env.root.querySelector('.work-orca'), null);
+  env.render(env.h(env.context.SessionHubDetail, { data: { cards: [card], load: { rev: REV }, now },
+    selection: { key: card.key, rev: REV } }), env.root);
+  assert.ok(env.root.textContent.includes('기록'));
+  assert.ok(env.root.textContent.includes('상태 충돌'));
+  assert.ok(env.root.textContent.includes('알 수 없음'));
 });
 
 test('automatic start never sends after a cancelled start or after the chat unmounts', async t => {
   const env = setup(t), calls = [];
-  const idle = { epoch: 'boot', version: 0, state: 'idle', messages: [], turnInProgress: false };
+  const idle = { thread_id: 'thread-1', epoch: 'boot', version: 0, state: 'idle', messages: [], turnInProgress: false };
   env.context.EventSource = class { addEventListener() {} close() {} };
   let pendingStart = deferred();
   env.context.fetch = async (url, opts) => {
@@ -851,4 +876,180 @@ test('panel flex children can shrink, snapshot text wraps and timeline controls 
   assert.equal(computed('.work-event button').fontSize, '12px');
   assert.equal(computed('.work-event button').height, '24px');
   assert.equal(computed('.work-event button').minHeight, '24px');
+});
+
+test('failed sends retry the same thread and request ID; new conversation binds the next send', async t => {
+  const env = setup(t), calls = [];
+  let failed = true;
+  let snapshot = { thread_id: 'thread-1', epoch: 'boot', version: 0, state: 'idle',
+    messages: [], turnInProgress: false };
+  env.context.EventSource = class { addEventListener() {} close() {} };
+  env.context.fetch = async (url, options) => {
+    calls.push({ url, options });
+    assert.match(url, /^\/api\/session-hub\/chat\//);
+    if (url.endsWith('/start')) snapshot = { ...snapshot, version: snapshot.version + 1, state: 'running' };
+    if (url.endsWith('/threads')) snapshot = { ...snapshot, version: snapshot.version + 1,
+      state: 'idle', thread_id: 'thread-2', messages: [] };
+    if (url.endsWith('/message') && failed) { failed = false; throw new Error('network'); }
+    if (url.endsWith('/message')) snapshot = { ...snapshot, version: snapshot.version + 1 };
+    return response(snapshot);
+  };
+  env.render(env.h(env.context.SessionHubChat), env.root); await flushEffects(); await flushEffects();
+  const ask = async text => {
+    const input = env.root.querySelector('textarea');
+    input.value = text; input.dispatchEvent(new env.window.Event('input', { bubbles: true }));
+    await flushEffects(); env.root.querySelector('button[type="submit"]').click(); await flushEffects();
+  };
+  await ask('질문');
+  assert.equal(env.root.querySelector('textarea').value, '질문');
+  await ask('질문');
+  const sent = calls.filter(call => call.url.endsWith('/message')).map(call => JSON.parse(call.options.body));
+  assert.deepEqual(sent[0], sent[1]);
+  assert.equal(sent[0].thread_id, 'thread-1');
+  assert.match(sent[0].request_id, /^[a-z0-9-]{36}$/i);
+  assert.deepEqual(calls.slice(0, 3).map(call => call.url.split('/').at(-1)), ['state', 'start', 'message']);
+  Array.from(env.root.querySelectorAll('button')).find(node => node.textContent === '새 대화').click();
+  await flushEffects(); await ask('다음 질문');
+  const next = JSON.parse(calls.at(-1).options.body);
+  assert.equal(next.thread_id, 'thread-2'); assert.notEqual(next.request_id, sent[0].request_id);
+  assert.equal(env.root.querySelector('textarea').value, '');
+  assert.ok(!calls.some(call => /router|conversations|clear/.test(call.url)));
+});
+
+test('scroll pages and full messages stay bound to the active thread and render sanitized evidence', async t => {
+  const env = setup(t), calls = [], delayed = deferred();
+  let source;
+  const key = 'alpha:claude:session-0';
+  const snapshot = { thread_id: 'thread-1', epoch: 'boot', version: 0, state: 'running',
+    messages: [{ id: 'a', seq: 12, turn_id: 't1', role: 'assistant', status: 'complete',
+      content: '잘린 답변', truncated: true }], turnInProgress: false };
+  env.context.EventSource = class {
+    constructor() { source = this; } addEventListener(name, callback) { this.receive = callback; } close() {}
+  };
+  env.context.fetch = async (url, options) => {
+    calls.push({ url, options }); assert.match(url, /^\/api\/session-hub\/chat\//);
+    if (url.endsWith('/messages/a')) return response({ ...snapshot.messages[0],
+      content: `전체 답변 [[session:${key}@${REV}]] <img onerror="alert(1)">` });
+    if (url.includes('?before=12')) return response({ thread_id: 'thread-1', messages: [
+      { id: 'u', seq: 11, role: 'user', content: '이전 질문' },
+    ] });
+    if (url.includes('?before=11')) return delayed.promise;
+    return response(snapshot);
+  };
+  env.render(env.h(env.context.SessionHubChat, { panel: { rev: REV, cards: [
+    { key, machine: { label: 'Mac' }, ai_title: '인증 검토' },
+  ] } }), env.root); await flushEffects(); await flushEffects();
+  Array.from(env.root.querySelectorAll('button')).find(node => node.textContent === '전체 보기').click();
+  await flushEffects(); assert.ok(env.root.querySelector('.session-evidence'));
+  assert.equal(env.root.querySelectorAll('[onerror]').length, 0);
+  const log = env.root.querySelector('[role="log"]');
+  log.dispatchEvent(new env.window.Event('scroll')); await flushEffects();
+  assert.ok(env.root.textContent.includes('이전 질문'));
+  assert.ok(calls.some(call => call.url.endsWith('/messages?before=12&limit=50')));
+  log.dispatchEvent(new env.window.Event('scroll')); await flushEffects();
+  source.receive({ data: JSON.stringify({ ...snapshot, version: 1, thread_id: 'thread-2', messages: [] }) });
+  await flushEffects();
+  delayed.resolve(response({ messages: [{ id: 'old', seq: 10, role: 'user', content: '늦은 이전 질문' }] }));
+  await flushEffects(); assert.ok(!env.root.textContent.includes('이전 질문'));
+  assert.ok(!calls.some(call => /router|conversations/.test(call.url)));
+});
+
+test('three panes, grouping preferences and Palantir details preserve assistant DOM and SSE', async t => {
+  const env = setup(t), { alpha, beta } = fixture(t), streams = [], calls = [];
+  alpha.sessions[0].status = { state: 'working', source: 'orca', evidence_at: alpha.generated_at, reason: null };
+  alpha.sessions[1].status = { state: 'waiting', source: 'transcript', evidence_at: alpha.generated_at,
+    reason: 'conflict' };
+  beta.sessions[0].status = { state: 'ended', source: 'transcript', evidence_at: beta.generated_at, reason: null };
+  env.context.EventSource = class {
+    constructor() { streams.push(this); } addEventListener() {} close() { this.closed = true; }
+  };
+  env.context.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return response(url.endsWith('/chat/state') ? { thread_id: 'thread-1', epoch: 'boot', version: 0,
+      state: 'running', messages: [], turnInProgress: false }
+      : url.endsWith('/snapshots/status') ? { enabled: true, targets: [] }
+        : url === '/api/observe/snapshots' ? { rev: REV, snapshots: [
+          { machine_id: 'alpha', machine_label: 'Mac', sha256: 'a' },
+          { machine_id: 'beta', machine_label: 'codev2', sha256: 'b' },
+        ] } : url.includes('/alpha') ? alpha : beta);
+  };
+  env.context.ManagerChat = props => env.h('div', { class: 'manager-chat-side',
+     'data-target': props.conversationTarget });
+  env.context.SessionGrid = props => env.h('button', { class: 'manager-grid-side',
+    onClick: () => props.onSelectConversation('top') }, 'grid');
+  env.context.managerProfileAuthState = () => 'ok';
+  const src = fs.readFileSync(path.join(publicRoot, 'app/components/ManagerView.js'), 'utf8');
+  vm.runInContext(transformComponentSource(src).replace(/^export\s+\{[^}]+\};?\s*$/gm, ''), env.context);
+  const props = { manager: { status: {} }, projects: [{ id: 'p', name: 'Project', pm_enabled: 1 }],
+    runs: [], tasks: [], nodeSummary: {}, sessionHubActive: true };
+  env.render(env.h(env.context.ManagerView, props), env.root); await flushEffects(); await flushEffects();
+  const chat = env.root.querySelector('.session-hub-chat'), input = chat.querySelector('textarea');
+  input.value = '계속 쓰는 질문'; input.dispatchEvent(new env.window.Event('input', { bubbles: true }));
+  await flushEffects();
+  assert.deepEqual(Array.from(env.root.querySelectorAll('.session-hub-group h2'), node => node.textContent.trim()),
+    ['입력 대기 1', '작업 중 1', '응답 끝남 1']);
+  const rows = () => Array.from(env.root.querySelectorAll('.session-hub-sidebar .session-row'));
+  assert.deepEqual(rows().map(row => row.dataset.sessionKey),
+    [alpha.sessions[1].key, alpha.sessions[0].key, beta.sessions[0].key]);
+  rows()[0].click(); await flushEffects();
+  assert.ok(env.root.querySelector('.session-hub-detail').textContent.includes('상태 충돌'));
+  Array.from(env.root.querySelectorAll('button')).find(node => node.textContent === '비서에게 묻기').click();
+  await flushEffects(); assert.ok(input.value.includes(`[[session:${alpha.sessions[1].key}@${REV}]]`));
+  assert.equal(env.document.activeElement, input);
+  const nav = label => Array.from(env.root.querySelectorAll('.session-hub-nav'))
+    .find(node => node.textContent === label);
+  for (const [label, target] of [['Top', 'top'], ['Operator · Project', 'operator:p']]) {
+    nav(label).click(); await flushEffects();
+    assert.equal(env.root.querySelector('.session-hub-panel-side [data-target]').dataset.target, target);
+  }
+  nav('작업').click(); await flushEffects();
+  env.root.querySelector('.manager-grid-side').click(); await flushEffects();
+  assert.equal(env.root.querySelector('.session-hub-panel-side [data-target]').dataset.target, 'top');
+  for (const width of [1400, 1100, 800]) {
+    env.window.innerWidth = width; env.window.dispatchEvent(new env.window.Event('resize'));
+    for (const segment of env.root.querySelectorAll('.session-hub-segments button')) {
+      segment.click(); await flushEffects(); assert.equal(env.root.querySelector('.session-hub-chat'), chat);
+    }
+  }
+  assert.equal(streams.length, 1); assert.ok(!streams[0].closed);
+  const grouping = env.root.querySelector('[aria-label="묶음 선택, 상태별"]');
+  grouping.click(); await flushEffects();
+  Array.from(env.root.querySelectorAll('[role="option"]')).find(node => node.textContent === '머신·repo').click();
+  await flushEffects(); assert.equal(env.window.localStorage.getItem('session-hub-grouping'), 'repo');
+  assert.equal(env.root.querySelectorAll('.session-hub-group h2').length, 3);
+  const choose = async (label, option) => {
+    env.root.querySelector(`[aria-label="${label}"]`).click(); await flushEffects();
+    Array.from(env.root.querySelectorAll('[role="option"]')).find(node => node.textContent === option).click();
+    await flushEffects();
+  };
+  await choose('머신, 머신: 전체', '머신: codev2');
+  assert.equal(rows().length, 1); assert.equal(rows()[0].dataset.sessionKey, beta.sessions[0].key);
+  await choose('머신, 머신: codev2', '머신: 전체');
+  await choose('도구, 도구: 전체', '도구: Codex');
+  assert.equal(rows().length, 1); assert.equal(rows()[0].dataset.sessionKey, beta.sessions[0].key);
+  await choose('도구, 도구: Codex', '도구: 전체');
+  env.root.querySelector('button.session-hub-group-title').click(); await flushEffects();
+  assert.equal(env.root.querySelector('button.session-hub-group-title').getAttribute('aria-expanded'), 'false');
+  assert.equal(env.window.localStorage.getItem('session-hub-palantir'), 'closed');
+  const search = env.root.querySelector('#hub-query');
+  search.value = '로그인리다'; search.dispatchEvent(new env.window.Event('input', { bubbles: true }));
+  await flushEffects(); assert.equal(rows().length, 1);
+  nav('★ 비서').click(); await flushEffects(); assert.equal(env.document.activeElement, input);
+  env.render(null, env.root); assert.ok(streams[0].closed);
+  env.render(env.h(env.context.ManagerView, props), env.root); await flushEffects(); await flushEffects();
+  assert.equal(env.root.querySelector('[aria-label="묶음 선택, 머신·repo"]').dataset.value, 'repo');
+  assert.equal(env.root.querySelector('button.session-hub-group-title').getAttribute('aria-expanded'), 'false');
+  const storage = env.window.Storage.prototype;
+  storage.getItem = () => { throw new Error('blocked'); };
+  storage.setItem = () => { throw new Error('blocked'); };
+  env.render(null, env.root); env.render(env.h(env.context.ManagerView, props), env.root);
+  await flushEffects(); await flushEffects();
+  env.root.querySelector('[aria-label="묶음 선택, 상태별"]').click(); await flushEffects();
+  Array.from(env.root.querySelectorAll('[role="option"]')).find(node => node.textContent === '머신·repo').click();
+  await flushEffects(); assert.ok(env.root.querySelector('[aria-label="묶음 선택, 머신·repo"]'));
+  assert.ok(!calls.some(call => /router|conversations/.test(call.url)));
+  const css = fs.readFileSync(path.join(publicRoot, 'styles.css'), 'utf8');
+  assert.match(css, /@media \(min-width: 900px\) and \(max-width: 1279px\)/);
+  assert.match(css, /@media \(max-width: 899px\)/);
+  assert.match(css, /\.session-hub-panel-side\s*\{\s*position: absolute/);
 });

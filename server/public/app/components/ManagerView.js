@@ -6,12 +6,12 @@
 
 import { ManagerChat, managerProfileAuthState } from './ManagerChat.js';
 import { SessionHubChat } from './SessionHubChat.js';
-import { AllSessionsPanel } from './AllSessionsPanel.js';
-import { Dropdown } from './Dropdown.js';
-import { operatorConversationId } from '../lib/conversationId.js';
+import { SessionHubSidebar, SessionHubDetail } from './SessionHubSidebar.js';
+import { useSessionSnapshots } from '../lib/hooks/useSessionSnapshots.js';
+import { snapshotCards } from '../lib/workBoard.js';
 import { SessionGrid } from './SessionGrid.js';
 
-import { h } from '../../vendor/preact.module.js';
+import { h, cloneElement } from '../../vendor/preact.module.js';
 import { useEffect, useState } from '../../vendor/hooks.module.js';
 import { useNodeSummary } from '../lib/hooks.js';
 import htm from '../../vendor/htm.module.js';
@@ -39,19 +39,43 @@ export function ManagerView({ manager, runs, tasks, projects, agents, agentsErro
   }, [initialTarget, sessionHubActive]);
   const activePms = manager.status?.pms || [];
 
-  const [panelTab, setPanelTab] = useState(initialPanel || 'all');
-  const [mobilePane, setMobilePane] = useState(initialPanel ? 'panel' : 'chat');
-  const [panelData, setPanelData] = useState({ cards: [], rev: null });
+  const chat = html`<${ManagerChat} manager=${manager} projects=${projects} runs=${runs} tasks=${tasks}
+    agents=${agents} agentsError=${agentsError} agentsLoading=${agentsLoading} reloadAgents=${reloadAgents}
+    driftAudit=${driftAudit} onOpenDrift=${onOpenDrift} conversationTarget=${conversationTarget}
+    onConversationChange=${setConversationTarget} />`;
+  const grid = html`<${SessionGrid} tasks=${tasks} runs=${runs} projects=${projects} activePms=${activePms}
+    managerStatus=${manager.status} conversationTarget=${conversationTarget}
+    onSelectConversation=${setConversationTarget} nodeSummary=${nodeSummary} />`;
+  if (!sessionHubActive) return html`<div class="manager-view" data-view="manager">${chat}${grid}</div>`;
+  return html`<${AssistantLayout} projects=${projects} initialTarget=${initialTarget} initialPanel=${initialPanel}
+    chat=${chat} grid=${grid} setConversationTarget=${setConversationTarget} />`;
+}
+
+function AssistantLayout({ projects, initialTarget, initialPanel, chat, grid, setConversationTarget }) {
+  const snapshots = useSessionSnapshots();
+  const cards = snapshots.load.snapshots.flatMap(snapshotCards);
+  const data = { ...snapshots, cards };
+  const panel = { cards, rev: snapshots.load.rev };
+  const [right, setRight] = useState(initialTarget && initialTarget !== 'hub' ? 'manager' : null);
+  const [mobilePane, setMobilePane] = useState(initialPanel ? 'sidebar' : 'chat');
   const [selection, setSelection] = useState(null);
   const [revisionMismatch, setRevisionMismatch] = useState(false);
+  const [draft, setDraft] = useState(null);
+  const focusAssistant = text => {
+    setMobilePane('chat');
+    setDraft(value => ({ text, version: (value?.version || 0) + 1 }));
+  };
+  const close = () => { setRight(null); focusAssistant(); };
   useEffect(() => {
-    if (initialPanel) { setPanelTab(initialPanel); setMobilePane('panel'); }
+    if (initialTarget && initialTarget !== 'hub') { setRight('manager'); setMobilePane('right'); }
+  }, [initialTarget]);
+  useEffect(() => {
+    if (initialPanel) { setRight(null); setMobilePane('sidebar'); }
   }, [initialPanel]);
   useEffect(() => {
-    if (!sessionHubActive) return;
     const syncPanel = () => {
       if (location.hash === '#work' || location.hash === '#manager/all-sessions') {
-        setPanelTab('all'); setMobilePane('panel');
+        setRight(null); setMobilePane('sidebar');
       }
     };
     const onLink = event => {
@@ -69,55 +93,40 @@ export function ManagerView({ manager, runs, tasks, projects, agents, agentsErro
       window.removeEventListener('hashchange', syncPanel);
       document.removeEventListener('click', onLink);
     };
-  }, [sessionHubActive]);
-  const selectPanel = tab => setPanelTab(tab);
-  const openSession = (key, rev) => {
-    setSelection({ key, rev }); selectPanel('all'); setMobilePane('panel');
+  }, []);
+  const openSession = (key, rev, query = '') => {
+    setSelection({ key, rev, query }); setRight('session'); setMobilePane('right');
   };
-  const selectConversation = target => {
-    setConversationTarget(target);
-    if (sessionHubActive) setMobilePane('chat');
+  const openConversation = target => {
+    setConversationTarget(target); setRight('manager'); setMobilePane('right');
   };
-  const conversationOptions = [{ value: 'hub', label: '세션 비서' }, { value: 'top', label: 'Top Manager' },
-    ...(projects || []).filter(project => project.pm_enabled).map(project => ({
-      value: operatorConversationId(project.id), label: project.name,
-    }))];
-  const chat = conversationTarget === 'hub' && sessionHubActive ? html`
-    <${SessionHubChat} panel=${panelData} onOpenSession=${openSession}
-      onRevisionMismatch=${setRevisionMismatch} />` : html`
-    <${ManagerChat} manager=${manager} projects=${projects} runs=${runs} tasks=${tasks}
-      agents=${agents} agentsError=${agentsError} agentsLoading=${agentsLoading} reloadAgents=${reloadAgents}
-      driftAudit=${driftAudit} onOpenDrift=${onOpenDrift} conversationTarget=${conversationTarget}
-      onConversationChange=${setConversationTarget} />`;
-  const grid = html`<${SessionGrid} tasks=${tasks} runs=${runs} projects=${projects} activePms=${activePms}
-    managerStatus=${manager.status} conversationTarget=${conversationTarget}
-    onSelectConversation=${sessionHubActive ? selectConversation : setConversationTarget}
-    nodeSummary=${nodeSummary} />`;
-  if (!sessionHubActive) return html`<div class="manager-view" data-view="manager">${chat}${grid}</div>`;
-  return html`<div class="manager-view session-hub-manager" data-view="manager" data-pane=${mobilePane}>
+  // SessionHubChat always occupies this slot; pane changes only affect CSS visibility.
+  return html`<div class="manager-view session-hub-manager" data-view="manager"
+    data-pane=${mobilePane} data-right=${right || 'closed'}>
     <div class="session-hub-segments" role="group" aria-label="매니저 화면">
-      <button class="ghost" type="button" aria-pressed=${mobilePane === 'chat'}
-        onClick=${() => setMobilePane('chat')}>채팅</button>
-      <button class="ghost" type="button" aria-pressed=${mobilePane === 'panel'}
-        onClick=${() => setMobilePane('panel')}>세션 패널</button>
+      ${[['sidebar', '목록'], ['chat', '비서'], ['right', '상세']].map(([pane, label]) => html`
+        <button key=${pane} class="ghost" type="button" aria-pressed=${mobilePane === pane}
+          onClick=${() => setMobilePane(pane)}>${label}</button>`)}
     </div>
+    <${SessionHubSidebar} data=${data} projects=${projects} onAssistant=${close}
+      onConversation=${openConversation} onWork=${() => { setRight('work'); setMobilePane('right'); }}
+      onOpenSession=${openSession} revisionMismatch=${revisionMismatch} />
     <div class="session-hub-chat-side">
-      <div class="session-hub-picker board-filter"><${Dropdown} wide ariaLabel="대화 선택"
-        value=${conversationTarget} options=${conversationOptions} onChange=${setConversationTarget} /></div>
-      ${chat}
+      <${SessionHubChat} panel=${panel} onOpenSession=${openSession} draft=${draft}
+        onRevisionMismatch=${setRevisionMismatch} />
     </div>
     <div class="session-hub-panel-side">
-      <div class="session-hub-tabs" role="group" aria-label="세션 패널 선택">
-        <button type="button" class="ghost" aria-pressed=${panelTab === 'all'}
-          onClick=${() => selectPanel('all')}>모든 세션</button>
-        <button type="button" class="ghost" aria-pressed=${panelTab === 'palantir'}
-          onClick=${() => selectPanel('palantir')}>Palantir 작업</button>
-      </div>
-      <div class="session-hub-panel-content" hidden=${panelTab !== 'all'}>
-        <${AllSessionsPanel} onData=${setPanelData} selection=${selection}
-          revisionMismatch=${revisionMismatch} onSelectionChange=${setSelection} />
-      </div>
-      ${panelTab === 'palantir' && grid}
+      <header class="session-hub-right-header">
+        <span>${right === 'session' ? '세션 상세'
+          : right === 'manager' ? 'Palantir' : right === 'work' ? '작업' : '상세'}</span>
+        <button class="ghost" type="button" onClick=${close} aria-label="오른쪽 칸 닫기">×</button>
+      </header>
+      ${right === 'session' && html`<${SessionHubDetail} data=${data} selection=${selection}
+        revisionMismatch=${revisionMismatch} onAsk=${(key, rev) =>
+          focusAssistant(`이 세션 [[session:${key}@${rev}]] 지금 상태와 원래 목적 알려줘`)} />`}
+      ${right === 'manager' && chat}
+      ${right === 'work' && cloneElement(grid, { onSelectConversation: openConversation })}
+      ${!right && html`<p class="session-hub-note">세션을 선택하세요.</p>`}
     </div>
   </div>`;
 }

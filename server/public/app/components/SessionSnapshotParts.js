@@ -64,20 +64,23 @@ export function Instruction({ instruction, query, now }) {
   </li>`;
 }
 
-export function SessionRow({ card, query, now, onOpen }) {
+export function SessionRow({ card, query, now, onOpen, compact = false }) {
   const title = sessionDisplayTitle(card);
   const recent = card.recent || (card.instructions.length ? W.missing : W.noInstruction);
-  const orcaState = card.orca_link.confirmed && card.agent?.state !== 'unknown' && W.states[card.agent?.state];
+  const status = card.status || { state: 'unknown' };
+  const stateLabel = W.states[status.state] || W.states.unknown;
   return html`<button class="ghost work-card session-row" type="button"
     data-session-key=${card.key}
-    aria-label=${`${card.machine.label} · ${title}`} onClick=${() => onOpen(card.key)}>
-    <span class="work-title"><${Highlight} text=${title} query=${query} transformed=${card.titleTransformed} /></span>
+    aria-label=${`${card.machine.label} · ${title} · ${stateLabel}`} onClick=${() => onOpen(card.key)}>
+    <span class="work-title"><span class="session-status-dot ${status.state}"
+      title=${stateLabel} aria-label=${stateLabel} /><${Highlight} text=${title} query=${query}
+      transformed=${card.titleTransformed} /></span>
     <span class="work-meta">${`${card.machine.label} · ${card.repo_label || W.repoUnknown} · `}
       <${SnapshotTime} value=${card.last_record_at} now=${now} relativeOnly=${true} />
-      ${orcaState && html`<span class="work-orca">${` · Orca ${orcaState}`}</span>`}
+      ${!compact && html`<span class="work-orca">${` · ${stateLabel}`}</span>`}
     </span>
-    <span class="work-recent"><${Highlight} text=${recent} query=${query}
-      transformed=${card.recentTransformed} /></span>
+    ${!compact && html`<span class="work-recent"><${Highlight} text=${recent} query=${query}
+      transformed=${card.recentTransformed} /></span>`}
   </button>`;
 }
 

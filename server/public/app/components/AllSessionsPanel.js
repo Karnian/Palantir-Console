@@ -1,52 +1,26 @@
 import { h } from '../../vendor/preact.module.js';
 import { useEffect, useMemo, useRef, useState } from '../../vendor/hooks.module.js';
 import htm from '../../vendor/htm.module.js';
-import { apiFetch } from '../lib/api.js';
 import { WORK_BOARD_LABELS as W } from '../lib/copy.js';
-import { snapshotCards, rankCards, loadSessionSnapshots } from '../lib/workBoard.js';
+import { snapshotCards, rankCards } from '../lib/workBoard.js';
 import { SnapshotTime, SessionCard, SessionRow, Coverage } from './SessionSnapshotParts.js';
 import { Dropdown } from './Dropdown.js';
+import { useSessionSnapshots } from '../lib/hooks/useSessionSnapshots.js';
 const html = htm.bind(h);
-const emptyPanelLoad = () => ({ entries: [], snapshots: [], failures: [], done: 0, total: 0, rev: null });
 
 export function AllSessionsPanel({ onData, selection, onSelectionChange,
   revisionMismatch = false, standalone = false }) {
-  const [load, setLoad] = useState(emptyPanelLoad);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(false);
-  const [revision, setRevision] = useState(0);
+  const { load, loading, error, now, reload } = useSessionSnapshots(onData);
   const [query, setQuery] = useState('');
   const [machine, setMachine] = useState('');
   const [provider, setProvider] = useState('');
   const [localSelection, setLocalSelection] = useState(null);
-  const [now, setNow] = useState(Date.now);
-  const generation = useRef(0);
   const panelRef = useRef(null);
   const backRef = useRef(null);
   const previousSelection = useRef(null);
   const returnKey = useRef(null);
   const selected = selection === undefined ? localSelection : selection;
   const select = onSelectionChange || setLocalSelection;
-  useEffect(() => {
-    const controller = new AbortController();
-    const current = ++generation.current;
-    setLoad(emptyPanelLoad()); setLoading(true); setError(false);
-    onData?.({ cards: [], rev: null });
-    loadSessionSnapshots(apiFetch, controller.signal, next => {
-      if (!controller.signal.aborted && generation.current === current) {
-        setLoad(next);
-        onData?.({ cards: next.snapshots.flatMap(snapshotCards), rev: next.rev });
-      }
-    }).catch(() => {
-      if (!controller.signal.aborted && generation.current === current) {
-        setLoad(emptyPanelLoad()); setError(true); onData?.({ cards: [], rev: null });
-      }
-    }).finally(() => {
-      if (!controller.signal.aborted && generation.current === current) setLoading(false);
-    });
-    const timer = setInterval(() => setNow(Date.now()), 60000);
-    return () => { generation.current++; controller.abort(); clearInterval(timer); };
-  }, [revision]);
   const cards = useMemo(() => load.snapshots.flatMap(snapshotCards), [load.snapshots]);
   const results = useMemo(() => rankCards(cards, query, machine, provider), [cards, query, machine, provider]);
   const selectedCard = cards.find(card => card.key === selected?.key);
@@ -76,10 +50,10 @@ export function AllSessionsPanel({ onData, selection, onSelectionChange,
           label=${snapshot?.machine.label || entry.machine_label} snapshot=${true} /></span>`;
       })}<span class="work-observation-note">${W.observationNote}</span></div>
       <button type="button" class="ghost" disabled=${loading}
-        onClick=${() => setRevision(value => value + 1)}><span aria-hidden="true">↻</span> ${W.refresh}</button>
+        onClick=${reload}><span aria-hidden="true">↻</span> ${W.refresh}</button>
       ${!loading && !load.rev && html`<p class="work-label" role="status">스냅샷 rev 미확정 · 확인 불가
         <button type="button" class="ghost"
-          onClick=${() => setRevision(value => value + 1)}>다시 시도</button></p>`}
+          onClick=${reload}>다시 시도</button></p>`}
       ${(changed || revisionMismatch) && html`<p role="status" class="work-label">
         답변 뒤 갱신됨 · 현재 스냅샷을 표시합니다.</p>`}
     </header>
