@@ -1,6 +1,7 @@
 # C1 — 채팅으로 모든 세션 조회 (구현 brief)
 
-- 상태: v8 — codex 설계검토 R8 **GO** (2026-10-11). 구현 대기
+- 상태: v8 — codex 설계검토 R8 **GO** (2026-10-11). PR-A·PR-B merged
+- **개정 (2026-10-11)**: 사용자 피드백으로 [개인 비서 개정 brief](./c1-personal-assistant-brief.md) 가 상태·갱신(PR-D)·대화 지속·기억·화면(§1.3 대화 상태, §3, §5)을 대체한다.
 - 상위 문서: [지시 중심 관제 방향 brief](./instruction-centric-direction-brief.md) §0.1 (2026-10-11 채팅 중심 개정)
 - 선행: I0a 구현 전체(#577~#585). 스냅샷 스키마와 반출 경계는 [I0a brief](./i0a-session-snapshot-board-brief.md) §2~§4 를 그대로 따른다.
 
