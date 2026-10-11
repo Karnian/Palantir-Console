@@ -7,6 +7,7 @@ import htm from '../../vendor/htm.module.js';
 const html = htm.bind(h);
 
 import { apiFetch } from '../lib/api.js';
+import { createClientMessageKey } from '../lib/clientMessageKey.js';
 import { addToast } from '../lib/toast.js';
 import { useConversation } from '../lib/hooks.js';
 import { renderMarkdown } from '../lib/markdown.js';
@@ -636,12 +637,6 @@ export function ManagerChat({ manager, projects, runs = [], tasks = [], agents =
       return;
     }
   };
-
-  const createClientMessageKey = () => (
-    globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function'
-      ? globalThis.crypto.randomUUID()
-      : `msg_${Date.now()}_${Math.random().toString(16).slice(2)}`
-  );
 
   const upsertLocalQueuedMessage = (message, replaceId = null) => {
     if (!message || !message.id) return;

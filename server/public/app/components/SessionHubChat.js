@@ -4,6 +4,7 @@ import htm from '../../vendor/htm.module.js';
 import { useAssistantMemory } from '../lib/hooks/useAssistantMemory.js';
 import { AssistantMemoryProposal } from './AssistantMemory.js';
 import { apiFetch } from '../lib/api.js';
+import { createClientMessageKey } from '../lib/clientMessageKey.js';
 import { renderMarkdown } from '../lib/markdown.js';
 import { sessionEvidenceLabel } from '../lib/workBoard.js';
 const html = htm.bind(h);
@@ -125,6 +126,9 @@ export function groupHubMessages(messages) {
 }
 
 const initialState = () => ({ state: 'idle', messages: [], turnInProgress: false });
+const messageSignature = message => JSON.stringify([
+  message.status, message.content, message.truncated, message.version,
+]);
 const statusLabels = { idle: '중지됨', starting: '시작 중', running: '조회 준비됨', closing: '중지 중',
   closed: '종료됨', error: '오류' };
 export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch, draft }) {
@@ -143,12 +147,14 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch, draft
   const memory = useAssistantMemory({ enabled: !!state.memory?.pending_count || !!proposalIds.length,
     refreshKey: `${state.epoch}:${state.memory?.revision}:${state.memory?.pending_count}:${proposalIds.join(',')}` });
   const [text, setText] = useState('');
+  const inputGeneration = useRef(0);
   const [busy, setBusy] = useState(false);
   const [localTransition, setLocalTransition] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [history, setHistory] = useState({ thread: null, messages: [], exhausted: false });
   const [fullMessages, setFullMessages] = useState({});
+  const refreshingRows = useRef(new Set());
   const [sendNotice, setSendNotice] = useState('');
   const inputRef = useRef(null);
   const scrollRef = useRef(null);
@@ -160,7 +166,7 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch, draft
   useEffect(() => {
     if (!draft) return;
     threadGeneration.current++; setViewedThread(null); setThreadBusy(false);
-    if (draft.text !== undefined) setText(draft.text);
+    if (draft.text !== undefined) { inputGeneration.current++; setText(draft.text); }
   }, [draft]);
   useEffect(() => { if (draft && !readOnly) inputRef.current?.focus(); }, [draft, readOnly]);
   const epoch = useRef(null);
@@ -211,6 +217,7 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch, draft
   const action = async (name, body) => {
     if (pending.current || !controller.current) return;
     pending.current = true;
+    const requestedInputGeneration = inputGeneration.current;
     setBusy(true); setError('');
     const autoStart = name === 'message' && state.state !== 'running';
     if (autoStart || name === 'start') setLocalTransition('starting');
@@ -244,7 +251,7 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch, draft
           setError('대화가 바뀌었습니다. 다시 보내 주세요.'); return;
         }
         if (!retry.current || retry.current.thread_id !== thread || retry.current.text !== body.text) {
-          retry.current = { thread_id: thread, request_id: crypto.randomUUID(), text: body.text };
+          retry.current = { thread_id: thread, request_id: createClientMessageKey(), text: body.text };
         }
         body = retry.current;
       }
@@ -254,13 +261,16 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch, draft
         if (value.epoch === sentEpoch && value.epoch === epoch.current
           && value.thread_id === body.thread_id && currentThread.current === body.thread_id) {
           retry.current = null; atBottom.current = true;
-          setText(''); setSendNotice('');
+          if (requestedInputGeneration === inputGeneration.current) setText('');
+          setSendNotice('');
         } else setSendNotice('서버가 다시 시작되어 질문이 '
           + '전달되지 않았을 수 있습니다. 다시 보내 주세요.');
       }
       if (name === 'threads' && value.thread_id === currentThread.current && value.epoch === epoch.current) {
         retry.current = null; threadGeneration.current++; setViewedThread(null); setThreadList(null);
-        setThreadBusy(false); setText(''); setNotice('새 대화를 시작했습니다.');
+        setThreadBusy(false);
+        if (requestedInputGeneration === inputGeneration.current) setText('');
+        setNotice('새 대화를 시작했습니다.');
       }
     } catch (err) {
       if (alive.current) {
@@ -311,18 +321,22 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch, draft
     finally { if (alive.current && sequence === threadGeneration.current) setThreadBusy(false); }
   };
   const loadOlder = async () => {
-    if (paging.current || !thread || (history.thread === thread && history.exhausted)) return;
-    const older = history.thread === thread ? history.messages : [];
+    if (paging.current || !thread || (history.thread === thread && history.epoch === state.epoch
+      && history.exhausted)) return;
+    const older = history.thread === thread && history.epoch === state.epoch ? history.messages : [];
     const before = Math.min(...[...older, ...windowMessages].map(message => message.seq));
     if (!Number.isSafeInteger(before) || before <= 1) return;
     paging.current = true;
     const requestedEpoch = epoch.current;
+    const requestedVersion = version.current;
     const scroller = scrollRef.current, height = scroller?.scrollHeight || 0;
     try {
       const value = await apiFetch(`/api/session-hub/chat/threads/${encodeURIComponent(thread)}/messages`
         + `?before=${before}&limit=50`, { signal: controller.current.signal, allowAppForbidden: true });
       if (!alive.current || thread !== displayThread.current || requestedEpoch !== epoch.current) return;
-      setHistory({ thread, messages: [...value.messages, ...older], exhausted: !value.messages.length });
+      setHistory({ thread, epoch: requestedEpoch,
+        messages: [...value.messages.map(row => ({ ...row, observedVersion: requestedVersion })), ...older],
+        exhausted: !value.messages.length });
       requestAnimationFrame(() => {
         if (alive.current && displayThread.current === thread && scroller) {
           scroller.scrollTop += scroller.scrollHeight - height;
@@ -333,30 +347,76 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch, draft
   };
   const showFull = async message => {
     const requestedEpoch = epoch.current;
+    const requestedVersion = version.current;
     try {
       const value = await apiFetch(`/api/session-hub/chat/threads/${encodeURIComponent(thread)}/messages/`
         + encodeURIComponent(message.id), { signal: controller.current.signal, allowAppForbidden: true });
       if (alive.current && displayThread.current === thread && requestedEpoch === epoch.current) {
-        setFullMessages(current => ({ ...current, [`${thread}:${message.id}`]: value.content }));
+        const row = { ...message, ...value, truncated: false, observedVersion: requestedVersion };
+        setHistory(current => {
+          const sameThread = current.thread === thread && current.epoch === requestedEpoch;
+          const rows = sameThread ? current.messages.filter(item => item.id !== row.id) : [];
+          return { thread, epoch: requestedEpoch, exhausted: sameThread && current.exhausted,
+            messages: [...rows, row].sort((a, b) => a.seq - b.seq) };
+        });
+        setFullMessages(current => ({ ...current, [`${requestedEpoch}:${thread}:${message.id}`]: {
+          row, signature: messageSignature(message),
+          epoch: requestedEpoch, thread, observedVersion: requestedVersion,
+        } }));
       }
     } catch { if (alive.current && displayThread.current === thread) setError('메시지를 읽지 못했습니다.'); }
   };
+  // Paged/full partial rows can leave the recent SSE window before their final commit.
+  useEffect(() => {
+    if (!state.epoch || !thread) return;
+    const previous = history.thread === thread && history.epoch === state.epoch ? history.messages : [];
+    const visible = new Map([...previous, ...windowMessages].map(row => [row.id, row]));
+    const candidates = new Map(previous.filter(row => row.status === 'partial'
+      && row.observedVersion < state.version).map(row => [row.id, row]));
+    for (const cached of Object.values(fullMessages)) {
+      const row = visible.get(cached.row.id);
+      if (cached.epoch === state.epoch && cached.thread === thread && cached.row.status === 'partial'
+        && cached.observedVersion < state.version && row?.status === 'partial') candidates.set(row.id, row);
+    }
+    for (const row of candidates.values()) {
+      if (windowMessages.some(item => item.id === row.id && item.status !== 'partial')) continue;
+      const key = `${state.epoch}:${thread}:${row.id}`, flight = `${key}:${state.version}`;
+      if (refreshingRows.current.has(flight)) continue;
+      refreshingRows.current.add(flight);
+      const requestedAt = applied.current;
+      apiFetch(`/api/session-hub/chat/threads/${encodeURIComponent(thread)}/messages/${encodeURIComponent(row.id)}`,
+        { signal: controller.current.signal, allowAppForbidden: true }).then(value => {
+        if (!alive.current || displayThread.current !== thread || applied.current !== requestedAt) return;
+        const updated = { ...row, ...value, truncated: false, observedVersion: state.version };
+        setHistory(current => current.thread === thread && current.epoch === state.epoch ? { ...current,
+          messages: current.messages.map(item => item.id === row.id ? updated : item),
+        } : current);
+        setFullMessages(current => ({ ...current, [key]: { row: updated, signature: messageSignature(row),
+          epoch: state.epoch, thread, observedVersion: state.version } }));
+      }).catch(() => {
+        if (alive.current && displayThread.current === thread && applied.current === requestedAt) {
+          setError('메시지를 읽지 못했습니다.');
+        }
+      }).finally(() => refreshingRows.current.delete(flight));
+    }
+  }, [state.epoch, state.version, thread, history, fullMessages, windowMessages]);
   const rendered = useMemo(() => {
     const evidence = [];
     const recentIds = new Set(windowMessages.map(message => message.id));
-    const previous = history.thread === thread
+    const previous = history.thread === thread && history.epoch === state.epoch
       ? history.messages.filter(message => !recentIds.has(message.id)) : [];
     const messages = [...previous, ...windowMessages].map(message => {
-      const full = fullMessages[`${thread}:${message.id}`];
-      const text = full ?? message.content;
-      return { ...message, text, truncated: message.truncated && full === undefined,
+      const cached = fullMessages[`${state.epoch}:${thread}:${message.id}`];
+      const full = cached?.signature === messageSignature(message) ? cached.row : null;
+      const merged = { ...message, ...full }, text = merged.content;
+      return { ...merged, text,
         rendered: message.role === 'assistant'
           ? renderSessionMarkdown(text, panel, onOpenSession, evidence) : null };
     });
     const mismatch = !!panel?.rev && evidence.some(item => item.rev !== panel.rev
       && panel.cards.some(card => card.key === item.key));
     return { messages: groupHubMessages(messages), mismatch };
-  }, [windowMessages, thread, history, fullMessages, panel, onOpenSession]);
+  }, [state.epoch, windowMessages, thread, history, fullMessages, panel, onOpenSession]);
   useEffect(() => {
     onRevisionMismatch?.(rendered.mismatch);
     return () => onRevisionMismatch?.(false);
@@ -472,7 +532,9 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch, draft
       <textarea ref=${inputRef} aria-label="세션 비서에게 질문" value=${text} rows="2" disabled=${disabled || readOnly}
         onKeyDown=${handleKeyDown} oncompositionstart=${() => { composing.current = true; }}
         oncompositionend=${() => { composing.current = false; }}
-        placeholder="모든 세션에 대해 물어보세요" onInput=${event => setText(event.target.value)} />
+        placeholder="모든 세션에 대해 물어보세요" onInput=${event => {
+          inputGeneration.current++; setText(event.target.value);
+        }} />
       <button type="submit" class="primary" disabled=${!canSend}>
         전송</button>
     </form>

@@ -58,17 +58,22 @@ function AssistantLayout({ projects, initialTarget, initialPanel, chat, grid, se
   const panel = { cards, rev: snapshots.load.rev };
   const [activeItem, setActiveItem] = useState(initialTarget && initialTarget !== 'hub' ? initialTarget : 'assistant');
   const [right, setRight] = useState(initialTarget && initialTarget !== 'hub' ? 'manager' : null);
+  const [managerVisited, setManagerVisited] = useState(!!initialTarget && initialTarget !== 'hub');
   const [mobilePane, setMobilePane] = useState(initialPanel ? 'sidebar' : 'chat');
   const [selection, setSelection] = useState(null);
   const [revisionMismatch, setRevisionMismatch] = useState(false);
   const [draft, setDraft] = useState(null);
   const focusAssistant = text => {
+    if (window.innerWidth >= 900 && window.innerWidth < 1280) {
+      setRight(null); setActiveItem('assistant');
+    }
     setMobilePane('chat');
     setDraft(value => ({ text, version: (value?.version || 0) + 1 }));
   };
   const close = () => { setRight(null); setActiveItem('assistant'); focusAssistant(); };
   useEffect(() => {
     if (initialTarget && initialTarget !== 'hub') {
+      setManagerVisited(true);
       setActiveItem(initialTarget); setRight('manager'); setMobilePane('right');
     }
   }, [initialTarget]);
@@ -101,6 +106,7 @@ function AssistantLayout({ projects, initialTarget, initialPanel, chat, grid, se
     setActiveItem(key); setSelection({ key, rev, query }); setRight('session'); setMobilePane('right');
   };
   const openConversation = target => {
+    setManagerVisited(true);
     setActiveItem(target); setConversationTarget(target); setRight('manager'); setMobilePane('right');
   };
   // SessionHubChat always occupies this slot; pane changes only affect CSS visibility.
@@ -130,7 +136,10 @@ function AssistantLayout({ projects, initialTarget, initialPanel, chat, grid, se
       ${right === 'session' && html`<${SessionHubDetail} data=${data} selection=${selection}
         revisionMismatch=${revisionMismatch} onAsk=${(key, rev) =>
           focusAssistant(`이 세션 [[session:${key}@${rev}]] 지금 상태와 원래 목적 알려줘`)} />`}
-      ${right === 'manager' && chat}
+      <div class="session-hub-manager-chat" hidden=${right !== 'manager'}
+        aria-hidden=${right !== 'manager'} inert=${right !== 'manager' ? '' : null}>
+        ${managerVisited && chat}
+      </div>
       ${right === 'work' && cloneElement(grid, { onSelectConversation: openConversation })}
     </div>
   </div>`;

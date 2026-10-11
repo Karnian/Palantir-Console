@@ -2,7 +2,8 @@ import { h } from '../../vendor/preact.module.js';
 import { useEffect, useMemo, useRef, useState } from '../../vendor/hooks.module.js';
 import htm from '../../vendor/htm.module.js';
 import { WORK_BOARD_LABELS as W } from '../lib/copy.js';
-import { rankCards, sessionDisplayState, sessionDisplayStatusLabel } from '../lib/workBoard.js';
+import { rankCards, sessionDisplayState, sessionDisplayStatusLabel,
+  sessionHasOldTranscript } from '../lib/workBoard.js';
 import { useSnapshotRefresh } from '../lib/hooks/useSnapshotRefresh.js';
 import { Dropdown } from './Dropdown.js';
 import { SnapshotTime, SessionRow, SessionCard, Coverage } from './SessionSnapshotParts.js';
@@ -17,13 +18,15 @@ function writePreference(key, value) {
 }
 export function sessionGroups(cards, grouping, now = Date.now()) {
   const groups = new Map();
-  const states = ['waiting', 'working', 'ended', 'unresponsive', 'interrupted', 'unknown'];
-  if (grouping === 'status') for (const state of states) groups.set(state, {
-    label: state === 'unresponsive' ? '응답 없음 · 종료 기록 없음' : W.states[state], cards: [],
+  const groupKeys = ['waiting', 'working', 'working-old-record', 'ended', 'interrupted', 'unknown'];
+  if (grouping === 'status') for (const key of groupKeys) groups.set(key, {
+    label: key === 'working-old-record' ? '작업 중 · 30분 넘게 새 기록 없음' : W.states[key], cards: [],
   });
   for (const card of cards) {
-    const state = sessionDisplayState(card, now);
-    const key = grouping === 'status' ? (states.includes(state) ? state : 'unknown')
+    const state = sessionDisplayState(card);
+    const statusGroup = sessionHasOldTranscript(card, now) ? 'working-old-record'
+      : groupKeys.includes(state) ? state : 'unknown';
+    const key = grouping === 'status' ? statusGroup
       : `${card.machine.id}:${card.repo_label || card.cwd_id || ''}`;
     if (!groups.has(key)) groups.set(key, { label: `${card.machine.label} · ${card.repo_label || W.repoUnknown}`,
       cards: [] });

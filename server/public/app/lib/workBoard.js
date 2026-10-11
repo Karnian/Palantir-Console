@@ -45,16 +45,24 @@ export function sessionEvidenceLabel(card) {
   return `${card.machine.label} · ${Array.from(sessionDisplayTitle(card)).slice(0, 24).join('')}`;
 }
 
-export function sessionDisplayState(card, now = Date.now()) {
+export function sessionDisplayState(card) {
+  return card.status?.state || 'unknown';
+}
+export function sessionHasOldTranscript(card, now = Date.now()) {
   const status = card.status || { state: 'unknown' };
   const evidence = Date.parse(status.evidence_at);
   return status.state === 'working' && status.source === 'transcript' && Number.isFinite(evidence)
-    && now - evidence > 30 * 60000 ? 'unresponsive' : status.state;
+    && now - evidence > 30 * 60000;
 }
 export function sessionDisplayStatusLabel(card, now = Date.now()) {
   const labels = { waiting: '입력 대기', working: '작업 중', ended: '응답 끝남',
-    unresponsive: '응답 없음 · 종료 기록 없음', interrupted: '중단됨', unknown: '알 수 없음' };
-  return labels[sessionDisplayState(card, now)] || labels.unknown;
+    interrupted: '중단됨', unknown: '알 수 없음' };
+  const label = labels[sessionDisplayState(card)] || labels.unknown;
+  if (!sessionHasOldTranscript(card, now)) return label;
+  const minutes = Math.floor((now - Date.parse(card.status.evidence_at)) / 60000);
+  const age = minutes < 60 ? `${minutes}분 전` : minutes < 1440
+    ? `${Math.floor(minutes / 60)}시간 전` : `${Math.floor(minutes / 1440)}일 전`;
+  return `${label} · 마지막 기록 ${age}`;
 }
 
 export function normalizeSearch(text) {

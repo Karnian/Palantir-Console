@@ -1122,7 +1122,7 @@ test('three panes, grouping preferences and Palantir details preserve assistant 
   assert.match(css, /\.session-hub-panel-side\s*\{\s*position: absolute/);
 });
 
-test('stale transcript working is a factual grey group; Orca and the 30-minute boundary stay working', t => {
+test('R1 old transcript is a working subgroup with observation age, never a new state', t => {
   const env = setup(t), now = Date.parse('2026-10-12T12:00:00Z');
   const card = (key, state, source, age) => ({ key, machine: { id: 'm', label: 'Mac' }, repo_label: 'repo',
     status: { state, source, evidence_at: new Date(now - age * 60000).toISOString() } });
@@ -1131,16 +1131,24 @@ test('stale transcript working is a factual grey group; Orca and the 30-minute b
     card('end', 'ended', 'transcript', 40), card('stop', 'interrupted', 'transcript', 50),
     card('unknown', 'unknown', 'none', 100)];
   assert.deepEqual(Array.from(env.context.sessionGroups(cards, 'status', now), group => group.key),
-    ['waiting', 'working', 'ended', 'unresponsive', 'interrupted', 'unknown']);
-  assert.equal(env.context.sessionDisplayState(cards[0], now), 'unresponsive');
+    ['waiting', 'working', 'working-old-record', 'ended', 'interrupted', 'unknown']);
+  assert.equal(env.context.sessionDisplayState(cards[0], now), 'working');
   assert.equal(env.context.sessionDisplayState(cards[1], now), 'working');
   assert.equal(env.context.sessionDisplayState(cards[2], now), 'working');
   assert.equal(cards[0].status.state, 'working');
   assert.equal(env.context.sessionDisplayState({ status: { state: 'working', source: 'transcript' } }, now), 'working');
   env.render(env.h(env.context.SessionRow, { card: { ...cards[0], instructions: [], ai_title: '오래된 지시' },
     now, compact: true, onOpen: () => {} }), env.root);
-  assert.ok(env.root.querySelector('.session-status-dot.unresponsive'));
-  assert.equal(env.root.querySelector('.session-status-dot').title, '응답 없음 · 종료 기록 없음');
+  assert.ok(env.root.querySelector('.session-status-dot.working.old-record'));
+  assert.ok(env.root.textContent.includes('작업 중 · 마지막 기록 31분 전'));
+  const groups = env.context.sessionGroups(cards, 'status', now);
+  assert.equal(groups[2].label, '작업 중 · 30분 넘게 새 기록 없음');
+  assert.equal(env.context.sessionGroups(cards, 'repo', now).length, 1);
+  const old = { ...env.context.snapshotCards(fixture(t).alpha)[0],
+    status: { ...cards[0].status, evidence_at: new Date(now - 3 * 86400000).toISOString() } };
+  env.render(env.h(env.context.SessionHubDetail, { data: { cards: [old], now, load: { rev: REV } },
+    selection: { key: old.key } }), env.root);
+  assert.ok(env.root.textContent.includes('작업 중 · 마지막 기록 3일 전'));
   const make = changes => ({ key: 'k', first_instruction: 'recoverable', instructions: [
     { text: '<command-name>/login</command-name>' }, { text: '인증 흐름을 검토해 주세요.' },
   ], ...changes });
@@ -1320,4 +1328,158 @@ test('sidebar controls stay in a compact normal-flow header and navigation uses 
   await flushEffects();
   assert.equal(env.root.querySelectorAll('.work-orca').length, 0);
   assert.equal(env.root.querySelectorAll('.session-hub-detail-header .work-meta').length, 1);
+});
+
+// R1 regressions: these cases fail on the reviewed implementation.
+test('R1 remote HTTP without randomUUID sends and retries the same fallback request id', async t => {
+  const env = setup(t), calls = [];
+  Object.defineProperty(env.window.crypto, 'randomUUID', { value: undefined, configurable: true });
+  env.context.globalThis = env.context;
+  env.context.EventSource = class { addEventListener() {} close() {} };
+  const snapshot = { thread_id: 'current', epoch: 'boot', version: 1, state: 'running', messages: [] };
+  env.context.fetch = async (url, options) => {
+    assert.match(url, /^\/api\/session-hub\/chat\//);
+    if (url.endsWith('/message')) { calls.push(JSON.parse(options.body));
+      if (calls.length === 1) throw new Error('network'); }
+    return response({ ...snapshot, version: calls.length + 1 });
+  };
+  env.render(env.h(env.context.SessionHubChat), env.root); await flushEffects();
+  const input = env.root.querySelector('textarea');
+  input.value = 'HTTP 질문'; input.dispatchEvent(new env.window.Event('input', { bubbles: true }));
+  await flushEffects(); env.root.querySelector('button[type="submit"]').click(); await flushEffects();
+  assert.equal(calls.length, 1);
+  env.root.querySelector('button[type="submit"]').click(); await flushEffects();
+  assert.equal(calls.length, 2); assert.deepEqual(calls[0], calls[1]);
+  assert.match(calls[0].request_id, /^msg_\d+_[a-f0-9]+$/);
+});
+
+for (const operation of ['message', 'threads']) test(
+  `R1 delayed ${operation} response preserves a newer external draft`, async t => {
+    const env = setup(t), delayed = deferred();
+    env.context.EventSource = class { addEventListener() {} close() {} };
+    const snapshot = { thread_id: 'current', epoch: 'boot', version: 1, state: 'running', messages: [] };
+    env.context.fetch = async (url, options) => {
+      assert.match(url, /^\/api\/session-hub\/chat\//);
+      return url.endsWith(`/${operation}`) && options.method === 'POST' ? delayed.promise : response(snapshot);
+    };
+    env.render(env.h(env.context.SessionHubChat), env.root); await flushEffects();
+    const input = env.root.querySelector('textarea');
+    input.value = '질문 A'; input.dispatchEvent(new env.window.Event('input', { bubbles: true })); await flushEffects();
+    (operation === 'message' ? env.root.querySelector('button[type="submit"]')
+      : Array.from(env.root.querySelectorAll('button')).find(node => node.textContent === '새 대화')).click();
+    await flushEffects();
+    env.render(env.h(env.context.SessionHubChat, { draft: { text: '질문 B', version: 1 } }), env.root);
+    await flushEffects();
+    delayed.resolve(response({ ...snapshot, version: 2, thread_id: operation === 'threads' ? 'next' : 'current' }));
+    await flushEffects(); assert.equal(input.value, '질문 B');
+  });
+
+for (const mode of ['page', 'full', 'full-window']) test(
+  `R1 ${mode} partial outside the SSE window refreshes to final`, async t => {
+  const env = setup(t), calls = [];
+  let receive, complete = false;
+  const partial = { id: 'a', seq: 10, role: 'assistant', status: 'partial', content: '오래된 답변', truncated: true };
+  const note = { id: 'note', seq: 12, role: 'system_note', content: '최근 기록', status: 'complete' };
+  const snapshot = { thread_id: 'current', epoch: 'boot', version: 1, state: 'running',
+    messages: mode === 'full-window' ? [partial, note] : [note] };
+  env.context.EventSource = class { addEventListener(name, handler) { receive = handler; } close() {} };
+  env.context.fetch = async url => {
+    calls.push(url); assert.match(url, /^\/api\/session-hub\/chat\//);
+    if (url.includes('?before=')) return response({ messages: [partial] });
+    if (url.endsWith('/messages/a')) return response({ ...partial,
+      status: complete ? 'complete' : 'partial', content: complete ? '최종 답변' : '진행 중 전체 답변', truncated: false });
+    return response(snapshot);
+  };
+  env.render(env.h(env.context.SessionHubChat), env.root); await flushEffects();
+  if (mode !== 'full-window') {
+    env.root.querySelector('[role="log"]').dispatchEvent(new env.window.Event('scroll')); await flushEffects();
+  }
+  if (mode !== 'page') {
+    Array.from(env.root.querySelectorAll('button')).find(node => node.textContent === '전체 보기').click();
+    await flushEffects();
+  }
+  complete = true; receive({ data: JSON.stringify({ ...snapshot, messages: [note], version: 2 }) });
+  await flushEffects(); await flushEffects();
+  assert.ok(env.root.textContent.includes('최종 답변'));
+  assert.ok(!env.root.querySelector('.manager-msg-assistant').textContent.includes('답변 중'));
+  assert.ok(calls.some(url => url.endsWith('/messages/a')));
+});
+
+test('R1 changed recent message invalidates its cached full content', async t => {
+  const env = setup(t); let receive;
+  const message = { id: 'a', seq: 1, role: 'assistant', status: 'partial', content: '처음', truncated: true };
+  const snapshot = { thread_id: 'current', epoch: 'boot', version: 1, state: 'running', messages: [message] };
+  env.context.EventSource = class { addEventListener(name, handler) { receive = handler; } close() {} };
+  env.context.fetch = async url => {
+    assert.match(url, /^\/api\/session-hub\/chat\//);
+    return response(url.endsWith('/messages/a') ? { ...message, content: '이전 전체 본문' } : snapshot);
+  };
+  env.render(env.h(env.context.SessionHubChat), env.root); await flushEffects();
+  Array.from(env.root.querySelectorAll('button')).find(node => node.textContent === '전체 보기').click();
+  await flushEffects(); assert.ok(env.root.textContent.includes('이전 전체 본문'));
+  receive({ data: JSON.stringify({ ...snapshot, version: 2,
+    messages: [{ ...message, content: '최종 본문', status: 'complete', truncated: false }] }) });
+  await flushEffects(); assert.ok(env.root.textContent.includes('최종 본문'));
+  assert.ok(!env.root.textContent.includes('이전 전체 본문'));
+});
+
+async function r1Manager(t) {
+  const env = setup(t), { alpha } = fixture(t), delayed = deferred();
+  env.context.EventSource = class { addEventListener() {} close() {} };
+  env.context.useConversation = () => ({ events: [], queuedMessages: [], reloadQueue: () => {} });
+  env.context.addToast = () => {};
+  loadLib(env, 'conversationId.js');
+  env.loadComponent('EmptyState'); env.loadComponent('MentionInput'); env.loadComponent('ManagerChat');
+  env.context.SessionGrid = () => env.h('div', { class: 'manager-grid-side' }, '작업 목록');
+  env.context.fetch = async (url, options) => {
+    if (url === '/api/router/resolve') return response({ target: 'top', text: '매니저 질문' });
+    if (url === '/api/conversations/top/message') return delayed.promise;
+    return response(url.endsWith('/chat/state') ? { thread_id: 'current', epoch: 'boot', version: 1,
+      state: 'running', messages: [] } : url.endsWith('/snapshots/status') ? { enabled: true, targets: [] }
+        : url === '/api/observe/snapshots' ? { rev: REV, snapshots: [{ machine_id: 'alpha', sha256: 'a' }] }
+          : url.includes('/snapshots/alpha') ? alpha : {});
+  };
+  const source = fs.readFileSync(path.join(publicRoot, 'app/components/ManagerView.js'), 'utf8');
+  vm.runInContext(transformComponentSource(source).replace(/^export\s+\{[^}]+\};?\s*$/gm, ''), env.context);
+  env.render(env.h(env.context.ManagerView, { manager: { status: { active: true, pms: [] }, events: [],
+    queuedMessages: [], reloadQueue: () => {} }, projects: [], runs: [], tasks: [], nodeSummary: {},
+    sessionHubActive: true }), env.root); await flushEffects(); await flushEffects();
+  const nav = async label => {
+    Array.from(env.root.querySelectorAll('.session-hub-nav')).find(node => node.textContent === label).click();
+    await flushEffects();
+  };
+  return { env, nav, delayed };
+}
+
+test('R1 real ManagerChat keeps draft, image and sending lock across right pane switches', async t => {
+  const { env, nav, delayed } = await r1Manager(t);
+  await nav('Top');
+  const chat = env.root.querySelector('.manager-chat-side'), input = chat.querySelector('textarea');
+  input.value = '매니저 질문'; input.dispatchEvent(new env.window.Event('input', { bubbles: true }));
+  const file = chat.querySelector('input[type="file"]');
+  Object.defineProperty(file, 'files', { value: [new env.window.File(['image'], 'test.png', { type: 'image/png' })] });
+  file.dispatchEvent(new env.window.Event('change', { bubbles: true })); await flushEffects();
+  assert.equal(chat.querySelectorAll('.manager-image-preview').length, 1);
+  await nav('작업');
+  const wrapper = chat.closest('.session-hub-manager-chat');
+  assert.ok(wrapper?.hidden); assert.equal(wrapper.getAttribute('aria-hidden'), 'true');
+  assert.ok(wrapper.hasAttribute('inert'));
+  await nav('Top'); assert.equal(env.root.querySelector('.manager-chat-side'), chat);
+  assert.equal(input.value, '매니저 질문'); assert.equal(chat.querySelectorAll('.manager-image-preview').length, 1);
+  chat.querySelector('.manager-send-btn').click(); await flushEffects();
+  assert.equal(chat.querySelector('.manager-send-btn').disabled, true);
+  env.root.querySelector('.session-row').click(); await flushEffects(); await nav('Top');
+  assert.equal(env.root.querySelector('.manager-chat-side'), chat);
+  assert.equal(chat.querySelector('.manager-send-btn').disabled, true);
+  delayed.resolve(response({ message: { id: 'done', status: 'queued' } })); await flushEffects();
+});
+
+test('R1 drawer asking assistant closes the drawer and focuses its draft', async t => {
+  const { env } = await r1Manager(t); env.window.innerWidth = 1100;
+  env.root.querySelector('.session-row').click(); await flushEffects();
+  Array.from(env.root.querySelectorAll('button')).find(node => node.textContent === '비서에게 묻기').click();
+  await flushEffects();
+  assert.equal(env.root.querySelector('.session-hub-manager').dataset.right, 'closed');
+  const input = env.root.querySelector('.session-hub-chat textarea');
+  assert.equal(env.document.activeElement, input); assert.ok(input.value.includes('[[session:'));
 });

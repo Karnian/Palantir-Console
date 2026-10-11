@@ -8814,10 +8814,13 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   background: var(--bg-surface); min-height: 0;
 }
 .session-hub-panel-side[hidden] { display: none; }
-.session-hub-panel-side > .manager-chat-side,
+.session-hub-manager-chat,
 .session-hub-panel-side > .manager-grid-side {
   width: 100%; min-width: 0; flex: 1; min-height: 0; max-height: none;
 }
+.session-hub-manager-chat { display: flex; flex-direction: column; }
+.session-hub-manager-chat[hidden] { display: none; }
+.session-hub-manager-chat > .manager-chat-side { width: 100%; min-width: 0; flex: 1; min-height: 0; }
 .session-hub-panel-content { flex: 1; min-width: 0; min-height: 0; display: flex; }
 .session-hub-right-header {
   display: flex; align-items: center; justify-content: space-between; padding: 4px 12px;
@@ -8959,7 +8962,7 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   display: flex; align-items: center; gap: 4px; border: 0; border-radius: 0; background: transparent;
   font-size: 11px; line-height: 16px; min-height: 0; padding: 0 8px; margin: 10px 0 4px;
 }
-.session-status-dot.unresponsive { background: var(--text-muted); }
+.session-status-dot.working.old-record { opacity: .45; }
 .session-hub-chat > .manager-chat-header {
   flex: 0 0 auto; padding: 8px 12px; gap: 8px; min-height: 46px;
 }

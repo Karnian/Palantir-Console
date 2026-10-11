@@ -4,7 +4,7 @@ import htm from '../../vendor/htm.module.js';
 import { WORK_BOARD_LABELS as W } from '../lib/copy.js';
 import { snapshotCards, rankCards, highlightParts, matchedLines,
   coverageCounts, formatLocalSnapshotTime, cardLineVisibility,
-  displayInstructionText, sessionDisplayTitle, sessionDisplayState, sessionDisplayStatusLabel
+  displayInstructionText, sessionDisplayTitle, sessionDisplayState, sessionDisplayStatusLabel, sessionHasOldTranscript
 } from '../lib/workBoard.js';
 
 const html = htm.bind(h);
@@ -70,14 +70,15 @@ export function SessionRow({ card, query, now, onOpen, compact = false, selected
   const recent = card.recent || (card.instructions.length ? W.missing : W.noInstruction);
   const displayState = sessionDisplayState(card, now);
   const stateLabel = sessionDisplayStatusLabel(card, now);
+  const oldRecord = sessionHasOldTranscript(card, now);
   return html`<button class="ghost work-card session-row" type="button"
     data-session-key=${card.key} aria-current=${selected ? 'true' : null}
     aria-label=${`${card.machine.label} · ${title} · ${stateLabel}`} onClick=${() => onOpen(card.key)}>
-    <span class="work-title"><span class="session-status-dot ${displayState}"
+    <span class="work-title"><span class="session-status-dot ${displayState} ${oldRecord ? 'old-record' : ''}"
       title=${stateLabel} aria-label=${stateLabel} /><${Highlight} text=${title} query=${query}
       transformed=${card.titleTransformed} /></span>
     <span class="work-meta">${`${card.machine.label} · ${card.repo_label || W.repoUnknown} · `}
-      <${SnapshotTime} value=${card.last_record_at} now=${now} relativeOnly=${true} />
+      ${oldRecord ? stateLabel : html`<${SnapshotTime} value=${card.last_record_at} now=${now} relativeOnly=${true} />`}
       ${!compact && html`<span class="work-orca">${` · ${stateLabel}`}</span>`}
     </span>
     ${!compact && html`<span class="work-recent"><${Highlight} text=${recent} query=${query}
