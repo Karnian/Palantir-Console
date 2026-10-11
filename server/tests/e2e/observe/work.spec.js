@@ -63,14 +63,13 @@ for (const theme of ['light', 'dark']) {
       await page.getByLabel('지시 검색', { exact: true }).fill('로그인리다');
       await expect(cards).toHaveCount(1);
       await expect(cards.locator('.work-title')).toHaveText('합성 세션 검토');
-      await expect(page.locator('.work-match mark')).toHaveText('로그인 리다');
+      await expect(page.locator('.session-row .work-recent mark')).toHaveText('로그인 리다');
       await scan(page);
       await expect(page).toHaveScreenshot(`search-${theme}-${viewport.name}.png`, {
         fullPage: true, animations: 'disabled', maxDiffPixels: 100, threshold: 0.2,
         mask: [page.locator('.nav-status')],
       });
-      const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
-      expect(overflow).toBe(false);
+      await require('../helpers/session-hub').expectNoHorizontalOverflow(page);
       for (const button of await page.locator('[data-view="all-sessions"] button:not(.session-row)').all()) {
         const box = await button.boundingBox();
         if (!box) continue;

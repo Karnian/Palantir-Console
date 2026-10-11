@@ -321,3 +321,132 @@ test('compact panel rows have three lines, searchable content and visibly named 
   assert.ok(env.root.querySelector('.work-card-footer'));
   assert.equal(env.root.querySelectorAll('.work-event').length, 2);
 });
+
+test('idle questions start once before sending; start failures retain the question and never send', async t => {
+  const env = setup(t), calls = [], starting = deferred();
+  const idle = { state: 'idle', messages: [], turnInProgress: false };
+  const running = { ...idle, state: 'running' };
+  env.context.EventSource = class { addEventListener() {} close() {} };
+  let failStart = false;
+  env.context.fetch = async (url, opts) => {
+    calls.push({ url, opts });
+    if (url.endsWith('/start')) return failStart
+      ? response({ error: 'session_hub_binary_unavailable' }, 503) : starting.promise;
+    if (url.endsWith('/message')) return response({ ...running, messages: [
+      { role: 'user', text: JSON.parse(opts.body).text },
+    ] });
+    return response(idle);
+  };
+  const mount = async () => {
+    env.render(env.h(env.context.SessionHubChat, { panel: { cards: [], rev: REV } }), env.root);
+    await flushEffects(); await flushEffects();
+  };
+  const ask = async text => {
+    const input = env.root.querySelector('textarea');
+    input.value = text;
+    input.dispatchEvent(new env.window.Event('input', { bubbles: true }));
+    await flushEffects();
+    assert.equal(env.root.querySelector('button[type="submit"]').disabled, false);
+    const enter = () => input.dispatchEvent(new env.window.KeyboardEvent('keydown', {
+      key: 'Enter', bubbles: true, cancelable: true,
+    }));
+    enter(); enter();
+    await flushEffects();
+  };
+  await mount(); await ask('모든 세션 알려줘');
+  assert.deepEqual(calls.map(call => call.url), ['state', 'start'].map(name => `/api/session-hub/chat/${name}`));
+  assert.equal(env.root.querySelector('.manager-status-badge').textContent, '시작 중');
+  assert.equal(env.root.querySelector('button[type="submit"]').disabled, true);
+  starting.resolve(response(running)); await flushEffects(); await flushEffects();
+  assert.equal(calls.at(-1).url, '/api/session-hub/chat/message');
+  assert.equal(JSON.parse(calls.at(-1).opts.body).text, '모든 세션 알려줘');
+  assert.equal(env.root.querySelector('textarea').value, '');
+  assert.equal(env.root.querySelector('.manager-msg-user').textContent, '모든 세션 알려줘');
+  assert.equal(calls.filter(call => call.url.endsWith('/start')).length, 1);
+  env.render(null, env.root); failStart = true;
+  await mount(); await ask('시작 실패 질문'); await flushEffects();
+  assert.equal(calls.filter(call => call.url.endsWith('/message')).length, 1);
+  assert.equal(env.root.querySelector('textarea').value, '시작 실패 질문');
+  assert.equal(env.root.querySelector('[role="alert"]').textContent, 'Claude 실행 파일을 찾지 못했습니다.');
+  for (const call of calls) assert.match(call.url, /^\/api\/session-hub\/chat\//);
+});
+
+test('row metadata has exact separator spacing and omits unknown Orca while detail retains it', t => {
+  const env = setup(t), { alpha } = fixture(t);
+  const card = env.context.snapshotCards(alpha)[0];
+  const now = Date.parse(card.last_record_at) + 2 * 3600000;
+  const props = { card, now, query: '', onOpen: () => {} };
+  card.machine.label = 'codev2'; card.repo_label = 'c2'; card.agent = { state: 'running' };
+  env.render(env.h(env.context.SessionRow, props), env.root);
+  assert.equal(env.root.querySelector('.work-meta').textContent, 'codev2 · c2 · 2시간 전 · Orca 실행 중');
+  card.agent = { state: 'unknown' };
+  env.render(env.h(env.context.SessionRow, { ...props }), env.root);
+  assert.equal(env.root.querySelector('.work-meta').textContent, 'codev2 · c2 · 2시간 전');
+  assert.equal(env.root.querySelector('.work-orca'), null);
+  env.render(env.h(env.context.SessionCard, { ...props, timeline: true }), env.root);
+  assert.match(env.root.querySelector('.work-orca').textContent, /Orca · 불명/);
+  card.orca_link.confirmed = false; card.agent = { state: 'running' };
+  env.render(env.h(env.context.SessionRow, { ...props }), env.root);
+  assert.equal(env.root.querySelector('.work-orca'), null);
+});
+
+test('automatic start never sends after a cancelled start or after the chat unmounts', async t => {
+  const env = setup(t), calls = [], idle = { state: 'idle', messages: [], turnInProgress: false };
+  env.context.EventSource = class { addEventListener() {} close() {} };
+  let pendingStart = deferred();
+  env.context.fetch = async (url, opts) => {
+    calls.push({ url, opts });
+    return url.endsWith('/start') ? pendingStart.promise : response(idle);
+  };
+  const ask = async () => {
+    env.render(env.h(env.context.SessionHubChat), env.root); await flushEffects(); await flushEffects();
+    const input = env.root.querySelector('textarea');
+    input.value = '보관할 질문'; input.dispatchEvent(new env.window.Event('input', { bubbles: true }));
+    await flushEffects(); env.root.querySelector('form').dispatchEvent(new env.window.Event('submit', {
+      bubbles: true, cancelable: true,
+    }));
+    await flushEffects();
+  };
+  await ask(); pendingStart.resolve(response(idle)); await flushEffects();
+  assert.equal(env.root.querySelector('textarea').value, '보관할 질문');
+  assert.equal(env.root.querySelector('[role="alert"]').textContent, '세션 비서를 먼저 시작해 주세요.');
+  env.render(null, env.root); pendingStart = deferred(); await ask();
+  const signal = calls.at(-1).opts.signal;
+  env.render(null, env.root); assert.equal(signal.aborted, true);
+  pendingStart.resolve(response({ ...idle, state: 'running' })); await flushEffects();
+  assert.equal(calls.filter(call => call.url.endsWith('/start')).length, 2);
+  assert.equal(calls.filter(call => call.url.endsWith('/message')).length, 0);
+});
+
+test('panel flex children can shrink, snapshot text wraps and timeline controls use compact type', async t => {
+  const env = setup(t), { alpha } = fixture(t);
+  const css = fs.readFileSync(path.join(publicRoot, 'styles.css'), 'utf8');
+  const style = env.document.createElement('style');
+  style.textContent = css.slice(css.indexOf('/* Session snapshot board'));
+  env.document.head.append(style);
+  env.context.apiFetch = async url => url.endsWith('/snapshots') ? { rev: REV, snapshots: [
+    { machine_id: 'alpha', machine_label: 'Mac', sha256: 'a' },
+  ] } : alpha;
+  env.render(env.h('div', { class: 'session-hub-manager' }, env.h('div', { class: 'session-hub-panel-content' },
+    env.h(env.context.AllSessionsPanel))), env.root);
+  await flushEffects(); await flushEffects();
+  const computed = selector => env.window.getComputedStyle(env.root.querySelector(selector));
+  for (const selector of ['.session-hub-manager', '.session-hub-panel-content', '.all-sessions-panel',
+    '.work-header', '.work-body', '.work-grid', '.session-row', '.session-row .work-title',
+    '.session-row .work-meta', '.session-row .work-recent']) {
+    assert.equal(parseFloat(computed(selector).minWidth), 0, selector);
+  }
+  for (const selector of ['.session-row .work-title', '.session-row .work-meta', '.session-row .work-recent']) {
+    assert.equal(computed(selector).overflow, 'hidden');
+    assert.equal(computed(selector).textOverflow, 'ellipsis');
+    assert.equal(computed(selector).whiteSpace, 'nowrap');
+  }
+  assert.equal(computed('.work-snapshot-times').whiteSpace, 'normal');
+  assert.equal(computed('.work-snapshot-times').flexWrap, 'wrap');
+  assert.equal(computed('.work-search').boxSizing, 'border-box');
+  env.root.querySelector('button.session-row').click(); await flushEffects();
+  assert.equal(computed('.work-instruction').fontSize, '13px');
+  assert.equal(computed('.work-event button').fontSize, '12px');
+  assert.equal(computed('.work-event button').height, '24px');
+  assert.equal(computed('.work-event button').minHeight, '24px');
+});

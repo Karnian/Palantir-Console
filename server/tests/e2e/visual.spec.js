@@ -526,10 +526,15 @@ for (const modal of FORM_MODALS) {
 
 // C1 baseline additions: session assistant replaces the default active-hub manager view.
 // Host generates these baselines after reviewing the compact controls and mobile segments.
+const HUB_VIEWPORTS = [
+  { name: 'desktop', width: 1440, height: 900 },
+  { name: 'mobile', width: 390, height: 844 },
+];
 for (const theme of THEMES) {
-  for (const vp of VIEWPORTS) {
+  for (const vp of HUB_VIEWPORTS) {
     test(`@visual session-hub manager [${theme}/${vp.name}]`, async ({ page }) => {
-      await require('./helpers/session-hub').mockSessionHub(page);
+      const { mockSessionHub, expectNoHorizontalOverflow } = require('./helpers/session-hub');
+      await mockSessionHub(page, { longText: true });
       await page.setViewportSize({ width: vp.width, height: vp.height });
       await setTheme(page, theme);
       await page.goto('/#manager');
@@ -539,17 +544,20 @@ for (const theme of THEMES) {
       await expect(page.locator('.manager-msg-assistant .markdown-body h2')).toHaveText('검토 결과');
       await expect(page.locator('.session-hub-tools summary')).toContainText('세션 열기:');
       await stabilize(page);
+      await expectNoHorizontalOverflow(page);
       await expect(page).toHaveScreenshot(`session-hub-chat-${theme}-${vp.name}.png`, {
         maxDiffPixels: 100, threshold: 0.2,
       });
       await page.locator('button.session-evidence').click();
       await expect(page.locator('.work-event').first()).toBeVisible();
+      await expectNoHorizontalOverflow(page);
       await expect(page).toHaveScreenshot(`session-hub-timeline-${theme}-${vp.name}.png`, {
         maxDiffPixels: 100, threshold: 0.2,
       });
       await page.getByRole('button', { name: '← 모든 세션', exact: true }).click();
       await expect(page.locator('button.session-row')).toHaveCount(3);
       await expect(page.locator('.session-rows .work-label, .session-rows .work-card-footer')).toHaveCount(0);
+      await expectNoHorizontalOverflow(page);
       await expect(page).toHaveScreenshot(`session-hub-panel-${theme}-${vp.name}.png`, {
         maxDiffPixels: 100, threshold: 0.2,
       });

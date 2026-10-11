@@ -144,17 +144,37 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch }) {
     if (pending.current || !controller.current) return;
     pending.current = true;
     setBusy(true); setError('');
-    const before = version.current;
+    const autoStart = name === 'message' && state.state === 'idle';
+    const beforeStart = version.current;
+    const previousState = state.state;
+    if (autoStart || name === 'start') setState(value => ({ ...value, state: 'starting', error: null }));
+    const request = async (operation, payload) => {
+      const before = version.current;
+      const value = await apiFetch(`/api/session-hub/chat/${operation}`, { method: 'POST',
+        body: JSON.stringify(payload || {}), signal: controller.current.signal, allowAppForbidden: true });
+      if (alive.current && version.current === before) setState(value);
+      return value;
+    };
     try {
-      const value = await apiFetch(`/api/session-hub/chat/${name}`, { method: 'POST',
-        body: JSON.stringify(body || {}), signal: controller.current.signal, allowAppForbidden: true });
+      if (autoStart) {
+        const started = await request('start');
+        if (!alive.current || controller.current.signal.aborted) return;
+        if (started.state !== 'running' || started.disabled || started.turnInProgress) {
+          setError(sessionHubErrorText(started.error || started.disabled || 'session_hub_not_running'));
+          return;
+        }
+      }
+      const value = await request(name, body);
       if (!alive.current) return;
-      if (version.current === before) setState(value);
       if (name === 'message') setText('');
       if (name === 'clear') setClearNotice(value.result === 'incomplete'
         ? `대화는 지웠지만 파일 ${value.remaining}개가 남았습니다.` : '대화를 지웠습니다.');
     } catch (err) {
-      if (alive.current) setError(sessionHubErrorText(err.data?.error || err.code || err.message));
+      if (alive.current) {
+        setError(sessionHubErrorText(err.data?.error || err.code || err.message));
+        if (version.current === beforeStart) setState(value => value.state === 'starting'
+          ? { ...value, state: previousState } : value);
+      }
     } finally { pending.current = false; if (alive.current) setBusy(false); }
   };
   const rendered = useMemo(() => {
@@ -172,7 +192,7 @@ export function SessionHubChat({ panel, onOpenSession, onRevisionMismatch }) {
   const running = state.state === 'running';
   const transitioning = ['starting', 'closing', 'closed'].includes(state.state);
   const disabled = busy || transitioning || !!state.disabled;
-  const canSend = !disabled && running && !state.turnInProgress && !!text.trim();
+  const canSend = !disabled && (running || state.state === 'idle') && !state.turnInProgress && !!text.trim();
   const send = () => { if (canSend) action('message', { text }); };
   const handleKeyDown = event => {
     if (event.isComposing || composing.current || event.keyCode === 229) return;

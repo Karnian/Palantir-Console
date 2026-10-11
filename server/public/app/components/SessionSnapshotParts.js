@@ -57,7 +57,7 @@ export function Instruction({ instruction, query, now }) {
     </div>
     <p class="work-instruction"><${Highlight}
       text=${instruction.text_missing ? W.missing : text} query=${query} transformed=${transformed} /></p>
-    <button class="ghost" type="button" onClick=${copy}>${W.copy}</button>
+    <button class="ghost session-selector-copy" type="button" onClick=${copy}>${W.copy}</button>
     <span role="status">${copyState === 'copied' ? W.copied : copyState === 'fallback' ? W.copyFallback : ''}</span>
     ${copyState === 'fallback' && html`<input ref=${selectorRef} class="work-selector"
       aria-label=${W.selector} value=${selector} readOnly />`}
@@ -67,13 +67,13 @@ export function Instruction({ instruction, query, now }) {
 export function SessionRow({ card, query, now, onOpen }) {
   const title = sessionDisplayTitle(card);
   const recent = card.recent || (card.instructions.length ? W.missing : W.noInstruction);
+  const orcaState = card.orca_link.confirmed && card.agent?.state !== 'unknown' && W.states[card.agent?.state];
   return html`<button class="ghost work-card session-row" type="button"
     aria-label=${`${card.machine.label} · ${title}`} onClick=${() => onOpen(card.key)}>
     <span class="work-title"><${Highlight} text=${title} query=${query} transformed=${card.titleTransformed} /></span>
-    <span class="work-meta">${card.machine.label} · ${card.repo_label || W.repoUnknown} ·
+    <span class="work-meta">${`${card.machine.label} · ${card.repo_label || W.repoUnknown} · `}
       <${SnapshotTime} value=${card.last_record_at} now=${now} relativeOnly=${true} />
-      ${card.orca_link.confirmed && html`<span class="work-orca">
-        · Orca ${W.states[card.agent?.state || 'unknown']}</span>`}
+      ${orcaState && html`<span class="work-orca">${` · Orca ${orcaState}`}</span>`}
     </span>
     <span class="work-recent"><${Highlight} text=${recent} query=${query}
       transformed=${card.recentTransformed} /></span>
@@ -154,5 +154,4 @@ export function Coverage({ load }) {
       ${entry.machine_label || entry.machine_id || W.unnamedFailure} · ${W.machineFailure}</p>`)}
   </section>`;
 }
-
 

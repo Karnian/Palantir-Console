@@ -354,7 +354,8 @@ test.afterAll(() => {
 for (const theme of THEMES) {
   for (const vp of VIEWPORTS) {
     test(`@a11y session-hub manager [${theme}/${vp.name}]`, async ({ page }) => {
-      await require('./helpers/session-hub').mockSessionHub(page);
+      const { mockSessionHub, expectNoHorizontalOverflow } = require('./helpers/session-hub');
+      await mockSessionHub(page);
       await page.setViewportSize({ width: vp.width, height: vp.height });
       await setTheme(page, theme);
       await page.goto('/#manager');
@@ -364,6 +365,7 @@ for (const theme of THEMES) {
       await expect(page.locator('.manager-msg-assistant .markdown-body h2')).toHaveText('검토 결과');
       await expect(page.locator('.session-hub-tools summary')).toContainText('세션 열기:');
       const check = async () => {
+        await expectNoHorizontalOverflow(page);
         const result = await new AxeBuilder({ page }).withTags(WCAG_TAGS)
           .include('[data-view="manager"]').analyze();
         expect(result.violations.filter(item => item.impact !== 'minor')).toEqual([]);
