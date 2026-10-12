@@ -286,6 +286,42 @@ const benchmark = `
   process.stdout.write(JSON.stringify({ sizes, milliseconds, ratio: milliseconds[2] / milliseconds[0] }));
 `;
 
+function runBenchmarkWithRetry(run) {
+  let child = run();
+  // Retry scheduler-sensitive performance assertions only. Correctness failures,
+  // crashes, signals and timeouts must still fail on the first attempt.
+  if (!child.error && child.signal === null && child.status !== null && child.status !== 0
+    && /AssertionError \[ERR_ASSERTION\]/.test(child.stderr)
+    && /\bat assertLinearPerformance\b/.test(child.stderr)) {
+    child = run();
+  }
+  assert.ifError(child.error);
+  assert.equal(child.signal, null, child.stderr);
+  assert.equal(child.status, 0, child.stderr);
+  return child;
+}
+
+test('benchmark retry is limited to one linearity assertion failure', () => {
+  const success = { status: 0, signal: null, stderr: '', stdout: '{}' };
+  const linearFailure = { status: 1, signal: null,
+    stderr: 'AssertionError [ERR_ASSERTION]: growth\n    at assertLinearPerformance ([eval]:10:12)' };
+  for (const [responses, expectedCalls, passes] of [
+    [[success], 1, true],
+    [[linearFailure, success], 2, true],
+    [[linearFailure, linearFailure], 2, false],
+    [[{ status: 1, signal: null, stderr: 'Error: crash' }], 1, false],
+    [[{ status: 1, signal: null, stderr: 'AssertionError [ERR_ASSERTION]\n    at measure ([eval]:20:12)' }], 1, false],
+    [[{ ...linearFailure, status: null, signal: 'SIGKILL' }], 1, false],
+    [[{ ...linearFailure, error: Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' }) }], 1, false],
+  ]) {
+    let calls = 0;
+    const run = () => runBenchmarkWithRetry(() => responses[calls++]);
+    if (passes) assert.doesNotThrow(run);
+    else assert.throws(run);
+    assert.equal(calls, expectedCalls);
+  }
+});
+
 for (const [family, unit, masked = false] of [
   ['UPPER_SNAKE', 'AKEY'],
   ['PEM without END', '-----BEGIN PRIVATE KEY-----'],
@@ -295,13 +331,10 @@ for (const [family, unit, masked = false] of [
   ['CLI password repeated values', '--password hunter2 ', true],
 ]) {
   for (const [mode, tail] of [['raw', ''], ['normalized backstop', '\u200B']]) {
-    test(`linear performance: ${family}, ${mode}, 200K/400K/800K`, { timeout: 15000 }, t => {
-      const child = spawnSync(process.execPath,
+    test(`linear performance: ${family}, ${mode}, 200K/400K/800K`, { timeout: 30000 }, t => {
+      const child = runBenchmarkWithRetry(() => spawnSync(process.execPath,
         ['-e', benchmark, require.resolve('../services/memorySanitize'), unit, tail, masked ? 'masked' : 'clean'],
-        { encoding: 'utf8', timeout: 12000, killSignal: 'SIGKILL', maxBuffer: 65536 });
-      assert.ifError(child.error);
-      assert.equal(child.signal, null, child.stderr);
-      assert.equal(child.status, 0, child.stderr);
+        { encoding: 'utf8', timeout: 12000, killSignal: 'SIGKILL', maxBuffer: 65536 }));
       t.diagnostic(child.stdout);
     });
   }

@@ -166,6 +166,26 @@ function resolveClaudeProviderAuthEnv(allow) {
   return { env, sources };
 }
 
+function claudeKeychainLookupArgs(readPassword = false) {
+  const base = ['find-generic-password', '-s', CLAUDE_KEYCHAIN_SERVICE];
+  const suffix = readPassword ? ['-w'] : [];
+  const lookups = [];
+  try {
+    const account = os.userInfo().username;
+    if (typeof account === 'string' && account) {
+      lookups.push([...base, '-a', account, ...suffix]);
+    }
+  } catch {
+    // User metadata may be unavailable; retain the legacy service lookup.
+  }
+  lookups.push([...base, ...suffix]);
+  return lookups;
+}
+
+function keychainLookupTimedOut(error) {
+  return error.killed === true || Boolean(error.signal) || error.code === 'ETIMEDOUT';
+}
+
 /**
  * Check whether the macOS Keychain has a Claude Code OAuth credentials item.
  *
@@ -196,15 +216,16 @@ function resolveClaudeProviderAuthEnv(allow) {
 function hasClaudeKeychainCredentials() {
   if (hostCredentialDiscoveryDisabled()) return false;
   if (process.platform !== 'darwin') return false;
-  try {
-    execFileSync('security', ['find-generic-password', '-s', CLAUDE_KEYCHAIN_SERVICE], {
-      stdio: 'pipe',
-      timeout: 3000,
-    });
-    return true;
-  } catch {
-    return false;
+  for (const args of claudeKeychainLookupArgs()) {
+    try {
+      execFileSync('security', args, { stdio: 'pipe', timeout: 3000 });
+      return true;
+    } catch (error) {
+      if (keychainLookupTimedOut(error)) break;
+      // Try the next lookup when the item is missing or inaccessible.
+    }
   }
+  return false;
 }
 
 /**
@@ -262,22 +283,27 @@ function parseClaudeOAuthAccessToken(raw) {
 function readClaudeKeychainTokenSync() {
   if (hostCredentialDiscoveryDisabled()) return null;
   if (process.platform !== 'darwin') return null;
-  try {
-    const raw = execFileSync(
-      'security',
-      ['find-generic-password', '-s', CLAUDE_KEYCHAIN_SERVICE, '-w'],
-      { stdio: 'pipe', timeout: 3000, encoding: 'utf8' },
-    ).trim();
-    if (!raw) return null;
+  for (const args of claudeKeychainLookupArgs(true)) {
     try {
-      return parseClaudeOAuthAccessToken(raw);
-    } catch {
-      // Older keychain schemas stored the token as a bare string.
-      return raw;
+      const raw = execFileSync(
+        'security',
+        args,
+        { stdio: 'pipe', timeout: 3000, encoding: 'utf8' },
+      ).trim();
+      if (!raw) continue;
+      try {
+        const token = parseClaudeOAuthAccessToken(raw);
+        if (token) return token;
+      } catch {
+        // Older keychain schemas stored the token as a bare string.
+        return raw;
+      }
+    } catch (error) {
+      if (keychainLookupTimedOut(error)) break;
+      // Try the next lookup when the item is missing or inaccessible.
     }
-  } catch {
-    return null;
   }
+  return null;
 }
 
 function readClaudeLinuxCredentialsTokenSync() {
@@ -750,28 +776,33 @@ function resolveCodexAuth({
 async function readClaudeKeychainToken() {
   if (hostCredentialDiscoveryDisabled()) return null;
   if (process.platform !== 'darwin') return null;
-  try {
-    const { stdout } = await execFileAsync(
-      'security',
-      ['find-generic-password', '-s', CLAUDE_KEYCHAIN_SERVICE, '-w'],
-      { stdio: 'pipe', timeout: 3000, encoding: 'utf8' },
-    );
-    const raw = stdout.trim();
-    if (!raw) return null;
-    // Claude Code stores its credentials as JSON in the keychain payload.
-    // Fields of interest: claudeAiOauth.accessToken (+ expiresAt).
+  for (const args of claudeKeychainLookupArgs(true)) {
     try {
-      return parseClaudeOAuthAccessToken(raw);
-    } catch {
-      // Older schemas / test fixtures may store a bare token string instead
-      // of JSON. Accept any non-empty string — the Anthropic API itself is
-      // the authoritative validator of whether the value is a usable token.
-      // No structured payload here, so no expiry data to check against.
-      return raw;
+      const { stdout } = await execFileAsync(
+        'security',
+        args,
+        { stdio: 'pipe', timeout: 3000, encoding: 'utf8' },
+      );
+      const raw = stdout.trim();
+      if (!raw) continue;
+      // Claude Code stores its credentials as JSON in the keychain payload.
+      // Fields of interest: claudeAiOauth.accessToken (+ expiresAt).
+      try {
+        const token = parseClaudeOAuthAccessToken(raw);
+        if (token) return token;
+      } catch {
+        // Older schemas / test fixtures may store a bare token string instead
+        // of JSON. Accept any non-empty string — the Anthropic API itself is
+        // the authoritative validator of whether the value is a usable token.
+        // No structured payload here, so no expiry data to check against.
+        return raw;
+      }
+    } catch (error) {
+      if (keychainLookupTimedOut(error)) break;
+      // Try the next lookup when the item is missing or inaccessible.
     }
-  } catch {
-    return null;
   }
+  return null;
 }
 
 /**

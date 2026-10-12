@@ -5,7 +5,17 @@ import { createRequire } from 'node:module';
 import { buildBundle, runExecutor, receiveEnvelope, writeSnapshotAtomic } from './lib/sessionSnapshotBundle.mjs';
 const require = createRequire(import.meta.url);
 const { assertSpawnAllowed, isSpawnGuardActive } = require('../server/utils/spawnGuard.js');
-function invalidInput() { throw new Error('request_invalid'); }
+const INPUT_HINTS = Object.freeze({
+  usage: '사용법: session-snapshot.mjs [remote --host <user@host>] snapshot|exclude ...',
+  out_dir_missing: 'snapshot 에는 --out-dir 또는 PALANTIR_OBSERVE_SNAPSHOT_DIR 이 필요합니다',
+  host_invalid: '--host 에는 유효한 호스트 이름 또는 user@host 가 필요합니다',
+  now_invalid: '--now 에는 유효한 YYYY-MM-DD 날짜 또는 ISO 날짜/시간이 필요합니다',
+  label_invalid: '--label 은 영문, 숫자, 점, 밑줄, 하이픈으로 된 1~32자이며 하이픈으로 시작할 수 없습니다',
+  exclude_target: 'exclude 에는 --instruction 또는 --session 중 정확히 하나가 필요합니다',
+});
+function invalidInput(reason = 'usage') {
+  throw Object.assign(new Error('request_invalid'), { hint: INPUT_HINTS[reason] });
+}
 function assertPrivateOutput(outDir) {
   const publicRoot = fs.realpathSync(fileURLToPath(new URL('../server/public', import.meta.url)));
   let ancestor = path.resolve(outDir);
@@ -51,27 +61,28 @@ function parseArguments(argv, env) {
   }
   const host = values['--host'];
   if (remote && (typeof host !== 'string' || !/^[A-Za-z0-9._-]+(?:@[A-Za-z0-9._-]+)?$/.test(host)
-    || host.startsWith('-'))) invalidInput();
+    || host.startsWith('-'))) invalidInput('host_invalid');
   const remoteNode = values['--remote-node'];
   if (remoteNode !== undefined && !/^\/[A-Za-z0-9._/-]+$/.test(remoteNode)) invalidInput();
   const sshBin = env.PALANTIR_OBSERVE_SSH_BIN || 'ssh';
   if (sshBin !== 'ssh' && !/^\/[A-Za-z0-9._/-]+$/.test(sshBin)) invalidInput();
-  if (values['--now'] !== undefined && !/^\d{4}-\d{2}-\d{2}(?:T.+)?$/.test(values['--now'])) invalidInput();
+  if (values['--now'] !== undefined && !/^\d{4}-\d{2}-\d{2}(?:T.+)?$/.test(values['--now'])) invalidInput('now_invalid');
   const now = values['--now'] === undefined ? new Date() : new Date(values['--now']);
-  if (!Number.isFinite(+now) || !/^\d{4}-/.test(now.toISOString())) invalidInput();
+  if (!Number.isFinite(+now) || !/^\d{4}-/.test(now.toISOString())) invalidInput('now_invalid');
   const label = values['--label'];
-  if (label !== undefined && (!/^[A-Za-z0-9._-]{1,32}$/.test(label) || label.startsWith('-'))) invalidInput();
+  if (label !== undefined && (!/^[A-Za-z0-9._-]{1,32}$/.test(label) || label.startsWith('-'))) invalidInput('label_invalid');
   const request = { schema: 'palantir.snapshot-request/1', op: 'snapshot', now: now.toISOString(),
     include_exec: values['--include-exec'] === true, orca_bin: values['--orca-bin'] ?? 'orca' };
   const outDir = values['--out-dir'] || env.PALANTIR_OBSERVE_SNAPSHOT_DIR;
   if (operation === 'snapshot') {
-    if (!outDir || values['--instruction'] !== undefined || values['--session'] !== undefined) invalidInput();
+    if (!outDir) invalidInput('out_dir_missing');
+    if (values['--instruction'] !== undefined || values['--session'] !== undefined) invalidInput();
     if (label !== undefined) request.machine_label = label;
   } else {
     if (values['--out-dir'] !== undefined || values['--include-exec'] || label !== undefined) invalidInput();
     const instruction = values['--instruction'];
     const session = values['--session'];
-    if ((instruction === undefined) === (session === undefined)) invalidInput();
+    if ((instruction === undefined) === (session === undefined)) invalidInput('exclude_target');
     request.op = 'exclude_query';
     if (instruction !== undefined) {
       const separator = instruction.lastIndexOf('#');
@@ -110,7 +121,12 @@ export async function main(argv, { stdin = process.stdin, stdout = process.stdou
     if (isSpawnGuardActive()) {
       assertSpawnAllowed({ command: options.request.orca_bin, source: 'session-snapshot:orca_bin' });
     }
-  } catch (error) { stderr.write((error.code || 'request_invalid') + '\n'); return 2; }
+  } catch (error) {
+    const code = error.code || 'request_invalid';
+    stderr.write(code + '\n');
+    if (code === 'request_invalid' && error.hint) stderr.write('hint: ' + error.hint + '\n');
+    return 2;
+  }
   async function execute(request, expectedKinds) {
     const bundle = buildBundle({ request });
     const result = await runExecutor({ ...options, bundle, env, spawnImpl, timeoutMs });

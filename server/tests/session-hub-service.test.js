@@ -438,7 +438,7 @@ test('spawn error and natural exit use the single cleanup Promise', async t => {
 
 test('real fixture group with SIGTERM-ignoring descendant is reaped after parent exits', async t => {
   const signals = [];
-  const fx = serviceFixture(t, { termMs: 60, reapMs: 1500, pollMs: 10,
+  const fx = serviceFixture(t, { termMs: 60, reapMs: 3000, pollMs: 10,
     spawn: (command, argv, opts) => childProcess.spawn(command, [...argv, '--fixture-stubborn-child'], opts),
     kill: (...args) => { signals.push(args[1]); return process.kill(...args); },
   });
@@ -449,6 +449,16 @@ test('real fixture group with SIGTERM-ignoring descendant is reaped after parent
   await new Promise(resolve => setTimeout(resolve, 100));
   await fx.service.stop();
   assert.ok(signals.includes('SIGKILL'));
+  // A killed orphan can remain a zombie briefly while the OS reparents/reaps it.
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    try { process.kill(descendant, 0); }
+    catch (err) {
+      if (err.code === 'ESRCH') break;
+      throw err;
+    }
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
   assert.throws(() => process.kill(descendant, 0), err => err.code === 'ESRCH');
 });
 
