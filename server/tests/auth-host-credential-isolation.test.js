@@ -278,6 +278,7 @@ test('isolation suppresses the keychain probes on a Darwin-shaped host', async (
 test('positive control: unisolated keychain probes are observable', async (t) => {
   sandbox(t);
   asDarwinHost(t);
+  t.mock.method(os, 'userInfo', () => ({ username: 'fixture-account' }));
   const probes = spyOnNativeProbes(t);
   const resolver = loadResolver();
 
@@ -285,10 +286,15 @@ test('positive control: unisolated keychain probes are observable', async (t) =>
   // are meaningless here — reaching the probe at all is the whole assertion.
   resolver.hasClaudeKeychainCredentials();   // execFileSync
   await resolver.readClaudeKeychainToken();  // execFile (promisified)
-  assert.equal(
-    probes.securityCalls().length,
-    2,
-    'both the sync existence probe and the async token read must be observable',
+  assert.deepEqual(
+    probes.securityCalls(),
+    [
+      'security find-generic-password -s Claude Code-credentials -a fixture-account',
+      'security find-generic-password -s Claude Code-credentials',
+      'security find-generic-password -s Claude Code-credentials -a fixture-account -w',
+      'security find-generic-password -s Claude Code-credentials -w',
+    ],
+    'both readers must probe the account before falling back to the service',
   );
 });
 

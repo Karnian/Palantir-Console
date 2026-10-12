@@ -10,6 +10,48 @@ function args(f, extra = []) {
   return ['remote', '--host', 'synthetic@host', 'snapshot', '--now', NOW,
     '--out-dir', f.out, '--orca-bin', f.request.orca_bin, ...extra];
 }
+test('CLI validation adds fixed hints without exposing unknown argument values', async t => {
+  const f = fixture(t);
+  const entrypoint = path.resolve(__dirname, '../../scripts/session-snapshot.mjs');
+  const env = { ...f.env };
+  delete env.PALANTIR_OBSERVE_SNAPSHOT_DIR;
+  for (const [argv, hint] of [
+    [['snapshot'], 'hint: snapshot 에는 --out-dir 또는 PALANTIR_OBSERVE_SNAPSHOT_DIR 이 필요합니다'],
+    [['snapshot', '--unknown'], 'hint: 사용법: session-snapshot.mjs [remote --host <user@host>] snapshot|exclude ...'],
+    [['snapshot', '--password=hunter2'], 'hint: 사용법: session-snapshot.mjs [remote --host <user@host>] snapshot|exclude ...'],
+  ]) {
+    const result = spawnSync(process.execPath, [entrypoint, ...argv], { env, encoding: 'utf8' });
+    assert.ifError(result.error);
+    assert.equal(result.status, 2);
+    assert.equal(result.stdout, '');
+    assert.deepEqual(result.stderr.split('\n'), ['request_invalid', hint, '']);
+    assert.equal(result.stderr.includes('--password=hunter2'), false);
+    assert.equal(result.stderr.includes('hunter2'), false);
+  }
+});
+
+test('CLI validation distinguishes usage, host, date, label and exclude target hints', async t => {
+  const f = fixture(t);
+  const denied = recordingSpawn(t);
+  for (const [argv, hint] of [
+    [[], 'hint: 사용법:'],
+    [['remote', '--host', '-bad', 'snapshot'], 'hint: --host 에는'],
+    [['snapshot', '--now', 'bad'], 'hint: --now 에는'],
+    [['snapshot', '--now', '2026-99-99'], 'hint: --now 에는'],
+    [['snapshot', '--label', '-bad'], 'hint: --label 은'],
+    [['exclude'], 'hint: exclude 에는'],
+    [['exclude', '--session', 'claude:s', '--instruction', 'i#r'], 'hint: exclude 에는'],
+  ]) {
+    const result = await invoke(f, argv, '', f.env, denied.spawnImpl);
+    assert.equal(result.code, 2);
+    const lines = result.errors().split('\n');
+    assert.equal(lines[0], 'request_invalid');
+    assert.ok(lines[1].startsWith(hint), result.errors());
+    assert.equal(lines.length, 3);
+    assert.equal(result.spawns(), 0);
+  }
+  assert.equal(denied.calls.length, 0);
+});
 async function invoke(f, argv, input = '', env = f.env, executorSpawn, timeoutMs) {
   const io = capture(input, executorSpawn);
   let timeoutKills = 0;
@@ -159,7 +201,7 @@ test('CLI entrypoint propagates invalid input exit status and writes a real fixt
   assert.equal(invalid.error, undefined);
   assert.equal(invalid.status, 2);
   assert.equal(invalid.stdout, '');
-  assert.equal(invalid.stderr, 'request_invalid\n');
+  assert.equal(invalid.stderr, 'request_invalid\nhint: --host 에는 유효한 호스트 이름 또는 user@host 가 필요합니다\n');
   assert.equal(fs.existsSync(f.out), false);
   const valid = spawnSync(process.execPath, [entrypoint, ...args(f)], { env: f.env, encoding: 'utf8' });
   assert.equal(valid.error, undefined);
@@ -345,7 +387,7 @@ test('PR1c B invalid labels and labels on exclude are rejected by Mac with zero 
     [...exclusionArgs(f), '--label', 'codev2']])) {
     const result = await invoke(f, argv, '', f.env, denied.spawnImpl);
     assert.equal(result.code, 2);
-    assert.equal(result.errors(), 'request_invalid\n');
+    assert.match(result.errors(), /^request_invalid\nhint: [^\n]+\n$/);
     assert.equal(result.spawns(), 0);
     assert.deepEqual(fs.readFileSync(f.config), before);
   }
