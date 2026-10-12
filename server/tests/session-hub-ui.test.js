@@ -618,8 +618,7 @@ test('inactive ManagerView preserves original DOM; active defaults to assistant 
   env.context.EventSource = class { addEventListener() {} close() {} };
   const current = fs.readFileSync(path.join(publicRoot, 'app/components/ManagerView.js'), 'utf8');
   const transform = source => transformComponentSource(source).replace(/^export\s+\{[^}]+\};?\s*$/gm, '');
-  const original = require('node:child_process').execFileSync('git',
-    ['show', 'origin/main:server/public/app/components/ManagerView.js'], { encoding: 'utf8' });
+  const original = fs.readFileSync(path.join(__dirname, 'fixtures/manager-view-pre-hub.js'), 'utf8');
   vm.runInContext(transform(original) + '\nthis.OldManagerView = ManagerView;', env.context);
   const props = { manager: { status: {} }, projects: [], runs: [], tasks: [], nodeSummary: {} };
   env.render(env.h(env.context.OldManagerView, props), env.root); await flushEffects();
