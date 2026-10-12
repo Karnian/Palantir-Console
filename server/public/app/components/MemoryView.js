@@ -14,10 +14,12 @@ import { addToast, apiFetchWithToast } from '../lib/toast.js';
 import { sseBroker } from '../lib/hooks/sse.js';
 import { EmptyState } from './EmptyState.js';
 import { Dropdown } from './Dropdown.js';
+import { AssistantMemoryView } from './AssistantMemory.js';
 import { Modal } from './Modal.js';
 
 const SCOPE_TABS = [
   { key: 'user', label: '전체' },
+  { key: 'assistant', label: '비서 기억' },
   { key: 'workspace', label: '프로젝트' },
   { key: 'profile', label: 'Operator' },
   { key: 'cross_project', label: '공통 후보' },
@@ -327,6 +329,17 @@ export function MemoryView({ projects = [] }) {
     });
   }
 
+  if (scope === 'assistant') return html`
+    <div class="page memory-page memory-hub" data-view="memory">
+      <div class="page-header memory-hub-header"><div><h1>Memory Hub</h1>
+        <p class="memory-page-subtitle">비서가 기억할 내용을 관리합니다.</p></div></div>
+      <nav class="memory-scope-tabs" role="tablist" aria-label="메모리 범위">
+        ${SCOPE_TABS.map(tab => html`<button key=${tab.key} type="button" role="tab"
+          aria-selected=${scope === tab.key} class=${`memory-scope-tab ${scope === tab.key ? 'is-active' : ''}`}
+          onClick=${() => selectScope(tab.key)}>${tab.label}</button>`)}
+      </nav>
+      <${AssistantMemoryView} />
+    </div>`;
   const descriptor = describeScope(scope, projectId, profileId);
   const canReview = !!diagnostics?.approval?.can_review;
 
@@ -620,6 +633,7 @@ export function MemoryView({ projects = [] }) {
 }
 
 function describeScope(scope, projectId, profileId) {
+  if (scope === 'assistant') return { ready: false };
   if (scope === 'workspace') {
     const base = projectId ? `/api/projects/${encodeURIComponent(projectId)}/memory` : '';
     return {

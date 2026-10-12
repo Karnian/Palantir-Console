@@ -3,6 +3,7 @@ import { apiFetch } from '../api.js';
 import { startObserveEntry } from '../workBoard.js';
 
 export function useObserveEntry() {
+  const [sessionHubActive, setSessionHubActive] = useState(false);
   const [entry, setEntry] = useState({ activation: 'pending', loading: !location.hash });
   useEffect(() => startObserveEntry({
     request: apiFetch,
@@ -14,5 +15,12 @@ export function useObserveEntry() {
     },
     publish: setEntry,
   }), []);
-  return entry;
+  useEffect(() => {
+    const controller = new AbortController();
+    apiFetch('/api/health', { signal: controller.signal }).then(data => {
+      if (!controller.signal.aborted) setSessionHubActive(data.sessionHubActive === true);
+    }).catch(() => {});
+    return () => controller.abort();
+  }, []);
+  return { ...entry, sessionHubActive };
 }

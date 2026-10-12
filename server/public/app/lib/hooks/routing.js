@@ -13,17 +13,25 @@ import { useState, useEffect } from '../../../vendor/hooks.module.js';
 // empty-hash case lands on the Attention Dashboard.
 const DEFAULT_ROUTE = 'dashboard';
 
-export function useRoute() {
-  const getHash = () => location.hash.slice(1) || DEFAULT_ROUTE;
+export function useRoute(sessionHubActive = false) {
+  const getHash = () => {
+    if (sessionHubActive && location.hash === '#work') location.replace('#manager/all-sessions');
+    return location.hash.slice(1) || DEFAULT_ROUTE;
+  };
   const [route, setRoute] = useState(getHash);
   useEffect(() => {
+    setRoute(getHash());
     const onHash = () => setRoute(getHash());
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
-  }, []);
+  }, [sessionHubActive]);
   return route;
 }
 
 export function navigate(hash) {
+  const previous = location.hash;
   location.hash = hash;
+  if (location.hash === previous && previous === '#manager/all-sessions') {
+    window.dispatchEvent(new Event('hashchange'));
+  }
 }

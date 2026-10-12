@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const vm = require('node:vm');
-const { createPreactEnv, flushEffects } = require('./helpers/jsdom-preact');
+const { createPreactEnv, flushEffects, transformComponentSource } = require('./helpers/jsdom-preact');
 const { createSnapshots } = require('./helpers/work-board-fixture.cjs');
 const source = fs.readFileSync(path.join(__dirname, '../public/app/lib/workBoard.js'), 'utf8');
 const logic = import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
@@ -247,7 +247,7 @@ test('DOM displays command cards, timeline and raw search matches as safe litera
   alpha.instructions[1].text = commandText('///review', args);
   const env = boardEnv(t), root = env.document.getElementById('root');
   env.context.apiFetch = async url => url.endsWith('/snapshots') ? { snapshots: [{ machine_id: 'alpha' }] } : alpha;
-  env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
+  env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
   assert.equal(root.querySelector('.work-title').textContent, '/review scripts/lib');
   assert.equal(root.querySelector('.work-recent').textContent, `/review scripts/lib [REDACTED] ${attack}`);
   assert.equal(root.querySelector('.work-first').textContent, '/deep-research');
@@ -255,6 +255,7 @@ test('DOM displays command cards, timeline and raw search matches as safe litera
   const timeline = Array.from(root.querySelectorAll('.work-instruction'), node => node.textContent);
   assert.deepEqual(timeline, [`/review ${args}`, '/deep-research']);
   for (const term of ['command-name', 'onerror', '[REDACTED]', 'command-message']) {
+    if (!root.querySelector('#work-query')) await backToList(root);
     const query = root.querySelector('#work-query');
     query.value = term; query.dispatchEvent(new env.window.Event('input', { bubbles: true }));
     await flushEffects();
@@ -291,13 +292,14 @@ test('DOM command card rows use the existing display deduplication priority', as
     snapshot.instructions[1].text = variant.recent;
     env.context.apiFetch = async url => url.endsWith('/snapshots')
       ? { snapshots: [{ machine_id: 'alpha' }] } : snapshot;
-    env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
+    env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
     const check = () => {
       assert.equal(root.querySelector('.work-title').textContent, variant.ai || '/review scripts/lib');
       assert.equal(root.querySelectorAll('.work-recent-block').length, variant.omit ? 0 : 1);
       assert.equal(root.querySelectorAll('.work-first-block').length, variant.show ? 1 : 0);
     };
     check();
+    if (!root.querySelector('#work-query')) await backToList(root);
     const query = root.querySelector('#work-query');
     query.value = 'command-name'; query.dispatchEvent(new env.window.Event('input', { bubbles: true }));
     await flushEffects(); check();
@@ -317,7 +319,7 @@ test('DOM search highlights original lines without matching a synthesized comman
   alpha.instructions[1].text = wrapped;
   const env = boardEnv(t), root = env.document.getElementById('root');
   env.context.apiFetch = async url => url.endsWith('/snapshots') ? { snapshots: [{ machine_id: 'alpha' }] } : alpha;
-  env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
+  env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
   assert.equal(root.querySelector('.work-title').textContent, mismatched);
   assert.equal(root.querySelector('.work-recent').textContent, '/review x');
   root.querySelector('.work-card button').click(); await flushEffects();
@@ -328,6 +330,7 @@ test('DOM search highlights original lines without matching a synthesized comman
     { query: 'command-name', expected: '<command-name>/review</command-name><command-args>x' },
   ];
   for (const { query, expected } of cases) {
+    await backToList(root);
     const input = root.querySelector('#work-query');
     input.value = query; input.dispatchEvent(new env.window.Event('input', { bubbles: true }));
     await flushEffects();
@@ -360,7 +363,7 @@ test('DOM highlights original matches before verifying converted card and timeli
     snapshot.instructions[1].text = variant.recent;
     env.context.apiFetch = async url => url.endsWith('/snapshots')
       ? { snapshots: [{ machine_id: 'alpha' }] } : snapshot;
-    env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
+    env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
     const input = root.querySelector('#work-query');
     input.value = query; input.dispatchEvent(new env.window.Event('input', { bubbles: true }));
     await flushEffects();
@@ -407,10 +410,11 @@ test('recent instruction placeholders distinguish blank text from zero instructi
     assert.equal(card.recentMissing, !!variant.missing);
     env.context.apiFetch = async url => url.endsWith('/snapshots')
       ? { snapshots: [{ machine_id: 'alpha' }] } : snapshot;
-    env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
+    env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
     assert.equal(root.querySelectorAll('.work-card').length, 1);
     assert.equal(root.querySelector('.work-title').textContent, '합성 세션 검토');
     assert.equal(root.querySelector('.work-recent').textContent, variant.expected);
+    if (!root.querySelector('#work-query')) await backToList(root);
     const query = root.querySelector('#work-query');
     query.value = '합성'; query.dispatchEvent(new env.window.Event('input', { bubbles: true }));
     await flushEffects();
@@ -455,7 +459,7 @@ test('card line priority compares normalized display strings in normal and searc
     }
     env.context.apiFetch = async url => url.endsWith('/snapshots')
       ? { snapshots: [{ machine_id: 'alpha' }] } : snapshot;
-    env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
+    env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
     const check = () => {
       assert.equal(root.querySelectorAll('.work-card').length, 1);
       assert.equal(root.querySelector('.work-title').textContent, variant.ai || variant.first);
@@ -466,6 +470,7 @@ test('card line priority compares normalized display strings in normal and searc
         variant.state ? [status] : []);
     };
     check();
+    if (!root.querySelector('#work-query')) await backToList(root);
     const query = root.querySelector('#work-query');
     query.value = variant.state ? '로그인' : '검토 수정 지시'.split(' ').find(word =>
       [variant.ai, variant.first, variant.recent].some(text => text?.includes(word)));
@@ -486,7 +491,7 @@ test('whitespace-only AI titles fall back to the first text instruction', async 
   assert.equal(card.showFirst, false);
   const env = boardEnv(t), root = env.document.getElementById('root');
   env.context.apiFetch = async url => url.endsWith('/snapshots') ? { snapshots: [{ machine_id: 'alpha' }] } : alpha;
-  env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
+  env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
   assert.equal(root.querySelectorAll('.work-card').length, 1);
   assert.equal(root.querySelector('.work-title').textContent, '인증 흐름을 검토해 주세요.');
   assert.equal(root.querySelector('.work-title').previousElementSibling.textContent, '처음');
@@ -686,20 +691,37 @@ test('entry cleanup aborts probe and ignores late resolution', async t => {
   assert.equal(fx.states.length, 1); assert.deepEqual(fx.writes, []);
 });
 
-function boardEnv(t, snapshotRequest = async () => ({ enabled: false, targets: [], auto_interval_ms: 0 })) {
+async function backToList(root) {
+  const back = Array.from(root.querySelectorAll('button')).find(button => button.textContent === '← 모든 세션');
+  if (back) { back.click(); await flushEffects(); }
+}
+
+function boardEnv(t, snapshotRequest = async () => ({ enabled: true, targets: [] })) {
   const env = createPreactEnv();
-  let requestApi;
-  Object.defineProperty(env.context, 'apiFetch', { configurable: true,
-    get: () => (url, options) => url.startsWith('/api/session-hub/snapshots')
-      ? snapshotRequest(url, options) : requestApi(url, options),
-    set: value => { requestApi = value; },
-  });
   vm.runInContext(source.replace(/\bexport /g, ''), env.context);
   vm.runInContext('this.W = WORK_BOARD_LABELS;', env.context);
-  const hook = fs.readFileSync(path.join(__dirname, '../public/app/lib/hooks/useSnapshotRefresh.js'), 'utf8');
-  const { transformComponentSource } = require('./helpers/jsdom-preact');
-  vm.runInContext(transformComponentSource(hook), env.context);
-  env.loadComponent('WorkBoardView');
+  for (const name of ['useSessionSnapshots', 'useSnapshotRefresh']) {
+    const src = fs.readFileSync(path.join(__dirname, '../public/app/lib/hooks', `${name}.js`), 'utf8');
+    vm.runInContext(transformComponentSource(src), env.context);
+  }
+  env.loadComponent('Dropdown');
+  env.loadComponent('SessionSnapshotParts');
+  env.loadComponent('SnapshotRefreshControls');
+  env.loadComponent('SessionHubSidebar');
+  require('./helpers/session-detail-cards').installDetailCards(env);
+  // Keep rich timeline display contracts intact; compact row contracts live in session-hub-ui.test.js.
+  let request;
+  Object.defineProperty(env.context, 'apiFetch', {
+    configurable: true,
+    set(value) { request = value; },
+    get() { return async (url, options) => {
+      if (url.startsWith('/api/session-hub/snapshots')) return snapshotRequest(url, options);
+      const data = await request(url.split('?')[0], options);
+      return url.endsWith('/snapshots') ? { ...data, rev: '0123456789abcdef',
+        snapshots: data.snapshots.map(entry => entry.machine_id ? { ...entry, sha256: 'a'.repeat(64) } : entry) }
+        : data;
+    }; },
+  });
   t.after(() => { env.render(null, env.document.getElementById('root')); env.cleanup(); });
   return env;
 }
@@ -715,9 +737,9 @@ test('DOM preserves XSS instruction/title/repo as text, timeline flags and selec
     { machine_id: 'alpha', machine_label: 'Mac', generated_at: alpha.generated_at },
     { name_id: 'bad', error_code: 'parse_error' },
   ] } : alpha;
-  env.render(env.h(env.context.WorkBoardView), env.document.getElementById('root'));
+  env.render(env.h(env.context.DetailCards), env.document.getElementById('root'));
   await flushEffects(); await flushEffects();
-  const cards = env.document.querySelectorAll('.work-card');
+  let cards = env.document.querySelectorAll('.work-card');
   assert.equal(cards.length, 2);
   assert.equal(cards[0].querySelector('.work-repo').textContent, attack);
   assert.equal(cards[0].querySelector('.work-title').textContent, attack);
@@ -727,6 +749,7 @@ test('DOM preserves XSS instruction/title/repo as text, timeline flags and selec
   assert.equal(env.document.querySelectorAll('img, script').length, 0);
   assert.equal(env.document.querySelectorAll('[onerror]').length, 0);
   cards[0].querySelector('button').click(); await flushEffects();
+  cards = env.document.querySelectorAll('.work-card');
   assert.equal(cards[0].querySelectorAll('.work-event').length, 2);
   assert.equal(cards[0].querySelector('.work-instruction').textContent, attack);
   assert.ok(cards[0].textContent.includes('살균됨'));
@@ -736,6 +759,7 @@ test('DOM preserves XSS instruction/title/repo as text, timeline flags and selec
   const input = cards[0].querySelector('.work-selector');
   assert.equal(input.value, `${alpha.instructions[1].id}#${alpha.instructions[1].ref}`);
   assert.equal(input.selectionStart, 0); assert.equal(input.selectionEnd, input.value.length);
+  await backToList(env.document.getElementById('root'));
   const query = env.document.getElementById('work-query');
   query.value = 'onerror'; query.dispatchEvent(new env.window.Event('input', { bubbles: true }));
   await flushEffects();
@@ -753,14 +777,14 @@ test('DOM cleanup aborts detail requests and removes data; recovery messages rem
     return url.endsWith('/snapshots') ? Promise.resolve({ snapshots: [{ machine_id: 'alpha' }] }) : pending.promise;
   };
   const root = env.document.getElementById('root');
-  env.render(env.h(env.context.WorkBoardView), root); await flushEffects();
-  assert.equal(root.querySelector('.work-body [role="status"]').textContent, '불러오는 중 (0/1)');
+  env.render(env.h(env.context.DetailCards), root); await flushEffects();
+  assert.equal(root.querySelector('[role="status"]').textContent, '불러오는 중 (0/1)');
   assert.equal(signal.aborted, false);
   env.render(null, root); assert.equal(signal.aborted, true);
   pending.resolve(alpha); await flushEffects(); assert.equal(root.textContent, '');
   env.context.apiFetch = async url => url.endsWith('/snapshots')
     ? { snapshots: [{ machine_id: 'alpha' }, { machine_id: 'beta' }] } : url.endsWith('alpha') ? alpha : beta;
-  env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
+  env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
   assert.equal(root.querySelectorAll('.work-card').length, 3);
   assert.deepEqual(Array.from(root.querySelectorAll('.work-title'), node => node.textContent),
     ['합성 세션 검토', '이미지 크기별 결과를 정리해 주세요.',
@@ -784,7 +808,7 @@ test('attachment-first title instruction hides the same recent seq in normal and
   alpha.sessions[0].ai_title = null;
   const env = boardEnv(t), root = env.document.getElementById('root');
   env.context.apiFetch = async url => url.endsWith('/snapshots') ? { snapshots: [{ machine_id: 'alpha' }] } : alpha;
-  env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
+  env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
   assert.equal(root.querySelector('.work-title').textContent, '검색 가능한 첫 텍스트');
   assert.equal(root.querySelectorAll('.work-recent-block').length, 0);
   const query = root.querySelector('#work-query');
@@ -820,11 +844,12 @@ test('recovery status remains visible with AI titles and text titles, including 
       Object.assign(snapshot.sessions[0], { first_instruction: state, ai_title: title });
       env.context.apiFetch = async url => url.endsWith('/snapshots')
         ? { snapshots: [{ machine_id: 'alpha' }] } : snapshot;
-      env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
+      env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
       assert.equal(root.querySelectorAll('.work-card').length, 1);
       assert.equal(root.querySelector('.work-title').textContent, title || '인증 흐름을 검토해 주세요.');
       assert.deepEqual(Array.from(root.querySelectorAll('.work-first-status'), node => node.textContent), [message]);
-      const query = root.querySelector('#work-query');
+      if (!root.querySelector('#work-query')) await backToList(root);
+    const query = root.querySelector('#work-query');
       query.value = '로그인'; query.dispatchEvent(new env.window.Event('input', { bubbles: true }));
       await flushEffects();
       assert.equal(root.querySelectorAll('.work-card').length, 1);
@@ -875,14 +900,16 @@ for (const [status, reason, bounces] of [[403, 'cookie auth required', false], [
   });
 }
 
-test('observe nav is labeled and gated in both sidebar items and palette', async t => {
+test('snapshot nav is absorbed into manager in both sidebar items and palette', async t => {
   const env = createPreactEnv();
   const navSource = fs.readFileSync(path.join(__dirname, '../public/app/lib/nav.js'), 'utf8');
   vm.runInContext(navSource.replace(/^import .*$/gm, '').replace(/^export /gm, ''), env.context);
-  const get = state => vm.runInContext(`getNavItems('${state}')`, env.context);
-  assert.equal(get('on').length, 6);
-  assert.equal(get('on')[0].label, '작업');
-  assert.equal(get('on')[0].hash, 'work');
+  const get = (state, hub = true) => vm.runInContext(`getNavItems('${state}', ${hub})`, env.context);
+  assert.equal(get('on').length, 5);
+  assert.equal(get('on')[0].label, '매니저');
+  assert.equal(get('on')[0].hash, 'manager');
+  assert.equal(get('on', false).length, 6);
+  assert.equal(get('on', false).at(-1).hash, 'work');
   for (const state of ['pending', 'off', 'error']) {
     assert.equal(get(state).length, 5);
     assert.equal(get(state).some(item => item.hash === 'work'), false);
@@ -894,15 +921,19 @@ test('observe nav is labeled and gated in both sidebar items and palette', async
   t.after(() => { env.render(null, root); env.cleanup(); });
   env.render(env.h(env.context.CommandPalette, { open: true, onClose: () => {}, navItems: get('on') }), root);
   await flushEffects();
-  assert.equal(root.querySelectorAll('.command-palette-item').length, 6);
-  assert.equal(root.querySelector('.command-palette-label').textContent, '작업');
+  assert.equal(root.querySelectorAll('.command-palette-item').length, 5);
+  assert.equal(root.querySelector('.command-palette-label').textContent, '매니저');
   const input = root.querySelector('input');
   input.dispatchEvent(new env.window.KeyboardEvent('keydown', { key: '1', bubbles: true }));
-  assert.equal(env.window.location.hash, '#work');
+  assert.equal(env.window.location.hash, '#manager');
   env.render(env.h(env.context.CommandPalette, { open: true, onClose: () => {}, navItems: get('off') }), root);
   await flushEffects();
   assert.equal(root.querySelectorAll('.command-palette-item').length, 5);
   assert.equal(root.querySelector('.command-palette-label').textContent, '매니저');
+  env.render(env.h(env.context.CommandPalette, { open: true, onClose: () => {}, navItems: get('on', false) }), root);
+  await flushEffects();
+  assert.equal(root.querySelectorAll('.command-palette-item').length, 6);
+  assert.equal(root.querySelectorAll('.command-palette-label')[5].textContent, '작업');
 });
 
 test('clipboard success receives exact id#ref; total failures never expose raw errors', async t => {
@@ -913,7 +944,7 @@ test('clipboard success receives exact id#ref; total failures never expose raw e
   } });
   env.context.apiFetch = async url => url.endsWith('/snapshots')
     ? { snapshots: [{ machine_id: 'alpha' }] } : alpha;
-  env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
+  env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
   assert.equal(root.querySelectorAll('.work-card').length, 2);
   root.querySelector('.work-card button').click(); await flushEffects();
   root.querySelector('.work-event button').click(); await flushEffects();
@@ -922,7 +953,7 @@ test('clipboard success receives exact id#ref; total failures never expose raw e
   assert.equal(root.querySelectorAll('.work-selector').length, 0);
   env.render(null, root);
   env.context.apiFetch = async () => { throw new Error('secret English sentinel'); };
-  env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
+  env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
   assert.equal(root.querySelector('[role="alert"]').textContent,
     '스냅샷을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.');
   assert.equal(root.textContent.includes('secret English sentinel'), false);
@@ -972,7 +1003,7 @@ test('coverage aggregates every board counter and renders machine totals with Ko
     machine_id: 'alpha', machine_label: 'Mac', generated_at: '2026-10-10T01:00:00.000Z',
   }] } : alpha;
   const root = env.document.getElementById('root');
-  env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
+  env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
   assert.equal(root.querySelectorAll('.work-card').length, 2);
   const machines = root.querySelectorAll('.work-coverage-machine');
   assert.equal(machines.length, 1);
@@ -1036,7 +1067,7 @@ test('normal and search cards share title rules, omit duplicate rows and limit w
     env.context.apiFetch = async url => url.endsWith('/snapshots') ? { snapshots: [{
       machine_id: 'alpha', machine_label: 'Mac', generated_at: snapshot.generated_at,
     }] } : snapshot;
-    env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
+    env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
     const card = root.querySelector('.work-card');
     assert.equal(root.querySelectorAll('.work-card').length, 1);
     assert.equal(card.querySelector('.work-title').textContent, variant.title);
@@ -1063,7 +1094,8 @@ test('normal and search cards share title rules, omit duplicate rows and limit w
     const pill = root.querySelector('.work-snapshot-times .work-pill');
     assert.ok(pill.textContent.trim().startsWith('Mac · 방금 스냅샷 · '));
     if (variant.state === 'recoverable') {
-      const query = root.querySelector('#work-query');
+      if (!root.querySelector('#work-query')) await backToList(root);
+    const query = root.querySelector('#work-query');
       query.value = variant.same ? '인증흐름' : '로그인리다';
       query.dispatchEvent(new env.window.Event('input', { bubbles: true })); await flushEffects();
       assert.equal(root.querySelectorAll('.work-card').length, 1);
@@ -1133,12 +1165,13 @@ test('attachment-first cards hide empty first rows and fall back only when no te
     Object.assign(snapshot.instructions[1], { text: variant.text, text_missing: false });
     env.context.apiFetch = async url => url.endsWith('/snapshots')
       ? { snapshots: [{ machine_id: 'alpha' }] } : snapshot;
-    env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
+    env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
     assert.equal(root.querySelectorAll('.work-card').length, 1);
     assert.equal(root.querySelector('.work-title').textContent, variant.title);
     assert.equal(root.querySelectorAll('.work-first-block').length, 0);
     if (variant.text) {
-      const query = root.querySelector('#work-query');
+      if (!root.querySelector('#work-query')) await backToList(root);
+    const query = root.querySelector('#work-query');
       query.value = '검색가능'; query.dispatchEvent(new env.window.Event('input', { bubbles: true }));
       await flushEffects();
       assert.equal(root.querySelectorAll('.work-card').length, 1);
@@ -1157,7 +1190,7 @@ test('all composed separators have one space on each side; machine pill uses one
   env.context.apiFetch = async url => url.endsWith('/snapshots') ? { snapshots: [{
     machine_id: 'alpha', machine_label: 'Mac', generated_at: alpha.generated_at,
   }] } : alpha;
-  env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
+  env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
   assert.equal(root.querySelectorAll('.work-card').length, 2);
   const { formatLocalSnapshotTime } = await logic;
   const absolute = formatLocalSnapshotTime(alpha.generated_at, Date.parse('2026-10-10T03:10:00.000Z'));
@@ -1186,7 +1219,7 @@ test('PR1d footer shows total before retention while unknown ratio keeps the exp
   alpha.sessions[0].unknown_count = 1;
   const env = boardEnv(t), root = env.document.getElementById('root');
   env.context.apiFetch = async url => url.endsWith('/snapshots') ? { snapshots: [{ machine_id: 'alpha' }] } : alpha;
-  env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
+  env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
   assert.equal(root.querySelector('.work-card-footer span').textContent, env.context.W.instructions(401));
   assert.ok(root.textContent.includes(env.context.W.unknownRatio(1, 3)));
 });
@@ -1218,8 +1251,13 @@ test('snapshot refresh button uses its cookie endpoint and reloads board data af
     return alpha;
   };
   const root = env.document.getElementById('root');
-  env.render(env.h(env.context.WorkBoardView), root); await flushEffects(); await flushEffects();
-  const button = [...root.querySelectorAll('button')].find(item => item.textContent === '새로 만들기');
+  function Sidebar() {
+    const data = env.context.useSessionSnapshots();
+    return env.h(env.context.SessionHubSidebar, { data: { ...data,
+      cards: data.load.snapshots.flatMap(env.context.snapshotCards) } });
+  }
+  env.render(env.h(Sidebar), root); await flushEffects(); await flushEffects();
+  const button = [...root.querySelectorAll('button')].find(item => item.getAttribute('aria-label') === '새로 만들기');
   assert.equal(button.disabled, false); button.click(); await flushEffects();
   assert.equal(posts.length, 1);
   assert.equal(posts[0].url, '/api/session-hub/snapshots/refresh');

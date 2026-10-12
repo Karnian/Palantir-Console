@@ -26,6 +26,45 @@ export function displayInstructionText(text) {
   return `/${name}${args ? ` ${args}` : ''}`;
 }
 
+// A readable title is shared by compact rows, evidence chips and tool summaries.
+export function sessionDisplayTitle(card) {
+  const first = card.first_instruction === 'recoverable'
+    ? displayInstructionText(card.instructions?.[0]?.text) || card.first : card.first;
+  const meaningful = card.instructions?.filter(instruction => !instruction.text_missing)
+    .map(instruction => displayInstructionText(instruction.text)) || [];
+  const candidates = [card.ai_title, first, ...meaningful, card.recent];
+  if (!card.ai_title && !first && !card.instructions?.length) candidates.unshift(card.title);
+  const lines = candidates.map(candidate => String(displayInstructionText(candidate) || '').split(/\r?\n/u)
+    .map(value => value.trim()).find(value => value && !/^(?:<?[a-z][a-z0-9+.-]*:\/\/|www\.)/iu.test(value)))
+    .filter(Boolean);
+  return lines.find(line => !/^\/[A-Za-z][\w-]*(?:\s|$)/u.test(line)) || lines[0]
+    || `세션 ${String(card.key || '').slice(-6)}`;
+}
+
+export function sessionEvidenceLabel(card) {
+  return `${card.machine.label} · ${Array.from(sessionDisplayTitle(card)).slice(0, 24).join('')}`;
+}
+
+export function sessionDisplayState(card) {
+  return card.status?.state || 'unknown';
+}
+export function sessionHasOldTranscript(card, now = Date.now()) {
+  const status = card.status || { state: 'unknown' };
+  const evidence = Date.parse(status.evidence_at);
+  return status.state === 'working' && status.source === 'transcript' && Number.isFinite(evidence)
+    && now - evidence > 30 * 60000;
+}
+export function sessionDisplayStatusLabel(card, now = Date.now()) {
+  const labels = { waiting: '입력 대기', working: '작업 중', ended: '응답 끝남',
+    interrupted: '중단됨', unknown: '알 수 없음' };
+  const label = labels[sessionDisplayState(card)] || labels.unknown;
+  if (!sessionHasOldTranscript(card, now)) return label;
+  const minutes = Math.floor((now - Date.parse(card.status.evidence_at)) / 60000);
+  const age = minutes < 60 ? `${minutes}분 전` : minutes < 1440
+    ? `${Math.floor(minutes / 60)}시간 전` : `${Math.floor(minutes / 1440)}일 전`;
+  return `${label} · 마지막 기록 ${age}`;
+}
+
 export function normalizeSearch(text) {
   const spaced = String(text || '').normalize('NFC').toLowerCase();
   return { spaced, compact: spaced.replace(/\s/gu, '') };
@@ -196,6 +235,58 @@ export async function loadWorkSnapshots(request, signal, publish) {
       emit();
     }
   }));
+}
+
+// Confirm one complete observe generation; a changed detail restarts the entire list.
+export async function loadSessionSnapshots(request, signal, publish) {
+  for (let attempt = 0; attempt <= 3; attempt++) {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) { abort(); return; }
+    try {
+      const list = await request('/api/observe/snapshots',
+        { signal: controller.signal, allowAppForbidden: true });
+      if (signal.aborted) return;
+      const result = { entries: list.snapshots, snapshots: [], failures: [],
+        done: 0, total: list.snapshots.length, rev: null };
+      const emit = () => publish({ ...result, snapshots: [...result.snapshots], failures: [...result.failures] });
+      emit();
+      let changed = false;
+      let unconfirmed = false;
+      const details = Promise.all(list.snapshots.map(async entry => {
+        try {
+          if (!entry.machine_id || !entry.sha256 || entry.error_code) {
+            if (entry.machine_id && !entry.error_code) unconfirmed = true;
+            result.failures.push(entry); return;
+          }
+          const path = `/api/observe/snapshots/${encodeURIComponent(entry.machine_id)}`;
+          const snapshot = await request(`${path}?sha256=${encodeURIComponent(entry.sha256)}`,
+            { signal: controller.signal, allowAppForbidden: true });
+          if (!controller.signal.aborted) result.snapshots.push(snapshot);
+        } catch (error) {
+          if (error.status === 409) { changed = true; controller.abort(); }
+          else if (error.message === 'Not authenticated') throw error;
+          else if (!controller.signal.aborted) { unconfirmed = true; result.failures.push(entry); }
+        } finally { result.done++; }
+      }));
+      await Promise.race([details, new Promise(resolve => {
+        if (controller.signal.aborted) resolve();
+        else controller.signal.addEventListener('abort', resolve, { once: true });
+      })]);
+      if (signal.aborted) return;
+      if (changed) {
+        if (attempt === 3) throw new Error('snapshot_changed');
+        continue;
+      }
+      result.rev = unconfirmed ? null : list.rev;
+      emit();
+      return;
+    } finally {
+      controller.abort();
+      signal.removeEventListener('abort', abort);
+    }
+  }
 }
 
 // Spec §6 entry: fallback and any user navigation permanently close default selection.

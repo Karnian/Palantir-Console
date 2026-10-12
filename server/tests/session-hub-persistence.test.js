@@ -72,7 +72,9 @@ for (const retry of ['stop', 'rotation', 'boot']) {
     if (retry === 'boot') {
       const next = createSessionHubService(fx.options);
       t.after(() => next.shutdown());
-      await until(() => !fs.existsSync(filename));
+      // Boot cleanup removes files, awaits the ledger write, then deletes the DB tombstone.
+      await until(() => !fs.existsSync(filename)
+        && !fx.db.prepare('SELECT id FROM assistant_threads WHERE id = ?').get(old));
     } else {
       await fx.service.start();
       if (retry === 'rotation') {
