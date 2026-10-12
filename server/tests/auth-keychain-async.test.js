@@ -132,10 +132,10 @@ for (const reader of ['readClaudeKeychainTokenSync', 'readClaudeKeychainToken'])
     });
   }
 
-  for (const scenario of ['empty username', 'unavailable user info']) {
+  for (const scenario of ['empty username', 'throwing os.userInfo']) {
     test(`${reader}: ${scenario} uses the service-only lookup`, async t => {
       t.mock.method(os, 'userInfo', () => {
-        if (scenario === 'unavailable user info') throw new Error('unavailable');
+        if (scenario === 'throwing os.userInfo') throw new Error('unavailable');
         return { username: '' };
       });
       const harness = loadAuthResolverWithExecFile(() => ({ stdout: oauthPayload('service-token') }));
@@ -144,7 +144,11 @@ for (const reader of ['readClaudeKeychainTokenSync', 'readClaudeKeychainToken'])
         assert.equal(await harness.authResolver[reader](), 'service-token');
       });
       assert.equal(harness.calls.length, 1);
-      assert.deepEqual(harness.calls[0].args, [...serviceArgs, '-w']);
+      assert.deepEqual(harness.calls, [{
+        command: 'security',
+        args: [...serviceArgs, '-w'],
+        options: { stdio: 'pipe', timeout: 3000, encoding: 'utf8' },
+      }]);
     });
   }
 }
@@ -198,6 +202,7 @@ test('readClaudeKeychainToken uses async execFile without blocking the event loo
 });
 
 test('readClaudeKeychainToken preserves expiry, legacy-string, and failure handling', async (t) => {
+  t.mock.method(os, 'userInfo', () => ({ username: 'fixture-account' }));
   const responses = [
     { stdout: JSON.stringify({ claudeAiOauth: { accessToken: 'expired', expiresAt: Date.now() - 1000 } }), stderr: '' },
     { stdout: JSON.stringify({ claudeAiOauth: { accessToken: 'expired', expiresAt: Date.now() - 1000 } }), stderr: '' },
