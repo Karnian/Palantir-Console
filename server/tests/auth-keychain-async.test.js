@@ -71,6 +71,35 @@ function oauthPayload(accessToken, expiresAt = Date.now() + 60000) {
   return JSON.stringify({ claudeAiOauth: { accessToken, expiresAt } });
 }
 
+for (const reader of ['hasClaudeKeychainCredentials', 'readClaudeKeychainTokenSync', 'readClaudeKeychainToken']) {
+  for (const [shape, properties] of [
+    ['killed', { killed: true }],
+    ['signal', { signal: 'SIGTERM' }],
+    ['ETIMEDOUT', { code: 'ETIMEDOUT' }],
+  ]) {
+    test(`${reader}: timeout stops fallback (${shape})`, async t => {
+      t.mock.method(os, 'userInfo', () => ({ username: 'fixture-account' }));
+      const harness = loadAuthResolverWithExecFile(({ args }) => {
+        if (args.includes('-a')) throw Object.assign(new Error('keychain timeout'), properties);
+        return { stdout: oauthPayload('service-token'), stderr: '' };
+      });
+      t.after(harness.restore);
+      let result;
+      await withPlatform('darwin', async () => {
+        result = await harness.authResolver[reader]();
+      });
+      assert.equal(harness.calls.length, 1, 'timeout must stop further keychain lookups');
+      const existenceOnly = reader === 'hasClaudeKeychainCredentials';
+      assert.equal(result, existenceOnly ? false : null);
+      assert.deepEqual(harness.calls[0], {
+        command: 'security',
+        args: [...accountArgs, ...(existenceOnly ? [] : ['-w'])],
+        options: { stdio: 'pipe', timeout: 3000, ...(existenceOnly ? {} : { encoding: 'utf8' }) },
+      });
+    });
+  }
+}
+
 for (const reader of ['readClaudeKeychainTokenSync', 'readClaudeKeychainToken']) {
   for (const [scenario, accountResponse, serviceResponse, expected, lookups] of [
     ['valid account precedes stale service', () => oauthPayload('account-token'),

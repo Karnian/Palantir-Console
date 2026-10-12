@@ -182,6 +182,10 @@ function claudeKeychainLookupArgs(readPassword = false) {
   return lookups;
 }
 
+function keychainLookupTimedOut(error) {
+  return error.killed === true || Boolean(error.signal) || error.code === 'ETIMEDOUT';
+}
+
 /**
  * Check whether the macOS Keychain has a Claude Code OAuth credentials item.
  *
@@ -216,7 +220,8 @@ function hasClaudeKeychainCredentials() {
     try {
       execFileSync('security', args, { stdio: 'pipe', timeout: 3000 });
       return true;
-    } catch {
+    } catch (error) {
+      if (keychainLookupTimedOut(error)) break;
       // Try the next lookup when the item is missing or inaccessible.
     }
   }
@@ -293,7 +298,8 @@ function readClaudeKeychainTokenSync() {
         // Older keychain schemas stored the token as a bare string.
         return raw;
       }
-    } catch {
+    } catch (error) {
+      if (keychainLookupTimedOut(error)) break;
       // Try the next lookup when the item is missing or inaccessible.
     }
   }
@@ -791,7 +797,8 @@ async function readClaudeKeychainToken() {
         // No structured payload here, so no expiry data to check against.
         return raw;
       }
-    } catch {
+    } catch (error) {
+      if (keychainLookupTimedOut(error)) break;
       // Try the next lookup when the item is missing or inaccessible.
     }
   }
