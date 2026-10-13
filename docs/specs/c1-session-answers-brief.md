@@ -1,6 +1,6 @@
 # C1-A — 지시별 답변 보기 (화면 + 세션 비서) 구현 brief
 
-> **상태**: v4 (2026-10-14). 사용자 요청 + codex 설계 검토 2회 합의 + brief 적대리뷰 R1·R2(NO-GO) 반영 — R2 뒤 범위 축소(§11).
+> **상태**: v6 (2026-10-14). 사용자 요청 + codex 설계 검토 2회 합의 + brief 적대리뷰 R1·R2(NO-GO) 반영 — R2 뒤 범위 축소(§11).
 > **상위 문서**: `i0a-session-snapshot-board-brief.md` v11(스냅샷·반출 계약), `c1-session-hub-chat-brief.md` v8(broker·hub 토큰·게이트), `c1-personal-assistant-brief.md` v5(영구 대화·승인 기억 — v8 의 대화 저장·삭제 서술을 대체).
 > 이 문서는 세 문서의 **범위를 넓히는 부록**이다. 여기서 명시적으로 바꾼 것 말고는 기존 계약 그대로다.
 
@@ -34,7 +34,8 @@
 
 실측 구조(2026-10-13, Mac 최근 23개 파일, 본문 미열람): assistant 레코드는 content 블록마다 따로 기록되고 같은 `message.id` 를 공유한다. `stop_reason` 은 `tool_use`(6,343)·`end_turn`(208). `end_turn` 레코드의 블록은 `text`(121)·`thinking`(87). 턴 끝에 `system/turn_duration` 이 붙는다.
 
-- **대상 레코드**: `isSidechain!==true`, `isMeta!==true`, `isCompactSummary!==true`.
+- **대상 레코드** (v5 정정, A1b 실데이터): `isSidechain===true` 레코드만 사슬에서 완전히 제외한다(별도 사슬). `isMeta`·`isCompactSummary` 레코드는 **사슬의 투명한 고리**다 — 실제 transcript 에서 그 뒤 레코드 수백 개의 `parentUuid` 가 이들을 가리킨다. 부모 추적·구간 소속 판정에는 쓰고, 지시(실행 시작)·답변 근거·가지 경쟁 카운트에는 쓰지 않는다(attachment 와 같은 취급).
+- **사슬 끊김**: compact 경계(`parentUuid=null`)로 끊긴 뒤 레코드는 구간 밖이다(broken 아님). `chain_broken` 은 구간 후보 레코드의 부모가 비-sidechain 레코드 전체에서 찾을 수 없을 때만이다.
 - **실행 시작 지시 vs 실행 중 전달**: 사람 user 레코드(i0a §1.1 판별이 지시)는 **새 실행을 시작**한다. queued attachment(작업 중 전달) 지시는 실행 구간을 끊지 않는다.
 - **실행 구간**: 실행 시작 지시 S 의 uuid 에서 `parentUuid` 사슬을 따라 내려가는 후손 중, 사슬 위의 **다음 실행 시작 지시** 직전까지.
 - **최종 답변 판정** (구간 안에서):
@@ -44,6 +45,7 @@
   4. 마지막 증거가 `[Request interrupted by user]`(reader 기존 판별 함수)면 → `interrupted`.
   5. 그 외 → `pending`(최종 답변 아직 관측 안 됨). **"진행 중"이라고 단정하지 않는다.**
 - **queued 지시 (v1 단순화)**: 작업 중 전달(queued attachment) 지시는 v1 에서 **자기 답변을 따로 판정하지 않는다** → `queued_joined`(화면: "작업 중 추가로 전달한 지시 · 위 지시의 답변을 보세요"). 
+- **병렬 도구 호출** (v6, A1b 실데이터): 한 메시지의 tool_use 블록은 같은 `message.id` 의 assistant 레코드로 이어지고, 각 tool_result 는 자기 tool_use 레코드의 자식이 된다. 결과 도착 순서는 호출 순서와 다를 수 있다. 판정은 같은 `message.id` 레코드 묶음을 **한 노드**로 보고, `tool_use_id` 가 그 묶음의 블록과 맞는 tool_result 를 그 노드의 자식으로 본다. 마지막 증거의 조상 경로(main path) 밖에 남는 유의 레코드는 "그 묶음에 맞는 tool_result 이면서 유의 자식이 없는 말단" 만 허용하고, 그 외는 `branch_conflict`.
 - **가지 판정에서 attachment 제외**: queued attachment 레코드는 경쟁 가지를 만들지 않는다(사슬 밖·형제 위치·부모보다 먼저 기록돼도). 따라서 S 의 답변 판정은 queued 지시의 기록 위치와 무관하다. 이는 상태 판정이 부모 없는 attachment 를 직전 사슬 레코드에 결속하는 기존 규칙(reader `claudeStatus`)과 같은 방향이며, 답변 판정은 그 결속을 **쓰지 않고 무시**한다(차이 선언).
 - **slash 지시**: local-command stdout 증거(reader `claudeLocalCommandStdout`)로 끝난 구간만 `local_command`. 모델 실행을 시작한 slash(custom skill 등)는 일반 판정을 적용한다.
 - **compact**: compact summary·replacement 에서 답변을 복구하지 않는다. 원본 사슬이 없으면 `unbound`.
@@ -53,7 +55,8 @@
 실측 구조(2026-10-13, Mac 40개·codev2 40개 파일, 본문 미열람): 모든 턴이 `event_msg/task_started`(turn_id) → user 메시지 → `turn_context`(turn_id) → … → `event_msg/task_complete`(`turn_id`, `last_agent_message`, `completed_at`) 순서다. **user 메시지가 task_started 보다 앞서는 순서는 관측되지 않았다.** assistant 메시지는 `response_item/message` 의 `phase` 가 `commentary` 또는 `final_answer`. 중단은 `event_msg/turn_aborted`(turn_id).
 
 - **지원 순서 (이 순서만)**: user 메시지가 열린 실행 구간 `task_started(T)` 뒤, 같은 T 의 `task_complete|turn_aborted` 앞에 있을 때 그 지시는 T 에 속한다. 열린 구간 밖의 user 메시지(구간 사이, task_started 앞) → `unbound`. 인접성만으로 연결하지 않는다.
-- 구간이 겹치거나(`task_started` 가 닫히기 전에 다른 turn_id 시작) turn_id 가 맞지 않으면 그 구간의 지시 전부 `unbound`.
+- **버려진 구간** (v6 정정, A1b 실데이터): Codex 는 세션당 한 번에 한 턴만 실행한다. 닫히지 않은 구간 뒤에 새 `task_started` 가 오면 앞 구간은 그 지점에서 **버려진 것**이다 — 앞 구간의 지시는 `unbound`/`segment_conflict`, 새 구간은 정상 판정. (실측: Mac 에서 세션 첫 턴이 시작만 하고 닫히지 않은 파일이 흔했다. v5 의 "앞 구간이 모두 닫혀야 한다" 규칙은 그 뒤 모든 턴을 불통으로 만들었다.)
+- **겹침**: 대상 구간 안에 다른 turn_id 의 `turn_context`·`task_*` 레코드가 끼거나, 대상 turn_id 의 레코드가 구간 밖(다음 task_started 뒤)에 나오면 겹침 → 대상 구간 지시 전부 `unbound`/`segment_conflict`.
 - **최종 답변**:
   - `task_complete(T)` 있음: `last_agent_message` 가 비어 있지 않은 문자열이면 그것으로 `final`. 아니면 같은 구간의 `phase=final_answer` assistant 메시지 중 마지막으로 `final`. 둘 다 없으면 `no_text`.
   - `turn_aborted(T)` 있음 → `interrupted`. (`task_complete` 와 둘 다 있으면 충돌 → `unbound`.)
@@ -302,3 +305,5 @@ provider·CLI 버전별(Mac/codev2) 결과를 기록한다.
   - R2-S6 취소 → 취소 전파 제거, 30초 상한·회수 확인 뒤 슬롯 반납.
   - R2-M1 봉인값 전달 경로 5곳 명시. R2-M2 상태별 불변식 표·`reason` 코드·`answer_at` 원천.
 - 2026-10-14 brief R3 NO-GO (SERIOUS 2, MINOR 2; R2 지적은 닫힘 9·부분 1) → v4: 합치기 키·응답 target 에 file_fp 포함, file_fp 선택 필드(기존 스냅샷 읽기 호환, 없으면 서버가 바로 target_changed), 하드링크 검사 범위 = 열거 성공 파일 사이, 피해 상한 서술을 "답변 본문 추가 노출"로 정정, §7 취소 테스트 문구 정리, BigInt dev/ino·검증된 fd 에서 지문, inode 재사용 방어 범위 축소 명시, 턴 handle 은 첫 await 전 캡처.
+- 2026-10-14 v5 (A1b 실데이터 정정): Claude 실제 transcript 에서 isMeta·isCompactSummary user 레코드가 사슬 중간 고리임을 확인(구조 실측). v4 의 "대상에서 제외"는 Mac 표본 B 전부를 chain_broken 으로 만들었다 → 투명 고리로 정정, chain_broken 범위 한정.
+- 2026-10-14 v6 (A1b 적대리뷰 R1·R2 + 실데이터): Codex 버려진 구간 규칙(닫히지 않은 앞 구간은 새 task_started 에서 끝남 — 실측상 흔함), 겹침 = 레코드 교차로 한정. Claude 병렬 도구 = 같은 message.id 묶음을 한 노드로, 결과 도착 순서 무관, 말단 결과만 예외(진짜 rewind 는 계속 branch_conflict).

@@ -336,6 +336,39 @@ function validateStatusEnvelope(object) {
   };
   return validate(object, schema);
 }
+const ANSWER_STATUSES = Object.freeze(['final', 'no_text', 'pending', 'interrupted', 'local_command',
+  'queued_joined', 'unbound', 'withheld', 'target_changed', 'unavailable']);
+const ANSWER_REASONS = Object.freeze(['excluded', 'held', 'deleted_rule', 'too_large', 'file_missing',
+  'identity_mismatch', 'branch_conflict', 'chain_broken', 'unsupported_format', 'segment_conflict',
+  'read_limit', 'file_changed', 'timeout', 'exec_failed', 'ref_mismatch']);
+function validateAnswerEnvelope(object, { allowDiag = false, expectedMachineId, expectedTarget } = {}) {
+  const schema = {
+    schema: literal('palantir.answer/1'), kind: literal('answer'), machine_id: idSlot,
+    reader_build: hexSlot(16), target: { instrId: instructionIdSlot, ref: hexSlot(16), file_fp: hexSlot(16) },
+    status: value => ANSWER_STATUSES.includes(value), reason: nullable(value => ANSWER_REASONS.includes(value)),
+    text: nullable(value => typeof value === 'string' && value.length > 0 && value.length <= 8000
+      && finalizeAnswerText(value).value === value),
+    truncated: booleanSlot, redacted: booleanSlot, shared_turn: booleanSlot,
+    answer_at: nullable(timeSlot), observed_at: timeSlot
+  };
+  if (allowDiag && object && Object.hasOwn(object, 'diag')) schema.diag = {
+    evidence_ids: [idSlot, 100000], segment: { start_id: nullable(idSlot), end_id: nullable(idSlot) }
+  };
+  const valid = validate(object, schema);
+  if (!valid.ok) return valid;
+  const failed = { ok: false, code: 'request_invalid', path: '$' };
+  if (Buffer.byteLength(JSON.stringify(object)) > 64 * 1024
+    || expectedMachineId !== undefined && object.machine_id !== expectedMachineId
+    || expectedTarget && ['instrId', 'ref', 'file_fp'].some(key => object.target[key] !== expectedTarget[key])) return failed;
+  const terminal = ['final', 'no_text', 'interrupted'].includes(object.status);
+  const reasonRequired = ['unbound', 'withheld', 'target_changed', 'unavailable'].includes(object.status);
+  if ((object.status === 'final') !== (object.text !== null)
+    || terminal !== (object.answer_at !== null)
+    || reasonRequired !== (object.reason !== null)
+    || object.status !== 'final' && (object.truncated || object.redacted)
+    || object.shared_turn && (!terminal || !object.target.instrId.startsWith('codex:'))) return failed;
+  return valid;
+}
 // Test-only seam for exercising nonconvergence; production entry points always use redactSecrets.
 module.exports = {
   _finalizeWithRedactor: finalize,
@@ -373,5 +406,8 @@ module.exports = {
   canonicalEncode,
   validateSnapshot,
   validateExcludePreview,
-  validateStatusEnvelope
+  validateStatusEnvelope,
+  validateAnswerEnvelope,
+  ANSWER_STATUSES,
+  ANSWER_REASONS
 };

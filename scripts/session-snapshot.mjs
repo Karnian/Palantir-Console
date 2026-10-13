@@ -5,8 +5,10 @@ import { createRequire } from 'node:module';
 import { buildBundle, runExecutor, receiveEnvelope, writeSnapshotAtomic } from './lib/sessionSnapshotBundle.mjs';
 const require = createRequire(import.meta.url);
 const { assertSpawnAllowed, isSpawnGuardActive } = require('../server/utils/spawnGuard.js');
+const policy = require('../server/services/observeSnapshotPolicy.js');
 const INPUT_HINTS = Object.freeze({
   usage: '사용법: session-snapshot.mjs [remote --host <user@host>] snapshot|exclude ...',
+  answer_target: 'answer 에는 --instruction <instrId#ref> 와 --file-fp <hex16> 이 필요합니다',
   out_dir_missing: 'snapshot 에는 --out-dir 또는 PALANTIR_OBSERVE_SNAPSHOT_DIR 이 필요합니다',
   host_invalid: '--host 에는 유효한 호스트 이름 또는 user@host 가 필요합니다',
   now_invalid: '--now 에는 유효한 YYYY-MM-DD 날짜 또는 ISO 날짜/시간이 필요합니다',
@@ -44,14 +46,14 @@ function parseArguments(argv, env) {
   let operation;
   while (args.length) {
     const item = args.shift();
-    if (item === 'snapshot' || item === 'exclude') {
+    if (item === 'snapshot' || item === 'exclude' || item === 'answer') {
       if (operation) invalidInput();
       operation = item;
-    } else if (item === '--include-exec') {
+    } else if (item === '--include-exec' || item === '--diag') {
       if (values[item]) invalidInput();
       values[item] = true;
     } else if (['--host', '--remote-node', '--now', '--out-dir', '--orca-bin',
-      '--instruction', '--session', '--label'].includes(item)) {
+      '--instruction', '--session', '--label', '--file-fp'].includes(item)) {
       if (Object.hasOwn(values, item) || !args.length) invalidInput();
       values[item] = args.shift();
     } else invalidInput();
@@ -74,6 +76,20 @@ function parseArguments(argv, env) {
   const request = { schema: 'palantir.snapshot-request/1', op: 'snapshot', now: now.toISOString(),
     include_exec: values['--include-exec'] === true, orca_bin: values['--orca-bin'] ?? 'orca' };
   const outDir = values['--out-dir'] || env.PALANTIR_OBSERVE_SNAPSHOT_DIR;
+  if (operation !== 'answer' && (values['--diag'] !== undefined || values['--file-fp'] !== undefined)) invalidInput();
+  if (operation === 'answer') {
+    if (['--session', '--out-dir', '--include-exec', '--label', '--orca-bin'].some(key => values[key] !== undefined)) invalidInput();
+    const instruction = values['--instruction'];
+    const separator = typeof instruction === 'string' ? instruction.lastIndexOf('#') : -1;
+    const instrId = separator > 0 ? instruction.slice(0, separator) : '';
+    const ref = separator > 0 ? instruction.slice(separator + 1) : '';
+    if (!policy.isSafeInstructionId(instrId) || !/^[0-9a-f]{16}$/.test(ref)
+      || typeof values['--file-fp'] !== 'string' || !/^[0-9a-f]{16}$/.test(values['--file-fp'])) invalidInput('answer_target');
+    return { request: { schema: 'palantir.answer-request/1', op: 'answer_query', now: now.toISOString(),
+      target: { kind: 'instruction', instrId, ref, file_fp: values['--file-fp'] },
+      ...(values['--diag'] ? { diag: true } : {}) }, sshBin,
+      target: remote ? { kind: 'remote', host, remoteNode } : { kind: 'local' } };
+  }
   if (operation === 'snapshot') {
     if (!outDir) invalidInput('out_dir_missing');
     if (values['--instruction'] !== undefined || values['--session'] !== undefined) invalidInput();
@@ -118,7 +134,7 @@ export async function main(argv, { stdin = process.stdin, stdout = process.stdou
   try {
     options = parseArguments(argv, env);
     if (options.request.op === 'snapshot') assertPrivateOutput(options.outDir);
-    if (isSpawnGuardActive()) {
+    if (isSpawnGuardActive() && options.request.op !== 'answer_query') {
       assertSpawnAllowed({ command: options.request.orca_bin, source: 'session-snapshot:orca_bin' });
     }
   } catch (error) {
@@ -129,14 +145,23 @@ export async function main(argv, { stdin = process.stdin, stdout = process.stdou
   }
   async function execute(request, expectedKinds) {
     const bundle = buildBundle({ request });
-    const result = await runExecutor({ ...options, bundle, env, spawnImpl, timeoutMs });
-    return receiveEnvelope(result, { expectedKinds, expectedReaderBuild: bundle.readerBuild });
+    const result = await runExecutor({ ...options, bundle, env, spawnImpl,
+      timeoutMs: request.op === 'answer_query' ? Math.min(timeoutMs, 30000) : timeoutMs,
+      ...(request.op === 'answer_query' ? { maxStdoutBytes: 64 * 1024 } : {}) });
+    return receiveEnvelope(result, { expectedKinds, expectedReaderBuild: bundle.readerBuild,
+      expectedTarget: request.op === 'answer_query' ? request.target : undefined, allowDiag: request.diag === true });
   }
   try {
-    const expected = options.request.op === 'snapshot' ? ['snapshot', 'status'] : ['preview', 'status'];
+    const expected = options.request.op === 'answer_query' ? ['answer', 'status']
+      : options.request.op === 'snapshot' ? ['snapshot', 'status'] : ['preview', 'status'];
     const response = await execute(options.request, expected);
     if (!response.ok) { stderr.write(response.reason + '\n'); return 1; }
     const envelope = response.envelope;
+    if (response.kind === 'answer') {
+      const { text, ...safeEnvelope } = envelope;
+      stdout.write(JSON.stringify({ ...safeEnvelope, text_chars: text === null ? 0 : text.length }) + '\n');
+      return 0;
+    }
     if (response.kind === 'status') {
       stdout.write(envelope.code + ' ' + JSON.stringify(envelope.counts) + '\n');
       return 1;

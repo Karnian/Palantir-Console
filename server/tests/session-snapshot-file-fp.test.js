@@ -107,3 +107,32 @@ test('held, excluded and exec sessions export no session or file_fp', t => {
   assert.equal(duplicate.coverage.claude.multi_file_withheld, 1);
   assert.deepEqual(duplicate.sessions, []);
 });
+
+test('file_fp survives 300-session detail restoration, outside-window identity collision and exclude lookup', t => {
+  const { user, TS } = require('./fixtures/session-snapshot/a1a.cjs');
+  const path = require('node:path');
+  const transcripts = [];
+  const cap = policy.SNAPSHOT_LIMITS.sessions;
+  for (let i = 0; i <= cap; i++) transcripts.push(['claude', 'a-' + String(i).padStart(3, '0'), [user('Instruction ' + i,
+    { sessionId: 's' + i, timestamp: new Date(Date.parse(TS) - (cap - i) * 1000).toISOString() })]]);
+  transcripts.push(['claude', 'z-duplicate', [user('Duplicate newest', { sessionId: 's' + cap })]]);
+  const f = setup(t, transcripts);
+  const snapshot = reader.runSnapshot(f.options);
+  assert.equal(snapshot.sessions.length, cap);
+  const restored = snapshot.sessions.find(s => s.session_id === 's0'); assert.ok(restored);
+  assert.equal(restored.file_fp, fingerprint(fs.statSync(f.files[0], { bigint: true })));
+  const instruction = snapshot.instructions.find(i => i.session_key === restored.key);
+  const before = fs.readFileSync(f.config);
+  const preview = reader.excludeQuery({ ...f.options, target: { kind: 'instruction', instrId: instruction.id, ref: instruction.ref } });
+  assert.equal(preview.target, instruction.id); assert.equal(preview.preview, 'Instruction 0');
+  assert.deepEqual(fs.readFileSync(f.config), before);
+  assert.equal(reader.runSnapshot(f.options).sessions.find(s => s.session_id === 's0').file_fp, restored.file_fp);
+  const old = path.join(f.home, '.claude/projects/old-collision.jsonl');
+  const ts = '2026-09-01T00:00:00.000Z';
+  fs.writeFileSync(old, JSON.stringify(user('Old duplicate', { sessionId: 's0', timestamp: ts })) + '\n');
+  fs.utimesSync(old, new Date(ts), new Date(ts));
+  const collision = reader.runSnapshot(f.options);
+  assert.equal(collision.sessions.some(s => s.session_id === 's0'), false);
+  assert.ok(collision.coverage.claude.multi_file_withheld >= 2);
+  assert.throws(() => reader.excludeQuery({ ...f.options, target: { kind: 'instruction', instrId: instruction.id, ref: instruction.ref } }), { code: 'target_not_found' });
+});
