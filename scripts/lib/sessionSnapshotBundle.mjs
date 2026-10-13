@@ -11,6 +11,7 @@ const spawnGuard = require('../../server/utils/spawnGuard.js');
 const { reapProcessGroup } = require('../../server/utils/reapProcessGroup.js');
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 export const MANIFEST = Object.freeze([
+  'scripts/lib/sessionAnswerReader.cjs',
   'scripts/lib/sessionSnapshotLauncher.cjs', 'scripts/lib/sessionSnapshotReader.cjs',
   'scripts/lib/sessionTranscriptCore.cjs',
   'server/services/memorySanitize.js', 'server/services/observeSnapshotPolicy.js'
@@ -182,7 +183,7 @@ function resolveExecutable(command, env) {
   error.code = 'ENOENT';
   throw error;
 }
-export function receiveEnvelope(result, { expectedKinds, expectedReaderBuild }) {
+export function receiveEnvelope(result, { expectedKinds, expectedReaderBuild, expectedMachineId, expectedTarget, allowDiag = false }) {
   if (result.exitCode !== 0 || result.killedReason !== null) {
     return { ok: false, reason: 'executor_failed' };
   }
@@ -193,7 +194,9 @@ export function receiveEnvelope(result, { expectedKinds, expectedReaderBuild }) 
     const kinds = {
       'palantir.session-snapshot/1': ['snapshot', policy.validateSnapshot],
       'palantir.snapshot-status/1': ['status', policy.validateStatusEnvelope],
-      'palantir.snapshot-exclude-preview/1': ['preview', policy.validateExcludePreview]
+      'palantir.snapshot-exclude-preview/1': ['preview', policy.validateExcludePreview],
+      'palantir.answer/1': ['answer', object => policy.validateAnswerEnvelope(object,
+        { allowDiag, expectedMachineId, expectedTarget })]
     };
     const entry = kinds[envelope.schema];
     if (!entry || !expectedKinds.includes(entry[0]) || !entry[1](envelope).ok

@@ -39,6 +39,25 @@ function computeReaderBuild(sources) {
 function validRequest(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)
     || Object.getPrototypeOf(value) !== Object.prototype) return false;
+  if (value.op === 'answer_query') {
+    var answerKeys = ['schema', 'op', 'now', 'target'];
+    if (Object.prototype.hasOwnProperty.call(value, 'diag')) answerKeys.push('diag');
+    var target = value.target;
+    return Object.keys(value).length === answerKeys.length && answerKeys.every(function present(key) {
+      return Object.prototype.hasOwnProperty.call(value, key);
+    }) && value.schema === 'palantir.answer-request/1'
+      && typeof value.now === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value.now)
+      && isFinite(Date.parse(value.now)) && new Date(value.now).toISOString() === value.now
+      && (answerKeys.indexOf('diag') === -1 || typeof value.diag === 'boolean')
+      && target && typeof target === 'object' && !Array.isArray(target)
+      && Object.keys(target).length === 4 && target.kind === 'instruction'
+      && ['kind', 'instrId', 'ref', 'file_fp'].every(function present(key) {
+        return Object.prototype.hasOwnProperty.call(target, key);
+      }) && typeof target.instrId === 'string'
+      && /^(claude|codex):[A-Za-z0-9_-]{1,64}:[uin][A-Za-z0-9_-]{1,64}$/.test(target.instrId)
+      && typeof target.ref === 'string' && /^[0-9a-f]{16}$/.test(target.ref)
+      && typeof target.file_fp === 'string' && /^[0-9a-f]{16}$/.test(target.file_fp);
+  }
   var keys = ['schema', 'op', 'now', 'include_exec', 'orca_bin'];
   if (value.op === 'exclude_query' || value.op === 'exclude_commit') keys.push('target');
   if (value.op === 'exclude_commit') keys.push('token');
@@ -79,7 +98,10 @@ function launch() {
   if (REQUEST.op !== 'snapshot') options.target = REQUEST.target;
   if (REQUEST.op === 'exclude_commit') options.token = REQUEST.token;
   try {
-    var result = REQUEST.op === 'snapshot' ? reader.runSnapshot(options)
+    var result = REQUEST.op === 'answer_query' ? require('./sessionAnswerReader.cjs').readAnswer({
+      homeDir: home, configDir: options.configDir, now: options.now, readerBuild: launcherBuild,
+      instrId: REQUEST.target.instrId, ref: REQUEST.target.ref, file_fp: REQUEST.target.file_fp, diag: REQUEST.diag
+    }) : REQUEST.op === 'snapshot' ? reader.runSnapshot(options)
       : REQUEST.op === 'exclude_query' ? reader.excludeQuery(options) : reader.excludeCommit(options);
     setImmediate(function completed() { launcherEmit(result, 0); });
   } catch (error) {

@@ -1997,5 +1997,7 @@ module.exports = {
   orcaPromptForm,
   MAX_FILES,
   MAX_FILE_BYTES,
-  STATUS_TAIL_BYTES
+  STATUS_TAIL_BYTES,
+  listFiles,
+  transcriptRecords
 };
