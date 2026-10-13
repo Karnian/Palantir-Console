@@ -510,6 +510,27 @@ test('launcher hash encoding matches policy without loading other manifest modul
   assert.equal(response.envelope.reader_build, response.bundle.readerBuild);
   assert.equal(response.result.stderrBytes, 0);
 });
+test('transcript core is bundled, hash-bound and loaded by the remote reader', async t => {
+  const f = fixture(t);
+  const m = await api;
+  const name = 'scripts/lib/sessionTranscriptCore.cjs';
+  assert.equal(m.MANIFEST.includes(name), true);
+  const source = fs.readFileSync(path.resolve(__dirname, '../..', name), 'utf8');
+  const remote = await execute(f);
+  exactSnapshot(remote.envelope);
+  assert.ok(remote.bundle.code.includes(JSON.stringify(name)));
+  assert.ok(remote.bundle.code.includes(JSON.stringify(source)));
+  const changed = await execute(f, f.request, {}, { [name]: source + '\n// Synthetic hash variation\n' });
+  exactSnapshot(changed.envelope);
+  assert.notEqual(changed.bundle.readerBuild, remote.bundle.readerBuild);
+  assert.equal(changed.envelope.reader_build, changed.bundle.readerBuild);
+  assert.equal(m.receiveEnvelope(changed.result, { expectedKinds: ['snapshot'],
+    expectedReaderBuild: remote.bundle.readerBuild }).ok, false);
+  const broken = await execute(f, f.request, {}, { [name]: "throw new Error('synthetic_core_load');" });
+  assert.equal(broken.envelope.code, 'internal_error');
+  assert.equal(broken.envelope.reader_build, broken.bundle.readerBuild);
+  assert.equal(broken.result.stderrBytes, 0);
+});
 test('launcher and runtime bootstrap contain only older Node compatible syntax', async t => {
   const f = fixture(t);
   const m = await api;

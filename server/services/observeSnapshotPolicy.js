@@ -58,32 +58,42 @@ const COVERAGE_KEYS = Object.freeze({
 const COUNT_KEYS = [...new Set([...COVERAGE_KEYS.claude, ...COVERAGE_KEYS.codex, 'registered', 'equiv_count'])];
 
 // Spec §2.1: redact → slot conversion/truncation → redact; accept a fixed point within three passes.
-function finalize(inputValue, max, labelSlot, redactor = redactSecrets) {
+function finalize(inputValue, max, labelSlot, redactor = redactSecrets, answerSlot = false) {
   let value = inputValue == null ? '' : String(inputValue);
   let redacted = false;
+  let truncated = false;
   for (let index = 0; index < 3; index++) {
     const before = value;
     const firstRedaction = redactor(value);
     redacted ||= firstRedaction.redacted;
-    value = (labelSlot ? firstRedaction.text.replace(/[^\p{L}\p{N}._/-]/gu, '_') : firstRedaction.text).slice(0, max);
+    const converted = labelSlot ? firstRedaction.text.replace(/[^\p{L}\p{N}._/-]/gu, '_') : firstRedaction.text;
+    truncated ||= converted.length > max;
+    value = converted.slice(0, max);
+    if (answerSlot && converted.length > max && /[\uD800-\uDBFF]$/.test(value)) value = value.slice(0, -1);
     const lastRedaction = redactor(value);
     value = lastRedaction.text;
     redacted ||= lastRedaction.redacted;
     if (value === before) {
       return {
         value,
-        redacted
+        redacted,
+        ...(answerSlot ? { truncated } : {})
       };
     }
   }
   return {
     value: labelSlot ? 'redacted' : '[redacted]',
-    redacted: true
+    redacted: true,
+    ...(answerSlot ? { truncated } : {})
   };
 }
 
 function finalizeText(inputValue, max = 2000) {
   return finalize(inputValue, Number.isInteger(max) && max >= 10 && max <= 2000 ? max : 2000, false);
+}
+
+function finalizeAnswerText(inputValue) {
+  return finalize(inputValue, 8000, false, redactSecrets, true);
 }
 
 function finalizeLabel(inputValue) {
@@ -121,6 +131,7 @@ const labelSlot = value => typeof value === 'string' && value.length <= 64 && /^
 const nullable = predicate => value => value === null || predicate(value);
 const literal = inputValue => value => value === inputValue;
 const hexSlot = length => value => typeof value === 'string' && new RegExp(`^[0-9a-f]{${length}}$`).test(value);
+const optional = predicate => Object.assign(predicate, { optional: true });
 const countSlots = keys => Object.fromEntries(keys.map(key => [key, integerSlot]));
 const linkSchema = {
   evidence: enumSlot('evidence'),
@@ -139,6 +150,7 @@ const sessionSchema = {
   provider: enumSlot('provider'),
   run_mode: enumSlot('run_mode'),
   session_id: idSlot,
+  file_fp: optional(hexSlot(16)),
   cwd_id: opaqueSlot,
   path_gen: integerSlot,
   repo_label: nullable(labelSlot),
@@ -256,6 +268,7 @@ function validate(object, schema) {
       }
     }
     for (const key of Object.keys(slotSchema)) {
+      if (!Object.hasOwn(value, key) && slotSchema[key].optional === true) continue;
       walk(value[key], slotSchema[key], `${schemaPath}.${key}`);
     }
   }
@@ -354,6 +367,7 @@ module.exports = {
   COVERAGE_KEYS,
   COUNT_KEYS,
   finalizeText,
+  finalizeAnswerText,
   finalizeLabel,
   opaquePath,
   canonicalEncode,
