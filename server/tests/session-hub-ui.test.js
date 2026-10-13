@@ -548,7 +548,7 @@ test('panel confirms rev despite failed machine, opens timeline and copies exact
   env.root.querySelector('button.session-row').click(); await flushEffects();
   assert.equal(env.root.querySelectorAll('.work-card').length, 1);
   assert.equal(env.document.activeElement.textContent, '← 모든 세션');
-  env.root.querySelector('.work-event button').click(); await flushEffects();
+  env.root.querySelector('.work-event:last-child button').click(); await flushEffects();
   assert.deepEqual(copied, [`${alpha.instructions[1].id}#${alpha.instructions[1].ref}`]);
   Array.from(env.root.querySelectorAll('button')).find(button => button.textContent === '← 모든 세션').click();
   await flushEffects(); assert.equal(env.root.querySelectorAll('.work-card').length, 2);
@@ -2122,3 +2122,423 @@ for (const arrival of ['after resynchronization', 'at completion handoff']) test
     assert.equal(posts[1].body.text, '재전송할 질문'); assert.equal(posts[1].signal.aborted, false);
     assert.equal(input.value, ''); assert.equal(env.root.querySelector('.session-hub-note[role="status"]'), null);
   });
+
+function timelineSnapshot(t) {
+  const { alpha } = fixture(t);
+  const session = alpha.sessions[0];
+  const base = alpha.instructions.find(row => row.session_key === session.key);
+  alpha.instructions = [3, 1, 2].map(seq => ({ ...base, seq, id: `ordered-${seq}`,
+    ts: `2026-10-10T02:0${seq}:00.000Z`, text: `지시 ${seq}` }));
+  session.instruction_count = session.instruction_total = 3;
+  return alpha;
+}
+
+// jsdom has no layout: model a bordered, offset viewport with a nonzero initial scroll.
+// Extra content follows the timeline, so scrolling to scrollHeight would overshoot it.
+function trackTimelineScroll(t, env, container, initialHeight = 300) {
+  let scrollTop = 80, height = initialHeight;
+  const writes = [], focused = [];
+  Object.defineProperties(container, {
+    scrollTop: { configurable: true, get: () => scrollTop,
+      set: value => { writes.push(value); scrollTop = value; } },
+    clientTop: { configurable: true, value: 2 },
+    clientHeight: { configurable: true, get: () => height },
+    scrollHeight: { configurable: true, value: 2400 },
+  });
+  const rect = env.window.HTMLElement.prototype.getBoundingClientRect;
+  t.mock.method(env.window.HTMLElement.prototype, 'getBoundingClientRect', function () {
+    if (this === container) return { top: 120, bottom: 424 };
+    if (this.matches('.work-event') && container.contains(this)) {
+      const index = Array.from(container.querySelectorAll('.work-event')).indexOf(this);
+      return { top: 122 + index * 400 - scrollTop, bottom: 122 + (index + 1) * 400 - scrollTop };
+    }
+    return rect.call(this);
+  });
+  const focus = env.window.HTMLElement.prototype.focus;
+  t.mock.method(env.window.HTMLElement.prototype, 'focus', function (options) {
+    focused.push({ node: this, preventScroll: options?.preventScroll });
+    return focus.call(this, options);
+  });
+  env.window.HTMLElement.prototype.scrollIntoView = () => assert.fail('must not scroll outer layout');
+  for (const method of ['scroll', 'scrollTo', 'scrollBy']) {
+    t.mock.method(env.window, method, () => assert.fail('must not scroll window'));
+  }
+  return { writes, focused, read: () => scrollTop, userScroll: value => { scrollTop = value; },
+    resize: value => { height = value; } };
+}
+
+for (const view of ['manager', 'work']) test(
+  `timeline chat order: ${view} selected detail shows three instructions oldest to newest`, async t => {
+    const env = setup(t), alpha = timelineSnapshot(t);
+    if (view === 'manager') {
+      const cards = env.context.snapshotCards(alpha);
+      env.render(env.h(env.context.SessionHubDetail, {
+        data: { cards, load: { rev: REV }, now: Date.parse(alpha.generated_at) },
+        selection: { key: cards[0].key },
+      }), env.root);
+    } else {
+      env.context.apiFetch = async url => url.endsWith('/snapshots')
+        ? { rev: REV, snapshots: [{ machine_id: 'alpha', sha256: 'a' }] } : alpha;
+      env.render(env.h(env.context.AllSessionsPanel, { standalone: true }), env.root);
+      await flushEffects(); await flushEffects();
+      env.root.querySelector(`[data-session-key="${alpha.sessions[0].key}"]`).click();
+    }
+    await flushEffects();
+    assert.deepEqual(Array.from(env.root.querySelectorAll('.work-instruction'), node => node.textContent),
+      ['지시 1', '지시 2', '지시 3']);
+  });
+
+test('timeline selection scroll: manager scrolls once per key, preserves focus and reader position on updates', async t => {
+  const env = setup(t), alpha = timelineSnapshot(t);
+  let cards = env.context.snapshotCards(alpha);
+  const show = key => env.render(env.h(env.context.SessionHubDetail, {
+    data: { cards, load: { rev: REV }, now: Date.parse(alpha.generated_at) },
+    selection: { key, query: '' },
+  }), env.root);
+  show(cards[0].key);
+  const container = env.root.querySelector('.session-hub-detail');
+  const tracked = trackTimelineScroll(t, env, container);
+  await flushEffects();
+  assert.deepEqual(tracked.writes, [900]);
+  const header = container.querySelector('.session-hub-detail-header');
+  assert.equal(env.document.activeElement, header);
+  assert.equal(tracked.focused.length, 1);
+  assert.equal(tracked.focused[0].node, header);
+  assert.equal(tracked.focused[0].preventScroll, true);
+  tracked.userScroll(150);
+  alpha.instructions.push({ ...alpha.instructions[0], seq: 4, id: 'ordered-4',
+    ts: '2026-10-10T02:04:00.000Z', text: '새 지시 4' });
+  cards = env.context.snapshotCards(alpha);
+  show(cards[0].key); await flushEffects();
+  assert.equal(container.querySelectorAll('.work-event').length, 4);
+  assert.deepEqual(tracked.writes, [900]);
+  assert.equal(tracked.read(), 150);
+  assert.equal(tracked.focused.length, 1);
+  assert.equal(env.document.activeElement, header);
+  show(cards[1].key); await flushEffects();
+  assert.equal(container.querySelectorAll('.work-event').length, 0);
+  assert.deepEqual(tracked.writes, [900, 0], 'empty timeline must scroll to the top');
+  assert.equal(tracked.read(), 0);
+  assert.equal(env.document.activeElement, header);
+  show(cards[0].key); await flushEffects();
+  assert.deepEqual(tracked.writes, [900, 0, 1300]);
+  assert.equal(tracked.focused.length, 3);
+  assert.ok(tracked.focused.every(call => call.preventScroll === true));
+  assert.equal(env.root.scrollTop, 0);
+  assert.equal(env.document.documentElement.scrollTop, 0);
+  assert.equal(env.document.body.scrollTop, 0);
+});
+
+test('timeline selection scroll: work preserves position while the selected card stays present', async t => {
+  const env = setup(t);
+  let alpha = timelineSnapshot(t), revision = REV;
+  env.context.useSessionSnapshots = () => liveTimelineData(alpha, revision);
+  env.context.apiFetch = async url => url.endsWith('/snapshots')
+    ? { rev: REV, snapshots: [{ machine_id: 'alpha', sha256: 'a' }] } : alpha;
+  const show = selection => env.render(env.h(env.context.AllSessionsPanel, { standalone: true, selection }), env.root);
+  show(null); await flushEffects(); await flushEffects();
+  const container = env.root.querySelector('.work-board');
+  const tracked = trackTimelineScroll(t, env, container);
+  const key = alpha.sessions[0].key;
+  show({ key, rev: REV }); await flushEffects();
+  assert.deepEqual(tracked.writes, [900]);
+  assert.equal(env.document.activeElement.textContent, '← 모든 세션');
+  assert.equal(tracked.focused.length, 1);
+  assert.equal(tracked.focused[0].preventScroll, true);
+  tracked.userScroll(150);
+  alpha = structuredClone(alpha);
+  alpha.instructions.push({ ...alpha.instructions[0], seq: 4, id: 'ordered-4',
+    ts: '2026-10-10T02:04:00.000Z', text: '새 지시 4' });
+  const cardElement = container.querySelector('.work-card');
+  revision = NEXT;
+  show({ key, rev: NEXT }); await flushEffects();
+  assert.equal(container.querySelector('.work-card'), cardElement, 'card DOM stays mounted during update');
+  assert.equal(container.querySelectorAll('.work-event').length, 4);
+  assert.deepEqual(tracked.writes, [900]);
+  assert.equal(tracked.read(), 150);
+  assert.equal(tracked.focused.length, 1);
+  show({ key: alpha.sessions[1].key }); await flushEffects();
+  assert.equal(container.querySelectorAll('.work-event').length, 0);
+  assert.deepEqual(tracked.writes, [900, 0], 'empty timeline must scroll to the top');
+  assert.equal(tracked.read(), 0);
+  show({ key }); await flushEffects();
+  assert.deepEqual(tracked.writes, [900, 0, 1300]);
+  assert.equal(tracked.focused.length, 3);
+  assert.ok(tracked.focused.every(call => call.preventScroll === true));
+  assert.equal(env.root.scrollTop, 0);
+  assert.equal(env.document.documentElement.scrollTop, 0);
+  assert.equal(env.document.body.scrollTop, 0);
+});
+
+
+test('timeline retry: manager waits for the selected card and preserves position after completion', async t => {
+  const env = setup(t), alpha = timelineSnapshot(t), key = alpha.sessions[0].key;
+  let cards = [], loading = true;
+  const show = () => env.render(env.h(env.context.SessionHubDetail, {
+    data: { cards, loading, now: Date.parse(alpha.generated_at), load: { rev: loading ? null : REV } },
+    selection: { key },
+  }), env.root);
+  show();
+  const container = env.root.querySelector('.session-hub-detail');
+  const tracked = trackTimelineScroll(t, env, container);
+  await flushEffects();
+  assert.deepEqual(tracked.writes, [], 'pending card must not complete the initial scroll');
+  assert.equal(env.document.activeElement, container.querySelector('.session-hub-detail-header'));
+  cards = env.context.snapshotCards(alpha); loading = false;
+  show(); await flushEffects();
+  assert.equal(container.querySelectorAll('.work-event').length, 3);
+  assert.deepEqual(tracked.writes, [900]);
+  tracked.userScroll(150);
+  alpha.instructions.push({ ...alpha.instructions[0], seq: 4, id: 'ordered-4',
+    ts: '2026-10-10T02:04:00.000Z', text: '새 지시 4' });
+  cards = env.context.snapshotCards(alpha);
+  show(); await flushEffects();
+  assert.equal(container.querySelectorAll('.work-event').length, 4);
+  assert.deepEqual(tracked.writes, [900]);
+  assert.equal(tracked.read(), 150);
+  assert.equal(tracked.focused.length, 1);
+  assert.equal(tracked.focused[0].preventScroll, true);
+});
+
+test('timeline retry: work waits for the selected card and scrolls again after reload', async t => {
+  const env = setup(t), pending = deferred();
+  let alpha = timelineSnapshot(t);
+  const key = alpha.sessions[0].key;
+  let delayed = true;
+  env.context.apiFetch = async url => url.endsWith('/snapshots')
+    ? { rev: REV, snapshots: [{ machine_id: 'alpha', sha256: 'a' }] }
+    : delayed ? pending.promise : alpha;
+  env.render(env.h(env.context.AllSessionsPanel, { standalone: true, selection: { key } }), env.root);
+  const container = env.root.querySelector('.work-board');
+  const tracked = trackTimelineScroll(t, env, container);
+  await flushEffects(); await flushEffects();
+  assert.equal(container.querySelectorAll('.work-event').length, 0);
+  assert.deepEqual(tracked.writes, [], 'pending card must not complete the initial scroll');
+  delayed = false; pending.resolve(alpha);
+  await flushEffects(); await flushEffects();
+  assert.equal(container.querySelectorAll('.work-event').length, 3);
+  assert.deepEqual(tracked.writes, [900]);
+  tracked.userScroll(150);
+  alpha = structuredClone(alpha);
+  alpha.instructions.push({ ...alpha.instructions[0], seq: 4, id: 'ordered-4',
+    ts: '2026-10-10T02:04:00.000Z', text: '새 지시 4' });
+  Array.from(container.querySelectorAll('button')).find(button => button.textContent === '스냅샷 새로고침').click();
+  await flushEffects(); await flushEffects();
+  assert.equal(container.querySelectorAll('.work-event').length, 4);
+  assert.deepEqual(tracked.writes, [900, 1300]);
+  assert.equal(tracked.read(), 1300);
+  assert.equal(tracked.focused.length, 1);
+  assert.equal(tracked.focused[0].preventScroll, true);
+});
+
+async function readyTimelineDetail(t, view, initialHeight = 300) {
+  const env = setup(t), alpha = timelineSnapshot(t);
+  const cards = env.context.snapshotCards(alpha);
+  env.context.apiFetch = async url => url.endsWith('/snapshots')
+    ? { rev: REV, snapshots: [{ machine_id: 'alpha', sha256: 'a' }] } : alpha;
+  const show = key => env.render(view === 'manager'
+    ? env.h(env.context.SessionHubDetail, {
+      data: { cards, loading: false, now: Date.parse(alpha.generated_at), load: { rev: REV } },
+      selection: key ? { key } : null,
+    }) : env.h(env.context.AllSessionsPanel, { standalone: true, selection: key ? { key } : null }), env.root);
+  show(null); await flushEffects(); await flushEffects();
+  const container = env.root.querySelector(view === 'manager' ? '.session-hub-detail' : '.work-board');
+  const tracked = trackTimelineScroll(t, env, container, initialHeight);
+  return { env, alpha, container, tracked, select: async key => { show(key); await flushEffects(); } };
+}
+
+function fakeTimelineResizeObserver(env) {
+  const observers = [];
+  env.context.ResizeObserver = class {
+    constructor(callback) { this.callback = callback; this.disconnected = false; observers.push(this); }
+    observe(target) { this.target = target; }
+    disconnect() { this.disconnected = true; }
+    notify() { this.callback([{ target: this.target }]); }
+  };
+  return observers;
+}
+
+for (const view of ['manager', 'work']) {
+  test(`timeline retry: ${view} opens an empty loaded session at the top`, async t => {
+    const { alpha, tracked, container, select } = await readyTimelineDetail(t, view);
+    tracked.userScroll(2100);
+    await select(alpha.sessions[1].key);
+    assert.equal(container.querySelectorAll('.work-event').length, 0);
+    assert.ok(container.querySelector('.work-card'), 'empty session card is loaded');
+    assert.deepEqual(tracked.writes, [0]);
+    assert.equal(tracked.read(), 0);
+    tracked.userScroll(100);
+    await select(alpha.sessions[1].key);
+    assert.deepEqual(tracked.writes, [0]);
+    assert.equal(tracked.read(), 100, 'completed empty session must preserve reader position');
+  });
+
+  test(`timeline retry: ${view} opens a confirmed missing session at the top`, async t => {
+    const { container, tracked, select } = await readyTimelineDetail(t, view);
+    tracked.userScroll(2100);
+    await select('missing-session');
+    assert.ok(container.textContent.includes('현재 스냅샷에 없는 세션'));
+    assert.deepEqual(tracked.writes, [0]);
+    assert.equal(tracked.read(), 0);
+  });
+
+  test(`timeline retry: ${view} waits for layout and scrolls once after ResizeObserver notification`, async t => {
+    const { env, alpha, tracked, container, select } = await readyTimelineDetail(t, view, 0);
+    const observers = fakeTimelineResizeObserver(env);
+    await select(alpha.sessions[0].key);
+    assert.deepEqual(tracked.writes, [], 'hidden container must not scroll or complete');
+    const observer = observers.find(item => !item.disconnected);
+    assert.ok(observer, 'pending scroll must observe layout changes');
+    assert.equal(observer.target, container);
+    tracked.resize(300);
+    observer.notify();
+    assert.deepEqual(tracked.writes, [900]);
+    assert.equal(observer.disconnected, true, 'successful scroll stops observing');
+    tracked.userScroll(150);
+    tracked.resize(400);
+    observer.notify();
+    await select(alpha.sessions[0].key);
+    assert.deepEqual(tracked.writes, [900]);
+    assert.equal(tracked.read(), 150);
+    tracked.resize(0);
+    await select(alpha.sessions[1].key);
+    assert.deepEqual(tracked.writes, [900], 'changing keys while hidden resets completion');
+    const nextObserver = observers.find(item => !item.disconnected);
+    assert.ok(nextObserver);
+    observer.notify();
+    assert.deepEqual(tracked.writes, [900], 'retired observer cannot scroll another selection');
+    tracked.resize(300);
+    nextObserver.notify();
+    assert.deepEqual(tracked.writes, [900, 0]);
+    tracked.userScroll(100);
+    nextObserver.notify();
+    assert.deepEqual(tracked.writes, [900, 0]);
+    tracked.resize(0);
+    await select(alpha.sessions[0].key);
+    const unfinishedObserver = observers.find(item => !item.disconnected);
+    assert.ok(unfinishedObserver, 'another hidden selection is still pending');
+    env.render(null, env.root);
+    assert.ok(observers.every(item => item.disconnected), 'unmount disconnects observers');
+    tracked.resize(300);
+    unfinishedObserver.notify();
+    assert.deepEqual(tracked.writes, [900, 0], 'retired callbacks cannot scroll after unmount');
+  });
+}
+
+
+// A live update retains the card; real useSessionSnapshots reloads are tested separately below.
+function liveTimelineData(snapshot, revision = REV) {
+  return {
+    load: { rev: revision, snapshots: [snapshot], failures: [], done: 1, total: 1,
+      entries: [{ machine_id: 'alpha', machine_label: 'Mac', sha256: 'a' }] },
+    cards: [], loading: false, error: false, now: Date.parse(snapshot.generated_at), reload: () => {},
+  };
+}
+
+async function timelineTargetLifecycle(t, view, initialPhase) {
+  const env = setup(t), alpha = timelineSnapshot(t), key = alpha.sessions[0].key;
+  let phase = initialPhase, pending;
+  const emptySnapshot = { ...alpha, sessions: [], instructions: [] };
+  const snapshot = () => phase === 'absent' ? emptySnapshot : alpha;
+  const render = () => {
+    if (view === 'manager') {
+      const settled = phase === 'present' || phase === 'absent';
+      env.render(env.h(env.context.SessionHubDetail, {
+        data: { cards: settled ? env.context.snapshotCards(snapshot()) : [],
+          loading: phase === 'pending', now: Date.parse(alpha.generated_at),
+          load: { rev: settled ? REV : null } },
+        selection: { key },
+      }), env.root);
+    } else {
+      env.render(env.h(env.context.AllSessionsPanel, { standalone: true, selection: { key } }), env.root);
+    }
+  };
+  env.context.apiFetch = async url => {
+    if (url.startsWith('/api/session-hub/snapshots')) return { enabled: true, targets: [] };
+    if (phase === 'failed') throw new Error('snapshot unavailable');
+    if (url.endsWith('/snapshots')) return { rev: REV, snapshots: [{ machine_id: 'alpha', sha256: 'a' }] };
+    return phase === 'pending' ? pending.promise : snapshot();
+  };
+  render();
+  const container = env.root.querySelector(view === 'manager' ? '.session-hub-detail' : '.work-board');
+  const tracked = trackTimelineScroll(t, env, container);
+  await flushEffects(); await flushEffects();
+  return { env, alpha, container, tracked,
+    beginReload: async () => {
+      phase = 'pending'; pending = deferred();
+      if (view === 'manager') render();
+      else Array.from(container.querySelectorAll('button'))
+        .find(button => button.textContent === '스냅샷 새로고침').click();
+      await flushEffects(); await flushEffects();
+      assert.equal(container.querySelector('.work-card'), null, 'reload removes the card DOM');
+    },
+    finishReload: async () => {
+      phase = 'present';
+      if (view === 'manager') render();
+      else pending.resolve(alpha);
+      await flushEffects(); await flushEffects();
+      assert.equal(container.querySelectorAll('.work-event').length, 3);
+    },
+  };
+}
+
+for (const view of ['manager', 'work']) {
+  test(`timeline target: ${view} does not complete on failure and scrolls after a successful retry`, async t => {
+    const { tracked, container, beginReload, finishReload } = await timelineTargetLifecycle(t, view, 'failed');
+    assert.equal(container.querySelector('.work-card'), null);
+    assert.deepEqual(tracked.writes, [], 'no revision means failure, not confirmed absence');
+    assert.equal(tracked.read(), 80);
+    await beginReload();
+    assert.deepEqual(tracked.writes, []);
+    await finishReload();
+    assert.deepEqual(tracked.writes, [900]);
+    assert.equal(tracked.read(), 900);
+  });
+
+  test(`timeline target: ${view} returns to the latest instruction after reload removes and restores the card`, async t => {
+    const { tracked, beginReload, finishReload } = await timelineTargetLifecycle(t, view, 'present');
+    assert.deepEqual(tracked.writes, [900]);
+    tracked.userScroll(150);
+    await beginReload();
+    assert.deepEqual(tracked.writes, [900], 'loading without a card must not explicitly scroll');
+    // Model the browser clamping scrollTop after the tall timeline disappears.
+    tracked.userScroll(0);
+    await finishReload();
+    assert.deepEqual(tracked.writes, [900, 900]);
+    assert.equal(tracked.read(), 900);
+  });
+
+  test(`timeline target: ${view} scrolls from confirmed absence to a present card without changing keys`, async t => {
+    const env = setup(t), alpha = timelineSnapshot(t), key = alpha.sessions[0].key;
+    let snapshot = { ...alpha, sessions: [], instructions: [] };
+    env.context.apiFetch = async () => ({ enabled: true, targets: [] });
+    env.context.useSessionSnapshots = () => liveTimelineData(snapshot);
+    const render = () => env.render(view === 'manager'
+      ? env.h(env.context.SessionHubDetail, {
+        data: { ...liveTimelineData(snapshot), cards: env.context.snapshotCards(snapshot) },
+        selection: { key },
+      }) : env.h(env.context.AllSessionsPanel, { standalone: true, selection: { key } }), env.root);
+    render();
+    const container = env.root.querySelector(view === 'manager' ? '.session-hub-detail' : '.work-board');
+    const tracked = trackTimelineScroll(t, env, container);
+    tracked.userScroll(2100);
+    await flushEffects();
+    assert.ok(container.textContent.includes('현재 스냅샷에 없는 세션'));
+    assert.deepEqual(tracked.writes, [0]);
+    assert.equal(tracked.read(), 0);
+    snapshot = alpha;
+    render(); await flushEffects();
+    assert.equal(container.querySelectorAll('.work-event').length, 3);
+    assert.deepEqual(tracked.writes, [0, 900]);
+    tracked.userScroll(150);
+    snapshot = structuredClone(alpha);
+    snapshot.instructions.push({ ...snapshot.instructions[0], seq: 4, id: 'ordered-4',
+      ts: '2026-10-10T02:04:00.000Z', text: '새 지시 4' });
+    const cardElement = container.querySelector('.work-card');
+    render(); await flushEffects();
+    assert.equal(container.querySelector('.work-card'), cardElement);
+    assert.equal(container.querySelectorAll('.work-event').length, 4);
+    assert.deepEqual(tracked.writes, [0, 900]);
+    assert.equal(tracked.read(), 150);
+  });
+}

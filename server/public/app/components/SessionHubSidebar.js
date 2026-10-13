@@ -6,7 +6,7 @@ import { rankCards, sessionDisplayState, sessionDisplayStatusLabel,
   sessionHasOldTranscript } from '../lib/workBoard.js';
 import { SnapshotRefreshControls } from './SnapshotRefreshControls.js';
 import { Dropdown } from './Dropdown.js';
-import { SnapshotTime, SessionRow, SessionCard, Coverage } from './SessionSnapshotParts.js';
+import { SnapshotTime, SessionRow, SessionCard, Coverage, useInitialTimelineScroll } from './SessionSnapshotParts.js';
 const html = htm.bind(h);
 const GROUP_KEY = 'session-hub-grouping';
 const PALANTIR_KEY = 'session-hub-palantir';
@@ -105,9 +105,13 @@ export function SessionHubDetail({ data, selection, revisionMismatch, onAsk }) {
   const query = selection?.query || '';
   const card = selectedCard && { ...selectedCard, match: rankCards([selectedCard], query)[0]?.match };
   const header = useRef(null);
-  useEffect(() => { header.current?.focus(); }, [selection?.key]);
+  const detail = useRef(null);
+  useEffect(() => {
+    header.current?.focus({ preventScroll: true });
+  }, [selection?.key]);
+  useInitialTimelineScroll(detail, selection?.key, selectedCard, loading, load.rev);
   const changed = revisionMismatch || (selection?.rev && load.rev && selection.rev !== load.rev);
-  return html`<section class="all-sessions-panel session-hub-detail" aria-label="세션 상세">
+  return html`<section ref=${detail} class="all-sessions-panel session-hub-detail" aria-label="세션 상세">
     <header class="session-hub-detail-header" ref=${header} tabindex="-1">
       ${changed && html`<p class="work-label" role="status">답변 뒤 갱신됨 · 현재 스냅샷을 표시합니다.</p>`}
       ${card && html`<div class="work-meta"><span>${sessionDisplayStatusLabel(card, now)}</span>

@@ -253,7 +253,7 @@ test('DOM displays command cards, timeline and raw search matches as safe litera
   assert.equal(root.querySelector('.work-first').textContent, '/deep-research');
   root.querySelector('.work-card button').click(); await flushEffects();
   const timeline = Array.from(root.querySelectorAll('.work-instruction'), node => node.textContent);
-  assert.deepEqual(timeline, [`/review ${args}`, '/deep-research']);
+  assert.deepEqual(timeline, ['/deep-research', `/review ${args}`]);
   for (const term of ['command-name', 'onerror', '[REDACTED]', 'command-message']) {
     if (!root.querySelector('#work-query')) await backToList(root);
     const query = root.querySelector('#work-query');
@@ -324,7 +324,7 @@ test('DOM search highlights original lines without matching a synthesized comman
   assert.equal(root.querySelector('.work-recent').textContent, '/review x');
   root.querySelector('.work-card button').click(); await flushEffects();
   assert.deepEqual(Array.from(root.querySelectorAll('.work-instruction'), node => node.textContent),
-    [`/review ${args}`, mismatched]);
+    [mismatched, `/review ${args}`]);
   const cases = [
     { query: '/review x', expected: '/review x original line' },
     { query: 'command-name', expected: '<command-name>/review</command-name><command-args>x' },
@@ -371,7 +371,7 @@ test('DOM highlights original matches before verifying converted card and timeli
     assert.equal(root.querySelectorAll('.work-card').length, 1);
     assert.equal(root.querySelector('.work-match mark').textContent, query);
     const timeline = root.querySelectorAll('.work-instruction');
-    const originalIndex = variant.first === wrapped ? 0 : 1;
+    const originalIndex = variant.first === wrapped ? 1 : 0;
     assert.equal(timeline[originalIndex].querySelector('mark').textContent, query);
     if (variant.recent !== wrapped) assert.equal(root.querySelector('.work-recent mark').textContent, query);
     const converted = root.querySelector(variant.converted);
@@ -751,11 +751,11 @@ test('DOM preserves XSS instruction/title/repo as text, timeline flags and selec
   cards[0].querySelector('button').click(); await flushEffects();
   cards = env.document.querySelectorAll('.work-card');
   assert.equal(cards[0].querySelectorAll('.work-event').length, 2);
-  assert.equal(cards[0].querySelector('.work-instruction').textContent, attack);
+  assert.equal(cards[0].querySelector('.work-event:last-child .work-instruction').textContent, attack);
   assert.ok(cards[0].textContent.includes('살균됨'));
   assert.ok(cards[0].textContent.includes('첨부 2개'));
   assert.equal(env.document.querySelectorAll('img, script').length, 0);
-  cards[0].querySelector('.work-event button').click(); await flushEffects(); await flushEffects();
+  cards[0].querySelector('.work-event:last-child button').click(); await flushEffects(); await flushEffects();
   const input = cards[0].querySelector('.work-selector');
   assert.equal(input.value, `${alpha.instructions[1].id}#${alpha.instructions[1].ref}`);
   assert.equal(input.selectionStart, 0); assert.equal(input.selectionEnd, input.value.length);
@@ -947,7 +947,7 @@ test('clipboard success receives exact id#ref; total failures never expose raw e
   env.render(env.h(env.context.DetailCards), root); await flushEffects(); await flushEffects();
   assert.equal(root.querySelectorAll('.work-card').length, 2);
   root.querySelector('.work-card button').click(); await flushEffects();
-  root.querySelector('.work-event button').click(); await flushEffects();
+  root.querySelector('.work-event:last-child button').click(); await flushEffects();
   assert.deepEqual(copied, [`${alpha.instructions[1].id}#${alpha.instructions[1].ref}`]);
   assert.ok(root.textContent.includes('복사됨'));
   assert.equal(root.querySelectorAll('.work-selector').length, 0);
@@ -1362,4 +1362,25 @@ test('PR-S v1 snapshots without status have unknown cards regardless of legacy O
   const cards = snapshotCards(alpha);
   for (const card of cards) assert.deepEqual(card.status,
     { state: 'unknown', source: 'none', evidence_at: null, reason: null });
+});
+
+test('timeline chat order: manually expanded work card shows three instructions oldest to newest without scrolling', async t => {
+  const { alpha } = fixtures(t);
+  const session = alpha.sessions[0];
+  const base = alpha.instructions.find(row => row.session_key === session.key);
+  alpha.instructions = [3, 1, 2].map(seq => ({ ...base, seq, id: `ordered-${seq}`,
+    ts: `2026-10-10T02:0${seq}:00.000Z`, text: `지시 ${seq}` }));
+  const env = boardEnv(t), root = env.document.getElementById('root');
+  const card = env.context.snapshotCards(alpha)[0];
+  const writes = [];
+  Object.defineProperty(root, 'scrollTop', { get: () => 75, set: value => writes.push(value) });
+  env.window.HTMLElement.prototype.scrollIntoView = () => assert.fail('must not scroll outer layout');
+  t.mock.method(env.window, 'scrollTo', () => assert.fail('must not scroll window'));
+  env.render(env.h(env.context.SessionCard, { card, now: Date.parse(alpha.generated_at) }), root);
+  assert.equal(root.querySelectorAll('.work-instruction').length, 0);
+  root.querySelector('.work-card-footer button').click(); await flushEffects();
+  assert.deepEqual(Array.from(root.querySelectorAll('.work-instruction'), node => node.textContent),
+    ['지시 1', '지시 2', '지시 3']);
+  assert.deepEqual(writes, []);
+  assert.equal(root.scrollTop, 75);
 });
