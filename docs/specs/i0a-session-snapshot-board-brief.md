@@ -1,6 +1,7 @@
 # I0a — 여러 머신 세션 스냅샷 보드 (구현 brief)
 
 > **상태**: v11 — 사용자 spec 승인 (2026-10-08). 원격 실행은 ssh stdin 번들(§2.3, §4). **PR1a 구현 중 범위 축소 반영**(§11 v11): Orca 터미널 제목 비반출, cwd 접두사 제외 제거, 다중 파일·혼합 세션·시각 부적합 세션 보류. codex 설계검토 GO (R1~R10), PR1a 코드 적대리뷰 R10 GO. **PR1b**(번들·실행기·원격·exclude CLI): 위협 모델 명시(§2.3), launcher 가 만드는 오류 envelope 의 `machine_id` 는 `unknown`, exclude 도 `--now` 허용(§11 PR1b).
+> **부록 (2026-10-14)**: 지시별 답변 조회 — [`c1-session-answers-brief.md`](./c1-session-answers-brief.md) v4. 스냅샷 세션에 선택 필드 `file_fp` 추가(§3 개정), 번들 op `answer_query`·schema 추가(§2.3 확장). 스냅샷 생성 경로의 본문 폐기 계약은 불변.
 > **상위 문서**: [`instruction-centric-direction-brief.md`](./instruction-centric-direction-brief.md) (LOCKED). 이 문서는 그중 §3.1 데이터 원칙, §5 사용성, §6 성공 기준, §7 I0/I0a 를 구현 수준으로 구체화한다.
 > 상위 문서가 "구현 brief 에서 정한다"고 넘긴 네 가지를 여기서 확정한다: 반출 도구, 허용 필드, 측정 절차, U0 수치.
 
