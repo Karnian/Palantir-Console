@@ -65,6 +65,50 @@ export function Instruction({ instruction, query, now }) {
   </li>`;
 }
 
+// Scroll only the owning viewport: work-board coverage can follow the last instruction.
+// Report completion only when the viewport has layout and its destination is rendered.
+export function scrollToLastInstruction(container, card) {
+  if (!container || container.clientHeight <= 0) return false;
+  if (card && !container.querySelector('.work-card')) return false;
+  if (!card?.instructions.length) {
+    container.scrollTop = 0;
+    return true;
+  }
+  const last = container.querySelector('.work-event:last-child');
+  if (!last) return false;
+  const bottom = last.getBoundingClientRect().bottom;
+  const viewportTop = container.getBoundingClientRect().top + container.clientTop;
+  container.scrollTop = Math.max(0, container.scrollTop + bottom - viewportTop - container.clientHeight);
+  return true;
+}
+
+export function useInitialTimelineScroll(containerRef, key, card, loading, revision) {
+  const lastScroll = useRef(null);
+  const target = card ? 'present' : loading === false && revision ? 'absent' : null;
+  useEffect(() => {
+    // A reload removes the destination: its return requires a new initial scroll.
+    if (!key || target === null) { lastScroll.current = null; return; }
+    if (lastScroll.current?.key === key && lastScroll.current.target === target) return;
+    let observer;
+    let active = true;
+    let performed = false;
+    const attempt = () => {
+      if (!active || performed) return;
+      if (scrollToLastInstruction(containerRef.current, card)) {
+        lastScroll.current = { key, target };
+        performed = true;
+        observer?.disconnect();
+      }
+    };
+    attempt();
+    if (!performed && containerRef.current && typeof ResizeObserver === 'function') {
+      observer = new ResizeObserver(attempt);
+      observer.observe(containerRef.current);
+    }
+    return () => { active = false; observer?.disconnect(); };
+  }, [containerRef, key, target, card]);
+}
+
 export function SessionRow({ card, query, now, onOpen, compact = false, selected = false }) {
   const title = sessionDisplayTitle(card);
   const recent = card.recent || (card.instructions.length ? W.missing : W.noInstruction);
@@ -137,7 +181,7 @@ export function SessionCard({ card, query, rank, now, onOpen, timeline = false, 
         ${expanded ? W.closeTimeline : W.timeline}</button></footer>
     <div id=${timelineId} class="work-timeline" hidden=${!expanded}>
       ${expanded && (card.instructions.length === 0 ? html`<p>${W.timelineEmpty}</p>` : html`<ol>
-        ${[...card.instructions].reverse().map(instruction => html`<${Instruction} key=${instruction.id}
+        ${card.instructions.map(instruction => html`<${Instruction} key=${instruction.id}
           instruction=${instruction} query=${query} now=${now} />`)}
       </ol>`)}</div>
   </article>`;

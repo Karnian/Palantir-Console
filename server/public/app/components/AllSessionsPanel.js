@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from '../../vendor/hooks.module.
 import htm from '../../vendor/htm.module.js';
 import { WORK_BOARD_LABELS as W } from '../lib/copy.js';
 import { snapshotCards, rankCards } from '../lib/workBoard.js';
-import { SnapshotTime, SessionCard, SessionRow, Coverage } from './SessionSnapshotParts.js';
+import { SnapshotTime, SessionCard, SessionRow, Coverage, useInitialTimelineScroll } from './SessionSnapshotParts.js';
 import { Dropdown } from './Dropdown.js';
 import { SnapshotRefreshControls } from './SnapshotRefreshControls.js';
 import { useSessionSnapshots } from '../lib/hooks/useSessionSnapshots.js';
@@ -31,7 +31,9 @@ export function AllSessionsPanel({ onData, selection, onSelectionChange,
     .map(entry => ({ value: entry.machine_id, label: entry.machine_label }));
   useEffect(() => {
     if (selected?.key) {
-      if (previousSelection.current !== selected.key) backRef.current?.focus();
+      if (previousSelection.current !== selected.key) {
+        backRef.current?.focus({ preventScroll: true });
+      }
       returnKey.current = selected.key;
     } else if (returnKey.current) {
       const row = Array.from(panelRef.current?.querySelectorAll('button.session-row') || [])
@@ -41,6 +43,7 @@ export function AllSessionsPanel({ onData, selection, onSelectionChange,
     }
     previousSelection.current = selected?.key || null;
   }, [selected?.key, results, loading]);
+  useInitialTimelineScroll(panelRef, selected?.key, selectedCard, loading, load.rev);
   return html`<section ref=${panelRef} data-view=${standalone ? 'work' : 'all-sessions'}
     class="work-board all-sessions-panel ${standalone ? 'session-board-standalone' : ''}" aria-label="모든 세션">
     <header class="work-header">
