@@ -2274,6 +2274,8 @@ test('PR1c fixed pre-change bytes preserve window, whole sessions, exclusions an
   for (const session of legacy.sessions) {
     delete session.status;
     delete session.instruction_total;
+    assert.match(session.file_fp, /^[0-9a-f]{16}$/);
+    delete session.file_fp; // Omit only the deliberate C1-A schema addition from the legacy digest.
     // The fixture's complete unsupported JSON value now intentionally blocks Claude links.
     if (session.provider === 'claude') {
       assert.equal(session.orca_link.evidence, 'ambiguous');
@@ -3673,7 +3675,7 @@ for (const old of [false, true]) {
     });
     testContext.mock.method(fs, 'fstatSync', function countStatsBeforeGrowth(descriptor, ...args) {
       const stats = originalFstat(descriptor, ...args);
-      if (descriptors.has(descriptor)) statsRead++;
+      if (descriptors.has(descriptor) && !args[0]?.bigint) statsRead++;
       return stats;
     });
     testContext.mock.method(fs, 'readFileSync', function countUnboundedRead(descriptor, ...args) {
@@ -4151,6 +4153,8 @@ test('PR1d streaming is byte-equivalent to array parsing, bounds text retention,
   const oldCoverage = counters();
   const old = internals.parseFile('claude', records, oldCoverage, config);
   const streamed = internals.scanSessions(fixture.options, config);
+  const identity = fs.statSync(file, { bigint: true });
+  old.file_fp = crypto.createHash('sha256').update(`palantir-file/1:${identity.dev}:${identity.ino}`).digest('hex').slice(0, 16);
   assert.deepEqual(streamed.all[0], old);
   assert.equal(streamed.all[0].items.length, 201);
   assert.equal(streamed.all[0].instructionCount, 450);
@@ -4819,6 +4823,8 @@ test('PR1d R1a-3 33334 legacy small-file records match array parsing and keep fi
   const legacy = internals.parseFile('claude', rows, counters, config);
   const scanned = internals.scanSessions(fixture.options, config);
   assert.equal(scanned.all.length, 1);
+  const identity = fs.statSync(file, { bigint: true });
+  legacy.file_fp = crypto.createHash('sha256').update(`palantir-file/1:${identity.dev}:${identity.ino}`).digest('hex').slice(0, 16);
   assert.deepEqual(scanned.all[0], legacy);
   const snapshot = snapshotReader.runSnapshot(fixture.options);
   assert.equal(snapshot.sessions[0].instruction_total, 33334);
@@ -5739,7 +5745,7 @@ test('PR1d mutation coverage large-file shrink after all S0 bytes were read is w
     return count;
   });
   t.mock.method(fs, 'fstatSync', function(fd, ...args) {
-    if (fd === descriptor && ++statsRead === 2) {
+    if (fd === descriptor && !args[0]?.bigint && ++statsRead === 2) {
       assert.equal(bytes, initial.size * 2, 'truncate occurs after S0 and the bounded status tail read');
       fs.truncateSync(file, initial.size - 1);
       truncated = true;

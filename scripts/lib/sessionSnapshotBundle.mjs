@@ -12,6 +12,7 @@ const { reapProcessGroup } = require('../../server/utils/reapProcessGroup.js');
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 export const MANIFEST = Object.freeze([
   'scripts/lib/sessionSnapshotLauncher.cjs', 'scripts/lib/sessionSnapshotReader.cjs',
+  'scripts/lib/sessionTranscriptCore.cjs',
   'server/services/memorySanitize.js', 'server/services/observeSnapshotPolicy.js'
 ]);
 const builtins = ['node:fs', 'node:path', 'node:os', 'node:crypto', 'node:child_process'];
