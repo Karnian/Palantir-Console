@@ -1,7 +1,8 @@
 import { h } from '../../vendor/preact.module.js';
-import { useEffect, useRef, useState } from '../../vendor/hooks.module.js';
+import { useEffect, useLayoutEffect, useId, useRef, useState } from '../../vendor/hooks.module.js';
 import htm from '../../vendor/htm.module.js';
 import { WORK_BOARD_LABELS as W } from '../lib/copy.js';
+import { apiFetch } from '../lib/api.js';
 import { snapshotCards, rankCards, highlightParts, matchedLines,
   coverageCounts, formatLocalSnapshotTime, cardLineVisibility,
   displayInstructionText, sessionDisplayTitle, sessionDisplayState, sessionDisplayStatusLabel, sessionHasOldTranscript
@@ -29,7 +30,86 @@ export function Highlight({ text, query, transformed = false }) {
     ? html`<mark key=${index}>${part.text}</mark>` : part.text);
 }
 
-export function Instruction({ instruction, query, now }) {
+// Ephemeral answer state belongs to one instruction and one snapshot load.
+function InstructionAnswer({ machine, sessionKey, instructionId, machineRev, snapshotLoad, now }) {
+  const regionId = `work-answer-${useId()}`;
+  const [state, setState] = useState(null);
+  const currentTarget = useRef(null);
+  const generation = useRef(0);
+  const request = useRef(null);
+  const previous = currentTarget.current;
+  if (!previous || previous.machine !== machine || previous.key !== sessionKey
+    || previous.instruction !== instructionId || previous.rev !== machineRev
+    || previous.snapshotLoad !== snapshotLoad) {
+    currentTarget.current = { machine, key: sessionKey, instruction: instructionId,
+      rev: machineRev, snapshotLoad };
+  }
+  const target = currentTarget.current;
+  const discard = () => {
+    generation.current++;
+    request.current?.abort();
+    request.current = null;
+  };
+  useLayoutEffect(() => {
+    setState(null);
+    return discard;
+  }, [target]);
+  const expanded = state?.target === target;
+  const body = expanded ? state.body : null;
+  const load = async () => {
+    discard();
+    const controller = new AbortController();
+    request.current = controller;
+    const token = generation.current;
+    setState({ target, body: null });
+    const isCurrent = () => {
+      const current = currentTarget.current;
+      return !controller.signal.aborted && token === generation.current
+        && current.machine === target.machine && current.key === target.key
+        && current.instruction === target.instruction && current.rev === target.rev
+        && current.snapshotLoad === target.snapshotLoad;
+    };
+    try {
+      const answer = await apiFetch('/api/observe/answers?' + new URLSearchParams({
+        machine: target.machine, key: target.key, instruction: target.instruction, rev: target.rev,
+      }), { signal: controller.signal });
+      if (isCurrent()) setState({ target, body: { answer } });
+    } catch (error) {
+      if (isCurrent()) setState({ target, body: { errorStatus: error.status || 0 } });
+    } finally {
+      if (request.current === controller) request.current = null;
+    }
+  };
+  const toggle = () => {
+    if (expanded) { discard(); setState(null); }
+    else load();
+  };
+  const answer = body?.answer;
+  const message = body && (body.errorStatus === 409 ? W.answerSnapshotChanged
+    : body.errorStatus === 429 ? W.answerBusy
+      : answer ? W.answerStatuses[answer.status] || W.answerStatuses.unavailable
+        : W.answerStatuses.unavailable);
+  const retry = body && (answer ? answer.status === 'unavailable' : body.errorStatus !== 409);
+  return html`<button class="ghost work-answer-toggle" type="button"
+    aria-expanded=${expanded} aria-controls=${regionId} onClick=${toggle}>
+    ${expanded ? W.answerHide : W.answerShow}</button>
+    ${expanded && html`<div id=${regionId} class="work-answer" role="region" aria-label=${W.answerRegion}>
+      ${!body ? html`<p class="work-answer-status" role="status">${W.answerLoading}</p>`
+        : answer?.status === 'final' ? html`<p class="work-answer-text">${answer.text}</p>`
+          : html`<p class="work-answer-status">${message}</p>`}
+      ${answer && html`<div class="work-meta work-answer-meta">
+        ${['final', 'no_text', 'interrupted'].includes(answer.status) && answer.answer_at
+          && html`<${SnapshotTime} value=${answer.answer_at} now=${now} label=${W.answerAt} />`}
+        <${SnapshotTime} value=${answer.observed_at} now=${now} label=${W.answerObservedAt} />
+        ${answer.truncated && html`<span>${W.answerTruncated}</span>`}
+        ${answer.redacted && html`<span>${W.answerRedacted}</span>`}
+        ${answer.shared_turn && html`<span>${W.answerSharedTurn}</span>`}
+      </div>`}
+      ${retry && html`<button class="ghost work-answer-retry" type="button" onClick=${load}>${W.retry}</button>`}
+    </div>`}`;
+}
+
+export function Instruction({ instruction, query, now, card }) {
   const text = displayInstructionText(instruction.text);
   const transformed = !instruction.text_missing && text !== instruction.text;
   const [copyState, setCopyState] = useState('');
@@ -62,6 +142,10 @@ export function Instruction({ instruction, query, now }) {
     <span role="status">${copyState === 'copied' ? W.copied : copyState === 'fallback' ? W.copyFallback : ''}</span>
     ${copyState === 'fallback' && html`<input ref=${selectorRef} class="work-selector"
       aria-label=${W.selector} value=${selector} readOnly />`}
+    ${card?.answers === true && /^[0-9a-f]{64}$/.test(card.machineRev || '')
+      && html`<${InstructionAnswer} machine=${card.machine.id}
+        sessionKey=${instruction.session_key || card.key} instructionId=${instruction.id}
+        machineRev=${card.machineRev} snapshotLoad=${card.snapshotLoad} now=${now} />`}
   </li>`;
 }
 
@@ -182,7 +266,7 @@ export function SessionCard({ card, query, rank, now, onOpen, timeline = false, 
     <div id=${timelineId} class="work-timeline" hidden=${!expanded}>
       ${expanded && (card.instructions.length === 0 ? html`<p>${W.timelineEmpty}</p>` : html`<ol>
         ${card.instructions.map(instruction => html`<${Instruction} key=${instruction.id}
-          instruction=${instruction} query=${query} now=${now} />`)}
+          instruction=${instruction} query=${query} now=${now} card=${card} />`)}
       </ol>`)}</div>
   </article>`;
 }

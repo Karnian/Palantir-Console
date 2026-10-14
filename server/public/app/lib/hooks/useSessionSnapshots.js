@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from '../../../vendor/hooks.module.js';
 import { apiFetch } from '../api.js';
 import { snapshotCards, loadSessionSnapshots } from '../workBoard.js';
 
-const emptyPanelLoad = () => ({ entries: [], snapshots: [], failures: [], done: 0, total: 0, rev: null });
+const emptyPanelLoad = () => ({ entries: [], snapshots: [], failures: [], done: 0, total: 0, rev: null, answers: false });
 
 export function useSessionSnapshots(onData) {
   const [load, setLoad] = useState(emptyPanelLoad);
