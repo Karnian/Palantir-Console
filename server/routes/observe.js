@@ -61,10 +61,22 @@ function createObserveRouter({ state, store = snapshotStore, answers = true, ans
     if (!answers) throw new AppError('answers_off', 404);
     assertSameOrigin(req);
     if (req.headers['sec-fetch-site'] === 'cross-site') throw new ForbiddenError('cross-origin read blocked');
-    const query = req.query;
+    const separator = req.originalUrl.indexOf('?');
+    const raw = separator === -1 ? '' : req.originalUrl.slice(separator + 1);
+    if (Buffer.byteLength(raw, 'utf8') > 512) throw new AppError('invalid_query', 400);
+    const parts = raw.split('&');
     const keys = ['machine', 'key', 'instruction', 'rev'];
-    if (Object.keys(query).length !== keys.length || keys.some(key => typeof query[key] !== 'string')
-      || !isSafeId(query.machine) || !isSafeId(query.key) || !isSafeInstructionId(query.instruction)
+    if (parts.length !== keys.length) throw new AppError('invalid_query', 400);
+    const query = Object.create(null);
+    for (const part of parts) {
+      const pair = part.split('=');
+      if (pair.length !== 2 || !keys.includes(pair[0]) || Object.hasOwn(query, pair[0])) {
+        throw new AppError('invalid_query', 400);
+      }
+      try { query[pair[0]] = decodeURIComponent(pair[1]); }
+      catch { throw new AppError('invalid_query', 400); }
+    }
+    if (!isSafeId(query.machine) || !isSafeId(query.key) || !isSafeInstructionId(query.instruction)
       || !/^[0-9a-f]{64}$/.test(query.rev)) throw new AppError('invalid_query', 400);
     const result = await answerService.query({ machineId: query.machine, sessionKey: query.key,
       instructionId: query.instruction, rev: query.rev });

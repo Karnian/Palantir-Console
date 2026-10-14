@@ -150,3 +150,69 @@ test('unreaped group retains global capacity while other machines continue', asy
   assert.equal((await service.query(fx.query('gamma'))).status, 'final');
   assert.equal(fx.spawns(), 3);
 });
+
+test('ssh timeout cools only its machine until first request start + 60s, without retaining global capacity', async t => {
+  const start = Date.parse('2026-10-14T00:00:00.000Z'); let time = start;
+  const fx = setup(t);
+  const gamma = structuredClone(fx.alpha); gamma.machine.id = 'gamma';
+  gamma.sessions.forEach(row => { row.key = row.key.replace('alpha', 'gamma'); row.session_id = 'gamma-' + row.session_id; });
+  gamma.instructions.forEach(row => { row.session_key = row.session_key.replace('alpha', 'gamma'); row.id = row.id.replace('claude:', 'claude:gamma-'); });
+  fx.write(gamma);
+  const service = fx.newService({ timeoutMs: 500, clock: () => time,
+    env: { ...fx.env, PALANTIR_SNAPSHOT_TARGETS: JSON.stringify([
+      { name: 'remote', machineId: 'alpha', kind: 'ssh', host: 'user@host' },
+      { name: 'beta', machineId: 'beta', kind: 'local' }, { name: 'gamma', machineId: 'gamma', kind: 'local' }]) },
+    spawn(command, argv, options) {
+      return fx.options.spawn(command, argv, { ...options, env: { ...options.env,
+        FAKE_ANSWER_MODE: argv.includes('remote') ? 'hang' : 'ok', FAKE_ANSWER_DELAY: '100' } });
+    } });
+  const input = fx.query(); const first = service.query(input);
+  await until(() => fx.calls().length === 1);
+  time = start + 10000;
+  assert.equal(service.query(input), first, 'joining must not reset the request start');
+  const result = await first; assert.equal(result.status, 'unavailable'); assert.equal(result.reason, 'timeout');
+  assert.throws(() => process.kill(-fx.calls()[0].pid, 0), error => error.code === 'ESRCH');
+  const spawnCount = fx.spawns();
+  assert.throws(() => service.query(input), { code: 'answer_busy', status: 429 });
+  assert.equal(fx.spawns(), spawnCount);
+  const beta = service.query(fx.query('beta')), other = service.query(fx.query('gamma'));
+  assert.equal((await beta).status, 'final'); assert.equal((await other).status, 'final');
+  assert.equal(fx.spawns(), spawnCount + 2, 'both global slots must be available during cooling');
+  time = start + 59999;
+  assert.throws(() => service.query(input), { code: 'answer_busy', status: 429 });
+  assert.equal(fx.spawns(), spawnCount + 2);
+  time = start + 60001;
+  assert.equal((await service.query(input)).reason, 'timeout');
+  assert.equal(fx.spawns(), spawnCount + 3);
+  const begun = Date.now(); await service.shutdown();
+  assert.ok(Date.now() - begun < 1000, 'shutdown must not wait for cooling with the clock frozen');
+});
+
+test('ssh shutdown cancellation reaps its local group without waiting for remote cooling', async t => {
+  const fx = setup(t, 'hang');
+  const service = fx.newService({ timeoutMs: 60000, clock: () => Date.parse('2026-10-14T00:00:00.000Z'),
+    env: { ...fx.env, PALANTIR_SNAPSHOT_TARGETS: JSON.stringify([
+      { name: 'remote', machineId: 'alpha', kind: 'ssh', host: 'user@host' }]) } });
+  let settled = false;
+  const task = service.query(fx.query()).finally(() => { settled = true; });
+  await until(() => fx.calls().length >= 1); assert.equal(settled, false);
+  const pid = fx.calls()[0].pid, begun = Date.now();
+  await service.shutdown();
+  assert.equal(settled, true); failed(await task);
+  assert.throws(() => process.kill(-pid, 0), error => error.code === 'ESRCH');
+  assert.ok(Date.now() - begun < 1000, 'shutdown must wait for reaping, not a cooling deadline');
+});
+
+test('ssh execution cannot start after the request-time budget even when launch is delayed', async t => {
+  const start = Date.parse('2026-10-14T00:00:00.000Z'); let time = start;
+  const fx = setup(t);
+  const service = fx.newService({ clock: () => time, env: { ...fx.env,
+    PALANTIR_SNAPSHOT_TARGETS: JSON.stringify([{ name: 'remote', machineId: 'alpha', kind: 'ssh', host: 'user@host' }]) } });
+  const input = fx.query(), task = service.query(input);
+  time = start + 30001;
+  const result = await task;
+  assert.equal(result.status, 'unavailable'); assert.equal(result.reason, 'timeout'); assert.equal(fx.spawns(), 0);
+  assert.throws(() => service.query(input), { code: 'answer_busy', status: 429 });
+  time = start + 60001;
+  assert.equal((await service.query(input)).status, 'final'); assert.equal(fx.spawns(), 1);
+});

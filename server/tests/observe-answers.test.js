@@ -23,7 +23,9 @@ test('cookie-only matrix, explicit method rejection, same-site auth, and no-stor
   const worker = app.services.workerProposalTokenService.mint('answer-run', { projectId: 'answer-fixture' });
   for (const token of [TOKEN, PM, 'hub-live', top, operator, worker, 'bad']) {
     const denied = await request(app).get(fx.url()).set('Authorization', `Bearer ${token}`);
-    assert.equal(denied.status, 403, token); assert.equal(denied.headers['cache-control'], 'no-store');
+    const reason = [TOKEN, PM].includes(token) ? 'cookie auth required'
+      : token === 'hub-live' ? 'forbidden' : 'authentication_failed';
+    error(denied, reason, 403);
   }
   const mixed = await get(app, fx.url()).set('Authorization', 'Bearer bad');
   assert.equal(mixed.status, 403); assert.equal(mixed.headers['cache-control'], 'no-store');
@@ -151,5 +153,46 @@ test('all observe paths reject any Authorization header without cookie fallback'
   }
   assert.equal((await get(app, '/api/observe/snapshots')).status, 200);
   assert.equal((await get(app, fx.url())).status, 200);
+  assert.equal(fx.spawns(), 1);
+});
+
+test('Authorization is rejected before global auth even without a cookie, and observe off keeps priority', async t => {
+  const fx = setup(t); const app = appFor(fx);
+  const off = appFor(fx, { observeSnapshotDir: null, sessionHubTokenProvider: { current: () => 'hub-live' } });
+  const headers = ['bearer x', `BEARER ${TOKEN}`, 'Basic x', `Bearer ${TOKEN}`, ''];
+  for (const url of ['/api/observe/snapshots', fx.url()]) {
+    for (const authorization of headers) {
+      error(await request(app).get(url).set('Authorization', authorization), 'cookie auth required', 403);
+      for (const method of ['get', 'post']) {
+        const call = request(off)[method](url).set('Authorization', authorization).send('{broken');
+        error(await call, 'observe_off', 404);
+      }
+    }
+    error(await request(off).get(url).set('Authorization', 'Bearer hub-live'), 'observe_off', 404);
+  }
+  assert.equal((await get(app, '/api/observe/snapshots')).status, 200);
+  assert.equal((await get(app, fx.url())).status, 200); assert.equal(fx.spawns(), 1);
+});
+
+test('raw answer query rejects truncation padding, empty fragments, duplicate names and decoding failures', async t => {
+  const fx = setup(t); const app = appFor(fx);
+  const good = fx.url(), query = good.slice(good.indexOf('?') + 1), base = '/api/observe/answers?';
+  const invalid = [
+    good + '&'.repeat(1000) + 'extra=1',
+    good + '&machine=alpha',
+    good + '&',
+    base + query.replace(/key=[^&]+/, ''),
+    base + query.replace(/rev=[^&]+/, 'rev=' + '0'.repeat(600)),
+    base + query.replace(/machine=[^&]+/, 'machine=' + 'é'.repeat(260)),
+    base + query.replace(/machine=[^&]+/, 'machine=%ZZ'),
+    base + query.replace(/machine=[^&]+/, 'machine=%E0%A4%A'),
+    base + query.replace(/machine=[^&]+/, 'machine=alpha=extra'),
+    base + query.replace(/machine=[^&]+/, 'machine'),
+    base + query.replace(/key=[^&]+/, 'machine=alpha'),
+    base + query.replace('machine=', '%6Dachine=')
+  ];
+  for (const url of invalid) error(await get(app, url), 'invalid_query', 400);
+  assert.equal(fx.spawns(), 0);
+  assert.equal((await get(app, good)).status, 200, 'valid percent-encoded values must still work');
   assert.equal(fx.spawns(), 1);
 });

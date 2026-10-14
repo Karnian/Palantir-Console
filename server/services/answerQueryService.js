@@ -18,19 +18,26 @@ function createAnswerQueryService(options = {}) {
   let targets = [];
   try { targets = parseSnapshotTargets(env.PALANTIR_SNAPSHOT_TARGETS); }
   catch { (options.warn || console.warn)('snapshot_targets_invalid'); }
-  const active = new Map(); const locked = new Map();
+  const active = new Map(); const locked = new Map(); const cooling = new Map();
   let closed = false; let shutdownPromise;
   const status = (value, reason) => ({ status: value, reason, text: null, truncated: false,
     redacted: false, shared_turn: false, answer_at: null, observed_at: now() });
 
   async function execute(machineId, expectedTarget, target, run) {
+    let remoteTimedOut = false;
     try {
       const cli = prepareSnapshotCli({ ...options, env, source: 'answer-query:cli' });
       const argv = target.kind === 'ssh' ? ['remote', '--host', target.host] : [];
       if (target.remoteNode) argv.push('--remote-node', target.remoteNode);
       argv.push('answer', '--instruction', `${expectedTarget.instrId}#${expectedTarget.ref}`,
         '--file-fp', expectedTarget.file_fp, '--emit-envelope');
-      const result = await runSnapshotCli({ ...cli, argv, run, timeoutMs, reapOptions: options.reapOptions,
+      // Snapshot validation and CLI setup consume the same request-time budget.
+      const remainingMs = Math.min(timeoutMs, run.startedAt + timeoutMs - +new Date(clock()));
+      if (remainingMs <= 0) {
+        cancelCliRun(run, 'timeout');
+        return status('unavailable', run.cancelled === 'timeout' ? 'timeout' : 'exec_failed');
+      }
+      const result = await runSnapshotCli({ ...cli, argv, run, timeoutMs: remainingMs, reapOptions: options.reapOptions,
         spawn: options.spawn, maxStdoutBytes: 128 * 1024, waitForOutput: true });
       if (result.code === 'timeout') return status('unavailable', 'timeout');
       if (result.status_code !== 0 || run.stdout.truncated) return status('unavailable', 'exec_failed');
@@ -42,6 +49,7 @@ function createAnswerQueryService(options = {}) {
       if (!validateAnswerEnvelope(envelope, { allowDiag: false, expectedMachineId: machineId, expectedTarget }).ok) {
         return status('unavailable', 'exec_failed');
       }
+      remoteTimedOut = envelope.status === 'unavailable' && envelope.reason === 'timeout';
       return Object.fromEntries(FIELDS.map(key => [key, envelope[key]]));
     } catch (error) {
       if (error.code === 'reap_failed' || run.reaping && await run.reaping.then(() => false, () => true)) {
@@ -49,9 +57,23 @@ function createAnswerQueryService(options = {}) {
         (options.warn || console.warn)('reap_failed');
       }
       return status('unavailable', 'exec_failed');
+    } finally {
+      // SSH must launch within the server's 30s execution window; the remote reader
+      // then has its own 25s deadline. Reserve this machine until request start + 60s.
+      // The deadline is cooperative: a blocked readSync (disk/NFS stall) is outside
+      // the threat model. Cooling machines do not retain a global execution slot.
+      if (target.kind === 'ssh' && (run.cancelled || remoteTimedOut)) {
+        cooling.set(machineId, run.startedAt + 60000);
+      }
     }
   }
   function query({ machineId, sessionKey, instructionId, rev }) {
+    const startedAt = +new Date(clock());
+    const coolUntil = cooling.get(machineId);
+    if (!closed && coolUntil !== undefined) {
+      if (startedAt < coolUntil) throw fail('answer_busy', 429);
+      cooling.delete(machineId);
+    }
     let result;
     try { result = store.readSnapshotHashed(observeState, machineId); }
     catch { throw fail('snapshot_unavailable', 503); }
@@ -70,7 +92,7 @@ function createAnswerQueryService(options = {}) {
     if (active.has(key)) return active.get(key).task;
     // Unreaped groups retain their global capacity as well as their machine lock.
     if (active.size + locked.size >= 2 || [...active.values()].some(entry => entry.machineId === machineId)) throw fail('answer_busy', 429);
-    const run = { cancelled: null, pgid: null };
+    const run = { cancelled: null, pgid: null, startedAt };
     run.cancellation = new Promise(resolve => { run.resolveCancellation = resolve; });
     const entry = { machineId, run };
     entry.task = Promise.resolve().then(() => execute(machineId, expectedTarget, target, run))
@@ -82,6 +104,8 @@ function createAnswerQueryService(options = {}) {
     if (shutdownPromise) return shutdownPromise;
     closed = true;
     for (const entry of active.values()) cancelCliRun(entry.run, 'cancelled');
+    // Await local group reaping, but not cooling: remote readers finish under
+    // their own deadline within the bound above, with no server-side timer to drain.
     shutdownPromise = Promise.allSettled([...active.values()].map(entry => entry.task)).then(async () => {
       const results = await Promise.allSettled([...locked.values()].map(pgid => reapProcessGroup(pgid, options.reapOptions)));
       if (results.some(result => result.status === 'rejected')) throw fail('reap_failed', 503);

@@ -50,7 +50,7 @@ const { createLocalNodeExecutor } = require('./services/nodeExecutor');
 const { createWebhookService } = require('./services/webhookService');
 const { createLifecycleService } = require('./services/lifecycleService');
 const { createProjectMaterializationService } = require('./services/projectMaterializationService');
-const { createAuthMiddleware } = require('./middleware/auth');
+const { createAuthMiddleware, timingSafeEqualStr } = require('./middleware/auth');
 const { errorHandler } = require('./middleware/errorHandler');
 const { createManagerRouter } = require('./routes/manager');
 const { createConversationsRouter } = require('./routes/conversations');
@@ -124,7 +124,7 @@ const { createOperatorInstancesRouter } = require('./routes/operatorInstances');
 const { createOperatorScheduleService } = require('./services/operatorScheduleService');
 const { createOperatorScheduler } = require('./services/operatorScheduler');
 const { createOperatorSchedulesRouter } = require('./routes/operatorSchedules');
-const { sanitizeMessage } = require('./utils/errors');
+const { sanitizeMessage, ForbiddenError } = require('./utils/errors');
 
 function readGitSha() {
   try {
@@ -1842,8 +1842,19 @@ function createApp(options = {}) {
     if (req.path === '/snapshots/refresh' || req.path === '/snapshots/status') return next();
     return hubOffGate(req, res, next);
   });
-  app.use(createSessionHubTokenGate(sessionHubTokenProvider));
   app.use('/api/observe', createObserveOffGate(observeState));
+  app.use(createSessionHubTokenGate(sessionHubTokenProvider));
+  app.use('/api/observe', (req, res, next) => {
+    if (!Object.hasOwn(req.headers, 'authorization')) return next();
+    const header = req.headers.authorization;
+    // Keep the existing observe errors for exact Bearer credentials; all other
+    // Authorization forms are also refused before global auth can return 401.
+    const exactBearer = typeof header === 'string' && header.startsWith('Bearer ');
+    const knownHuman = exactBearer && (timingSafeEqualStr(header.slice(7), authToken)
+      || pmToken && timingSafeEqualStr(header.slice(7), pmToken));
+    const error = new ForbiddenError(exactBearer && !knownHuman ? 'Invalid token' : 'cookie auth required');
+    return observeErrorHandler(error, req, res, next);
+  });
   const parseJson = express.json({ limit: '2mb' });
   app.use(function parseNonObserveJson(req, res, next) {
     // Spec §5.3: observe authenticates before parsing bodies.
