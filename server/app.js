@@ -50,7 +50,7 @@ const { createLocalNodeExecutor } = require('./services/nodeExecutor');
 const { createWebhookService } = require('./services/webhookService');
 const { createLifecycleService } = require('./services/lifecycleService');
 const { createProjectMaterializationService } = require('./services/projectMaterializationService');
-const { createAuthMiddleware } = require('./middleware/auth');
+const { createAuthMiddleware, timingSafeEqualStr } = require('./middleware/auth');
 const { errorHandler } = require('./middleware/errorHandler');
 const { createManagerRouter } = require('./routes/manager');
 const { createConversationsRouter } = require('./routes/conversations');
@@ -77,6 +77,7 @@ const { createAssistantMemoryService } = require('./services/assistantMemoryServ
 const { createSessionHubMemoryRouter } = require('./routes/sessionHubMemory');
 const { createSessionHubService } = require('./services/sessionHubService');
 const { createSessionHubChatRouter } = require('./routes/sessionHubChat');
+const { createAnswerQueryService } = require('./services/answerQueryService');
 const { createSnapshotRefreshService } = require('./services/snapshotRefreshService');
 const { createSnapshotRefreshRouter } = require('./routes/snapshotRefresh');
 const { createSessionHubOffGate, createSessionHubTokenGate, createSessionHubRouter,
@@ -123,7 +124,7 @@ const { createOperatorInstancesRouter } = require('./routes/operatorInstances');
 const { createOperatorScheduleService } = require('./services/operatorScheduleService');
 const { createOperatorScheduler } = require('./services/operatorScheduler');
 const { createOperatorSchedulesRouter } = require('./routes/operatorSchedules');
-const { sanitizeMessage } = require('./utils/errors');
+const { sanitizeMessage, ForbiddenError } = require('./utils/errors');
 
 function readGitSha() {
   try {
@@ -1132,6 +1133,12 @@ function createApp(options = {}) {
     ...options.snapshotRefreshServiceOptions, observeState,
   });
   app.snapshotRefreshService = snapshotRefreshService;
+  const sessionAnswers = options.sessionAnswers === undefined
+    ? process.env.PALANTIR_SESSION_ANSWERS !== '0' : options.sessionAnswers === true;
+  const answerQueryService = sessionAnswers ? createAnswerQueryService({
+    ...options.answerQueryServiceOptions, observeState, store: options.observeSnapshotStore,
+  }) : null;
+  app.answerQueryService = answerQueryService;
   const actorTokenOptions = {
     actorTokenSource: options.actorTokenSource,
     agentProcessIsolation: options.agentProcessIsolation,
@@ -1835,8 +1842,19 @@ function createApp(options = {}) {
     if (req.path === '/snapshots/refresh' || req.path === '/snapshots/status') return next();
     return hubOffGate(req, res, next);
   });
-  app.use(createSessionHubTokenGate(sessionHubTokenProvider));
   app.use('/api/observe', createObserveOffGate(observeState));
+  app.use(createSessionHubTokenGate(sessionHubTokenProvider));
+  app.use('/api/observe', (req, res, next) => {
+    if (!Object.hasOwn(req.headers, 'authorization')) return next();
+    const header = req.headers.authorization;
+    // Keep the existing observe errors for exact Bearer credentials; all other
+    // Authorization forms are also refused before global auth can return 401.
+    const exactBearer = typeof header === 'string' && header.startsWith('Bearer ');
+    const knownHuman = exactBearer && (timingSafeEqualStr(header.slice(7), authToken)
+      || pmToken && timingSafeEqualStr(header.slice(7), pmToken));
+    const error = new ForbiddenError(exactBearer && !knownHuman ? 'Invalid token' : 'cookie auth required');
+    return observeErrorHandler(error, req, res, next);
+  });
   const parseJson = express.json({ limit: '2mb' });
   app.use(function parseNonObserveJson(req, res, next) {
     // Spec §5.3: observe authenticates before parsing bodies.
@@ -1944,8 +1962,8 @@ function createApp(options = {}) {
     clock: options.sessionHubClock, history: sessionHubService,
   }));
   app.use('/api/session-hub', sessionHubErrorHandler);
-  app.use('/api/observe', parseJson);
-  app.use('/api/observe', createObserveRouter({ state: observeState, store: options.observeSnapshotStore }));
+  app.use('/api/observe', createObserveRouter({ state: observeState, store: options.observeSnapshotStore,
+    answers: sessionAnswers, answerService: answerQueryService, parseJson }));
   app.use('/api/observe', observeErrorHandler);
   app.use('/api/agent-context', createAgentContextRouter({
     goalFeatureActive,
@@ -2361,6 +2379,7 @@ function createApp(options = {}) {
     _shuttingDown = true;
     const hubShutdown = sessionHubService?.shutdown();
     const snapshotShutdown = snapshotRefreshService.shutdown();
+    const answerShutdown = answerQueryService?.shutdown();
     try { _questionWaiterDrain = questionsRouter.stopWaiters(); }
     catch (err) { console.warn('[app.shutdown] question waiter stop failed:', err && err.message); }
 
@@ -2379,7 +2398,7 @@ function createApp(options = {}) {
       _shutdownPromise = Promise.resolve(_sweepWorkersThenFinish());
     }
     if (hubShutdown || snapshotShutdown) {
-      _shutdownPromise = Promise.allSettled([_shutdownPromise, hubShutdown, snapshotShutdown]).then(results => {
+      _shutdownPromise = Promise.allSettled([_shutdownPromise, hubShutdown, snapshotShutdown, answerShutdown]).then(results => {
         const failed = results.find(result => result.status === 'rejected');
         if (failed) throw failed.reason;
       });

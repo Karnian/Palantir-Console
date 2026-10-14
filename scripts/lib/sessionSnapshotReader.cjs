@@ -44,9 +44,10 @@ const MAX_FILE_BYTES = 16 * 1024 * 1024;
 const STATUS_TAIL_BYTES = 8 * 1024 * 1024;
 const STREAM_LIMITS = { lineBytes: 8 * 1024 * 1024, fileBytes: 256 * 1024 * 1024, identities: TRANSCRIPT_METADATA_LIMIT, smallFileBytes: MAX_FILE_BYTES };
 function checkMetadata(size) { coreCheckMetadata(size, STREAM_LIMITS.identities); }
-function* transcriptRecords(fd, observation) {
+function* transcriptRecords(fd, observation, checkDeadline) {
   const limited = true;
   function consume(line, terminated = true) {
+    checkDeadline?.();
     const record = parseTranscriptRecord(line, terminated);
     if (observation) selectFirstTranscriptIdentity(observation.provider, record, observation);
     return record;
@@ -56,7 +57,9 @@ function* transcriptRecords(fd, observation) {
   const endOffset = observation.size;
   const tailStart = Math.max(0, endOffset - STATUS_TAIL_BYTES);
   while (offset < endOffset) {
+    checkDeadline?.();
     const count = fs.readSync(fd, chunk, 0, Math.min(chunk.length, endOffset - offset, STREAM_LIMITS.fileBytes + 1 - offset), offset);
+    checkDeadline?.();
     if (!count) streamLimit();
     if (tailStart > 0 && tailStart - 1 >= offset && tailStart - 1 < offset + count)
       observation.statusTailStartsLine = chunk[tailStart - 1 - offset] === 10;
@@ -297,11 +300,12 @@ function defaultRunOrca(args, bin = 'orca') {
   }
 }
 
-function listFiles(root, providerCoverage, budget) {
+function listFiles(root, providerCoverage, budget, checkDeadline) {
   const result = [];
   let ancestor = root;
   const boundary = path.dirname(path.dirname(path.dirname(root)));
   while (ancestor !== boundary) {
+    checkDeadline?.();
     try {
       if (fs.lstatSync(ancestor).isSymbolicLink()) {
         return result;
@@ -316,6 +320,7 @@ function listFiles(root, providerCoverage, budget) {
     ancestor = path.dirname(ancestor);
   }
   function walk(dir, depth) {
+    checkDeadline?.();
     if (depth > 32) {
       providerCoverage.files_failed++;
       return;
@@ -343,6 +348,7 @@ function listFiles(root, providerCoverage, budget) {
       return;
     }
     for (const name of names) {
+      checkDeadline?.();
       if (++budget.entries > MAX_FILES) {
         providerCoverage.files_failed++;
         return;
@@ -362,7 +368,8 @@ function listFiles(root, providerCoverage, budget) {
           }
           result.push({ file: filePath, stats: fileStats, root });
         }
-      } catch {
+      } catch (error) {
+        if (error.answerDeadline) throw error;
         providerCoverage.files_failed++;
       }
     }

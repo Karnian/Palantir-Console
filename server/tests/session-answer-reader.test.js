@@ -350,3 +350,123 @@ for (const c of require('./fixtures/session-snapshot/answer-send-now.cjs').cases
   assert.equal(JSON.stringify(snapshotReader.runSnapshot(f.options)).includes('ANSWER_BODY_SENTINEL'), false);
   assert.equal(JSON.stringify(a.diag).includes('PRIVATE_'), false);
 });
+
+for (const provider of ['claude', 'codex']) test(`deadline ${provider}: timeout invariants and unexpired/no-deadline byte equivalence`, t => {
+  const f = setup(t, cases[provider]); const target = targetFor(f);
+  const baseline = JSON.stringify(query(f, target, { diag: true }));
+  assert.equal(JSON.stringify(query(f, target, { diag: true, deadlineAt: 1000, clock: () => 999 })), baseline);
+  assert.equal(JSON.stringify(query(f, target, { diag: true, clock() { throw Error('no deadline must not read clock'); } })), baseline);
+  const timeout = query(f, target, { deadlineAt: 1000, clock: () => 1001 });
+  assert.equal(timeout.status, 'unavailable'); assert.equal(timeout.reason, 'timeout');
+  assert.equal(timeout.text, null); assert.equal(timeout.answer_at, null);
+  assert.equal(timeout.truncated, false); assert.equal(timeout.redacted, false); assert.equal(timeout.shared_turn, false);
+  assert.equal(timeout.observed_at, f.options.now.toISOString());
+  assert.equal(policy.validateAnswerEnvelope(timeout).ok, true);
+});
+
+test('deadline interrupts recursive enumeration without opening a transcript', t => {
+  const f = setup(t); const target = targetFor(f); const config = snapshotReader.loadConfig(f.options);
+  const nested = path.join(f.home, '.claude/projects/nested'); fs.mkdirSync(nested);
+  fs.writeFileSync(path.join(nested, 'extra.jsonl'), '');
+  let clock = 0, opens = 0, entered = false;
+  const lstat = fs.lstatSync, open = fs.openSync;
+  t.mock.method(fs, 'lstatSync', (filename, ...args) => {
+    const value = lstat(filename, ...args);
+    if (filename === nested) { clock = 1001; entered = true; }
+    return value;
+  });
+  t.mock.method(fs, 'openSync', (...args) => { opens++; return open(...args); });
+  const answer = query(f, target, { config, deadlineAt: 1000, clock: () => clock });
+  assert.equal(entered, true); assert.equal(opens, 0);
+  assert.equal(answer.status, 'unavailable'); assert.equal(answer.reason, 'timeout');
+});
+
+test('deadline interrupts chunk reads even when the remaining input has no records, and closes fd', t => {
+  const f = setup(t); const target = targetFor(f); const config = snapshotReader.loadConfig(f.options);
+  fs.appendFileSync(f.files[0], ' '.repeat(2 * 256 * 1024));
+  let clock = 0, reads = 0, closes = 0;
+  const read = fs.readSync, close = fs.closeSync;
+  t.mock.method(fs, 'readSync', (...args) => { const count = read(...args); reads++; clock = 1001; return count; });
+  t.mock.method(fs, 'closeSync', (...args) => { closes++; return close(...args); });
+  const answer = query(f, target, { config, deadlineAt: 1000, clock: () => clock });
+  assert.equal(answer.status, 'unavailable'); assert.equal(answer.reason, 'timeout');
+  assert.equal(reads, 1); assert.equal(closes, 1); assert.equal(answer.text, null);
+});
+
+test('deadline interrupts record processing and closes the transcript fd', t => {
+  const f = setup(t); const target = targetFor(f); const config = snapshotReader.loadConfig(f.options);
+  let clock = 0, records = 0, closes = 0;
+  const original = snapshotReader.transcriptRecords, close = fs.closeSync;
+  t.mock.method(snapshotReader, 'transcriptRecords', function* (...args) {
+    for (const record of original(...args)) {
+      records++; if (records === 2) clock = 1001;
+      yield record;
+    }
+  });
+  t.mock.method(fs, 'closeSync', (...args) => { closes++; return close(...args); });
+  const answer = query(f, target, { config, deadlineAt: 1000, clock: () => clock });
+  assert.equal(answer.status, 'unavailable'); assert.equal(answer.reason, 'timeout');
+  assert.equal(records, 2); assert.equal(closes, 1); assert.equal(answer.text, null);
+});
+
+test('40000 transparent parents shared by 40000 assistants are memoized within two seconds', { timeout: 10000 }, t => {
+  const f = setup(t); const target = targetFor(f); const config = snapshotReader.loadConfig(f.options);
+  const records = [user('Synthetic instruction A')];
+  for (let index = 0; index < 40000; index++) records.push({ type: 'attachment', uuid: `m${index}`,
+    parentUuid: index ? `m${index - 1}` : 'u', timestamp: TS, attachment: { type: 'summary' } });
+  for (let index = 0; index < 40000; index++) records.push({ type: 'assistant', uuid: `a${index}`,
+    parentUuid: 'm39999', timestamp: TS, message: { id: 'shared', stop_reason: 'end_turn', content: [] } });
+  writeRecords(f, records);
+  const begun = performance.now();
+  const answer = query(f, target, { config });
+  const elapsed = performance.now() - begun;
+  assert.equal(answer.status, 'unbound'); assert.equal(answer.reason, 'branch_conflict');
+  assert.equal(policy.validateAnswerEnvelope(answer).ok, true);
+  assert.ok(elapsed < 2000, `memoized answer read took ${elapsed.toFixed(1)}ms`);
+  t.diagnostic(`80001-record answer read: ${elapsed.toFixed(1)}ms`);
+});
+
+for (const provider of ['claude', 'codex']) test(`${provider} judgment loops stop before state evaluation when a checkpoint expires`, t => {
+  const f = setup(t, cases[provider]); const target = targetFor(f);
+  const records = provider === 'claude' ? [user('Synthetic instruction A')] : [meta(), event('task_started'), message()];
+  for (let index = 0; index < 5000; index++) records.push(provider === 'claude'
+    ? assistant(`a${index}`, index ? `a${index - 1}` : 'u') : agent('commentary'));
+  if (provider === 'codex') records.push(event('task_complete', 't', { last_agent_message: 'SAFE' }));
+  writeRecords(f, records);
+  let eof = false, judgmentChecks = 0, stateCalls = 0;
+  const original = snapshotReader.transcriptRecords;
+  t.mock.method(snapshotReader, 'transcriptRecords', function* (...args) { yield* original(...args); eof = true; });
+  const core = require('../../scripts/lib/sessionTranscriptCore.cjs');
+  const method = provider === 'claude' ? 'claudeStatus' : 'codexStatus', state = core[method];
+  // The collector uses core.transcriptStatus internally; this export is called
+  // only after the answer judgment's node/segment loops have completed.
+  t.mock.method(core, method, (...args) => { stateCalls++; return state(...args); });
+  const complete = query(f, target, { deadlineAt: 1000, clock() { if (eof) judgmentChecks++; return 0; } });
+  assert.equal(complete.status, 'final'); assert.equal(stateCalls, 1);
+  const completeChecks = judgmentChecks, expireAt = 3;
+  assert.ok(completeChecks > expireAt, `full judgment needs loop checkpoints: ${completeChecks} clock calls, must exceed ${expireAt}`);
+  eof = false; judgmentChecks = 0; stateCalls = 0;
+  const answer = query(f, target, { deadlineAt: 1000, clock() {
+    if (!eof) return 0;
+    return ++judgmentChecks >= expireAt ? 1001 : 0;
+  } });
+  assert.equal(eof, true);
+  assert.equal(judgmentChecks, expireAt, 'deadline must be reached inside the judgment loops');
+  assert.equal(stateCalls, 0, 'interruption must precede state evaluation, not follow the complete judgment');
+  assert.equal(answer.status, 'unavailable'); assert.equal(answer.reason, 'timeout');
+  assert.equal(answer.text, null); assert.equal(policy.validateAnswerEnvelope(answer).ok, true);
+  t.diagnostic(`${provider}: full judgment ${completeChecks} clock calls; interrupted at ${judgmentChecks}, state evaluations ${stateCalls}`);
+});
+
+// Captured before parent memoization; only the inode-dependent fingerprint is normalized.
+const PRE_MEMOIZATION_ANSWER_BYTES = {
+  "claude": "{\"schema\":\"palantir.answer/1\",\"kind\":\"answer\",\"machine_id\":\"m\",\"reader_build\":\"0123456789abcdef\",\"target\":{\"instrId\":\"claude:s:uu\",\"ref\":\"fd82305462f77ffc\",\"file_fp\":\"0000000000000000\"},\"status\":\"final\",\"reason\":null,\"text\":\"ANSWER_BODY_SENTINEL\",\"truncated\":false,\"redacted\":false,\"shared_turn\":false,\"answer_at\":\"2026-10-08T02:00:00.000Z\",\"observed_at\":\"2026-10-08T03:00:00.000Z\",\"diag\":{\"evidence_ids\":[\"a\"],\"segment\":{\"start_id\":\"u\",\"end_id\":\"a\"}}}",
+  "codex": "{\"schema\":\"palantir.answer/1\",\"kind\":\"answer\",\"machine_id\":\"m\",\"reader_build\":\"0123456789abcdef\",\"target\":{\"instrId\":\"codex:s:n1\",\"ref\":\"24aaeeab19987449\",\"file_fp\":\"0000000000000000\"},\"status\":\"final\",\"reason\":null,\"text\":\"ANSWER_BODY_SENTINEL\",\"truncated\":false,\"redacted\":false,\"shared_turn\":false,\"answer_at\":\"2026-10-08T02:00:00.000Z\",\"observed_at\":\"2026-10-08T03:00:00.000Z\",\"diag\":{\"evidence_ids\":[\"t\"],\"segment\":{\"start_id\":\"t\",\"end_id\":\"t\"}}}",
+  "queued_resume": "{\"schema\":\"palantir.answer/1\",\"kind\":\"answer\",\"machine_id\":\"m\",\"reader_build\":\"0123456789abcdef\",\"target\":{\"instrId\":\"claude:s:uu\",\"ref\":\"fd82305462f77ffc\",\"file_fp\":\"0000000000000000\"},\"status\":\"pending\",\"reason\":null,\"text\":null,\"truncated\":false,\"redacted\":false,\"shared_turn\":false,\"answer_at\":null,\"observed_at\":\"2026-10-08T03:00:00.000Z\",\"diag\":{\"evidence_ids\":[],\"segment\":{\"start_id\":\"u\",\"end_id\":\"b\"}}}"
+};
+for (const [name, expected] of Object.entries(PRE_MEMOIZATION_ANSWER_BYTES)) test(
+  `answer serialized bytes preserve pre-memoization ${name}`, t => {
+    const f = setup(t, cases[name]); const answer = query(f, targetFor(f), { diag: true });
+    answer.target.file_fp = '0000000000000000';
+    assert.equal(JSON.stringify(answer), expected);
+  });

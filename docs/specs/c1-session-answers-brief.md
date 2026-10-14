@@ -1,6 +1,6 @@
 # C1-A — 지시별 답변 보기 (화면 + 세션 비서) 구현 brief
 
-> **상태**: v6 (2026-10-14). 사용자 요청 + codex 설계 검토 2회 합의 + brief 적대리뷰 R1·R2(NO-GO) 반영 — R2 뒤 범위 축소(§11).
+> **상태**: v7 (2026-10-14, A2a 구현 반영 — §4.1·§4.2·§11). v6 (2026-10-14). 사용자 요청 + codex 설계 검토 2회 합의 + brief 적대리뷰 R1·R2(NO-GO) 반영 — R2 뒤 범위 축소(§11).
 > **상위 문서**: `i0a-session-snapshot-board-brief.md` v11(스냅샷·반출 계약), `c1-session-hub-chat-brief.md` v8(broker·hub 토큰·게이트), `c1-personal-assistant-brief.md` v5(영구 대화·승인 기억 — v8 의 대화 저장·삭제 서술을 대체).
 > 이 문서는 세 문서의 **범위를 넓히는 부록**이다. 여기서 명시적으로 바꾼 것 말고는 기존 계약 그대로다.
 
@@ -154,11 +154,15 @@ i0a §2.3 의 번들·실행기·launcher·수신 검증 경로를 쓰되, **요
 - 실행 제한: 머신 측 30초. **머신당 동시 1개, 서버 전체 2개**. 같은 `(machine, instrId, ref, file_fp)` 진행 중 요청만 합친다(file_fp 가 다르면 다른 요청). 대기열 없음 — 초과는 즉시 429 `answer_busy`. 자동 재시도·미리 가져오기 없음.
 - **취소 없음 (v1 단순화)**: 요청자가 떠나도(HTTP 연결 종료) 실행은 30초 상한까지 계속하고 결과를 버린다. MCP 취소 notification 은 처리하지 않는다(MCP 서버는 요청을 직렬 처리하므로 비서발 조회는 동시에 1개뿐). 시간 초과 시 프로세스 그룹을 종료하고, **회수를 확인한 뒤** 슬롯을 반납한다. 회수 실패 시 그 머신 슬롯을 잠근다(refresh 서비스의 spawn·회수 helper 재사용).
 - 결과를 캐시하지 않는다(진행 중 합치기 외 메모리 보관 없음).
+- **rev (v7 확정)**: 요청 rev = 그 머신 스냅샷 파일의 sha256(64 hex) — 화면이 `/api/observe/snapshots` 목록의 `sha256` 으로 상세를 받은 바로 그 값. 머신 단위라 다른 머신의 갱신으로 무효화되지 않는다.
+- **원격 실행 상한 (v7)**: launcher 가 `answer_query` 에 25초 deadline 을 주고 reader 가 열거·청크·레코드·판정 루프에서 확인한다(초과 → `unavailable`/`timeout`). 서버는 원격 종료를 직접 확인할 수 없으므로, **ssh 대상**에서 검증 통과 envelope 외 모든 결과(시간 초과·비정상 종료·수신 검증 실패 등)이면 그 머신을 **요청 시작 + 60초까지 냉각 잠금**한다(즉시 429, 전역 슬롯 차지). 전역 사용량 = 실행 중 + 잠금·냉각 고유 머신 수. 남는 위험: 원격 겹침 상한은 원격 reader 의 협력적 deadline 에 의존한다 — `readSync` 정지·검사 사이 단일 연산 정지는 위협 모델 밖.
+- 서버는 CLI `answer --emit-envelope` 로 envelope 원문을 받고(기본 CLI 출력은 `text_chars` 유지), 원문 줄 64KiB 초과·diag 필드·검증 실패를 `unavailable`/`exec_failed` 로 닫는다.
 
 ### 4.2 화면용 endpoint
 - `GET /api/observe/answers?machine=&key=&instruction=&rev=` — **cookie-only**(기존 `/api/observe/*` 규칙과 같은 미들웨어: 모든 bearer·hub 토큰·PM·worker 403, 잘못된 bearer 의 cookie fallback 없음, same-origin 검사 기존 규칙 적용). GET 만, HEAD·그 외 메서드 405.
 - 응답 헤더 `Cache-Control: no-store`.
 - 오류 닫힌 집합: `invalid_query`(400), `not_found`(404), `snapshot_changed`(409), `answer_busy`(429), `snapshot_unavailable`(503), `forbidden`(403), `answers_off`(404). 실행 실패·시간 초과는 200 + `status:'unavailable'`.
+- **v7 구현 확정**: 403 본문 문자열은 기존 `/api/observe/*` 오류 처리기 규칙을 그대로 따른다(`forbidden` 은 상태 분류명). `/api/observe` 전체는 전역 auth 앞단에서 `Authorization` 헤더가 있으면(값·대소문자 무관) 403 — 대소문자 변형 bearer 의 cookie fallback 차단. 쿼리는 원본 문자열로 검사한다(2048바이트 이하, 정확히 네 파라미터 각 1회, 파서 잘림 우회 방지). 화면 boot 설정은 `/api/observe/snapshots` 응답의 `answers` 필드.
 
 ### 4.3 비서용 broker endpoint
 - `GET /api/session-hub/answers/:key/:instructionId?rev=` — **hub 토큰 전용**. 사람 cookie 도 403(비서 턴 범위·예산과 섞이지 않게; 사람은 §4.2 를 쓴다). hub 게이트 allowlist 에 이 경로 패턴을 **정확 일치**로 추가한다. 그 외 인증 행렬은 C1 v8 §1.2 그대로(폐기 토큰·Top/Operator·worker·PM·PALANTIR_TOKEN bearer 403).
@@ -307,3 +311,4 @@ provider·CLI 버전별(Mac/codev2) 결과를 기록한다.
 - 2026-10-14 brief R3 NO-GO (SERIOUS 2, MINOR 2; R2 지적은 닫힘 9·부분 1) → v4: 합치기 키·응답 target 에 file_fp 포함, file_fp 선택 필드(기존 스냅샷 읽기 호환, 없으면 서버가 바로 target_changed), 하드링크 검사 범위 = 열거 성공 파일 사이, 피해 상한 서술을 "답변 본문 추가 노출"로 정정, §7 취소 테스트 문구 정리, BigInt dev/ino·검증된 fd 에서 지문, inode 재사용 방어 범위 축소 명시, 턴 handle 은 첫 await 전 캡처.
 - 2026-10-14 v5 (A1b 실데이터 정정): Claude 실제 transcript 에서 isMeta·isCompactSummary user 레코드가 사슬 중간 고리임을 확인(구조 실측). v4 의 "대상에서 제외"는 Mac 표본 B 전부를 chain_broken 으로 만들었다 → 투명 고리로 정정, chain_broken 범위 한정.
 - 2026-10-14 v6 (A1b 적대리뷰 R1·R2 + 실데이터): Codex 버려진 구간 규칙(닫히지 않은 앞 구간은 새 task_started 에서 끝남 — 실측상 흔함), 겹침 = 레코드 교차로 한정. Claude 병렬 도구 = 같은 message.id 묶음을 한 노드로, 결과 도착 순서 무관, 말단 결과만 예외(진짜 rewind 는 계속 branch_conflict).
+- 2026-10-14 v7 (A2a 구현 + 적대리뷰 R1~R5, R5 GO): rev = 머신 스냅샷 sha256, 원격 25초 deadline + ssh 실패 시 60초 머신 냉각(원격 종료를 서버가 확인할 수 없어 시간 상한으로 닫음 — 리뷰 3라운드 비수렴 뒤 범위 축소), 부모 사슬 메모이즈(O(n²) 제거), observe Authorization 헤더 전면 거부, 원본 쿼리 검증, 403 본문은 기존 observe 규칙 유지.

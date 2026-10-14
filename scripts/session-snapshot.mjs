@@ -49,7 +49,7 @@ function parseArguments(argv, env) {
     if (item === 'snapshot' || item === 'exclude' || item === 'answer') {
       if (operation) invalidInput();
       operation = item;
-    } else if (item === '--include-exec' || item === '--diag') {
+    } else if (item === '--include-exec' || item === '--diag' || item === '--emit-envelope') {
       if (values[item]) invalidInput();
       values[item] = true;
     } else if (['--host', '--remote-node', '--now', '--out-dir', '--orca-bin',
@@ -76,8 +76,9 @@ function parseArguments(argv, env) {
   const request = { schema: 'palantir.snapshot-request/1', op: 'snapshot', now: now.toISOString(),
     include_exec: values['--include-exec'] === true, orca_bin: values['--orca-bin'] ?? 'orca' };
   const outDir = values['--out-dir'] || env.PALANTIR_OBSERVE_SNAPSHOT_DIR;
-  if (operation !== 'answer' && (values['--diag'] !== undefined || values['--file-fp'] !== undefined)) invalidInput();
+  if (operation !== 'answer' && ['--diag', '--emit-envelope', '--file-fp'].some(key => values[key] !== undefined)) invalidInput();
   if (operation === 'answer') {
+    if (values['--emit-envelope'] && values['--diag']) invalidInput();
     if (['--session', '--out-dir', '--include-exec', '--label', '--orca-bin'].some(key => values[key] !== undefined)) invalidInput();
     const instruction = values['--instruction'];
     const separator = typeof instruction === 'string' ? instruction.lastIndexOf('#') : -1;
@@ -87,7 +88,7 @@ function parseArguments(argv, env) {
       || typeof values['--file-fp'] !== 'string' || !/^[0-9a-f]{16}$/.test(values['--file-fp'])) invalidInput('answer_target');
     return { request: { schema: 'palantir.answer-request/1', op: 'answer_query', now: now.toISOString(),
       target: { kind: 'instruction', instrId, ref, file_fp: values['--file-fp'] },
-      ...(values['--diag'] ? { diag: true } : {}) }, sshBin,
+      ...(values['--diag'] ? { diag: true } : {}) }, sshBin, emitEnvelope: values['--emit-envelope'] === true,
       target: remote ? { kind: 'remote', host, remoteNode } : { kind: 'local' } };
   }
   if (operation === 'snapshot') {
@@ -158,6 +159,7 @@ export async function main(argv, { stdin = process.stdin, stdout = process.stdou
     if (!response.ok) { stderr.write(response.reason + '\n'); return 1; }
     const envelope = response.envelope;
     if (response.kind === 'answer') {
+      if (options.emitEnvelope) { stdout.write(JSON.stringify(envelope) + '\n'); return 0; }
       const { text, ...safeEnvelope } = envelope;
       stdout.write(JSON.stringify({ ...safeEnvelope, text_chars: text === null ? 0 : text.length }) + '\n');
       return 0;
