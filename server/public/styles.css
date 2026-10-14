@@ -8831,7 +8831,6 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   background: var(--accent-muted); color: var(--accent-light); border-color: var(--accent-border);
 }
 .session-hub-chat {
-  --session-hub-column-max: 900px;
   container: session-hub-chat / inline-size;
   flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; background: var(--bg-surface);
 }
