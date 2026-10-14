@@ -182,8 +182,8 @@ test('raw answer query rejects truncation padding, empty fragments, duplicate na
     good + '&machine=alpha',
     good + '&',
     base + query.replace(/key=[^&]+/, ''),
-    base + query.replace(/rev=[^&]+/, 'rev=' + '0'.repeat(600)),
-    base + query.replace(/machine=[^&]+/, 'machine=' + 'é'.repeat(260)),
+    base + query.replace(/rev=[^&]+/, 'rev=' + '0'.repeat(2100)),
+    base + query.replace(/machine=[^&]+/, 'machine=' + 'é'.repeat(1030)),
     base + query.replace(/machine=[^&]+/, 'machine=%ZZ'),
     base + query.replace(/machine=[^&]+/, 'machine=%E0%A4%A'),
     base + query.replace(/machine=[^&]+/, 'machine=alpha=extra'),
@@ -194,5 +194,23 @@ test('raw answer query rejects truncation padding, empty fragments, duplicate na
   for (const url of invalid) error(await get(app, url), 'invalid_query', 400);
   assert.equal(fx.spawns(), 0);
   assert.equal((await get(app, good)).status, 200, 'valid percent-encoded values must still work');
+  assert.equal(fx.spawns(), 1);
+});
+
+test('URL-encoded 128-character machine and matching key fit the 2048-byte query limit', async t => {
+  const fx = setup(t);
+  const machineId = 'm' + ':'.repeat(127), sessionKey = machineId;
+  const app = appFor(fx, { answerQueryServiceOptions: { ...fx.options, env: { ...fx.env,
+    PALANTIR_SNAPSHOT_TARGETS: JSON.stringify([{ name: 'long', kind: 'local', machineId }]) } } });
+  const snapshot = structuredClone(fx.alpha); snapshot.machine.id = machineId;
+  snapshot.sessions = [snapshot.sessions[0]]; snapshot.sessions[0].key = sessionKey;
+  snapshot.instructions = [snapshot.instructions.find(row => row.session_key === fx.alpha.sessions[0].key)];
+  snapshot.instructions[0].session_key = sessionKey; fx.write(snapshot);
+  const input = fx.query(machineId), url = fx.url(input);
+  const bytes = Buffer.byteLength(url.slice(url.indexOf('?') + 1));
+  assert.ok(bytes > 512 && bytes <= 2048);
+  // Receiver rejects the fixture's machine id; request parsing and snapshot selection succeed.
+  const response = await get(app, url); assert.equal(response.status, 200);
+  assert.equal(response.body.status, 'unavailable'); assert.equal(response.body.reason, 'exec_failed');
   assert.equal(fx.spawns(), 1);
 });

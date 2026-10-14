@@ -60,8 +60,9 @@ function createAnswerQueryService(options = {}) {
     } finally {
       // SSH must launch within the server's 30s execution window; the remote reader
       // then has its own 25s deadline. Reserve this machine until request start + 60s.
-      // The deadline is cooperative: a blocked readSync (disk/NFS stall) is outside
-      // the threat model. Cooling machines do not retain a global execution slot.
+      // The remote overlap bound depends on the remote reader's cooperative 25s
+      // deadline. A blocked readSync (disk/NFS stall), or a single operation stalled
+      // between deadline checks, is outside the threat model. Cooling retains global capacity.
       if (target.kind === 'ssh' && (run.cancelled || remoteTimedOut)) {
         cooling.set(machineId, run.startedAt + 60000);
       }
@@ -69,11 +70,8 @@ function createAnswerQueryService(options = {}) {
   }
   function query({ machineId, sessionKey, instructionId, rev }) {
     const startedAt = +new Date(clock());
-    const coolUntil = cooling.get(machineId);
-    if (!closed && coolUntil !== undefined) {
-      if (startedAt < coolUntil) throw fail('answer_busy', 429);
-      cooling.delete(machineId);
-    }
+    for (const [machine, until] of cooling) if (startedAt >= until) cooling.delete(machine);
+    if (!closed && cooling.has(machineId)) throw fail('answer_busy', 429);
     let result;
     try { result = store.readSnapshotHashed(observeState, machineId); }
     catch { throw fail('snapshot_unavailable', 503); }
@@ -91,7 +89,8 @@ function createAnswerQueryService(options = {}) {
     const key = JSON.stringify([machineId, instruction.id, instruction.ref, session.file_fp]);
     if (active.has(key)) return active.get(key).task;
     // Unreaped groups retain their global capacity as well as their machine lock.
-    if (active.size + locked.size >= 2 || [...active.values()].some(entry => entry.machineId === machineId)) throw fail('answer_busy', 429);
+    if (active.size + locked.size + cooling.size >= 2
+      || [...active.values()].some(entry => entry.machineId === machineId)) throw fail('answer_busy', 429);
     const run = { cancelled: null, pgid: null, startedAt };
     run.cancellation = new Promise(resolve => { run.resolveCancellation = resolve; });
     const entry = { machineId, run };

@@ -151,7 +151,7 @@ test('unreaped group retains global capacity while other machines continue', asy
   assert.equal(fx.spawns(), 3);
 });
 
-test('ssh timeout cools only its machine until first request start + 60s, without retaining global capacity', async t => {
+test('ssh timeout cools only its machine until first request start + 60s, retaining global capacity', async t => {
   const start = Date.parse('2026-10-14T00:00:00.000Z'); let time = start;
   const fx = setup(t);
   const gamma = structuredClone(fx.alpha); gamma.machine.id = 'gamma';
@@ -175,15 +175,20 @@ test('ssh timeout cools only its machine until first request start + 60s, withou
   const spawnCount = fx.spawns();
   assert.throws(() => service.query(input), { code: 'answer_busy', status: 429 });
   assert.equal(fx.spawns(), spawnCount);
-  const beta = service.query(fx.query('beta')), other = service.query(fx.query('gamma'));
-  assert.equal((await beta).status, 'final'); assert.equal((await other).status, 'final');
-  assert.equal(fx.spawns(), spawnCount + 2, 'both global slots must be available during cooling');
+  const beta = service.query(fx.query('beta'));
+  assert.throws(() => service.query(fx.query('gamma')), { code: 'answer_busy', status: 429 });
+  assert.equal((await beta).status, 'final');
+  assert.equal((await service.query(fx.query('gamma'))).status, 'final');
+  assert.equal(fx.spawns(), spawnCount + 2, 'cooling plus one execution must exhaust global capacity');
   time = start + 59999;
   assert.throws(() => service.query(input), { code: 'answer_busy', status: 429 });
   assert.equal(fx.spawns(), spawnCount + 2);
   time = start + 60001;
+  const freeBeta = service.query(fx.query('beta')), freeGamma = service.query(fx.query('gamma'));
+  assert.equal((await freeBeta).status, 'final'); assert.equal((await freeGamma).status, 'final');
+  assert.equal(fx.spawns(), spawnCount + 4, 'expired cooling must free capacity when other machines query');
   assert.equal((await service.query(input)).reason, 'timeout');
-  assert.equal(fx.spawns(), spawnCount + 3);
+  assert.equal(fx.spawns(), spawnCount + 5);
   const begun = Date.now(); await service.shutdown();
   assert.ok(Date.now() - begun < 1000, 'shutdown must not wait for cooling with the clock frozen');
 });

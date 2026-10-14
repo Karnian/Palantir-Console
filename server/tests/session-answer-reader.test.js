@@ -408,3 +408,53 @@ test('deadline interrupts record processing and closes the transcript fd', t => 
   assert.equal(answer.status, 'unavailable'); assert.equal(answer.reason, 'timeout');
   assert.equal(records, 2); assert.equal(closes, 1); assert.equal(answer.text, null);
 });
+
+test('40000 transparent parents shared by 40000 assistants are memoized within two seconds', { timeout: 10000 }, t => {
+  const f = setup(t); const target = targetFor(f); const config = snapshotReader.loadConfig(f.options);
+  const records = [user('Synthetic instruction A')];
+  for (let index = 0; index < 40000; index++) records.push({ type: 'attachment', uuid: `m${index}`,
+    parentUuid: index ? `m${index - 1}` : 'u', timestamp: TS, attachment: { type: 'summary' } });
+  for (let index = 0; index < 40000; index++) records.push({ type: 'assistant', uuid: `a${index}`,
+    parentUuid: 'm39999', timestamp: TS, message: { id: 'shared', stop_reason: 'end_turn', content: [] } });
+  writeRecords(f, records);
+  const begun = performance.now();
+  const answer = query(f, target, { config });
+  const elapsed = performance.now() - begun;
+  assert.equal(answer.status, 'unbound'); assert.equal(answer.reason, 'branch_conflict');
+  assert.equal(policy.validateAnswerEnvelope(answer).ok, true);
+  assert.ok(elapsed < 2000, `memoized answer read took ${elapsed.toFixed(1)}ms`);
+  t.diagnostic(`80001-record answer read: ${elapsed.toFixed(1)}ms`);
+});
+
+for (const provider of ['claude', 'codex']) test(`${provider} judgment loops check the deadline after EOF`, t => {
+  const f = setup(t, cases[provider]); const target = targetFor(f);
+  const records = provider === 'claude' ? [user('Synthetic instruction A')] : [meta(), event('task_started'), message()];
+  for (let index = 0; index < 5000; index++) records.push(provider === 'claude'
+    ? assistant(`a${index}`, index ? `a${index - 1}` : 'u') : agent('commentary'));
+  if (provider === 'codex') records.push(event('task_complete', 't', { last_agent_message: 'SAFE' }));
+  writeRecords(f, records);
+  let eof = false, judgmentChecks = 0;
+  const original = snapshotReader.transcriptRecords;
+  t.mock.method(snapshotReader, 'transcriptRecords', function* (...args) { yield* original(...args); eof = true; });
+  const answer = query(f, target, { deadlineAt: 1000, clock() {
+    if (!eof) return 0;
+    // The first post-parse check passes; the next must come from a judgment loop.
+    return ++judgmentChecks === 1 ? 0 : 1001;
+  } });
+  assert.equal(eof, true); assert.equal(judgmentChecks, 2);
+  assert.equal(answer.status, 'unavailable'); assert.equal(answer.reason, 'timeout');
+  assert.equal(answer.text, null); assert.equal(policy.validateAnswerEnvelope(answer).ok, true);
+});
+
+// Captured before parent memoization; only the inode-dependent fingerprint is normalized.
+const PRE_MEMOIZATION_ANSWER_BYTES = {
+  "claude": "{\"schema\":\"palantir.answer/1\",\"kind\":\"answer\",\"machine_id\":\"m\",\"reader_build\":\"0123456789abcdef\",\"target\":{\"instrId\":\"claude:s:uu\",\"ref\":\"fd82305462f77ffc\",\"file_fp\":\"0000000000000000\"},\"status\":\"final\",\"reason\":null,\"text\":\"ANSWER_BODY_SENTINEL\",\"truncated\":false,\"redacted\":false,\"shared_turn\":false,\"answer_at\":\"2026-10-08T02:00:00.000Z\",\"observed_at\":\"2026-10-08T03:00:00.000Z\",\"diag\":{\"evidence_ids\":[\"a\"],\"segment\":{\"start_id\":\"u\",\"end_id\":\"a\"}}}",
+  "codex": "{\"schema\":\"palantir.answer/1\",\"kind\":\"answer\",\"machine_id\":\"m\",\"reader_build\":\"0123456789abcdef\",\"target\":{\"instrId\":\"codex:s:n1\",\"ref\":\"24aaeeab19987449\",\"file_fp\":\"0000000000000000\"},\"status\":\"final\",\"reason\":null,\"text\":\"ANSWER_BODY_SENTINEL\",\"truncated\":false,\"redacted\":false,\"shared_turn\":false,\"answer_at\":\"2026-10-08T02:00:00.000Z\",\"observed_at\":\"2026-10-08T03:00:00.000Z\",\"diag\":{\"evidence_ids\":[\"t\"],\"segment\":{\"start_id\":\"t\",\"end_id\":\"t\"}}}",
+  "queued_resume": "{\"schema\":\"palantir.answer/1\",\"kind\":\"answer\",\"machine_id\":\"m\",\"reader_build\":\"0123456789abcdef\",\"target\":{\"instrId\":\"claude:s:uu\",\"ref\":\"fd82305462f77ffc\",\"file_fp\":\"0000000000000000\"},\"status\":\"pending\",\"reason\":null,\"text\":null,\"truncated\":false,\"redacted\":false,\"shared_turn\":false,\"answer_at\":null,\"observed_at\":\"2026-10-08T03:00:00.000Z\",\"diag\":{\"evidence_ids\":[],\"segment\":{\"start_id\":\"u\",\"end_id\":\"b\"}}}"
+};
+for (const [name, expected] of Object.entries(PRE_MEMOIZATION_ANSWER_BYTES)) test(
+  `answer serialized bytes preserve pre-memoization ${name}`, t => {
+    const f = setup(t, cases[name]); const answer = query(f, targetFor(f), { diag: true });
+    answer.target.file_fp = '0000000000000000';
+    assert.equal(JSON.stringify(answer), expected);
+  });

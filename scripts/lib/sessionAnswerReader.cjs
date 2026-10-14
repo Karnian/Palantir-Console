@@ -7,6 +7,19 @@ const core = require('./sessionTranscriptCore.cjs');
 const reader = require('./sessionSnapshotReader.cjs');
 const policy = require('../../server/services/observeSnapshotPolicy.js');
 const RAW_LIMIT = 1024 * 1024;
+// One per-read counter covers explicit walks and array callbacks, including
+// many short loops that would otherwise never reach an individual checkpoint.
+function deadlineStep(checkDeadline) {
+  let iterations = 0;
+  return () => { if ((++iterations & 4095) === 0) checkDeadline?.(); };
+}
+function checked(callback, step) {
+  return (a, b, c, d) => { step(); return callback(a, b, c, d); };
+}
+function checkedIndexOf(rows, value, step) {
+  for (let index = 0; index < rows.length; index++) { step(); if (rows[index] === value) return index; }
+  return -1;
+}
 const fileFingerprint = stats => crypto.createHash('sha256')
   .update(`palantir-file/1:${stats.dev.toString(10)}:${stats.ino.toString(10)}`).digest('hex').slice(0, 16);
 const failure = reason => ({ status: 'unbound', reason });
@@ -14,11 +27,12 @@ const transparent = r => r.type === 'attachment' || r.isMeta === true || r.isCom
 const instruction = r => { const c = core.classifyClaudeRecord(r); return Boolean(c?.kind && !c.empty && !core.claudeInterrupted(r)); };
 // The common parser owns identity, mixed/duplicate/time holds and classification. This callback
 // collects instruction fingerprints and positions only; it never creates snapshot display slots.
-function collectAnswerSession(provider, source, coverage, config) {
+function collectAnswerSession(provider, source, coverage, config, step) {
   const items = []; let position = -1, userNumber = 0, compact = false, firstCompact = false;
   source.answerItems = items;
   let firstRecord = null;
   for (const record of source) {
+    step();
     position++;
     if (core.transcriptParseState(record)?.invalid) continue;
     if (record.isCompactSummary || record.type === 'compacted') { compact = true; if (!firstRecord) firstCompact = true; }
@@ -43,15 +57,16 @@ function collectAnswerSession(provider, source, coverage, config) {
     items.push(item);
     core.checkMetadata(items.length);
   }
-  const sid = core.transcriptSessionId(provider, source), meta = source.find(r => r.type === 'session_meta')?.payload;
+  const sid = core.transcriptSessionId(provider, source), meta = source.find(checked(r => r.type === 'session_meta', step))?.payload;
   if (!core.isIdentityComponent(sid) || !source.analysis.firstTime || provider === 'codex' && !meta) return null;
   for (const item of items) {
+    step();
     item.id = `${provider}:${sid}:${item.suffix}`;
     item.ref = core.computeInstructionRef(config, item);
     delete item.structure; delete item.suffix;
   }
   const cwd = core.representativeTranscriptCwd(provider, source);
-  return { provider, sid, items: items.filter(i => policy.isSafeInstructionId(i.id)), cwd: cwd.length > 4096 ? null : cwd,
+  return { provider, sid, items: items.filter(checked(i => policy.isSafeInstructionId(i.id), step)), cwd: cwd.length > 4096 ? null : cwd,
     run_mode: provider === 'codex' ? core.determineCodexRunMode(meta.source, meta.thread_source) : 'interactive',
     status: core.transcriptStatus(provider, source), firstAt: source.analysis.firstTime, lastAt: source.analysis.lastTime,
     first: firstCompact ? 'unrecoverable' : provider === 'claude' && firstRecord
@@ -68,27 +83,27 @@ function projectSession(config, session, key) {
     instruction_total: session.instructionCount, unknown_count: 0,
     orca_link: { evidence: 'none', confirmed: false, pane_key: null, terminal_handle: null } };
 }
-function projectAnswerRecord(record, provider) {
+function projectAnswerRecord(record, provider, step) {
   const row = core.statusRecord(record);
   if (provider === 'claude' && record.type === 'assistant') {
     const parts = Array.isArray(record.message?.content) ? record.message.content
-      .filter(b => b.type === 'text' && typeof b.text === 'string').map(b => b.text) : [];
-    row.answerBytes = parts.reduce((n, s) => n + Buffer.byteLength(s), Math.max(0, parts.length - 1) * 2);
+      .filter(checked(b => b.type === 'text' && typeof b.text === 'string', step)).map(checked(b => b.text, step)) : [];
+    row.answerBytes = parts.reduce(checked((n, s) => n + Buffer.byteLength(s), step), Math.max(0, parts.length - 1) * 2);
     row.answerParts = parts.length;
     if (record.message?.stop_reason !== 'tool_use' && !transparent(record) && record.isSidechain !== true)
       row.answerText = row.answerBytes <= RAW_LIMIT ? parts.join('\n\n') : null;
     row.message.id = record.message?.id;
     row.toolUseIds = Array.isArray(record.message?.content) ? record.message.content
-      .filter(b => b.type === 'tool_use').map(b => typeof b.id === 'string' ? b.id : null) : [];
+      .filter(checked(b => b.type === 'tool_use', step)).map(checked(b => typeof b.id === 'string' ? b.id : null, step)) : [];
   } else if (provider === 'claude' && record.type === 'user' && Array.isArray(record.message?.content)) {
-    row.toolResultIds = record.message.content.filter(b => b.type === 'tool_result')
-      .map(b => typeof b.tool_use_id === 'string' ? b.tool_use_id : null);
+    row.toolResultIds = record.message.content.filter(checked(b => b.type === 'tool_result', step))
+      .map(checked(b => typeof b.tool_use_id === 'string' ? b.tool_use_id : null, step));
   } else if (provider === 'codex') {
     const p = record.payload;
     if (p?.type === 'message' && p.role === 'assistant') {
       row.payload.phase = p.phase;
-      const parts = Array.isArray(p.content) ? p.content.filter(b => b.type === 'output_text' && typeof b.text === 'string').map(b => b.text) : [];
-      row.answerBytes = parts.reduce((n, s) => n + Buffer.byteLength(s), Math.max(0, parts.length - 1) * 2);
+      const parts = Array.isArray(p.content) ? p.content.filter(checked(b => b.type === 'output_text' && typeof b.text === 'string', step)).map(checked(b => b.text, step)) : [];
+      row.answerBytes = parts.reduce(checked((n, s) => n + Buffer.byteLength(s), step), Math.max(0, parts.length - 1) * 2);
       if (record.type === 'response_item' && p.phase === 'final_answer')
         row.answerText = row.answerBytes <= RAW_LIMIT ? parts.join('\n\n') : null;
     }
@@ -100,21 +115,22 @@ function projectAnswerRecord(record, provider) {
   }
   return row;
 }
-function claudeAnswer(rows, position) {
+function claudeAnswer(rows, position, step) {
   const target = rows[position];
   if (core.isQueuedInstruction(target)) return { status: 'queued_joined' };
   // Every main-chain record can bridge ancestry, including metadata and compact summaries.
-  const relevant = rows.filter(r => r.isSidechain !== true);
-  const traversal = relevant.filter(r => typeof r.uuid === 'string');
-  const byId = new Map(traversal.map(r => [r.uuid, r]));
+  const relevant = rows.filter(checked(r => r.isSidechain !== true, step));
+  const traversal = relevant.filter(checked(r => typeof r.uuid === 'string', step));
+  const byId = new Map(traversal.map(checked(r => [r.uuid, r], step)));
   if (byId.size !== traversal.length) return failure('branch_conflict');
   if (!target || !instruction(target) || transparent(target) || target.isSidechain === true) return failure('chain_broken');
-  const starters = relevant.filter(r => r.type === 'user' && !transparent(r) && instruction(r));
-  const labels = new Map(starters.map(r => [r, r === target ? 'bound' : 'other']));
+  const starters = relevant.filter(checked(r => r.type === 'user' && !transparent(r) && instruction(r), step));
+  const labels = new Map(starters.map(checked(r => [r, r === target ? 'bound' : 'other'], step)));
   function label(row) {
     if (labels.has(row)) return labels.get(row);
     const visited = new Set(), chain = []; let current = row, result;
     while (current && !labels.has(current)) {
+      step();
       if (visited.has(current)) { result = 'cycle'; break; }
       visited.add(current); chain.push(current);
       if (current.parentUuid === null) { result = 'other'; break; }
@@ -123,45 +139,55 @@ function claudeAnswer(rows, position) {
       current = byId.get(current.parentUuid);
     }
     result = result || labels.get(current) || 'other';
-    for (const entry of chain) labels.set(entry, result);
+    for (const entry of chain) { step(); labels.set(entry, result); }
     return result;
   }
-  const positions = new Map(rows.map((row, index) => [row, index]));
+  const positions = new Map(rows.map(checked((row, index) => [row, index], step)));
   // Earlier history is outside this execution. Later rows with missing ancestry remain
   // ambiguous unless their parent chain reaches another starter or a detached root.
-  const candidates = relevant.filter(r => positions.get(r) > position
+  const candidates = relevant.filter(checked(r => positions.get(r) > position
     && !transparent(r)
-    && ['user', 'assistant', 'system'].includes(r.type));
-  if (candidates.some(r => label(r) === 'missing')) return failure('chain_broken');
-  if (candidates.some(r => label(r) === 'cycle')) return failure('branch_conflict');
-  if (candidates.some(r => label(r) === 'unsupported')) return failure('unsupported_format');
-  const segment = relevant.filter(r => label(r) === 'bound');
-  const significant = segment.filter(r => !transparent(r) && ['user', 'assistant', 'system'].includes(r.type));
+    && ['user', 'assistant', 'system'].includes(r.type), step));
+  if (candidates.some(checked(r => label(r) === 'missing', step))) return failure('chain_broken');
+  if (candidates.some(checked(r => label(r) === 'cycle', step))) return failure('branch_conflict');
+  if (candidates.some(checked(r => label(r) === 'unsupported', step))) return failure('unsupported_format');
+  const segment = relevant.filter(checked(r => label(r) === 'bound', step));
+  const significant = segment.filter(checked(r => !transparent(r) && ['user', 'assistant', 'system'].includes(r.type), step));
+  // Cache each starting row and every transparent intermediate row. Each parent
+  // edge is traversed at most once, including shared metadata/attachment chains.
+  const effectiveParents = new Map();
   function effectiveParent(row) {
-    let parent = byId.get(row.parentUuid); const seen = new Set();
+    if (effectiveParents.has(row)) return effectiveParents.get(row);
+    const chain = [row], seen = new Set([row]);
+    let parent = byId.get(row.parentUuid);
     while (parent && transparent(parent)) {
-      if (seen.has(parent)) return null;
-      seen.add(parent); parent = byId.get(parent.parentUuid);
+      step();
+      if (effectiveParents.has(parent)) { parent = effectiveParents.get(parent); break; }
+      if (seen.has(parent)) { parent = null; break; }
+      seen.add(parent); chain.push(parent); parent = byId.get(parent.parentUuid);
     }
+    for (const entry of chain) { step(); effectiveParents.set(entry, parent); }
     return parent;
   }
-  const boundary = starters.filter(r => r !== target && label(effectiveParent(r)) === 'bound');
+  const boundary = starters.filter(checked(r => r !== target && label(effectiveParent(r)) === 'bound', step));
   // Collapse an assistant message before computing ancestry. Result arrival order
   // does not determine which tool-call records belong to that message node.
   const messages = new Map(), nodeOf = new Map(), nodes = [], messageRoots = new Map();
   function messageRoot(row) {
     const path = []; let current = row;
     while (!messageRoots.has(current)) {
+      step();
       path.push(current);
       const parent = effectiveParent(current);
       if (parent?.type !== 'assistant' || parent.message?.id !== row.message.id) break;
       current = parent;
     }
     const root = messageRoots.get(current) || current;
-    for (const entry of path) messageRoots.set(entry, root);
+    for (const entry of path) { step(); messageRoots.set(entry, root); }
     return root;
   }
   for (const row of significant) {
+    step();
     const key = row.type === 'assistant' && typeof row.message?.id === 'string' && row.message.id && messageRoot(row);
     let node = key && messages.get(key);
     if (!node) {
@@ -169,33 +195,35 @@ function claudeAnswer(rows, position) {
       nodes.push(node); if (key) messages.set(key, node);
     }
     node.rows.push(row); nodeOf.set(row, node);
-    for (const id of row.toolUseIds || []) node.calls.add(id);
+    for (const id of row.toolUseIds || []) { step(); node.calls.add(id); }
   }
   const root = nodeOf.get(target);
-  for (const row of significant.filter(r => r !== target)) {
+  for (const row of significant.filter(checked(r => r !== target, step))) {
+    step();
     const node = nodeOf.get(row), parent = nodeOf.get(effectiveParent(row));
     if (parent && parent !== node) { node.parents.add(parent); parent.children.add(node); }
   }
   // A following instruction cuts the segment, but still prevents its parent from
   // qualifying as a terminal parallel result.
-  for (const row of boundary) nodeOf.get(effectiveParent(row))?.children.add(row);
+  for (const row of boundary) { step(); nodeOf.get(effectiveParent(row))?.children.add(row); }
   function matchedResult(node) {
     if (!node.rows) return false;
     const row = node.rows[0], parent = [...node.parents][0];
     return node.rows.length === 1 && node.parents.size === 1 && row.type === 'user'
       && !instruction(row) && row.toolResultIds?.length > 0 && parent.rows[0].type === 'assistant'
-      && row.toolResultIds.every(id => typeof id === 'string' && id.length > 0 && parent.calls.has(id));
+      && row.toolResultIds.every(checked(id => typeof id === 'string' && id.length > 0 && parent.calls.has(id), step));
   }
-  const competingChildren = nodes.some(n => {
-    const children = [...n.children], ordinary = children.filter(child => !matchedResult(child));
-    return ordinary.length > 1 || children.length > 1 && ordinary.some(child =>
-      child.rows?.[0]?.type === 'user' && child.rows[0].toolResultIds?.length > 0 && !instruction(child.rows[0]));
-  });
+  const competingChildren = nodes.some(checked(n => {
+    const children = [...n.children], ordinary = children.filter(checked(child => !matchedResult(child), step));
+    return ordinary.length > 1 || children.length > 1 && ordinary.some(checked(child =>
+      child.rows?.[0]?.type === 'user' && child.rows[0].toolResultIds?.length > 0 && !instruction(child.rows[0]), step));
+  }, step));
   if (competingChildren) return failure('branch_conflict');
-  const leafResults = new Set(nodes.filter(n => n.children.size === 0 && matchedResult(n)));
+  const leafResults = new Set(nodes.filter(checked(n => n.children.size === 0 && matchedResult(n), step)));
   function pathFrom(head) {
     const path = new Set(); let node = head;
     while (node && !path.has(node)) {
+      step();
       path.add(node);
       if (node === root) return path;
       if (node.parents.size !== 1) return null;
@@ -203,53 +231,57 @@ function claudeAnswer(rows, position) {
     }
     return null;
   }
-  const main = [nodeOf.get(significant.at(-1)), nodes.filter(n => !leafResults.has(n)).at(-1)]
-    .map(pathFrom).find(path => path && nodes.every(n => path.has(n) || leafResults.has(n)));
-  if (!main || nodes.some(n => n !== root && n.parents.size !== 1)) return failure('branch_conflict');
-  const mainSignificant = significant.filter(r => main.has(nodeOf.get(r)));
+  const main = [nodeOf.get(significant.at(-1)), nodes.filter(checked(n => !leafResults.has(n), step)).at(-1)]
+    .map(checked(pathFrom, step)).find(checked(path => path && nodes.every(checked(n => path.has(n) || leafResults.has(n), step)), step));
+  if (!main || nodes.some(checked(n => n !== root && n.parents.size !== 1, step))) return failure('branch_conflict');
+  const mainSignificant = significant.filter(checked(r => main.has(nodeOf.get(r)), step));
   // Apply the shared transition function to the linearized message path. Every
   // grouped assistant block is on that path; terminal result satellites are not.
-  const stateRows = mainSignificant.map((r, index) => index === 0 ? r : {
+  const stateRows = mainSignificant.map(checked((r, index) => index === 0 ? r : {
     ...r, parentUuid: mainSignificant[index - 1].uuid
-  });
+  }, step));
   const state = core.claudeStatus(stateRows);
   if (state.state === 'unknown') return failure(state.reason === 'branch_ambiguous' ? 'branch_conflict'
     : ['instruction_unbound', 'truncated'].includes(state.reason) ? 'chain_broken' : 'unsupported_format');
   const diag = { evidence_ids: [], segment: { start_id: target.uuid, end_id: mainSignificant.at(-1)?.uuid || target.uuid } };
   if (state.reason === 'local_command') return { status: 'local_command', diag };
-  const evidence = mainSignificant.filter(r => core.claudeInterrupted(r) || r.type === 'assistant'
-    || r.type === 'user' && Array.isArray(r.message?.content) && r.message.content.some(b => b.type === 'tool_result')).at(-1);
+  const evidence = mainSignificant.filter(checked(r => core.claudeInterrupted(r) || r.type === 'assistant'
+    || r.type === 'user' && Array.isArray(r.message?.content) && r.message.content.some(checked(b => b.type === 'tool_result', step)), step)).at(-1);
   if (state.state === 'working') return { status: 'pending', diag };
   if (!evidence || !policy.isSafeTimestamp(evidence.timestamp)) return failure('unsupported_format');
   if (state.state === 'interrupted') return { status: 'interrupted', answer_at: evidence.timestamp,
     diag: { ...diag, evidence_ids: [evidence.uuid] } };
   // Old transcripts without message.id can prove only this terminal record, never a multi-record group.
-  const group = evidence.message?.id ? mainSignificant.filter(r => r.type === 'assistant'
-    && r.message?.id === evidence.message.id && r.message.stop_reason !== 'tool_use') : [evidence];
-  const textRecords = group.filter(r => r.answerParts > 0);
-  const bytes = textRecords.reduce((n, r) => n + (r.answerBytes || 0), Math.max(0, textRecords.length - 1) * 2);
-  const text = bytes <= RAW_LIMIT ? textRecords.map(r => r.answerText).join('\n\n') : null;
+  const group = evidence.message?.id ? mainSignificant.filter(checked(r => r.type === 'assistant'
+    && r.message?.id === evidence.message.id && r.message.stop_reason !== 'tool_use', step)) : [evidence];
+  const textRecords = group.filter(checked(r => r.answerParts > 0, step));
+  const bytes = textRecords.reduce(checked((n, r) => n + (r.answerBytes || 0), step), Math.max(0, textRecords.length - 1) * 2);
+  const text = bytes <= RAW_LIMIT ? textRecords.map(checked(r => r.answerText, step)).join('\n\n') : null;
   return { status: bytes > 0 ? 'final' : 'no_text', text, bytes, answer_at: evidence.timestamp,
-    diag: { ...diag, evidence_ids: group.map(r => r.uuid) } };
+    diag: { ...diag, evidence_ids: group.map(checked(r => r.uuid, step)) } };
 }
-function codexAnswer(rows, position) {
+function codexAnswer(rows, position, step) {
   let start = -1;
-  for (let i = 0; i < position; i++) if (rows[i].type === 'event_msg' && rows[i].payload?.type === 'task_started') start = i;
+  for (let i = 0; i < position; i++) {
+    step(); if (rows[i].type === 'event_msg' && rows[i].payload?.type === 'task_started') start = i;
+  }
   if (start < 0) return failure('segment_conflict');
   let end = rows.length;
-  for (let i = start + 1; i < rows.length; i++) if (rows[i].type === 'event_msg' && rows[i].payload?.type === 'task_started') { end = i; break; }
+  for (let i = start + 1; i < rows.length; i++) {
+    step(); if (rows[i].type === 'event_msg' && rows[i].payload?.type === 'task_started') { end = i; break; }
+  }
   const segment = rows.slice(start, end), turn = rows[start].payload.turn_id;
   if (!policy.isSafeId(turn)) return failure('unsupported_format');
-  const closings = segment.filter(r => r.type === 'event_msg' && ['task_complete', 'turn_aborted'].includes(r.payload?.type));
+  const closings = segment.filter(checked(r => r.type === 'event_msg' && ['task_complete', 'turn_aborted'].includes(r.payload?.type), step));
   if (closings.length > 1 || closings.length === 0 && end < rows.length || position >= end
-    || closings[0] && rows.indexOf(closings[0]) < position
-    || segment.some(r => (r.type === 'turn_context' || r.type === 'event_msg'
-      && (r.payload?.type?.startsWith('task_') || r.payload?.type === 'turn_aborted')) && r.payload?.turn_id !== turn)
-    || end < rows.length && rows.slice(end).some(r => r.payload?.turn_id === turn)) return failure('segment_conflict');
+    || closings[0] && checkedIndexOf(rows, closings[0], step) < position
+    || segment.some(checked(r => (r.type === 'turn_context' || r.type === 'event_msg'
+      && (r.payload?.type?.startsWith('task_') || r.payload?.type === 'turn_aborted')) && r.payload?.turn_id !== turn, step))
+    || end < rows.length && rows.slice(end).some(checked(r => r.payload?.turn_id === turn, step))) return failure('segment_conflict');
   const closing = closings[0];
-  if (closing && segment.slice(segment.indexOf(closing) + 1).some(r => r.payload?.role === 'assistant' || r.payload?.role === 'user')) return failure('segment_conflict');
-  const assistants = segment.filter(r => r.type === 'response_item' && r.payload?.type === 'message' && r.payload.role === 'assistant');
-  if (assistants.length && !assistants.some(r => ['commentary', 'final_answer'].includes(r.payload.phase))
+  if (closing && segment.slice(checkedIndexOf(segment, closing, step) + 1).some(checked(r => r.payload?.role === 'assistant' || r.payload?.role === 'user', step))) return failure('segment_conflict');
+  const assistants = segment.filter(checked(r => r.type === 'response_item' && r.payload?.type === 'message' && r.payload.role === 'assistant', step));
+  if (assistants.length && !assistants.some(checked(r => ['commentary', 'final_answer'].includes(r.payload.phase), step))
     && !closing?.answerBytes && closing?.payload.type !== 'turn_aborted') return failure('unsupported_format');
   const state = core.codexStatus(segment);
   if (state.state === 'unknown') return failure('unsupported_format');
@@ -258,14 +290,14 @@ function codexAnswer(rows, position) {
   const answerAt = closing.payload.type === 'task_complete' && policy.isSafeTimestamp(closing.payload.completed_at)
     ? closing.payload.completed_at : closing.timestamp;
   if (!policy.isSafeTimestamp(answerAt)) return failure('unsupported_format');
-  const shared = segment.filter(r => {
+  const shared = segment.filter(checked(r => {
     if (r.type !== 'response_item' || r.payload?.type !== 'message' || r.payload.role !== 'user') return false;
     const classification = core.classifyCodexMessage(r.payload);
     return classification.kind && !classification.empty && !classification.unverified;
-  }).length > 1;
+  }, step)).length > 1;
   if (state.state === 'interrupted') return { status: 'interrupted', answer_at: answerAt, shared_turn: shared,
     diag: { ...diag, evidence_ids: [turn] } };
-  const candidate = closing.answerBytes > 0 ? closing : assistants.filter(r => r.payload.phase === 'final_answer').at(-1);
+  const candidate = closing.answerBytes > 0 ? closing : assistants.filter(checked(r => r.payload.phase === 'final_answer', step)).at(-1);
   const bytes = candidate?.answerBytes || 0;
   return { status: bytes > 0 ? 'final' : 'no_text', text: candidate?.answerText || null, bytes,
     answer_at: answerAt, shared_turn: shared, diag: { ...diag, evidence_ids: [turn] } };
@@ -313,6 +345,7 @@ function readAnswer(input) {
   const checkDeadline = input.deadlineAt === undefined ? undefined : () => {
     if (clock() >= input.deadlineAt) throw deadlineError;
   };
+  const step = deadlineStep(checkDeadline);
   try {
     checkDeadline?.();
     const coverage = Object.fromEntries(policy.COVERAGE_KEYS[provider].map(k => [k, 0]));
@@ -321,7 +354,7 @@ function readAnswer(input) {
     checkDeadline?.();
     const matches = [];
     for (const file of files) {
-      checkDeadline?.();
+      checkDeadline?.(); step();
       try { const stats = fs.lstatSync(file.file, { bigint: true });
         if (stats.isFile() && !stats.isSymbolicLink() && fileFingerprint(stats) === file_fp) matches.push({ ...file, identity: stats });
       } catch { coverage.files_failed++; }
@@ -366,7 +399,7 @@ function readAnswer(input) {
           for (const record of reader.transcriptRecords(descriptor, observed, checkDeadline)) {
             checkDeadline?.();
             observePartial(record);
-            const row = projectAnswerRecord(record, provider);
+            const row = projectAnswerRecord(record, provider, step);
             toolIdentifiers += (row.toolUseIds?.length || 0) + (row.toolResultIds?.length || 0);
             core.checkMetadata(rows.length + 1 + toolIdentifiers); rows.push(row); yield record;
             checkDeadline?.();
@@ -374,7 +407,7 @@ function readAnswer(input) {
         }, readStatusTail: () => rows
       });
       let parsed, readError;
-      try { parsed = core.parseIndependentTranscript(provider, source, coverage, config, true, {}, collectAnswerSession); } catch (e) { if (e === deadlineError) throw e; readError = e; }
+      try { parsed = core.parseIndependentTranscript(provider, source, coverage, config, true, {}, (provider, source, coverage, config) => collectAnswerSession(provider, source, coverage, config, step)); } catch (e) { if (e === deadlineError) throw e; readError = e; }
       checkDeadline?.();
       let changed = false;
       try {
@@ -397,16 +430,17 @@ function readAnswer(input) {
         if (core.hasSessionInstructionDeletionRule(config, observedSession)) return reject('withheld', 'deleted_rule');
       }
       if (!readError && !session) return reject('withheld', 'held');
-      const target = (session?.items || source.answerItems || []).find(item => item.id === instrId);
+      const target = (session?.items || source.answerItems || []).find(checked(item => item.id === instrId, step));
       if (target && target.ref !== ref || !readError && !target) return reject('target_changed', 'ref_mismatch');
       if (changed) return reject('unavailable', 'file_changed');
       if (readError) return reject('unavailable', readError.streamLimit ? 'read_limit' : 'exec_failed');
       if (provider === 'claude') unboundStart = rows[target.position]?.uuid || null;
       else for (let i = 0; i < target.position; i++) {
+        step();
         if (rows[i].type === 'event_msg' && rows[i].payload?.type === 'task_started') unboundStart = rows[i].payload.turn_id;
       }
       if (source.analysis.brokenJson) return reject('unbound', 'unsupported_format');
-      const result = provider === 'claude' ? claudeAnswer(rows, target.position) : codexAnswer(rows, target.position);
+      const result = provider === 'claude' ? claudeAnswer(rows, target.position, step) : codexAnswer(rows, target.position, step);
       checkDeadline?.();
       return envelope(result);
     } catch (error) {

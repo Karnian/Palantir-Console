@@ -63,7 +63,7 @@ function createObserveRouter({ state, store = snapshotStore, answers = true, ans
     if (req.headers['sec-fetch-site'] === 'cross-site') throw new ForbiddenError('cross-origin read blocked');
     const separator = req.originalUrl.indexOf('?');
     const raw = separator === -1 ? '' : req.originalUrl.slice(separator + 1);
-    if (Buffer.byteLength(raw, 'utf8') > 512) throw new AppError('invalid_query', 400);
+    if (Buffer.byteLength(raw, 'utf8') > 2048) throw new AppError('invalid_query', 400);
     const parts = raw.split('&');
     const keys = ['machine', 'key', 'instruction', 'rev'];
     if (parts.length !== keys.length) throw new AppError('invalid_query', 400);
