@@ -27,8 +27,11 @@ for (const provider of ['claude', 'codex']) test(`remote answer_query ${provider
     assert.equal(api.receiveEnvelope(result, { expectedKinds: ['answer'], expectedReaderBuild: bundle.readerBuild,
       allowDiag: true, ...expected }).ok, false);
   }
-  const name = 'scripts/lib/sessionAnswerReader.cjs', source = fs.readFileSync(path.resolve(__dirname, '../..', name), 'utf8');
-  assert.notEqual(api.buildBundle({ request, sourceOverrides: { [name]: source + '\n// hash variation\n' } }).readerBuild, bundle.readerBuild);
+  for (const name of ['scripts/lib/sessionAnswerReader.cjs', 'scripts/lib/sessionSnapshotLauncher.cjs', 'scripts/lib/sessionSnapshotReader.cjs']) {
+    assert.equal(api.MANIFEST.includes(name), true);
+    const source = fs.readFileSync(path.resolve(__dirname, '../..', name), 'utf8');
+    assert.notEqual(api.buildBundle({ request, sourceOverrides: { [name]: source + '\n// hash variation\n' } }).readerBuild, bundle.readerBuild);
+  }
   const cli = await import('../../scripts/session-snapshot.mjs'); const io = capture();
   assert.equal(await cli.main(['remote', '--host', f.target.host, '--remote-node', f.target.remoteNode,
     'answer', '--instruction', request.target.instrId + '#' + request.target.ref, '--file-fp', request.target.file_fp, '--diag', '--now', request.now],
@@ -51,7 +54,7 @@ for (const provider of ['claude', 'codex']) test(`remote answer_query ${provider
 });
 test('answer request strict allowlist rejects malformed/forbidden fields before reader', async t => {
   const f = setup(t); const valid = requestFor(f); const api = await import('../../scripts/lib/sessionSnapshotBundle.mjs');
-  for (const request of [{ ...valid, include_exec: true }, { ...valid, diag: 'true' }, { ...valid, schema: 'palantir.snapshot-request/1' },
+  for (const request of [{ ...valid, include_exec: true }, { ...valid, diag: 'true' }, { ...valid, deadlineAt: 123 }, { ...valid, schema: 'palantir.snapshot-request/1' },
     { ...valid, target: { ...valid.target, path: '/private' } }, { ...valid, target: { ...valid.target, file_fp: 'X'.repeat(16) } },
     { ...valid, target: { ...valid.target, instrId: 'bad' } }]) {
     const bundle = api.buildBundle({ request, sourceOverrides: { 'scripts/lib/sessionSnapshotReader.cjs': "throw Error('reader must not run');" } });
@@ -88,4 +91,27 @@ test('answer response closed sets, invariants, sanitizer fixed point, size and d
   assert.equal(policy.validateAnswerEnvelope({ ...base, diag }).ok, false);
   assert.equal(policy.validateAnswerEnvelope({ ...base, diag: { ...diag, text: 'PRIVATE' } }, { allowDiag: true }).ok, false);
   assert.equal(policy.validateAnswerEnvelope({ ...base, diag: { ...diag, evidence_ids: Array(10000).fill('x'.repeat(64)) } }, { allowDiag: true }).ok, false);
+});
+
+for (const kind of ['local', 'remote']) test(`bundled ${kind} launcher sets an internal 25 second deadline`, async t => {
+  const f = setup(t); const request = requestFor(f); const api = await import('../../scripts/lib/sessionSnapshotBundle.mjs');
+  const launcher = 'scripts/lib/sessionSnapshotLauncher.cjs', answer = 'scripts/lib/sessionAnswerReader.cjs';
+  const launcherSource = fs.readFileSync(path.resolve(__dirname, '../..', launcher), 'utf8');
+  const answerSource = fs.readFileSync(path.resolve(__dirname, '../..', answer), 'utf8');
+  const bundle = api.buildBundle({ request, sourceOverrides: {
+    [launcher]: 'Date.now = function fakeStartTime() { return 1000; };\n' + launcherSource,
+    [answer]: answerSource + `
+const bundledReadAnswer = readAnswer;
+module.exports.readAnswer = function verifyDeadline(options) {
+  if (options.deadlineAt !== 26000) throw new Error('deadline_invalid');
+  return bundledReadAnswer({ ...options, clock: () => 26001 });
+};`
+  } });
+  const result = await api.runExecutor({ target: kind === 'local' ? { kind: 'local' } : f.target,
+    bundle, sshBin: f.env.PALANTIR_OBSERVE_SSH_BIN, env: f.env });
+  const received = api.receiveEnvelope(result, { expectedKinds: ['answer'], expectedReaderBuild: bundle.readerBuild,
+    expectedMachineId: 'm', expectedTarget: request.target, allowDiag: true });
+  assert.equal(received.ok, true, result.stdout.toString());
+  assert.equal(received.envelope.status, 'unavailable'); assert.equal(received.envelope.reason, 'timeout');
+  assert.equal(received.envelope.text, null);
 });

@@ -350,3 +350,61 @@ for (const c of require('./fixtures/session-snapshot/answer-send-now.cjs').cases
   assert.equal(JSON.stringify(snapshotReader.runSnapshot(f.options)).includes('ANSWER_BODY_SENTINEL'), false);
   assert.equal(JSON.stringify(a.diag).includes('PRIVATE_'), false);
 });
+
+for (const provider of ['claude', 'codex']) test(`deadline ${provider}: timeout invariants and unexpired/no-deadline byte equivalence`, t => {
+  const f = setup(t, cases[provider]); const target = targetFor(f);
+  const baseline = JSON.stringify(query(f, target, { diag: true }));
+  assert.equal(JSON.stringify(query(f, target, { diag: true, deadlineAt: 1000, clock: () => 999 })), baseline);
+  assert.equal(JSON.stringify(query(f, target, { diag: true, clock() { throw Error('no deadline must not read clock'); } })), baseline);
+  const timeout = query(f, target, { deadlineAt: 1000, clock: () => 1001 });
+  assert.equal(timeout.status, 'unavailable'); assert.equal(timeout.reason, 'timeout');
+  assert.equal(timeout.text, null); assert.equal(timeout.answer_at, null);
+  assert.equal(timeout.truncated, false); assert.equal(timeout.redacted, false); assert.equal(timeout.shared_turn, false);
+  assert.equal(timeout.observed_at, f.options.now.toISOString());
+  assert.equal(policy.validateAnswerEnvelope(timeout).ok, true);
+});
+
+test('deadline interrupts recursive enumeration without opening a transcript', t => {
+  const f = setup(t); const target = targetFor(f); const config = snapshotReader.loadConfig(f.options);
+  const nested = path.join(f.home, '.claude/projects/nested'); fs.mkdirSync(nested);
+  fs.writeFileSync(path.join(nested, 'extra.jsonl'), '');
+  let clock = 0, opens = 0, entered = false;
+  const lstat = fs.lstatSync, open = fs.openSync;
+  t.mock.method(fs, 'lstatSync', (filename, ...args) => {
+    const value = lstat(filename, ...args);
+    if (filename === nested) { clock = 1001; entered = true; }
+    return value;
+  });
+  t.mock.method(fs, 'openSync', (...args) => { opens++; return open(...args); });
+  const answer = query(f, target, { config, deadlineAt: 1000, clock: () => clock });
+  assert.equal(entered, true); assert.equal(opens, 0);
+  assert.equal(answer.status, 'unavailable'); assert.equal(answer.reason, 'timeout');
+});
+
+test('deadline interrupts chunk reads even when the remaining input has no records, and closes fd', t => {
+  const f = setup(t); const target = targetFor(f); const config = snapshotReader.loadConfig(f.options);
+  fs.appendFileSync(f.files[0], ' '.repeat(2 * 256 * 1024));
+  let clock = 0, reads = 0, closes = 0;
+  const read = fs.readSync, close = fs.closeSync;
+  t.mock.method(fs, 'readSync', (...args) => { const count = read(...args); reads++; clock = 1001; return count; });
+  t.mock.method(fs, 'closeSync', (...args) => { closes++; return close(...args); });
+  const answer = query(f, target, { config, deadlineAt: 1000, clock: () => clock });
+  assert.equal(answer.status, 'unavailable'); assert.equal(answer.reason, 'timeout');
+  assert.equal(reads, 1); assert.equal(closes, 1); assert.equal(answer.text, null);
+});
+
+test('deadline interrupts record processing and closes the transcript fd', t => {
+  const f = setup(t); const target = targetFor(f); const config = snapshotReader.loadConfig(f.options);
+  let clock = 0, records = 0, closes = 0;
+  const original = snapshotReader.transcriptRecords, close = fs.closeSync;
+  t.mock.method(snapshotReader, 'transcriptRecords', function* (...args) {
+    for (const record of original(...args)) {
+      records++; if (records === 2) clock = 1001;
+      yield record;
+    }
+  });
+  t.mock.method(fs, 'closeSync', (...args) => { closes++; return close(...args); });
+  const answer = query(f, target, { config, deadlineAt: 1000, clock: () => clock });
+  assert.equal(answer.status, 'unavailable'); assert.equal(answer.reason, 'timeout');
+  assert.equal(records, 2); assert.equal(closes, 1); assert.equal(answer.text, null);
+});

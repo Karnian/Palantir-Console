@@ -1951,12 +1951,8 @@ function createApp(options = {}) {
     clock: options.sessionHubClock, history: sessionHubService,
   }));
   app.use('/api/session-hub', sessionHubErrorHandler);
-  app.use('/api/observe', (req, res, next) => {
-    if (/^\/answers\/?$/i.test(req.path)) return next();
-    return parseJson(req, res, next);
-  });
   app.use('/api/observe', createObserveRouter({ state: observeState, store: options.observeSnapshotStore,
-    answers: sessionAnswers, answerService: answerQueryService }));
+    answers: sessionAnswers, answerService: answerQueryService, parseJson }));
   app.use('/api/observe', observeErrorHandler);
   app.use('/api/agent-context', createAgentContextRouter({
     goalFeatureActive,

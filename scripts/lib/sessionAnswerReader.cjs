@@ -308,92 +308,115 @@ function readAnswer(input) {
   const reject = (status, reason) => envelope({ status, reason });
   if (!file_fp) return reject('target_changed', 'file_missing');
   if (typeof file_fp !== 'string' || !/^[0-9a-f]{16}$/.test(file_fp)) throw new reader.ReaderError('request_invalid');
-  const coverage = Object.fromEntries(policy.COVERAGE_KEYS[provider].map(k => [k, 0]));
-  const root = path.join(options.homeDir, provider === 'claude' ? '.claude/projects' : '.codex/sessions');
-  const files = reader.listFiles(root, coverage, { entries: 0, files: 0 });
-  const matches = [];
-  for (const file of files) {
-    try { const stats = fs.lstatSync(file.file, { bigint: true });
-      if (stats.isFile() && !stats.isSymbolicLink() && fileFingerprint(stats) === file_fp) matches.push({ ...file, identity: stats });
-    } catch { coverage.files_failed++; }
-  }
-  if (matches.length > 1) return reject('withheld', 'held');
-  if (!matches.length) return coverage.files_failed ? reject('unavailable', 'read_limit') : reject('target_changed', 'file_missing');
-  const file = matches[0]; let fd;
+  const deadlineError = Object.assign(new Error('answer_deadline'), { answerDeadline: true });
+  const clock = input.clock || Date.now;
+  const checkDeadline = input.deadlineAt === undefined ? undefined : () => {
+    if (clock() >= input.deadlineAt) throw deadlineError;
+  };
   try {
-    fd = fs.openSync(file.file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-    const initial = fs.fstatSync(fd, { bigint: true });
-    if (initial.dev !== file.identity.dev || initial.ino !== file.identity.ino) return reject('unavailable', 'file_changed');
-    const observation = { provider, size: Number(initial.size), selected: false };
-    const rows = []; let toolIdentifiers = 0;
-    const partial = { held: false, sessions: new Set(), identities: new Set(), users: new Set(), queued: new Set() };
-    function observePartial(record) {
-      const sessionId = provider === 'claude' ? record.sessionId : record.type === 'session_meta' ? record.payload?.id : undefined;
-      if (typeof sessionId === 'string') partial.sessions.add(sessionId);
-      partial.held ||= partial.sessions.size > 1 || Object.hasOwn(record, 'timestamp') && !policy.isSafeTimestamp(record.timestamp);
-      const user = provider === 'claude' ? record.type === 'user'
-        : record.type === 'response_item' && record.payload?.type === 'message' && record.payload.role === 'user';
-      const queued = provider === 'claude' && core.isQueuedInstruction(record);
-      const id = provider === 'claude' ? record.uuid : record.payload?.id;
-      if ((user || queued) && core.isIdentityComponent(id)) {
-        partial.held ||= partial.identities.has(id); partial.identities.add(id);
-      }
-      if (provider === 'claude' && user) for (const alias of [record.uuid, record.source_uuid, record.delivery_id,
-        record.message?.uuid, record.message?.source_uuid, record.message?.delivery_id]) {
-        if (typeof alias !== 'string') continue;
-        partial.held ||= partial.queued.has(alias); partial.users.add(alias);
-      }
-      if (queued) for (const alias of [record.uuid, record.source_uuid, record.delivery_id,
-        record.attachment.source_uuid, record.attachment.delivery_id]) {
-        if (typeof alias !== 'string') continue;
-        partial.held ||= partial.users.has(alias); partial.queued.add(alias);
-      }
-      core.checkMetadata(partial.sessions.size + partial.identities.size + partial.users.size + partial.queued.size);
+    checkDeadline?.();
+    const coverage = Object.fromEntries(policy.COVERAGE_KEYS[provider].map(k => [k, 0]));
+    const root = path.join(options.homeDir, provider === 'claude' ? '.claude/projects' : '.codex/sessions');
+    const files = reader.listFiles(root, coverage, { entries: 0, files: 0 }, checkDeadline);
+    checkDeadline?.();
+    const matches = [];
+    for (const file of files) {
+      checkDeadline?.();
+      try { const stats = fs.lstatSync(file.file, { bigint: true });
+        if (stats.isFile() && !stats.isSymbolicLink() && fileFingerprint(stats) === file_fp) matches.push({ ...file, identity: stats });
+      } catch { coverage.files_failed++; }
     }
-    const source = core.transcriptSource(fd, provider, observation, {
-      transcriptRecords: function* (descriptor, observed) {
-        for (const record of reader.transcriptRecords(descriptor, observed)) {
-          observePartial(record);
-          const row = projectAnswerRecord(record, provider);
-          toolIdentifiers += (row.toolUseIds?.length || 0) + (row.toolResultIds?.length || 0);
-          core.checkMetadata(rows.length + 1 + toolIdentifiers); rows.push(row); yield record;
-        }
-      }, readStatusTail: () => rows
-    });
-    let parsed, readError;
-    try { parsed = core.parseIndependentTranscript(provider, source, coverage, config, true, {}, collectAnswerSession); } catch (e) { readError = e; }
-    let changed = false;
+    checkDeadline?.();
+    if (matches.length > 1) return reject('withheld', 'held');
+    if (!matches.length) return coverage.files_failed ? reject('unavailable', 'read_limit') : reject('target_changed', 'file_missing');
+    const file = matches[0]; let fd;
     try {
-      const current = fs.fstatSync(fd, { bigint: true }), named = fs.statSync(file.file, { bigint: true });
-      changed = current.dev !== initial.dev || current.ino !== initial.ino || current.size < initial.size
-        || named.dev !== initial.dev || named.ino !== initial.ino;
-    } catch { changed = true; }
-    if (observation.selected && observation.sessionId !== sid) return reject('withheld', 'identity_mismatch');
-    if (partial.held || source.analysis.mixed || source.analysis.duplicates || source.analysis.queuedDuplicate || source.analysis.invalidTime)
-      return reject('withheld', 'held');
-    const session = parsed?.session;
-    const observedSession = session || (observation.selected && observation.sessionId === sid ? {
-      provider, sid, cwd: core.representativeTranscriptCwd(provider, source),
-      run_mode: provider === 'codex' ? core.determineCodexRunMode(source.find(r => r.type === 'session_meta')?.payload?.source,
-        source.find(r => r.type === 'session_meta')?.payload?.thread_source) : 'interactive' } : null);
-    if (observedSession) {
-      if (observedSession.cwd?.length > 4096) observedSession.cwd = null;
-      const exclusion = core.snapshotSessionExclusion(options, config, observedSession, Boolean(session), projectSession);
-      if (exclusion) return reject('withheld', ['excluded_sessions', 'exec_sessions_excluded', 'subagent_excluded'].includes(exclusion) ? 'excluded' : 'held');
-      if (core.hasSessionInstructionDeletionRule(config, observedSession)) return reject('withheld', 'deleted_rule');
+      checkDeadline?.();
+      fd = fs.openSync(file.file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+      const initial = fs.fstatSync(fd, { bigint: true });
+      if (initial.dev !== file.identity.dev || initial.ino !== file.identity.ino) return reject('unavailable', 'file_changed');
+      const observation = { provider, size: Number(initial.size), selected: false };
+      const rows = []; let toolIdentifiers = 0;
+      const partial = { held: false, sessions: new Set(), identities: new Set(), users: new Set(), queued: new Set() };
+      function observePartial(record) {
+        const sessionId = provider === 'claude' ? record.sessionId : record.type === 'session_meta' ? record.payload?.id : undefined;
+        if (typeof sessionId === 'string') partial.sessions.add(sessionId);
+        partial.held ||= partial.sessions.size > 1 || Object.hasOwn(record, 'timestamp') && !policy.isSafeTimestamp(record.timestamp);
+        const user = provider === 'claude' ? record.type === 'user'
+          : record.type === 'response_item' && record.payload?.type === 'message' && record.payload.role === 'user';
+        const queued = provider === 'claude' && core.isQueuedInstruction(record);
+        const id = provider === 'claude' ? record.uuid : record.payload?.id;
+        if ((user || queued) && core.isIdentityComponent(id)) {
+          partial.held ||= partial.identities.has(id); partial.identities.add(id);
+        }
+        if (provider === 'claude' && user) for (const alias of [record.uuid, record.source_uuid, record.delivery_id,
+          record.message?.uuid, record.message?.source_uuid, record.message?.delivery_id]) {
+          if (typeof alias !== 'string') continue;
+          partial.held ||= partial.queued.has(alias); partial.users.add(alias);
+        }
+        if (queued) for (const alias of [record.uuid, record.source_uuid, record.delivery_id,
+          record.attachment.source_uuid, record.attachment.delivery_id]) {
+          if (typeof alias !== 'string') continue;
+          partial.held ||= partial.users.has(alias); partial.queued.add(alias);
+        }
+        core.checkMetadata(partial.sessions.size + partial.identities.size + partial.users.size + partial.queued.size);
+      }
+      const source = core.transcriptSource(fd, provider, observation, {
+        transcriptRecords: function* (descriptor, observed) {
+          for (const record of reader.transcriptRecords(descriptor, observed, checkDeadline)) {
+            checkDeadline?.();
+            observePartial(record);
+            const row = projectAnswerRecord(record, provider);
+            toolIdentifiers += (row.toolUseIds?.length || 0) + (row.toolResultIds?.length || 0);
+            core.checkMetadata(rows.length + 1 + toolIdentifiers); rows.push(row); yield record;
+            checkDeadline?.();
+          }
+        }, readStatusTail: () => rows
+      });
+      let parsed, readError;
+      try { parsed = core.parseIndependentTranscript(provider, source, coverage, config, true, {}, collectAnswerSession); } catch (e) { if (e === deadlineError) throw e; readError = e; }
+      checkDeadline?.();
+      let changed = false;
+      try {
+        const current = fs.fstatSync(fd, { bigint: true }), named = fs.statSync(file.file, { bigint: true });
+        changed = current.dev !== initial.dev || current.ino !== initial.ino || current.size < initial.size
+          || named.dev !== initial.dev || named.ino !== initial.ino;
+      } catch { changed = true; }
+      if (observation.selected && observation.sessionId !== sid) return reject('withheld', 'identity_mismatch');
+      if (partial.held || source.analysis.mixed || source.analysis.duplicates || source.analysis.queuedDuplicate || source.analysis.invalidTime)
+        return reject('withheld', 'held');
+      const session = parsed?.session;
+      const observedSession = session || (observation.selected && observation.sessionId === sid ? {
+        provider, sid, cwd: core.representativeTranscriptCwd(provider, source),
+        run_mode: provider === 'codex' ? core.determineCodexRunMode(source.find(r => r.type === 'session_meta')?.payload?.source,
+          source.find(r => r.type === 'session_meta')?.payload?.thread_source) : 'interactive' } : null);
+      if (observedSession) {
+        if (observedSession.cwd?.length > 4096) observedSession.cwd = null;
+        const exclusion = core.snapshotSessionExclusion(options, config, observedSession, Boolean(session), projectSession);
+        if (exclusion) return reject('withheld', ['excluded_sessions', 'exec_sessions_excluded', 'subagent_excluded'].includes(exclusion) ? 'excluded' : 'held');
+        if (core.hasSessionInstructionDeletionRule(config, observedSession)) return reject('withheld', 'deleted_rule');
+      }
+      if (!readError && !session) return reject('withheld', 'held');
+      const target = (session?.items || source.answerItems || []).find(item => item.id === instrId);
+      if (target && target.ref !== ref || !readError && !target) return reject('target_changed', 'ref_mismatch');
+      if (changed) return reject('unavailable', 'file_changed');
+      if (readError) return reject('unavailable', readError.streamLimit ? 'read_limit' : 'exec_failed');
+      if (provider === 'claude') unboundStart = rows[target.position]?.uuid || null;
+      else for (let i = 0; i < target.position; i++) {
+        if (rows[i].type === 'event_msg' && rows[i].payload?.type === 'task_started') unboundStart = rows[i].payload.turn_id;
+      }
+      if (source.analysis.brokenJson) return reject('unbound', 'unsupported_format');
+      const result = provider === 'claude' ? claudeAnswer(rows, target.position) : codexAnswer(rows, target.position);
+      checkDeadline?.();
+      return envelope(result);
+    } catch (error) {
+      if (error === deadlineError) throw error;
+      return reject('unavailable', error.streamLimit ? 'read_limit' : 'file_changed');
     }
-    if (!readError && !session) return reject('withheld', 'held');
-    const target = (session?.items || source.answerItems || []).find(item => item.id === instrId);
-    if (target && target.ref !== ref || !readError && !target) return reject('target_changed', 'ref_mismatch');
-    if (changed) return reject('unavailable', 'file_changed');
-    if (readError) return reject('unavailable', readError.streamLimit ? 'read_limit' : 'exec_failed');
-    if (provider === 'claude') unboundStart = rows[target.position]?.uuid || null;
-    else for (let i = 0; i < target.position; i++) {
-      if (rows[i].type === 'event_msg' && rows[i].payload?.type === 'task_started') unboundStart = rows[i].payload.turn_id;
-    }
-    if (source.analysis.brokenJson) return reject('unbound', 'unsupported_format');
-    return envelope(provider === 'claude' ? claudeAnswer(rows, target.position) : codexAnswer(rows, target.position));
-  } catch (error) { return reject('unavailable', error.streamLimit ? 'read_limit' : 'file_changed'); }
-  finally { if (fd !== undefined) fs.closeSync(fd); }
+    finally { if (fd !== undefined) fs.closeSync(fd); }
+  } catch (error) {
+    if (error === deadlineError) return reject('unavailable', 'timeout');
+    throw error;
+  }
 }
 module.exports = { readAnswer, fileFingerprint };

@@ -76,6 +76,7 @@ function validRequest(value) {
     && (value.op !== 'exclude_commit' || typeof value.token === 'string' && /^[0-9a-f]{64}$/.test(value.token));
 }
 function launch() {
+  var answerDeadlineAt = REQUEST.op === 'answer_query' ? Date.now() + 25000 : undefined;
   // Check major before compiling any other manifest source.
   if (Number(process.versions.node.split('.')[0]) < 18) {
     launcherBuild = computeReaderBuild(BUNDLE_SOURCES);
@@ -100,7 +101,8 @@ function launch() {
   try {
     var result = REQUEST.op === 'answer_query' ? require('./sessionAnswerReader.cjs').readAnswer({
       homeDir: home, configDir: options.configDir, now: options.now, readerBuild: launcherBuild,
-      instrId: REQUEST.target.instrId, ref: REQUEST.target.ref, file_fp: REQUEST.target.file_fp, diag: REQUEST.diag
+      instrId: REQUEST.target.instrId, ref: REQUEST.target.ref, file_fp: REQUEST.target.file_fp, diag: REQUEST.diag,
+      deadlineAt: answerDeadlineAt
     }) : REQUEST.op === 'snapshot' ? reader.runSnapshot(options)
       : REQUEST.op === 'exclude_query' ? reader.excludeQuery(options) : reader.excludeCommit(options);
     setImmediate(function completed() { launcherEmit(result, 0); });

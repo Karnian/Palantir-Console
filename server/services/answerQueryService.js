@@ -37,7 +37,7 @@ function createAnswerQueryService(options = {}) {
       const raw = Buffer.concat(run.stdout.chunks).toString('utf8');
       // Exactly one JSON line; one final line terminator is optional.
       const line = raw.endsWith('\n') ? raw.slice(0, -1) : raw;
-      if (!line || /[\r\n]/.test(line)) return status('unavailable', 'exec_failed');
+      if (!line || Buffer.byteLength(line, 'utf8') > 65536 || /[\r\n]/.test(line)) return status('unavailable', 'exec_failed');
       const envelope = JSON.parse(line);
       if (!validateAnswerEnvelope(envelope, { allowDiag: false, expectedMachineId: machineId, expectedTarget }).ok) {
         return status('unavailable', 'exec_failed');

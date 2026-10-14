@@ -28,6 +28,10 @@ if (mode === 'hang') {
   if (mode === 'status') { process.stdout.write('{"kind":"status","code":"request_invalid"}\n'); return; }
   if (mode === 'invalid_json') { process.stdout.write('{broken\n'); return; }
   if (mode === 'stderr') process.stderr.write('PRIVATE_STDERR_SENTINEL'.repeat(10000));
-  process.stdout.write(JSON.stringify(answer) + '\n');
+  const encoded = JSON.stringify(answer);
+  if (mode === 'padded') {
+    process.stdout.write(encoded + ' '.repeat(70 * 1024 - Buffer.byteLength(encoded)) + '\n'); return;
+  }
+  process.stdout.write(encoded + '\n');
   if (mode === 'two_lines') process.stdout.write(JSON.stringify(answer) + '\n');
 }, Number(env.FAKE_ANSWER_DELAY || 0));

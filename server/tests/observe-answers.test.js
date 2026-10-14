@@ -3,7 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { setup, BODY } = require('./helpers/answer-query-fixture.cjs');
+const { setup, until, BODY } = require('./helpers/answer-query-fixture.cjs');
 const { request, managerToken, COOKIE, TOKEN, PM } = require('./helpers/session-hub-fixture.cjs');
 const get = (app, url) => request(app).get(url).set('Cookie', COOKIE);
 function appFor(fx, extra = {}) {
@@ -111,10 +111,45 @@ test('execution failures are HTTP 200 unavailable, answers never enter app DB or
 });
 
 test('route maps service busy error to 429; app shutdown awaits active query group removal', async t => {
-  const fx = setup(t, 'hang'); const app = appFor(fx);
-  const task = app.answerQueryService.query(fx.query());
+  let releaseReap = false, sawGone = false;
+  const fx = setup(t, 'hang', { timeoutMs: 60000, reapOptions: { termMs: 20, reapMs: 3000, pollMs: 5,
+    kill(pgid, signal) {
+      try { return process.kill(pgid, signal); }
+      catch (error) {
+        if (error.code === 'ESRCH' && signal === 0 && !releaseReap) { sawGone = true; return; }
+        throw error;
+      }
+    } } }); const app = appFor(fx);
+  let settled = false;
+  const task = app.answerQueryService.query(fx.query()).finally(() => { settled = true; });
+  await until(() => fx.calls().length >= 1);
+  const calls = fx.calls(); assert.ok(calls.length >= 1, 'the hang fixture must be running before shutdown');
+  assert.equal(settled, false);
   error(await get(app, fx.url(fx.query('alpha', 1))), 'answer_busy', 429);
-  const closing = app.shutdown(); assert.equal(app.shutdown(), closing); await closing;
-  assert.equal((await task).status, 'unavailable');
-  for (const call of fx.calls()) assert.throws(() => process.kill(-call.pid, 0), error => error.code === 'ESRCH');
+  const begun = Date.now();
+  const closing = app.shutdown(); assert.equal(app.shutdown(), closing);
+  let shutdownSettled = false; closing.then(() => { shutdownSettled = true; });
+  try {
+    await until(() => sawGone);
+    assert.equal(settled, false, 'answer must await the held reap confirmation');
+    assert.equal(shutdownSettled, false, 'shutdown must await the held answer task');
+  } finally { releaseReap = true; }
+  await closing;
+  assert.equal(settled, true, 'shutdown must await answer settlement');
+  for (const call of calls) assert.throws(() => process.kill(-call.pid, 0), error => error.code === 'ESRCH');
+  assert.ok(Date.now() - begun < 5000, 'shutdown must finish before the 30 second CLI timeout');
+  const result = await task; assert.equal(result.status, 'unavailable'); assert.equal(result.reason, 'exec_failed');
+});
+
+test('all observe paths reject any Authorization header without cookie fallback', async t => {
+  const fx = setup(t); const app = appFor(fx);
+  for (const url of ['/api/observe/snapshots', '/api/observe/snapshots/alpha', fx.url(), '/api/observe/unknown']) {
+    for (const authorization of ['bearer bad', `BEARER ${TOKEN}`, 'Basic xxx', '']) {
+      error(await get(app, url).set('Authorization', authorization), 'cookie auth required', 403);
+      error(await get(app, url).set('Authorization', authorization).send('{broken'), 'cookie auth required', 403);
+    }
+  }
+  assert.equal((await get(app, '/api/observe/snapshots')).status, 200);
+  assert.equal((await get(app, fx.url())).status, 200);
+  assert.equal(fx.spawns(), 1);
 });

@@ -42,8 +42,18 @@ function requireResult(result) {
   return result;
 }
 
-function createObserveRouter({ state, store = snapshotStore, answers = true, answerService }) {
+function createObserveRouter({ state, store = snapshotStore, answers = true, answerService, parseJson }) {
   const router = express.Router();
+  router.use(function observeCookieOnly(req, res, next) {
+    if (Object.hasOwn(req.headers, 'authorization') || req.auth?.method !== 'cookie') {
+      return next(new ForbiddenError('cookie auth required'));
+    }
+    return next();
+  });
+  if (parseJson) router.use((req, res, next) => {
+    if (/^\/answers\/?$/i.test(req.path)) return next();
+    return parseJson(req, res, next);
+  });
   router.all('/answers', asyncHandler(async function answersQuery(req, res) {
     res.set('Cache-Control', 'no-store');
     if (req.auth?.method !== 'cookie') throw new ForbiddenError('cookie auth required');

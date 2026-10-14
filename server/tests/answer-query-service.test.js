@@ -34,7 +34,7 @@ test('ssh argv includes remoteNode and snapshot values, omits diag/label/orcaBin
     'answer', '--instruction', `${row.id}#${row.ref}`, '--file-fp', fx.beta.sessions[0].file_fp, '--emit-envelope']);
 });
 
-for (const mode of ['target', 'fp', 'instruction', 'machine', 'diag', 'invariant', 'large', 'flood', 'two_lines', 'status', 'invalid_json', 'failed']) {
+for (const mode of ['target', 'fp', 'instruction', 'machine', 'diag', 'invariant', 'large', 'padded', 'flood', 'two_lines', 'status', 'invalid_json', 'failed']) {
   test(`receiver fails closed for ${mode}, and retains no result`, async t => {
     const fx = setup(t, mode); failed(await fx.service.query(fx.query())); failed(await fx.service.query(fx.query()));
     assert.equal(fx.spawns(), 2);
