@@ -476,28 +476,32 @@ test('session markdown table wrappers preserve table semantics', t => {
   }
 });
 
-test('session markdown does not add focus to aria-hidden code blocks or tables', t => {
+test('session markdown strips source visibility and focus attributes before wrapping tables', t => {
   const env = setup(t);
-  const table = '<table title="hidden table"><tbody><tr><td>hidden cell</td></tr></tbody></table>';
-  const text = '<div aria-hidden="true"><div aria-hidden="false">'
-    + '<pre tabindex="-1"><code>hidden code</code></pre>' + table + '</div></div>';
-  const render = content => env.render(env.h('div', {}, env.context.renderSessionMarkdown(content)), env.root);
-  render(text);
-  assert.equal(env.root.querySelectorAll('[tabindex="0"]').length, 0);
-  assert.equal(env.root.querySelector('pre').hasAttribute('tabindex'), false);
-  assert.equal(env.root.querySelectorAll('.session-hub-table-scroll').length, 0);
-  assert.equal(env.root.querySelector('table').getAttribute('title'), 'hidden table');
-  // A hidden subtree does not affect later siblings or a subsequent render.
-  render(text + '<pre>visible sibling</pre>' + table);
-  assert.equal(env.root.querySelectorAll('pre')[1].getAttribute('tabindex'), '0');
-  assert.equal(env.root.querySelectorAll('.session-hub-table-scroll[tabindex="0"]').length, 1);
-  render('<pre tabindex="5">visible code</pre>' + table);
+  const text = '<div aria-hidden="true"><section ARIA-HIDDEN="false">'
+    + '<pre ArIa-HiDdEn="true" TABINDEX="-1"><code>code</code></pre>'
+    + '<table tabindex="5" title="data"><tbody><tr><td>cell</td></tr></tbody></table>'
+    + '</section></div>';
+  env.render(env.h('div', {}, env.context.renderSessionMarkdown(text)), env.root);
+  assert.equal(env.root.querySelectorAll('[aria-hidden]').length, 0);
+  assert.equal(env.root.querySelectorAll('[tabindex]:not([tabindex="0"])').length, 0);
   assert.equal(env.root.querySelector('pre').getAttribute('tabindex'), '0');
-  render('<pre aria-hidden="true" tabindex="5">hidden code</pre>'
-    + table.replace('<table ', '<table aria-hidden="true" '));
-  assert.equal(env.root.querySelectorAll('[tabindex="0"]').length, 0);
-  assert.equal(env.root.querySelector('pre').hasAttribute('tabindex'), false);
-  assert.equal(env.root.querySelectorAll('.session-hub-table-scroll').length, 0);
+  const table = env.root.querySelector('table');
+  assert.equal(table.hasAttribute('tabindex'), false);
+  assert.ok(table.parentElement.matches('.session-hub-table-scroll[tabindex="0"]'));
+  assert.equal(table.getAttribute('title'), 'data');
+  assert.equal(table.querySelector('td').textContent, 'cell');
+});
+
+test('session markdown strips source tabindex from links and other elements', t => {
+  const env = setup(t);
+  const text = '<a tabindex="3" aria-hidden="true" href="https://example.com" title="link">link</a>'
+    + '<span TABINDEX="-1">text</span>';
+  env.render(env.h('div', {}, env.context.renderSessionMarkdown(text)), env.root);
+  assert.equal(env.root.querySelectorAll('[tabindex], [aria-hidden]').length, 0);
+  assert.equal(env.root.querySelector('a').getAttribute('href'), 'https://example.com');
+  assert.equal(env.root.querySelector('a').getAttribute('title'), 'link');
+  assert.equal(env.root.querySelector('span').textContent, 'text');
 });
 
 test('session markdown keeps pre focus across rerenders', t => {
@@ -514,7 +518,7 @@ test('session markdown keeps pre focus across rerenders', t => {
   assert.equal(pre.textContent, 'third');
   render('<pre TABINDEX="5">fourth</pre>\n\n<p tabindex="5">unchanged</p>');
   assert.equal(pre.getAttribute('tabindex'), '0');
-  assert.equal(env.root.querySelector('p').getAttribute('tabindex'), '5');
+  assert.equal(env.root.querySelector('p').hasAttribute('tabindex'), false);
 });
 
 test('session markdown scrollable HTML keeps sanitization and overrides supplied tabindex', t => {

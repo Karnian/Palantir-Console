@@ -25,7 +25,7 @@ export function renderSessionMarkdown(text, panel, onOpenSession, evidence = [])
   const template = document.createElement('template');
   template.innerHTML = renderMarkdown(text);
   const token = /\[\[session:([A-Za-z0-9:_-]{1,128})@([0-9a-f]{16})\]\]/g;
-  const convert = (node, inCode = false, inAriaHidden = false) => {
+  const convert = (node, inCode = false) => {
     if (node.nodeType === 3) {
       if (inCode) return node.textContent;
       const parts = []; let end = 0;
@@ -40,21 +40,18 @@ export function renderSessionMarkdown(text, panel, onOpenSession, evidence = [])
     }
     if (node.nodeType !== 1) return null;
     let tag = node.tagName.toLowerCase();
-    const ariaHidden = inAriaHidden || node.getAttribute('aria-hidden') === 'true';
     const props = Object.fromEntries(Array.from(node.attributes, attr => [attr.name, attr.value]));
-    if (tag === 'pre' || (tag === 'table' && !ariaHidden)) {
-      for (const key of Object.keys(props)) {
-        if (key.toLowerCase() === 'tabindex') delete props[key];
-      }
-      if (tag === 'pre' && !ariaHidden) props.tabindex = '0';
+    for (const key of Object.keys(props)) {
+      if (['tabindex', 'aria-hidden'].includes(key.toLowerCase())) delete props[key];
     }
+    if (tag === 'pre') props.tabindex = '0';
     // Evidence owns its click; unwrap enclosing links to avoid nested interactive elements.
     if (tag === 'a' && new RegExp(token.source).test(node.textContent)) {
       tag = 'span'; delete props.href; delete props.target; delete props.rel;
     }
     const element = h(tag, props, Array.from(node.childNodes, child =>
-      convert(child, inCode || tag === 'pre' || tag === 'code', ariaHidden)));
-    return tag === 'table' && !ariaHidden
+      convert(child, inCode || tag === 'pre' || tag === 'code')));
+    return tag === 'table'
       ? h('div', { class: 'session-hub-table-scroll', tabindex: '0' }, element) : element;
   };
   return Array.from(template.content.childNodes, node => convert(node));
