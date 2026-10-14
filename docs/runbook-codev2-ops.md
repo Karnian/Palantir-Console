@@ -48,7 +48,7 @@ curl -s http://codev2:4177/api/health    # gitSha 가 검토한 SHA 인지
 ## 다른 서버 추가
 서버가 늘면 같은 화면에서 함께 본다. 코드 변경 없이 수집 대상 한 줄을 더한다. codev2 가 그 서버에 ssh 로 접속해 수집 코드를 표준입력으로 넘겨 `node -` 로 실행하므로, 대상 서버에는 Palantir 체크아웃이 필요 없다. 지시별 답변 조회도 같은 ssh 경로로 동작한다.
 
-대상 서버 요건: codev2 의 codev 사용자로 비대화형 ssh 접속(키 인증), Node 22 이상, Orca 세션을 보려면 Orca CLI. 비대화형 ssh 의 PATH 에 node·orca 가 없으면 절대경로를 대상 설정에 넣는다.
+대상 서버 요건: codev2 의 codev 사용자로 비대화형 ssh 접속(키 인증), Node 22 이상. **Orca 는 선택이다** — 세션·지시·답변은 그 서버의 Claude Code·Codex 기록(`~/.claude`, `~/.codex`)에서 읽으므로 Orca 없이도 보이고, Orca 가 없으면 Orca 연결 정보(어느 워크스페이스·터미널인지, Orca 상태)만 `orca_unavailable` 로 빠진다(2026-10-14 실측: Orca 없이 수집 성공, 세션 102·지시 965). 비대화형 ssh 의 PATH 에 node·orca 가 없으면 절대경로를 대상 설정에 넣는다.
 
 1. codev2 에 ssh 키 만들기(최초 1회 — 2026-10-14 현재 codev2 에는 개인키가 없다):
    `ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ''` → 공개키를 대상 서버의 `~/.ssh/authorized_keys` 에 등록.
