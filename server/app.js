@@ -77,6 +77,7 @@ const { createAssistantMemoryService } = require('./services/assistantMemoryServ
 const { createSessionHubMemoryRouter } = require('./routes/sessionHubMemory');
 const { createSessionHubService } = require('./services/sessionHubService');
 const { createSessionHubChatRouter } = require('./routes/sessionHubChat');
+const { createAnswerQueryService } = require('./services/answerQueryService');
 const { createSnapshotRefreshService } = require('./services/snapshotRefreshService');
 const { createSnapshotRefreshRouter } = require('./routes/snapshotRefresh');
 const { createSessionHubOffGate, createSessionHubTokenGate, createSessionHubRouter,
@@ -1132,6 +1133,12 @@ function createApp(options = {}) {
     ...options.snapshotRefreshServiceOptions, observeState,
   });
   app.snapshotRefreshService = snapshotRefreshService;
+  const sessionAnswers = options.sessionAnswers === undefined
+    ? process.env.PALANTIR_SESSION_ANSWERS !== '0' : options.sessionAnswers === true;
+  const answerQueryService = sessionAnswers ? createAnswerQueryService({
+    ...options.answerQueryServiceOptions, observeState, store: options.observeSnapshotStore,
+  }) : null;
+  app.answerQueryService = answerQueryService;
   const actorTokenOptions = {
     actorTokenSource: options.actorTokenSource,
     agentProcessIsolation: options.agentProcessIsolation,
@@ -1944,8 +1951,12 @@ function createApp(options = {}) {
     clock: options.sessionHubClock, history: sessionHubService,
   }));
   app.use('/api/session-hub', sessionHubErrorHandler);
-  app.use('/api/observe', parseJson);
-  app.use('/api/observe', createObserveRouter({ state: observeState, store: options.observeSnapshotStore }));
+  app.use('/api/observe', (req, res, next) => {
+    if (/^\/answers\/?$/i.test(req.path)) return next();
+    return parseJson(req, res, next);
+  });
+  app.use('/api/observe', createObserveRouter({ state: observeState, store: options.observeSnapshotStore,
+    answers: sessionAnswers, answerService: answerQueryService }));
   app.use('/api/observe', observeErrorHandler);
   app.use('/api/agent-context', createAgentContextRouter({
     goalFeatureActive,
@@ -2361,6 +2372,7 @@ function createApp(options = {}) {
     _shuttingDown = true;
     const hubShutdown = sessionHubService?.shutdown();
     const snapshotShutdown = snapshotRefreshService.shutdown();
+    const answerShutdown = answerQueryService?.shutdown();
     try { _questionWaiterDrain = questionsRouter.stopWaiters(); }
     catch (err) { console.warn('[app.shutdown] question waiter stop failed:', err && err.message); }
 
@@ -2379,7 +2391,7 @@ function createApp(options = {}) {
       _shutdownPromise = Promise.resolve(_sweepWorkersThenFinish());
     }
     if (hubShutdown || snapshotShutdown) {
-      _shutdownPromise = Promise.allSettled([_shutdownPromise, hubShutdown, snapshotShutdown]).then(results => {
+      _shutdownPromise = Promise.allSettled([_shutdownPromise, hubShutdown, snapshotShutdown, answerShutdown]).then(results => {
         const failed = results.find(result => result.status === 'rejected');
         if (failed) throw failed.reason;
       });

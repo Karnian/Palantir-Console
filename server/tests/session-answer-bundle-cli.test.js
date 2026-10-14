@@ -35,6 +35,19 @@ for (const provider of ['claude', 'codex']) test(`remote answer_query ${provider
   { ...io, env: f.env }), 0, io.errors());
   const safe = JSON.parse(io.output()); assert.equal(Object.hasOwn(safe, 'text'), false); assert.equal(safe.text_chars, 20);
   assert.equal(io.output().includes('ANSWER_BODY_SENTINEL'), false); assert.equal(io.output().trim().split('\n').length, 1);
+  const emitted = capture();
+  assert.equal(await cli.main(['remote', '--host', f.target.host, '--remote-node', f.target.remoteNode,
+    'answer', '--instruction', request.target.instrId + '#' + request.target.ref, '--file-fp', request.target.file_fp,
+    '--emit-envelope', '--now', request.now], { ...emitted, env: f.env }), 0, emitted.errors());
+  const envelope = JSON.parse(emitted.output()); assert.equal(envelope.text, 'ANSWER_BODY_SENTINEL');
+  assert.equal(Object.hasOwn(envelope, 'text_chars'), false); assert.equal(Object.hasOwn(envelope, 'diag'), false);
+  assert.equal(policy.validateAnswerEnvelope(envelope).ok, true);
+  assert.equal(emitted.output().trim().split('\n').length, 1);
+  const rejected = capture();
+  assert.equal(await cli.main(['answer', '--instruction', request.target.instrId + '#' + request.target.ref,
+    '--file-fp', request.target.file_fp, '--emit-envelope', '--diag'], { ...rejected, env: f.env }), 2);
+  assert.match(rejected.errors(), /^request_invalid\n/); assert.equal(rejected.output(), ''); assert.equal(rejected.spawns(), 0);
+
 });
 test('answer request strict allowlist rejects malformed/forbidden fields before reader', async t => {
   const f = setup(t); const valid = requestFor(f); const api = await import('../../scripts/lib/sessionSnapshotBundle.mjs');

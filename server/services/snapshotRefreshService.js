@@ -2,49 +2,14 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawn } = require('node:child_process');
 const store = require('./observeSnapshotStore');
 const { isSafeId, validateSnapshot } = require('./observeSnapshotPolicy');
-const { assertSpawnAllowed, isSpawnGuardActive } = require('../utils/spawnGuard');
 const { reapProcessGroup } = require('../utils/reapProcessGroup');
 const { acquireSnapshotRefreshLock } = require('../utils/snapshotRefreshLock');
 
-const CLI = path.resolve(__dirname, '../../scripts/session-snapshot.mjs');
-const FIXTURES = path.resolve(__dirname, '../tests/fixtures/bin');
-const KEYS = ['name', 'kind', 'host', 'machineId', 'label', 'remoteNode', 'orcaBin'];
-const LABEL = /^[A-Za-z0-9._][A-Za-z0-9._-]{0,31}$/;
-const ABSOLUTE = /^\/[A-Za-z0-9._/-]+$/;
+const { parseSnapshotTargets } = require('./snapshotTargets');
+const { prepareSnapshotCli, runSnapshotCli, reapCliRun, cancelCliRun } = require('./snapshotCliRunner');
 const fail = (code, status = 400) => Object.assign(new Error(code), { code, status });
-
-function targetsFrom(raw) {
-  const values = JSON.parse(raw || '[]');
-  if (!Array.isArray(values)) throw fail('snapshot_targets_invalid');
-  const names = new Set(); const ids = new Set();
-  return values.map(value => {
-    if (!value || typeof value !== 'object' || Array.isArray(value)
-      || Object.keys(value).some(key => !KEYS.includes(key))
-      || typeof value.name !== 'string' || !LABEL.test(value.name)
-      || typeof value.machineId !== 'string' || !isSafeId(value.machineId)
-      || !['local', 'ssh'].includes(value.kind) || names.has(value.name) || ids.has(value.machineId)) {
-      throw fail('snapshot_targets_invalid');
-    }
-    if (value.kind === 'ssh') {
-      if (typeof value.host !== 'string' || !/^[A-Za-z0-9._][A-Za-z0-9._-]*(?:@[A-Za-z0-9._-]+)?$/.test(value.host)) {
-        throw fail('snapshot_targets_invalid');
-      }
-    } else if (value.host !== undefined || value.remoteNode !== undefined) throw fail('snapshot_targets_invalid');
-    if (value.label !== undefined && (typeof value.label !== 'string' || !LABEL.test(value.label))) {
-      throw fail('snapshot_targets_invalid');
-    }
-    for (const key of ['remoteNode', 'orcaBin']) {
-      if (value[key] !== undefined && (typeof value[key] !== 'string' || !ABSOLUTE.test(value[key]))) {
-        throw fail('snapshot_targets_invalid');
-      }
-    }
-    names.add(value.name); ids.add(value.machineId);
-    return Object.freeze({ ...value });
-  });
-}
 
 function integer(raw, fallback, minimum) {
   if (raw === undefined) return fallback;
@@ -61,7 +26,7 @@ function createSnapshotRefreshService(options = {}) {
   const observe = options.observeState || { on: false };
   let targets = []; let code = null; let intervalMs = 0; let timeoutMs = 120000;
   try {
-    targets = targetsFrom(env.PALANTIR_SNAPSHOT_TARGETS);
+    targets = parseSnapshotTargets(env.PALANTIR_SNAPSHOT_TARGETS);
     intervalMs = integer(env.PALANTIR_SNAPSHOT_REFRESH_MS, 300000, 0);
     timeoutMs = integer(env.PALANTIR_SNAPSHOT_TIMEOUT_MS, 120000, 1);
   } catch (err) {
@@ -130,50 +95,14 @@ function createSnapshotRefreshService(options = {}) {
     if (target.orcaBin) argv.push('--orca-bin', target.orcaBin);
     return argv;
   }
-  function fixtureScript(script) {
-    const real = fs.realpathSync(script);
-    if (!real.startsWith(fs.realpathSync(FIXTURES) + path.sep)) throw fail('snapshot_fixture_required');
-  }
   async function execute(entry, run) {
     let dir;
     let validating = false;
     try {
-      const command = options.execPath || process.execPath;
-      const script = options.scriptPath || CLI;
-      const guarded = isSpawnGuardActive() || Object.hasOwn(env, 'NODE_TEST_CONTEXT')
-        || env.PALANTIR_BLOCK_REAL_SPAWN === '1';
-      if (guarded) fixtureScript(script);
-      assertSpawnAllowed({ command, source: 'snapshot-refresh:cli' });
+      const cli = prepareSnapshotCli({ ...options, env, source: 'snapshot-refresh:cli' });
       dir = staging(entry); run.dir = dir;
-      if (run.cancelled) return { code: run.cancelled };
-      const childEnv = { ...env, PALANTIR_SNAPSHOT_EXECUTOR_GROUP: 'inherit' };
-      if (guarded) {
-        childEnv.NODE_TEST_CONTEXT = process.env.NODE_TEST_CONTEXT || env.NODE_TEST_CONTEXT || 'snapshot-refresh';
-        childEnv.PALANTIR_BLOCK_REAL_SPAWN = '1'; childEnv.PALANTIR_ALLOW_REAL_SPAWN = '0';
-      }
-      const child = (options.spawn || spawn)(command, [script, ...argumentsFor(entry.target, dir)],
-        { detached: true, shell: false, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
-      run.pgid = child.pid;
-      for (const name of ['stdout', 'stderr']) {
-        const output = { bytes: 0, chunks: [], truncated: false };
-        run[name] = output;
-        child[name].on('data', chunk => {
-          const remaining = 65536 - output.bytes;
-          if (chunk.length > remaining) output.truncated = true;
-          if (remaining > 0) { output.chunks.push(Buffer.from(chunk.subarray(0, remaining)));
-            output.bytes += Math.min(chunk.length, remaining); }
-        });
-      }
-      const exited = new Promise(resolve => {
-        child.once('exit', status => resolve({ code: 'failed', status_code: status }));
-        child.once('error', () => resolve({ code: 'failed', status_code: null }));
-      });
-      const timeout = setTimeout(() => cancel(run, 'timeout'), timeoutMs);
-      let result;
-      try {
-        result = await Promise.race([exited, run.cancellation]);
-        await reap(run);
-      } finally { clearTimeout(timeout); }
+      const result = await runSnapshotCli({ ...cli, argv: argumentsFor(entry.target, dir), run,
+        timeoutMs, reapOptions: options.reapOptions, spawn: options.spawn, maxStdoutBytes: 65536 });
       if (run.cancelled) return { code: run.cancelled };
       if (result.status_code !== 0) return result;
       validating = true;
@@ -218,14 +147,8 @@ function createSnapshotRefreshService(options = {}) {
       if (dir) fs.rmSync(dir, { recursive: true, force: true });
     }
   }
-  function reap(run) {
-    run.reaping ||= reapProcessGroup(run.pgid, options.reapOptions);
-    return run.reaping;
-  }
-  function cancel(run, reason) {
-    if (run.cancelled) return;
-    run.cancelled = reason; run.resolveCancellation({ code: reason });
-  }
+  const reap = run => reapCliRun(run, options.reapOptions);
+  const cancel = cancelCliRun;
   function start(entry) {
     if (entry.running || entry.locked || closed) return entry.task;
     const run = { cancelled: null, pgid: null };

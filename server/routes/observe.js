@@ -3,11 +3,17 @@
 const express = require('express');
 const { asyncHandler } = require('../middleware/asyncHandler');
 const { AppError, ForbiddenError } = require('../utils/errors');
-const { isSafeId } = require('../services/observeSnapshotPolicy');
+const { isSafeId, isSafeInstructionId } = require('../services/observeSnapshotPolicy');
 const snapshotStore = require('../services/observeSnapshotStore');
+const { assertSameOrigin } = require('../utils/sameOrigin');
 
 const ERROR_STATUS = Object.freeze({
   observe_off: 404,
+  answers_off: 404,
+  invalid_query: 400,
+  answer_busy: 429,
+  snapshot_unavailable: 503,
+  method_not_allowed: 405,
   snapshot_changed: 409,
   invalid_machine_id: 400,
   not_found: 404,
@@ -36,14 +42,30 @@ function requireResult(result) {
   return result;
 }
 
-function createObserveRouter({ state, store = snapshotStore }) {
+function createObserveRouter({ state, store = snapshotStore, answers = true, answerService }) {
   const router = express.Router();
+  router.all('/answers', asyncHandler(async function answersQuery(req, res) {
+    res.set('Cache-Control', 'no-store');
+    if (req.auth?.method !== 'cookie') throw new ForbiddenError('cookie auth required');
+    if (req.method !== 'GET') { res.set('Allow', 'GET'); throw new AppError('method_not_allowed', 405); }
+    if (!answers) throw new AppError('answers_off', 404);
+    assertSameOrigin(req);
+    if (req.headers['sec-fetch-site'] === 'cross-site') throw new ForbiddenError('cross-origin read blocked');
+    const query = req.query;
+    const keys = ['machine', 'key', 'instruction', 'rev'];
+    if (Object.keys(query).length !== keys.length || keys.some(key => typeof query[key] !== 'string')
+      || !isSafeId(query.machine) || !isSafeId(query.key) || !isSafeInstructionId(query.instruction)
+      || !/^[0-9a-f]{64}$/.test(query.rev)) throw new AppError('invalid_query', 400);
+    const result = await answerService.query({ machineId: query.machine, sessionKey: query.key,
+      instructionId: query.instruction, rev: query.rev });
+    if (!res.destroyed) return res.json(result);
+  }));
   router.get('/snapshots', asyncHandler(function snapshotList(req, res) {
     if (req.auth?.method !== 'cookie') throw new ForbiddenError('cookie auth required');
     if (req.method !== 'GET') throw new AppError('route_not_found', 404);
     const entries = requireResult(store.readAllSnapshots(state)).snapshots;
     return res.json({ snapshots: entries.map(entry => snapshotStore.snapshotMetadata(entry, true)),
-      rev: snapshotStore.snapshotRevision(entries) });
+      rev: snapshotStore.snapshotRevision(entries), answers });
   }));
   router.get('/snapshots/:machineId', asyncHandler(function snapshotDetail(req, res) {
     if (req.auth?.method !== 'cookie') throw new ForbiddenError('cookie auth required');

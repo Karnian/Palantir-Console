@@ -667,6 +667,7 @@ test('store: fixed status table covers every public read failure', () => {
     observe_off: 404, snapshot_changed: 409, invalid_machine_id: 400, not_found: 404, not_regular: 422, symlink: 422,
     identity_mismatch: 422, too_large: 413, total_limit: 413, parse_error: 422, policy_violation: 422,
     observe_root_changed: 503, read_error: 503, route_not_found: 404,
+    answers_off: 404, invalid_query: 400, answer_busy: 429, snapshot_unavailable: 503, method_not_allowed: 405,
   });
 });
 
