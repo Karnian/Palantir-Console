@@ -29,7 +29,10 @@ function setup(t) {
   env.loadComponent('AssistantMemory');
   env.loadComponent('SnapshotRefreshControls');
   env.loadComponent('SessionHubSidebar');
-  env.loadComponent('Dropdown'); env.loadComponent('SessionSnapshotParts'); env.loadComponent('AllSessionsPanel');
+  env.loadComponent('Dropdown');
+  const parts = fs.readFileSync(path.join(publicRoot, 'app/components/SessionSnapshotParts.js'), 'utf8');
+  vm.runInContext(transformComponentSource(parts.replace(/^export const /gm, 'const ')), env.context);
+  env.loadComponent('AllSessionsPanel');
   env.loadComponent('SessionHubChat');
   t.after(() => { env.render(null, root); env.cleanup(); });
   return { ...env, root };
@@ -2968,4 +2971,96 @@ for (const initialError of [false, true]) test(
     assert.equal(snapshots.load.snapshots.length, 0);
     assert.ok(env.root.textContent.includes('읽는 중'));
     assert.equal(env.root.textContent.includes('세션 확인 불가'), false);
+  });
+
+async function mobileAnswerManager(t, view) {
+  const env = setup(t), { alpha } = fixture(t), pending = deferred(), requests = [];
+  env.window.innerWidth = 390;
+  env.context.EventSource = class { addEventListener() {} close() {} };
+  env.context.fetch = async (url, options) => {
+    if (url.startsWith('/api/observe/answers?')) {
+      requests.push({ url, options });
+      return requests.length === 1 ? response(answerEnvelope('final', '화면을 떠나면 버릴 답변')) : pending.promise;
+    }
+    return response(url.endsWith('/chat/state') ? { thread_id: 'current', epoch: 'boot', version: 1,
+      state: 'running', messages: [{ role: 'assistant', content: `[[session:${alpha.sessions[0].key}@${REV}]]` }] }
+      : url.endsWith('/snapshots/status') ? { enabled: true, targets: [] }
+        : url === '/api/observe/snapshots' ? { rev: REV, answers: true,
+          snapshots: [{ machine_id: 'alpha', sha256: ANSWER_REV }] }
+          : url.includes('/snapshots/alpha') ? alpha : {});
+  };
+  let epoch;
+  const Detail = env.context.SessionHubDetail;
+  env.context.SessionHubDetail = props => {
+    epoch = env.context.preactHooks.useContext(env.context.AnswerEpochContext);
+    return env.h(Detail, props);
+  };
+  env.context.ManagerChat = () => env.h('div', { class: 'manager-chat-side' });
+  env.context.SessionGrid = () => {
+    epoch = env.context.preactHooks.useContext(env.context.AnswerEpochContext);
+    return env.h('div', { class: 'manager-grid-side' }, env.h(env.context.AllSessionsPanel,
+      { standalone: true, selection: { key: alpha.sessions[0].key } }));
+  };
+  env.context.managerProfileAuthState = () => 'ok';
+  const source = fs.readFileSync(path.join(publicRoot, 'app/components/ManagerView.js'), 'utf8');
+  vm.runInContext(transformComponentSource(source).replace(/^export\s+\{[^}]+\};?\s*$/gm, ''), env.context);
+  env.render(env.h(env.context.ManagerView, { manager: { status: {} }, projects: [], runs: [], tasks: [],
+    nodeSummary: {}, sessionHubActive: true }), env.root);
+  await flushEffects(); await flushEffects();
+  const manager = env.root.querySelector('.session-hub-manager');
+  if (view === 'session') env.root.querySelector('button.session-evidence').click();
+  else Array.from(env.root.querySelectorAll('.session-hub-nav')).find(node => node.textContent === '작업').click();
+  await flushEffects(); await flushEffects();
+  const segment = label => Array.from(manager.querySelectorAll('.session-hub-segments button'))
+    .find(node => node.textContent === label);
+  return { ...env, manager, pending, requests, segment, epoch: () => epoch };
+}
+
+for (const [view, destination] of [['session', '비서'], ['session', '목록'], ['work', '비서']]) test(
+  `mobile answer epoch: ${view} leaving detail for ${destination} discards loaded and pending answers`, async t => {
+    const fx = await mobileAnswerManager(t, view);
+    const panel = fx.root.querySelector('.session-hub-panel-side');
+    const detail = panel.querySelector(view === 'session' ? '.session-hub-detail' : '.work-board');
+    const chat = fx.root.querySelector('.session-hub-chat');
+    assert.equal(fx.manager.dataset.pane, 'right');
+    assert.equal(fx.epoch(), 0, 'opening a session/work panel must not advance the epoch');
+    const toggles = Array.from(detail.querySelectorAll('.work-answer-toggle'));
+    toggles[0].click(); await flushEffects(20);
+    assert.equal(detail.querySelector('.work-answer-text').textContent, '화면을 떠나면 버릴 답변');
+    toggles[1].click(); await flushEffects(20);
+    assert.equal(panel.querySelectorAll('.work-answer').length, 2);
+    assert.equal(fx.requests[1].options.signal.aborted, false);
+    fx.segment('상세').click(); await flushEffects(20);
+    assert.equal(fx.epoch(), 0, 'right to right must not advance the epoch');
+    assert.equal(panel.querySelectorAll('.work-answer').length, 2);
+    assert.equal(fx.requests[1].options.signal.aborted, false);
+    if (view === 'session') {
+      fx.root.querySelector('button.session-evidence').click(); await flushEffects(20);
+      assert.equal(fx.epoch(), 0, 'openSession while already right must not advance the epoch');
+      assert.equal(panel.querySelectorAll('.work-answer').length, 2);
+      assert.equal(fx.requests[1].options.signal.aborted, false);
+    }
+    fx.segment(destination).click(); await flushEffects(20);
+    assert.equal(panel.querySelectorAll('.work-answer').length, 0, 'leaving detail must remove every answer region');
+    assert.equal(fx.epoch(), 1);
+    assert.equal(fx.manager.dataset.pane, destination === '비서' ? 'chat' : 'sidebar');
+    assert.equal(panel.querySelector(view === 'session' ? '.session-hub-detail' : '.work-board'), detail,
+      'pane visibility must preserve the owning detail DOM');
+    assert.equal(fx.root.querySelector('.session-hub-chat'), chat);
+    assert.equal(panel.querySelectorAll('.work-answer').length, 0);
+    assert.equal(fx.requests[1].options.signal.aborted, true);
+    fx.pending.resolve(response(answerEnvelope('final', '늦게 도착한 숨겨진 답변'))); await flushEffects(20);
+    assert.equal(panel.querySelectorAll('.work-answer').length, 0);
+    assert.equal(fx.root.textContent.includes('늦게 도착한 숨겨진 답변'), false);
+    fx.segment('상세').click(); await flushEffects(20);
+    assert.equal(fx.epoch(), 1, 'returning to right must not advance the epoch');
+    assert.equal(fx.manager.dataset.pane, 'right');
+    for (const toggle of toggles) assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+    assert.equal(panel.querySelectorAll('.work-answer').length, 0);
+    assert.equal(fx.requests.length, 2, 'returning to detail must not request answers');
+    fx.segment('비서').click(); await flushEffects(20);
+    assert.equal(fx.epoch(), 2);
+    fx.root.querySelector('button.session-evidence').click(); await flushEffects(20);
+    assert.equal(fx.epoch(), 2, 'openSession from chat must not advance the epoch');
+    assert.equal(fx.manager.dataset.pane, 'right');
   });

@@ -1,5 +1,5 @@
-import { h } from '../../vendor/preact.module.js';
-import { useEffect, useLayoutEffect, useId, useRef, useState } from '../../vendor/hooks.module.js';
+import { h, createContext } from '../../vendor/preact.module.js';
+import { useEffect, useLayoutEffect, useId, useRef, useState, useContext } from '../../vendor/hooks.module.js';
 import htm from '../../vendor/htm.module.js';
 import { WORK_BOARD_LABELS as W } from '../lib/copy.js';
 import { apiFetch } from '../lib/api.js';
@@ -7,6 +7,8 @@ import { snapshotCards, rankCards, highlightParts, matchedLines,
   coverageCounts, formatLocalSnapshotTime, cardLineVisibility,
   displayInstructionText, sessionDisplayTitle, sessionDisplayState, sessionDisplayStatusLabel, sessionHasOldTranscript
 } from '../lib/workBoard.js';
+
+export const AnswerEpochContext = createContext(0);
 
 const html = htm.bind(h);
 
@@ -32,6 +34,7 @@ export function Highlight({ text, query, transformed = false }) {
 
 // Ephemeral answer state belongs to one instruction and one snapshot load.
 function InstructionAnswer({ machine, sessionKey, instructionId, machineRev, snapshotLoad, now }) {
+  const answerEpoch = useContext(AnswerEpochContext);
   const regionId = `work-answer-${useId()}`;
   const [state, setState] = useState(null);
   const currentTarget = useRef(null);
@@ -40,9 +43,9 @@ function InstructionAnswer({ machine, sessionKey, instructionId, machineRev, sna
   const previous = currentTarget.current;
   if (!previous || previous.machine !== machine || previous.key !== sessionKey
     || previous.instruction !== instructionId || previous.rev !== machineRev
-    || previous.snapshotLoad !== snapshotLoad) {
+    || previous.snapshotLoad !== snapshotLoad || previous.answerEpoch !== answerEpoch) {
     currentTarget.current = { machine, key: sessionKey, instruction: instructionId,
-      rev: machineRev, snapshotLoad };
+      rev: machineRev, snapshotLoad, answerEpoch };
   }
   const target = currentTarget.current;
   const discard = () => {
@@ -67,7 +70,7 @@ function InstructionAnswer({ machine, sessionKey, instructionId, machineRev, sna
       return !controller.signal.aborted && token === generation.current
         && current.machine === target.machine && current.key === target.key
         && current.instruction === target.instruction && current.rev === target.rev
-        && current.snapshotLoad === target.snapshotLoad;
+        && current.snapshotLoad === target.snapshotLoad && current.answerEpoch === target.answerEpoch;
     };
     try {
       const answer = await apiFetch('/api/observe/answers?' + new URLSearchParams({

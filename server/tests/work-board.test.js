@@ -705,7 +705,8 @@ function boardEnv(t, snapshotRequest = async () => ({ enabled: true, targets: []
     vm.runInContext(transformComponentSource(src), env.context);
   }
   env.loadComponent('Dropdown');
-  env.loadComponent('SessionSnapshotParts');
+  const parts = fs.readFileSync(path.join(__dirname, '../public/app/components/SessionSnapshotParts.js'), 'utf8');
+  vm.runInContext(transformComponentSource(parts.replace(/^export const /gm, 'const ')), env.context);
   env.loadComponent('SnapshotRefreshControls');
   env.loadComponent('SessionHubSidebar');
   require('./helpers/session-detail-cards').installDetailCards(env);

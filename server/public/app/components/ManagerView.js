@@ -9,6 +9,7 @@ import { SessionHubChat } from './SessionHubChat.js';
 import { SessionHubSidebar, SessionHubDetail } from './SessionHubSidebar.js';
 import { useSessionSnapshots } from '../lib/hooks/useSessionSnapshots.js';
 import { snapshotCards } from '../lib/workBoard.js';
+import { AnswerEpochContext } from './SessionSnapshotParts.js';
 import { SessionGrid } from './SessionGrid.js';
 
 import { h, cloneElement } from '../../vendor/preact.module.js';
@@ -70,6 +71,7 @@ function AssistantLayout({ projects, initialTarget, initialPanel, chat, grid,
   const [right, setRight] = useState(isManagerTarget(initialTarget) ? 'manager' : null);
   const [managerVisited, setManagerVisited] = useState(isManagerTarget(initialTarget));
   const [mobilePane, setMobilePane] = useState(initialPanel ? 'sidebar' : 'chat');
+  const [answerEpoch, setAnswerEpoch] = useState(0);
   const [selection, setSelection] = useState(null);
   const [revisionMismatch, setRevisionMismatch] = useState(false);
   const [draft, setDraft] = useState(null);
@@ -132,7 +134,10 @@ function AssistantLayout({ projects, initialTarget, initialPanel, chat, grid,
       ${[['sidebar', '목록'], ['chat', '비서'], ['right', '상세']].map(([pane, label]) => html`
         <button key=${pane} class="ghost" type="button" aria-pressed=${mobilePane === pane}
           disabled=${pane === 'right' && !right}
-          onClick=${() => setMobilePane(pane)}>${label}</button>`)}
+          onClick=${() => {
+            if (mobilePane === 'right' && pane !== 'right') setAnswerEpoch(value => value + 1);
+            setMobilePane(pane);
+          }}>${label}</button>`)}
     </div>
     <${SessionHubSidebar} data=${data} projects=${projects} onAssistant=${close}
       onConversation=${openConversation} onWork=${() => {
@@ -145,6 +150,7 @@ function AssistantLayout({ projects, initialTarget, initialPanel, chat, grid,
         onRevisionMismatch=${setRevisionMismatch} />
     </div>
     <div class="session-hub-panel-side" hidden=${!right}>
+      <${AnswerEpochContext.Provider} value=${answerEpoch}>
       <header class="session-hub-right-header">
         <span>${right === 'session' ? '세션 상세'
           : right === 'manager' ? 'Palantir' : right === 'work' ? '작업' : '상세'}</span>
@@ -158,6 +164,7 @@ function AssistantLayout({ projects, initialTarget, initialPanel, chat, grid,
         ${managerVisited && chat}
       </div>
       ${right === 'work' && cloneElement(grid, { onSelectConversation: openConversation })}
+      </${AnswerEpochContext.Provider}>
     </div>
   </div>`;
 }
