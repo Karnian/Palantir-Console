@@ -13,7 +13,7 @@ import { AnswerEpochContext } from './SessionSnapshotParts.js';
 import { SessionGrid } from './SessionGrid.js';
 
 import { h, cloneElement } from '../../vendor/preact.module.js';
-import { useEffect, useState } from '../../vendor/hooks.module.js';
+import { useEffect, useLayoutEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import { useNodeSummary } from '../lib/hooks.js';
 import htm from '../../vendor/htm.module.js';
 const html = htm.bind(h);
@@ -72,6 +72,25 @@ function AssistantLayout({ projects, initialTarget, initialPanel, chat, grid,
   const [managerVisited, setManagerVisited] = useState(isManagerTarget(initialTarget));
   const [mobilePane, setMobilePane] = useState(initialPanel ? 'sidebar' : 'chat');
   const [answerEpoch, setAnswerEpoch] = useState(0);
+  const [narrow, setNarrow] = useState(() => window.matchMedia?.('(max-width: 899px)')?.matches ?? false);
+  useEffect(() => {
+    const media = window.matchMedia?.('(max-width: 899px)');
+    if (!media) return;
+    const update = () => setNarrow(media.matches);
+    update();
+    if (media.addEventListener) {
+      media.addEventListener('change', update);
+      return () => media.removeEventListener('change', update);
+    }
+    media.addListener(update);
+    return () => media.removeListener(update);
+  }, []);
+  const detailVisible = !!right && (!narrow || mobilePane === 'right');
+  const previousDetailVisible = useRef(detailVisible);
+  useLayoutEffect(() => {
+    if (previousDetailVisible.current && !detailVisible) setAnswerEpoch(value => value + 1);
+    previousDetailVisible.current = detailVisible;
+  }, [detailVisible]);
   const [selection, setSelection] = useState(null);
   const [revisionMismatch, setRevisionMismatch] = useState(false);
   const [draft, setDraft] = useState(null);
@@ -134,10 +153,7 @@ function AssistantLayout({ projects, initialTarget, initialPanel, chat, grid,
       ${[['sidebar', '목록'], ['chat', '비서'], ['right', '상세']].map(([pane, label]) => html`
         <button key=${pane} class="ghost" type="button" aria-pressed=${mobilePane === pane}
           disabled=${pane === 'right' && !right}
-          onClick=${() => {
-            if (mobilePane === 'right' && pane !== 'right') setAnswerEpoch(value => value + 1);
-            setMobilePane(pane);
-          }}>${label}</button>`)}
+          onClick=${() => setMobilePane(pane)}>${label}</button>`)}
     </div>
     <${SessionHubSidebar} data=${data} projects=${projects} onAssistant=${close}
       onConversation=${openConversation} onWork=${() => {

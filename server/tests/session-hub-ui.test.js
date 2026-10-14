@@ -2973,9 +2973,28 @@ for (const initialError of [false, true]) test(
     assert.equal(env.root.textContent.includes('세션 확인 불가'), false);
   });
 
-async function mobileAnswerManager(t, view) {
+function detailMedia(env, { narrow = true, legacy = false, absent = false } = {}) {
+  const listeners = new Set();
+  const media = { matches: narrow, media: '(max-width: 899px)' };
+  if (legacy) {
+    media.addListener = listener => listeners.add(listener);
+    media.removeListener = listener => listeners.delete(listener);
+  } else {
+    media.addEventListener = (event, listener) => { assert.equal(event, 'change'); listeners.add(listener); };
+    media.removeEventListener = (event, listener) => { assert.equal(event, 'change'); listeners.delete(listener); };
+  }
+  env.window.innerWidth = narrow ? 390 : 1440;
+  env.window.matchMedia = absent ? undefined : query => { assert.equal(query, media.media); return media; };
+  return { listeners, change: matches => {
+    media.matches = matches;
+    env.window.innerWidth = matches ? 390 : 1440;
+    for (const listener of listeners) listener({ matches, media: media.media });
+  } };
+}
+
+async function mobileAnswerManager(t, view, mediaOptions) {
   const env = setup(t), { alpha } = fixture(t), pending = deferred(), requests = [];
-  env.window.innerWidth = 390;
+  const media = detailMedia(env, mediaOptions);
   env.context.EventSource = class { addEventListener() {} close() {} };
   env.context.fetch = async (url, options) => {
     if (url.startsWith('/api/observe/answers?')) {
@@ -3013,7 +3032,7 @@ async function mobileAnswerManager(t, view) {
   await flushEffects(); await flushEffects();
   const segment = label => Array.from(manager.querySelectorAll('.session-hub-segments button'))
     .find(node => node.textContent === label);
-  return { ...env, manager, pending, requests, segment, epoch: () => epoch };
+  return { ...env, manager, pending, requests, segment, media, epoch: () => epoch };
 }
 
 for (const [view, destination] of [['session', '비서'], ['session', '목록'], ['work', '비서']]) test(
@@ -3064,3 +3083,89 @@ for (const [view, destination] of [['session', '비서'], ['session', '목록'],
     assert.equal(fx.epoch(), 2, 'openSession from chat must not advance the epoch');
     assert.equal(fx.manager.dataset.pane, 'right');
   });
+
+async function openManagerAnswers(fx) {
+  const panel = fx.root.querySelector('.session-hub-panel-side');
+  const detail = panel.querySelector('.session-hub-detail');
+  const toggles = Array.from(detail.querySelectorAll('.work-answer-toggle'));
+  toggles[0].click(); await flushEffects(20);
+  assert.equal(detail.querySelector('.work-answer-text').textContent, '화면을 떠나면 버릴 답변');
+  toggles[1].click(); await flushEffects(20);
+  assert.equal(panel.querySelectorAll('.work-answer').length, 2);
+  assert.equal(fx.requests[1].options.signal.aborted, false);
+  return { panel, detail, toggles };
+}
+
+async function assertManagerAnswersDiscarded(fx, { panel, detail, toggles }) {
+  assert.equal(panel.querySelectorAll('.work-answer').length, 0, 'hidden detail must remove every answer region');
+  assert.equal(fx.requests[1].options.signal.aborted, true);
+  assert.equal(panel.querySelector('.session-hub-detail'), detail, 'detail must stay mounted');
+  fx.pending.resolve(response(answerEnvelope('final', '늦게 도착한 숨겨진 답변'))); await flushEffects(20);
+  assert.equal(panel.querySelectorAll('.work-answer').length, 0);
+  assert.equal(fx.root.textContent.includes('늦게 도착한 숨겨진 답변'), false);
+  const epoch = fx.epoch();
+  fx.segment('상세').click(); await flushEffects(20);
+  assert.equal(fx.epoch(), epoch, 'showing detail again must not advance the epoch');
+  for (const toggle of toggles) assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+  assert.equal(panel.querySelectorAll('.work-answer').length, 0);
+  assert.equal(fx.requests.length, 2, 'showing detail again must not fetch answers');
+}
+
+test('mobile answer epoch: ask assistant hides narrow detail and discards answers', async t => {
+  const fx = await mobileAnswerManager(t, 'session');
+  const opened = await openManagerAnswers(fx);
+  Array.from(opened.detail.querySelectorAll('button')).find(node => node.textContent === '비서에게 묻기').click();
+  await flushEffects(20);
+  assert.equal(fx.manager.dataset.pane, 'chat');
+  await assertManagerAnswersDiscarded(fx, opened);
+  assert.equal(fx.epoch(), 1);
+  assert.equal(fx.media.listeners.size, 1);
+  fx.render(null, fx.root);
+  assert.equal(fx.media.listeners.size, 0, 'media change listener must be removed on unmount');
+});
+
+for (const legacy of [false, true]) test(
+  `mobile answer epoch: shrinking a wide chat pane hides detail (${legacy ? 'addListener' : 'change event'})`, async t => {
+    const fx = await mobileAnswerManager(t, 'session', { narrow: false, legacy });
+    const opened = await openManagerAnswers(fx);
+    fx.segment('비서').click(); await flushEffects(20);
+    assert.equal(fx.manager.dataset.pane, 'chat');
+    assert.equal(fx.epoch(), 0, 'pane changes on desktop must not advance the epoch');
+    assert.equal(opened.panel.querySelectorAll('.work-answer').length, 2);
+    assert.equal(fx.requests[1].options.signal.aborted, false);
+    fx.media.change(true); await flushEffects(20);
+    await assertManagerAnswersDiscarded(fx, opened);
+    assert.equal(fx.epoch(), 1);
+    assert.equal(fx.media.listeners.size, 1);
+    fx.render(null, fx.root);
+    assert.equal(fx.media.listeners.size, 0, 'modern and legacy listeners must be removed on unmount');
+  });
+
+test('mobile answer epoch: widening visible detail and wide pane changes preserve answers', async t => {
+  const fx = await mobileAnswerManager(t, 'session');
+  const opened = await openManagerAnswers(fx);
+  fx.media.change(false); await flushEffects(20);
+  for (const destination of ['비서', '목록', '상세']) {
+    fx.segment(destination).click(); await flushEffects(20);
+    assert.equal(fx.epoch(), 0);
+    assert.equal(opened.panel.querySelectorAll('.work-answer').length, 2);
+    assert.equal(opened.detail.querySelector('.work-answer-text').textContent, '화면을 떠나면 버릴 답변');
+    assert.equal(fx.requests[1].options.signal.aborted, false);
+  }
+  fx.media.change(true); await flushEffects(20);
+  assert.equal(fx.manager.dataset.pane, 'right');
+  assert.equal(fx.epoch(), 0, 'shrinking while right stays visible must preserve answers');
+  assert.equal(opened.panel.querySelectorAll('.work-answer').length, 2);
+  fx.pending.resolve(response(answerEnvelope('final', '계속 보이는 답변'))); await flushEffects(20);
+  assert.equal(fx.root.textContent.includes('계속 보이는 답변'), true);
+});
+
+test('mobile answer epoch: missing matchMedia keeps narrow false', async t => {
+  const fx = await mobileAnswerManager(t, 'session', { absent: true });
+  const opened = await openManagerAnswers(fx);
+  fx.segment('비서').click(); await flushEffects(20);
+  assert.equal(fx.epoch(), 0);
+  assert.equal(opened.panel.querySelectorAll('.work-answer').length, 2);
+  assert.equal(fx.requests[1].options.signal.aborted, false);
+  assert.equal(fx.media.listeners.size, 0);
+});
