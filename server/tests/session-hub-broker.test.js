@@ -732,6 +732,22 @@ test('broker bindings use the same batch hashes, stay private and run synchronou
   assert.equal(reads, 3);
 });
 
+async function within(promise, label, timeoutMs = 5000) {
+  let timer;
+  try {
+    return await Promise.race([promise, new Promise((resolve, reject) => {
+      timer = setTimeout(() => reject(new assert.AssertionError({
+        message: `Timed out after ${timeoutMs}ms waiting for ${label}`,
+      })), timeoutMs);
+    })]);
+  } finally { clearTimeout(timer); }
+}
+async function waitForEntry(entered, response) {
+  return within(Promise.race([entered, response.then(result => {
+    assert.fail(`HTTP response before query entry: status=${result.status ?? 'unknown'} body=${JSON.stringify(result.body ?? result.message)}`);
+  })]), 'query entry or early HTTP response');
+}
+
 // Real router + broker + turn owner, driven by Node HTTP objects without binding sockets.
 async function answerRouterFixture(t, { query, broker: brokerOverride } = {}) {
   const express = require('express');
@@ -769,9 +785,16 @@ async function answerRouterFixture(t, { query, broker: brokerOverride } = {}) {
     };
     app.handle(req, res);
     req.push(null);
-    return { req, res, response, abort() { res.emit('close'); } };
+    return { req, res, response, abort() {
+      if (!res.writableEnded) res.emit('close');
+      req.destroy(); res.destroy(); socket.destroy();
+    } };
   }
-  const get = url => pending(url).response;
+  const get = async url => {
+    const request = pending(url);
+    try { return await within(request.response, 'HTTP response'); }
+    finally { request.abort(); }
+  };
   const answer = (key, rev) => `${BASE}/answers/${key}/claude:s:u1?rev=${rev}`;
   return { ...fx, hub, processFx, broker, newTurn, result, calls, get, pending, answer };
 }
@@ -786,25 +809,32 @@ for (const outcome of ['normal', 'aborted-success', 'aborted-error']) test(
     const list = await fx.get(`${BASE}/sessions?machine=alpha`), key = list.body.sessions[0].key, rev = list.body.meta.rev;
     const original = fx.hub.completeAnswer; let completed = 0;
     fx.hub.completeAnswer = (...args) => { completed++; return original(...args); };
-    const request = fx.pending(fx.answer(key, rev)); await started;
-    if (outcome === 'normal') request.req.emit('close'); // normal request body EOF must not cancel completion
-    else request.abort();
-    if (outcome === 'aborted-error') task.reject(Object.assign(new Error('answer_busy'), { code: 'answer_busy', status: 429 }));
-    else task.resolve({ ...fx.result, text: '한'.repeat(8000) });
-    await new Promise(done => setImmediate(done));
-    if (outcome === 'normal') {
-      assert.equal((await request.response).status, 200); assert.equal(completed, 1);
-    } else {
-      assert.equal(completed, 0);
-      // An abandoned reply did not freeze the set; a new key can still be returned and reserved.
-      const beta = await fx.get(`${BASE}/sessions?machine=beta`), next = beta.body.sessions[0].key;
+    const request = fx.pending(fx.answer(key, rev));
+    try {
+      await waitForEntry(started, request.response);
+      if (outcome === 'normal') request.req.emit('close'); // normal request body EOF must not cancel completion
+      else request.abort();
+      if (outcome === 'aborted-error') task.reject(Object.assign(new Error('answer_busy'), { code: 'answer_busy', status: 429 }));
+      else task.resolve({ ...fx.result, text: '한'.repeat(8000) });
+      await new Promise(done => setImmediate(done));
+      if (outcome === 'normal') {
+        assert.equal((await within(request.response, 'answer response')).status, 200); assert.equal(completed, 1);
+      } else {
+        assert.equal(completed, 0);
+        // An abandoned reply did not freeze the set; a new key can still be returned and reserved.
+        const beta = await fx.get(`${BASE}/sessions?machine=beta`), next = beta.body.sessions[0].key;
+        const handle = fx.hub.captureHubTurn(fx.hub.current());
+        assert.equal(fx.hub.answerBinding(handle, next, beta.body.meta.rev).machineId, 'beta');
+        assert.deepEqual(fx.hub.completeAnswer(handle, key, 24576), { budget_clipped: false });
+      }
       const handle = fx.hub.captureHubTurn(fx.hub.current());
-      assert.equal(fx.hub.answerBinding(handle, next, beta.body.meta.rev).machineId, 'beta');
-      assert.deepEqual(fx.hub.completeAnswer(handle, key, 24576), { budget_clipped: false });
+      for (let i = 0; i < 4; i++) fx.hub.reserveAnswer(handle, key);
+      assert.throws(() => fx.hub.reserveAnswer(handle, key), /answer_budget_exceeded/);
+    } finally {
+      task.resolve(fx.result);
+      request.abort();
+      await new Promise(done => setImmediate(done));
     }
-    const handle = fx.hub.captureHubTurn(fx.hub.current());
-    for (let i = 0; i < 4; i++) fx.hub.reserveAnswer(handle, key);
-    assert.throws(() => fx.hub.reserveAnswer(handle, key), /answer_budget_exceeded/);
   });
 
 for (const method of ['list', 'search', 'detail']) for (const boundary of ['new-turn', 'frozen', 'no-capture', 'aborted']) test(
@@ -819,26 +849,33 @@ for (const method of ['list', 'search', 'detail']) for (const boundary of ['new-
     if (boundary === 'no-capture') fx.processFx.event({ type: 'result' });
     const url = method === 'list' ? `${BASE}/sessions?machine=alpha`
       : method === 'search' ? `${BASE}/search?q=${encodeURIComponent('인증')}` : `${BASE}/sessions/${key}`;
-    const delayed = fx.pending(url); await entered.promise;
-    if (boundary === 'new-turn' || boundary === 'no-capture') await fx.newTurn();
-    if (boundary === 'frozen') {
-      // Use an unblocked endpoint to return only beta before completing its answer.
-      const betaKey = fx.beta.sessions[0].key;
-      const beta = method === 'detail' ? await fx.get(`${BASE}/sessions?machine=beta`)
-        : await fx.get(`${BASE}/sessions/${betaKey}`);
-      assert.equal((await fx.get(fx.answer(betaKey, beta.body.meta.rev))).status, 200);
+    const delayed = fx.pending(url);
+    try {
+      await waitForEntry(entered.promise, delayed.response);
+      if (boundary === 'new-turn' || boundary === 'no-capture') await fx.newTurn();
+      if (boundary === 'frozen') {
+        // Use an unblocked endpoint to return only beta before completing its answer.
+        const betaKey = fx.beta.sessions[0].key;
+        const beta = method === 'detail' ? await fx.get(`${BASE}/sessions?machine=beta`)
+          : await fx.get(`${BASE}/sessions/${betaKey}`);
+        assert.equal((await fx.get(fx.answer(betaKey, beta.body.meta.rev))).status, 200);
+      }
+      if (boundary === 'aborted') delayed.abort();
+      gate.resolve();
+      await new Promise(done => setImmediate(done)); await new Promise(done => setImmediate(done));
+      if (boundary !== 'aborted') assert.equal((await within(delayed.response, 'delayed broker response')).status, 200);
+      const rev = (await fx.broker.detail(key, {})).meta.rev;
+      const rejected = await fx.get(fx.answer(key, rev));
+      assert.equal(rejected.status, 403); assert.equal(rejected.body.error, 'answer_out_of_scope');
+      await fx.newTurn();
+      const fresh = await fx.get(url); assert.equal(fresh.status, 200);
+      assert.equal((await fx.get(fx.answer(key, fresh.body.meta.rev))).status, 200,
+        'same real endpoint binds in a live unfrozen turn');
+    } finally {
+      gate.resolve();
+      delayed.abort();
+      await new Promise(done => setImmediate(done));
     }
-    if (boundary === 'aborted') delayed.abort();
-    gate.resolve();
-    await new Promise(done => setImmediate(done)); await new Promise(done => setImmediate(done));
-    if (boundary !== 'aborted') assert.equal((await delayed.response).status, 200);
-    const rev = (await fx.broker.detail(key, {})).meta.rev;
-    const rejected = await fx.get(fx.answer(key, rev));
-    assert.equal(rejected.status, 403); assert.equal(rejected.body.error, 'answer_out_of_scope');
-    await fx.newTurn();
-    const fresh = await fx.get(url); assert.equal(fresh.status, 200);
-    assert.equal((await fx.get(fx.answer(key, fresh.body.meta.rev))).status, 200,
-      'same real endpoint binds in a live unfrozen turn');
   });
 
 for (const frozen of [false, true]) test(`real session reads preserve four revs and evict only the oldest inserted rev, frozen=${frozen}`, async t => {
@@ -866,18 +903,25 @@ test('in-flight answer uses its captured binding and requested meta.rev after re
   const task = later(), started = later();
   const fx = await answerRouterFixture(t, { query: () => { started.resolve(); return task.promise; } });
   const key = fx.alpha.sessions[0].key, initial = await fx.get(`${BASE}/sessions/${key}`), rev = initial.body.meta.rev;
-  const pending = fx.pending(fx.answer(key, rev)); await started.promise;
-  const originalHash = fx.calls[0].rev;
-  for (let i = 0; i < 5; i++) {
-    fx.alpha.instructions[0].text += ` update-${i}`; fx.write(fx.alpha);
-    assert.equal((await fx.get(`${BASE}/sessions/${key}`)).status, 200);
+  const pending = fx.pending(fx.answer(key, rev));
+  try {
+    await waitForEntry(started.promise, pending.response);
+    const originalHash = fx.calls[0].rev;
+    for (let i = 0; i < 5; i++) {
+      fx.alpha.instructions[0].text += ` update-${i}`; fx.write(fx.alpha);
+      assert.equal((await fx.get(`${BASE}/sessions/${key}`)).status, 200);
+    }
+    assert.equal((await fx.get(fx.answer(key, rev))).body.error, 'snapshot_changed');
+    task.resolve(fx.result);
+    const response = await within(pending.response, 'in-flight answer response');
+    assert.equal(response.status, 200); assert.equal(response.body.meta.rev, rev);
+    assert.equal(fx.calls.length, 1); assert.equal(fx.calls[0].rev, originalHash);
+    assert.notEqual(originalHash, store.readSnapshotHashed(fx.state, 'alpha').sha256);
+  } finally {
+    task.resolve(fx.result);
+    pending.abort();
+    await new Promise(done => setImmediate(done));
   }
-  assert.equal((await fx.get(fx.answer(key, rev))).body.error, 'snapshot_changed');
-  task.resolve(fx.result);
-  const response = await pending.response;
-  assert.equal(response.status, 200); assert.equal(response.body.meta.rev, rev);
-  assert.equal(fx.calls.length, 1); assert.equal(fx.calls[0].rev, originalHash);
-  assert.notEqual(originalHash, store.readSnapshotHashed(fx.state, 'alpha').sha256);
 });
 
 for (const frozen of [false, true]) test(`same-key machine collision in real returned cards cannot rebind, frozen=${frozen}`, async t => {
@@ -902,4 +946,22 @@ for (const frozen of [false, true]) test(`same-key machine collision in real ret
   assert.equal((await fx.get(fx.answer(key, together.body.meta.rev))).status, 200);
   const firstMachine = duplicates[0].machine === fx.alpha.machine.label ? 'alpha' : 'beta';
   assert.equal(fx.calls.at(-1).machineId, firstMachine);
+});
+
+for (const [errorCode, message, expected, status] of [
+  ['EIO', 'snapshot_changed', 'snapshot_changed', 409],
+  ['answer_busy', 'not_found', 'answer_busy', 429],
+]) test(`hub error mapping prefers registered code and falls back from ${errorCode} to message`, () => {
+  const { sessionHubErrorHandler } = require('../routes/sessionHub');
+  let body, actualStatus, cacheControl;
+  const res = {
+    set(name, value) { assert.equal(name, 'Cache-Control'); cacheControl = value; return this; },
+    status(value) { actualStatus = value; return this; },
+    json(value) { body = value; return this; },
+  };
+  sessionHubErrorHandler(Object.assign(new Error(message), { code: errorCode }),
+    { auth: { method: 'cookie' } }, res, () => assert.fail('unexpected next'));
+  assert.equal(actualStatus, status);
+  assert.deepEqual(body, { error: expected, reason: expected });
+  assert.equal(cacheControl, 'no-store');
 });

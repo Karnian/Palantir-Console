@@ -129,7 +129,7 @@ function createSessionHubRouter({ state, store, provider = noToken, clock = Date
 
 function sessionHubErrorHandler(error, req, res, next) {
   if (res.headersSent) return next(error);
-  const code = error.code || error.message;
+  const code = Object.hasOwn(ERROR_STATUS, error.code) ? error.code : error.message;
   if (Object.hasOwn(ERROR_STATUS, code)) return fail(res, code);
   if (error instanceof URIError || error.type === 'entity.parse.failed') return fail(res, 'invalid_query');
   if (!req.auth || req.auth.method !== 'cookie' && req.auth.actor !== 'session_hub') return fail(res, 'forbidden');

@@ -600,6 +600,7 @@ for (const action of ['stop', 'newThread', 'shutdown']) {
 
 for (const event of ['close', 'end', 'error']) {
   test(`MCP ${event} closes its generation, revokes token and permits a fresh start only`, async t => {
+    const timers = captureMcpGrace(t);
     const fx = credentialFixture(t, (command, argv, opts, callback) => {
       callback(null, String(fx.service.diagnostics().pgid));
     });
@@ -613,7 +614,9 @@ for (const event of ['close', 'end', 'error']) {
     assert.equal(fx.service.state().state, 'running');
     assert.equal(fx.service.current(), null);
     await assert.rejects(() => send(fx.service, 'unavailable'), code('session_hub_not_running'));
-    await until(() => fx.service.state().error === 'session_hub_mcp_lost', 3000);
+    assert.equal(timers.length, 1, 'disconnect schedules exactly one 2-second grace');
+    timers[0](); // Advance the captured 2000ms timer without waiting for wall-clock time.
+    assert.equal(fx.service.state().error, 'session_hub_mcp_lost');
     await fx.service.close();
     assert.equal(fx.service.state().state, 'idle');
     assert.equal(fs.existsSync(path.join(fx.root, 'mcp.json')), false);

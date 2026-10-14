@@ -332,6 +332,22 @@ test('history token route is exact, generation-bound, byte capped and has its ow
   }
 });
 
+async function within(promise, label, timeoutMs = 5000) {
+  let timer;
+  try {
+    return await Promise.race([promise, new Promise((resolve, reject) => {
+      timer = setTimeout(() => reject(new assert.AssertionError({
+        message: `Timed out after ${timeoutMs}ms waiting for ${label}`,
+      })), timeoutMs);
+    })]);
+  } finally { clearTimeout(timer); }
+}
+async function waitForEntry(entered, response) {
+  return within(Promise.race([entered, response.then(result => {
+    assert.fail(`HTTP response before query entry: status=${result.status ?? 'unknown'} body=${JSON.stringify(result.body ?? result.message)}`);
+  })]), 'query entry or early HTTP response');
+}
+
 // Host-only createApp integration uses supertest; no real assistant is spawned.
 const supertest = require('supertest');
 const snapshotStore = require('../services/observeSnapshotStore');
@@ -492,15 +508,24 @@ test('late answer success is discarded with 409 after its turn ends and cannot f
   let resolve, started;
   const entered = new Promise(done => { started = done; });
   fx.query(() => { started(); return new Promise(done => { resolve = done; }); });
-  const pending = fx.get(fx.url(0, rev)).then(value => value); await entered;
-  await fx.newTurn(); resolve(answerResult());
-  const late = await pending; assert.equal(late.status, 409); assert.equal(late.body.error, 'turn_not_active');
-  fx.query(() => answerResult());
-  assert.equal((await fx.get(fx.url(0, rev))).body.error, 'answer_out_of_scope');
-  const search = await fx.get(`${BASE}/search?q=answer`); assert.equal(search.status, 200);
-  assert.equal((await fx.get(fx.url(1, search.body.meta.rev))).status, 200);
-  fx.processFx.children.at(-1).stdout.write('{"type":"result"}\n');
-  assert.equal((await fx.get(fx.url(0, rev))).body.error, 'turn_not_active');
+  const client = fx.get(fx.url(0, rev));
+  const pending = client.then(value => value);
+  try {
+    await waitForEntry(entered, pending);
+    await fx.newTurn(); resolve(answerResult());
+    const late = await within(pending, 'late answer response'); assert.equal(late.status, 409); assert.equal(late.body.error, 'turn_not_active');
+    fx.query(() => answerResult());
+    assert.equal((await fx.get(fx.url(0, rev))).body.error, 'answer_out_of_scope');
+    const search = await fx.get(`${BASE}/search?q=answer`); assert.equal(search.status, 200);
+    assert.equal((await fx.get(fx.url(1, search.body.meta.rev))).status, 200);
+    fx.processFx.children.at(-1).stdout.write('{"type":"result"}\n');
+    assert.equal((await fx.get(fx.url(0, rev))).body.error, 'turn_not_active');
+  } finally {
+    resolve?.(answerResult());
+    client.abort();
+    await closeHostServer(client.app);
+    await within(pending.catch(() => {}), 'answer request cleanup');
+  }
 });
 
 test('broker bucket is shared by answers and lists, and minute resets never reset turn budget', async t => {
@@ -560,21 +585,35 @@ test('app seals answers on after env mutation and service options cannot overrid
   assert.equal(fx.hub.state().promptVersion, 'c1-pa-pr-m-2a');
 });
 
-async function abortHostGet(t, app, url, token, entered) {
-  let server;
+async function closeHostServer(server) {
+  if (!server?.listening) return;
+  const closed = new Promise((resolve, reject) => server.close(error => {
+    if (error && error.code !== 'ERR_SERVER_NOT_RUNNING') reject(error);
+    else resolve();
+  }));
+  server.closeAllConnections();
+  await within(closed, 'HTTP server cleanup');
+}
+
+async function abortHostGet(app, url, token, entered) {
+  let server, client;
   const serverClosed = new Promise(resolve => {
     server = require('node:http').createServer((req, res) => {
       res.once('close', () => { if (!res.writableEnded) resolve(); });
       app(req, res);
     });
   });
-  t.after(async () => { if (server.listening) await new Promise(resolve => server.close(resolve)); });
-  const client = supertest(server).get(url).set('Authorization', `Bearer ${token}`);
-  const response = client.then(value => value, error => error);
-  await entered;
-  client.abort();
-  assert.equal((await response).code, 'ABORTED');
-  await serverClosed; // Actual TCP disconnect has reached the server before the lookup settles.
+  try {
+    client = supertest(server).get(url).set('Authorization', `Bearer ${token}`);
+    const response = client.then(value => value, error => error);
+    await waitForEntry(entered, response);
+    client.abort();
+    assert.equal((await within(response, 'client abort')).code, 'ABORTED');
+    await within(serverClosed, 'server disconnect'); // Wait for the actual TCP disconnect before settling the lookup.
+  } finally {
+    client?.abort();
+    await closeHostServer(server);
+  }
 }
 
 for (const outcome of ['success', 'exception']) test(`real client abort discards late answer ${outcome} without completion`, async t => {
@@ -586,19 +625,24 @@ for (const outcome of ['success', 'exception']) test(`real client abort discards
   let completes = 0;
   const complete = fx.hub.completeAnswer;
   fx.hub.completeAnswer = (...args) => { completes++; return complete(...args); };
-  await abortHostGet(t, fx.app, fx.url(0, rev), fx.hub.current(), entered);
-  if (outcome === 'success') resolve(answerResult('한'.repeat(8000)));
-  else reject(Object.assign(new Error('snapshot_unavailable'), { code: 'snapshot_unavailable', status: 503 }));
-  await new Promise(done => setImmediate(done));
-  assert.equal(completes, 0);
-  // A newly returned key remains usable, so the abandoned result did not freeze the scope.
-  await fx.list();
-  fx.query(() => answerResult('x'.repeat(24576)));
-  const first = await fx.get(fx.url(1, rev));
-  assert.equal(first.status, 200); assert.equal(first.body.answer.budget_clipped, false);
-  for (let i = 0; i < 3; i++) assert.equal((await fx.get(fx.url(0, rev))).status, 200);
-  assert.equal((await fx.get(fx.url(0, rev))).body.error, 'answer_budget_exceeded');
-  assert.equal(fx.calls.length, 5);
+  try {
+    await abortHostGet(fx.app, fx.url(0, rev), fx.hub.current(), entered);
+    if (outcome === 'success') resolve(answerResult('한'.repeat(8000)));
+    else reject(Object.assign(new Error('snapshot_unavailable'), { code: 'snapshot_unavailable', status: 503 }));
+    await new Promise(done => setImmediate(done));
+    assert.equal(completes, 0);
+    // A newly returned key remains usable, so the abandoned result did not freeze the scope.
+    await fx.list();
+    fx.query(() => answerResult('x'.repeat(24576)));
+    const first = await fx.get(fx.url(1, rev));
+    assert.equal(first.status, 200); assert.equal(first.body.answer.budget_clipped, false);
+    for (let i = 0; i < 3; i++) assert.equal((await fx.get(fx.url(0, rev))).status, 200);
+    assert.equal((await fx.get(fx.url(0, rev))).body.error, 'answer_budget_exceeded');
+    assert.equal(fx.calls.length, 5);
+  } finally {
+    resolve?.(answerResult());
+    await new Promise(done => setImmediate(done));
+  }
 });
 
 for (const method of ['list', 'search', 'detail']) test(`real aborted ${method} never grants an answer scope key`, async t => {
@@ -616,11 +660,16 @@ for (const method of ['list', 'search', 'detail']) test(`real aborted ${method} 
   app.use(sessionHubErrorHandler);
   const url = method === 'list' ? `${BASE}/sessions` : method === 'search' ? `${BASE}/search?q=answer`
     : `${BASE}/sessions/${fx.alpha.sessions[0].key}`;
-  await abortHostGet(t, app, url, fx.hub.current(), entered);
-  release(); await new Promise(done => setImmediate(done)); await new Promise(done => setImmediate(done));
-  const rev = (await broker.list({})).meta.rev;
-  assert.equal((await fx.get(fx.url(0, rev))).body.error, 'answer_out_of_scope');
-  assert.equal(fx.calls.length, 0);
-  assert.equal((await fx.list()).status, 200);
-  assert.equal((await fx.get(fx.url(0, rev))).status, 200);
+  try {
+    await abortHostGet(app, url, fx.hub.current(), entered);
+    release(); await new Promise(done => setImmediate(done)); await new Promise(done => setImmediate(done));
+    const rev = (await broker.list({})).meta.rev;
+    assert.equal((await fx.get(fx.url(0, rev))).body.error, 'answer_out_of_scope');
+    assert.equal(fx.calls.length, 0);
+    assert.equal((await fx.list()).status, 200);
+    assert.equal((await fx.get(fx.url(0, rev))).status, 200);
+  } finally {
+    release();
+    await new Promise(done => setImmediate(done));
+  }
 });
