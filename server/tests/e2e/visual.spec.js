@@ -525,16 +525,16 @@ for (const modal of FORM_MODALS) {
 }
 
 // C1 baseline additions: session assistant replaces the default active-hub manager view.
-// Host generates these baselines after reviewing the compact controls and mobile segments.
 const HUB_VIEWPORTS = [
   { name: 'desktop', width: 1440, height: 900 },
+  { name: 'wide', width: 1920, height: 1080 },
   { name: 'drawer', width: 1100, height: 900 },
   { name: 'mobile', width: 390, height: 844 },
 ];
 for (const theme of THEMES) {
   for (const vp of HUB_VIEWPORTS) {
     test(`@visual session-hub manager [${theme}/${vp.name}]`, async ({ page }) => {
-      const { mockSessionHub, expectAssistantLayout } = require('./helpers/session-hub');
+      const { mockSessionHub, expectAssistantLayout, expectChatColumn } = require('./helpers/session-hub');
       await mockSessionHub(page, { longText: true });
       await page.setViewportSize({ width: vp.width, height: vp.height });
       await setTheme(page, theme);
@@ -547,6 +547,7 @@ for (const theme of THEMES) {
       await expect(page.locator('.session-hub-manager')).toHaveAttribute('data-right', 'closed');
       await stabilize(page);
       await expectAssistantLayout(page);
+      await expectChatColumn(page);
       await expect(page).toHaveScreenshot(`session-hub-chat-${theme}-${vp.name}.png`, {
         maxDiffPixels: 100, threshold: 0.2,
       });
@@ -554,6 +555,7 @@ for (const theme of THEMES) {
       await expect(page.locator('.work-event').first()).toBeVisible();
       await expect(page.locator('.session-hub-detail-header')).toBeFocused();
       await expectAssistantLayout(page);
+      await expectChatColumn(page);
       await expect(page).toHaveScreenshot(`session-hub-timeline-${theme}-${vp.name}.png`, {
         maxDiffPixels: 100, threshold: 0.2,
       });
@@ -564,9 +566,51 @@ for (const theme of THEMES) {
       await expect(page.locator('#hub-query')).toBeVisible();
       await expect(page.locator('.session-rows .work-label, .session-rows .work-card-footer')).toHaveCount(0);
       await expectAssistantLayout(page);
+      await expectChatColumn(page);
       await expect(page).toHaveScreenshot(`session-hub-panel-${theme}-${vp.name}.png`, {
         maxDiffPixels: 100, threshold: 0.2,
       });
+    });
+  }
+  for (const vp of HUB_VIEWPORTS.filter(item => ['desktop', 'wide'].includes(item.name))) {
+    test(`@visual session-hub chat column [${theme}/${vp.name}]`, async ({ page }) => {
+      const { mockSessionHub, expectAssistantLayout, expectChatColumn } = require('./helpers/session-hub');
+      await mockSessionHub(page, { longText: true });
+      await page.setViewportSize({ width: vp.width, height: 700 });
+      await setTheme(page, theme);
+      await page.goto('/#manager');
+      const tools = page.locator('.session-hub-tools');
+      await expect(tools.locator('summary')).toContainText('도구 2회 사용');
+      await tools.locator('summary').click();
+      await expect(tools).toHaveAttribute('open', '');
+      for (const item of await tools.locator('li').all()) {
+        const layout = await item.evaluate(node => ({ scrollWidth: node.scrollWidth,
+          clientWidth: node.clientWidth, whiteSpace: getComputedStyle(node).whiteSpace }));
+        expect(layout.scrollWidth).toBeLessThanOrEqual(layout.clientWidth + 1);
+        expect(layout.whiteSpace).not.toBe('nowrap');
+      }
+      await stabilize(page);
+      await expectAssistantLayout(page);
+      await expectChatColumn(page);
+      const chat = await page.locator('.session-hub-chat').boundingBox();
+      expect(chat.width).toBeGreaterThan(900);
+      const messages = page.locator('.session-hub-messages');
+      const box = await messages.boundingBox();
+      expect(await messages.evaluate(node => node.scrollHeight)).toBeGreaterThan(box.height);
+      await messages.evaluate(node => { node.scrollTop = 0; });
+      const before = await messages.evaluate(node => node.scrollTop);
+      const gutterX = chat.x + 20;
+      expect(gutterX).toBeLessThan(chat.x + (chat.width - 900) / 2);
+      await page.mouse.move(gutterX, box.y + box.height / 2);
+      await page.mouse.wheel(0, 400);
+      await expect.poll(() => messages.evaluate(node => node.scrollTop)).toBeGreaterThan(before);
+      // Capture the same scroll position after verifying native wheel scrolling in the gutter.
+      await messages.evaluate(node => { node.scrollTop = 0; });
+      await expect(messages).toHaveJSProperty('scrollTop', 0);
+      await expect(page.locator('.session-hub-chat'))
+        .toHaveScreenshot(`session-hub-column-${theme}-${vp.name}.png`, {
+          maxDiffPixels: 100, threshold: 0.2,
+        });
     });
   }
 }

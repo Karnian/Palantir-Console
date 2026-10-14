@@ -24,6 +24,13 @@ async function mockSessionHub(page, { observe = true, clock = true, longText = f
     evidence_at: '2026-10-01T00:00:00Z', reason: 'turn_open' };
   beta.sessions[0].status = { state: 'ended', source: 'transcript', evidence_at: beta.generated_at, reason: null };
   const key = alpha.sessions[0].key;
+  const wideTable = [
+    `| ${Array.from({ length: 10 }, (_, i) => `열 ${i + 1}`).join(' | ')} |`,
+    `| ${Array(10).fill('---').join(' | ')} |`,
+    ...Array.from({ length: 8 }, (_, row) =>
+      `| ${Array.from({ length: 10 }, (_, col) =>
+        `session${row}${col}${'longcellcontent'.repeat(5)}`).join(' | ')} |`),
+  ].join('\n');
   let proposals = [{ id: 'proposal-1', operation: 'add', kind: 'preference', content: '한국어로 간단히 답변',
     reason: '사용자 요청', revision: 1, content_hash: HASH, source_content: '한국어로 간단히 답해 줘',
     source_thread_id: 'thread-1', source_message_id: 'user-1', status: 'pending' }];
@@ -32,9 +39,11 @@ async function mockSessionHub(page, { observe = true, clock = true, longText = f
       { id: 'user-1', seq: 1, turn_id: 'turn-1', role: 'user', content: '지금 각 세션 뭐 하고 있어?' },
       { id: 'answer-1', seq: 2, turn_id: 'turn-1', role: 'assistant', status: 'complete',
         content: '## 검토 결과\n\n- Mac에서 인증 흐름을 검토했습니다. ' + `[[session:${key}@${REV}]]`
-          + (longText ? `\n\n${'긴답변'.repeat(20)}\n\n\`\`\`\n${'long-code-'.repeat(100)}\n\`\`\`` : '') },
-      { id: 'tool-1', seq: 3, turn_id: 'turn-1', role: 'tool_note', content: '검색: 인증' },
-      { id: 'tool-2', seq: 4, turn_id: 'turn-1', role: 'tool_note', content: '세션 열기: 인증 검토',
+          + (longText ? `\n\n${'긴답변'.repeat(20)}\n\n\`\`\`\n${'long-code-'.repeat(100)}\n\`\`\`\n\n${wideTable}` : '') },
+      { id: 'tool-1', seq: 3, turn_id: 'turn-1', role: 'tool_note',
+        content: '검색: 인증' + (longText ? ` ${'long-search-query-'.repeat(80)}` : '') },
+      { id: 'tool-2', seq: 4, turn_id: 'turn-1', role: 'tool_note',
+        content: '세션 열기: 인증 검토' + (longText ? ` ${'긴세션도구본문'.repeat(80)}` : ''),
         memory_proposal_id: 'proposal-1' },
     ] };
   let threads = [{ id: 'thread-1', title: '현재 대화' }, { id: 'thread-old', title: '이전 검토' }];
@@ -177,4 +186,60 @@ async function expectAssistantLayout(page) {
   await expect(page.locator('.session-hub-chat .session-hub-snapshot-line')).toHaveCount(0);
   await expect(page.locator('.session-hub-chat .work-header')).toHaveCount(0);
 }
-module.exports = { mockSessionHub, expectNoHorizontalOverflow, expectAssistantLayout };
+async function expectChatColumn(page) {
+  const { expect } = require('@playwright/test');
+  const chat = page.locator('.session-hub-chat');
+  // Mobile timeline/list panes hide the chat entirely.
+  if (!await chat.isVisible()) return;
+  const box = await chat.boundingBox();
+  const messages = page.locator('.session-hub-messages');
+  const messageBox = await messages.boundingBox();
+  expect(Math.abs(messageBox.width - box.width)).toBeLessThanOrEqual(1);
+  if (box.width > 900) {
+    const left = box.x + (box.width - 900) / 2 + 16;
+    const right = left + 900 - 32;
+    for (const row of await chat.locator('.manager-msg-row').all()) {
+      if (!await row.isVisible()) continue;
+      const rowBox = await row.boundingBox();
+      expect(rowBox.x).toBeGreaterThanOrEqual(left - 1);
+      expect(rowBox.x + rowBox.width).toBeLessThanOrEqual(right + 1);
+      const isUser = await row.evaluate(node => node.classList.contains('manager-msg-row-user'));
+      expect(Math.abs(isUser ? rowBox.x + rowBox.width - right : rowBox.x - left))
+        .toBeLessThanOrEqual(2);
+    }
+    const textarea = await chat.locator('.session-hub-input textarea').boundingBox();
+    const send = await chat.locator('.session-hub-input button[type="submit"]').boundingBox();
+    expect(Math.abs(textarea.x - left)).toBeLessThanOrEqual(2);
+    expect(Math.abs(send.x + send.width - right)).toBeLessThanOrEqual(2);
+    for (const row of await chat.locator('.manager-msg-row-assistant').all()) {
+      if (await row.isVisible()) {
+        expect(Math.abs(textarea.x - (await row.boundingBox()).x)).toBeLessThanOrEqual(2);
+      }
+    }
+    for (const row of await chat.locator('.manager-msg-row-user').all()) {
+      if (await row.isVisible()) {
+        const rowBox = await row.boundingBox();
+        expect(Math.abs(send.x + send.width - rowBox.x - rowBox.width)).toBeLessThanOrEqual(2);
+      }
+    }
+  } else {
+    expect(await messages.evaluate(node => getComputedStyle(node).paddingLeft)).toBe('16px');
+    expect(await chat.locator('.session-hub-input')
+      .evaluate(node => getComputedStyle(node).paddingLeft)).toBe('12px');
+  }
+  for (const table of await chat.locator('.markdown-body table').all()) {
+    if (!await table.isVisible()) continue;
+    const dimensions = await table.evaluate(node => {
+      const tableBox = node.getBoundingClientRect();
+      const bubbleBox = node.closest('.manager-msg').getBoundingClientRect();
+      const contentWidth = node.querySelector('thead, tbody').getBoundingClientRect().width;
+      return { right: tableBox.right, bubbleRight: bubbleBox.right,
+        scrollWidth: node.scrollWidth, clientWidth: node.clientWidth, contentWidth };
+    });
+    expect(dimensions.right).toBeLessThanOrEqual(dimensions.bubbleRight + 1);
+    if (dimensions.contentWidth > dimensions.clientWidth + 1) {
+      expect(dimensions.scrollWidth).toBeGreaterThan(dimensions.clientWidth);
+    }
+  }
+}
+module.exports = { mockSessionHub, expectNoHorizontalOverflow, expectAssistantLayout, expectChatColumn };

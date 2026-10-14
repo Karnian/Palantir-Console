@@ -41,6 +41,7 @@ export function renderSessionMarkdown(text, panel, onOpenSession, evidence = [])
     if (node.nodeType !== 1) return null;
     let tag = node.tagName.toLowerCase();
     const props = Object.fromEntries(Array.from(node.attributes, attr => [attr.name, attr.value]));
+    if (tag === 'pre' || tag === 'table') props.tabIndex = 0;
     // Evidence owns its click; unwrap enclosing links to avoid nested interactive elements.
     if (tag === 'a' && new RegExp(token.source).test(node.textContent)) {
       tag = 'span'; delete props.href; delete props.target; delete props.rel;

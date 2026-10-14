@@ -355,7 +355,7 @@ for (const theme of THEMES) {
   for (const vp of [...VIEWPORTS, { name: 'drawer', width: 1100, height: 900 }]) {
     test(`@a11y session-hub manager [${theme}/${vp.name}]`, async ({ page }) => {
       const { mockSessionHub, expectAssistantLayout } = require('./helpers/session-hub');
-      await mockSessionHub(page);
+      await mockSessionHub(page, { longText: true });
       await page.setViewportSize({ width: vp.width, height: vp.height });
       await setTheme(page, theme);
       await page.goto('/#manager');

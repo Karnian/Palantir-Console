@@ -452,6 +452,39 @@ test('evidence uses sanitized text only; malformed tokens, code and attributes s
   assert.deepEqual(opened, [[key, REV]]);
 });
 
+test('session markdown scrollable code blocks and tables are keyboard focusable', t => {
+  const env = setup(t);
+  const text = '```js\nconst value = 1;\n```\n\n| 이름 | 값 |\n| --- | --- |\n| 항목 | 내용 |';
+  env.render(env.h('div', {}, env.context.renderSessionMarkdown(text)), env.root);
+  const pre = env.root.querySelector('pre'), table = env.root.querySelector('table');
+  assert.ok(pre); assert.ok(table);
+  assert.equal(pre.getAttribute('tabindex'), '0');
+  assert.equal(table.getAttribute('tabindex'), '0');
+  assert.equal(table.hasAttribute('role'), false);
+  assert.equal(pre.querySelector('code').textContent.trim(), 'const value = 1;');
+  assert.equal(table.querySelectorAll('th').length, 2);
+});
+
+test('session markdown scrollable HTML keeps sanitization and overrides supplied tabindex', t => {
+  const env = setup(t);
+  const text = '<pre tabindex="-1" title="code" onfocus="alert(1)"><code>safe code</code></pre>\n\n'
+    + '<table tabindex="-1" title="data" onclick="alert(2)" role="table">'
+    + '<tbody><tr><td>safe cell</td></tr></tbody></table>';
+  env.render(env.h('div', {}, env.context.renderSessionMarkdown(text)), env.root);
+  for (const node of env.root.querySelectorAll('*')) {
+    assert.equal(Array.from(node.attributes).some(attr => /^on/i.test(attr.name)), false);
+  }
+  const pre = env.root.querySelector('pre'), table = env.root.querySelector('table');
+  assert.ok(pre); assert.ok(table);
+  assert.equal(pre.getAttribute('tabindex'), '0');
+  assert.equal(table.getAttribute('tabindex'), '0');
+  assert.equal(pre.getAttribute('title'), 'code');
+  assert.equal(table.getAttribute('title'), 'data');
+  assert.equal(table.getAttribute('role'), 'table');
+  assert.equal(pre.textContent, 'safe code');
+  assert.equal(table.querySelector('td').textContent, 'safe cell');
+});
+
 test('evidence links become spans without link attributes or nested interactive elements', t => {
   const env = setup(t), key = 'k', token = `[[session:${key}@${REV}]]`, opened = [];
   const panel = { rev: REV, cards: [{ key, machine: { label: 'Mac' }, ai_title: 'Evidence' }] };

@@ -8831,15 +8831,26 @@ input[type="date"]::-webkit-datetime-edit-day-field {
   background: var(--accent-muted); color: var(--accent-light); border-color: var(--accent-border);
 }
 .session-hub-chat {
+  --session-hub-column-max: 900px;
+  container: session-hub-chat / inline-size;
   flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; background: var(--bg-surface);
 }
 .session-hub-manager .ghost, .session-hub-manager .primary { min-height: 30px; padding: 4px 10px; font-size: 13px; }
 .session-hub-note { color: var(--text-secondary); font-size: 13px; margin: 8px 12px; }
 .session-hub-messages .session-hub-note { margin: 0; }
 .nav-work-label { font-size: 13px; }
-.session-hub-messages { flex: 1; min-height: 0; overflow: auto; padding: 12px 16px; }
+.session-hub-messages {
+  flex: 1; min-height: 0; overflow: auto; padding: 12px 16px;
+  padding-inline: max(16px, calc((100% - var(--session-hub-column-max)) / 2 + 16px));
+}
 .session-hub-empty { color: var(--text-secondary); font-size: 13px; line-height: 1.6; }
 .session-hub-input { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--border); }
+/* Container queries require a literal threshold; narrow chats retain their original padding. */
+@container session-hub-chat (width > 900px) {
+  .session-hub-input {
+    padding-inline: calc((100% - var(--session-hub-column-max)) / 2 + 16px);
+  }
+}
 .session-hub-input textarea {
   flex: 1; min-width: 0; resize: vertical; padding: 8px;
   color: var(--text-primary); background: var(--bg-base); border: 1px solid var(--border-hover);
@@ -8893,11 +8904,18 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 .session-hub-tools { color: var(--text-muted); font-size: 12px; min-width: 0; }
 .session-hub-tools summary { cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-hub-tools ul { margin: 4px 0; padding-left: 18px; }
-.session-hub-tools li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-hub-chat .session-hub-tools li { white-space: normal; overflow-wrap: anywhere; }
 .session-hub-error { color: var(--danger); font-size: 13px; margin: 8px 12px; }
 .session-hub-chat .manager-msg-row,
 .session-hub-chat .manager-msg,
 .session-hub-chat .manager-msg-content { min-width: 0; }
+.session-hub-chat .manager-msg-assistant .markdown-body table {
+  display: block; overflow-x: auto; max-width: 100%;
+}
+.session-hub-chat .markdown-body pre:focus-visible,
+.session-hub-chat .markdown-body table:focus-visible {
+  outline: none; box-shadow: var(--focus-ring);
+}
 .all-sessions-panel .session-row {
   display: flex; align-items: stretch; gap: 3px; width: 100%; min-width: 0;
   text-align: left; white-space: normal; padding: 10px 8px; background: var(--bg-surface);
