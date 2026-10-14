@@ -525,16 +525,16 @@ for (const modal of FORM_MODALS) {
 }
 
 // C1 baseline additions: session assistant replaces the default active-hub manager view.
-// Host generates these baselines after reviewing the compact controls and mobile segments.
 const HUB_VIEWPORTS = [
   { name: 'desktop', width: 1440, height: 900 },
+  { name: 'wide', width: 1920, height: 1080 },
   { name: 'drawer', width: 1100, height: 900 },
   { name: 'mobile', width: 390, height: 844 },
 ];
 for (const theme of THEMES) {
   for (const vp of HUB_VIEWPORTS) {
     test(`@visual session-hub manager [${theme}/${vp.name}]`, async ({ page }) => {
-      const { mockSessionHub, expectAssistantLayout } = require('./helpers/session-hub');
+      const { mockSessionHub, expectAssistantLayout, expectChatColumn } = require('./helpers/session-hub');
       await mockSessionHub(page, { longText: true });
       await page.setViewportSize({ width: vp.width, height: vp.height });
       await setTheme(page, theme);
@@ -547,6 +547,7 @@ for (const theme of THEMES) {
       await expect(page.locator('.session-hub-manager')).toHaveAttribute('data-right', 'closed');
       await stabilize(page);
       await expectAssistantLayout(page);
+      await expectChatColumn(page);
       await expect(page).toHaveScreenshot(`session-hub-chat-${theme}-${vp.name}.png`, {
         maxDiffPixels: 100, threshold: 0.2,
       });
@@ -554,6 +555,7 @@ for (const theme of THEMES) {
       await expect(page.locator('.work-event').first()).toBeVisible();
       await expect(page.locator('.session-hub-detail-header')).toBeFocused();
       await expectAssistantLayout(page);
+      await expectChatColumn(page);
       await expect(page).toHaveScreenshot(`session-hub-timeline-${theme}-${vp.name}.png`, {
         maxDiffPixels: 100, threshold: 0.2,
       });
@@ -564,9 +566,121 @@ for (const theme of THEMES) {
       await expect(page.locator('#hub-query')).toBeVisible();
       await expect(page.locator('.session-rows .work-label, .session-rows .work-card-footer')).toHaveCount(0);
       await expectAssistantLayout(page);
+      await expectChatColumn(page);
       await expect(page).toHaveScreenshot(`session-hub-panel-${theme}-${vp.name}.png`, {
         maxDiffPixels: 100, threshold: 0.2,
       });
     });
   }
+  for (const vp of HUB_VIEWPORTS.filter(item => ['desktop', 'wide'].includes(item.name))) {
+    test(`@visual session-hub chat column [${theme}/${vp.name}]`, async ({ page }) => {
+      const { mockSessionHub, expectAssistantLayout, expectChatColumn } = require('./helpers/session-hub');
+      await mockSessionHub(page, { longText: true });
+      await page.setViewportSize({ width: vp.width, height: 700 });
+      await setTheme(page, theme);
+      await page.goto('/#manager');
+      const tools = page.locator('.session-hub-tools');
+      await expect(tools.locator('summary')).toContainText('도구 2회 사용');
+      await tools.locator('summary').click();
+      await expect(tools).toHaveAttribute('open', '');
+      for (const item of await tools.locator('li').all()) {
+        const layout = await item.evaluate(node => ({ scrollWidth: node.scrollWidth,
+          clientWidth: node.clientWidth, whiteSpace: getComputedStyle(node).whiteSpace }));
+        expect(layout.scrollWidth).toBeLessThanOrEqual(layout.clientWidth + 1);
+        expect(layout.whiteSpace).not.toBe('nowrap');
+      }
+      await stabilize(page);
+      await expectAssistantLayout(page);
+      await expectChatColumn(page, { keyboard: true });
+      const chat = await page.locator('.session-hub-chat').boundingBox();
+      expect(chat.width).toBeGreaterThan(900);
+      const messages = page.locator('.session-hub-messages');
+      const box = await messages.boundingBox();
+      expect(await messages.evaluate(node => node.scrollHeight)).toBeGreaterThan(box.height);
+      await messages.evaluate(node => { node.scrollTop = 0; });
+      const before = await messages.evaluate(node => node.scrollTop);
+      const gutterX = chat.x + 20;
+      expect(gutterX).toBeLessThan(chat.x + (chat.width - 900) / 2);
+      await page.mouse.move(gutterX, box.y + box.height / 2);
+      await page.mouse.wheel(0, 400);
+      await expect.poll(() => messages.evaluate(node => node.scrollTop)).toBeGreaterThan(before);
+      // Capture the same scroll position after verifying native wheel scrolling in the gutter.
+      await messages.evaluate(node => { node.scrollTop = 0; });
+      await expect(messages).toHaveJSProperty('scrollTop', 0);
+      await expect(page.locator('.session-hub-chat'))
+        .toHaveScreenshot(`session-hub-column-${theme}-${vp.name}.png`, {
+          maxDiffPixels: 100, threshold: 0.2,
+        });
+    });
+  }
+  test(`@visual session-hub tools wrap [${theme}/mobile]`, async ({ page }) => {
+    const { mockSessionHub, expectNoHorizontalOverflow } = require('./helpers/session-hub');
+    await mockSessionHub(page, { longText: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await setTheme(page, theme);
+    await page.goto('/#manager');
+    const tools = page.locator('.session-hub-tools');
+    await expect(tools.locator('summary')).toContainText('도구 2회 사용');
+    await tools.locator('summary').click();
+    await expect(tools).toHaveAttribute('open', '');
+    await expect(tools.locator('li')).toHaveCount(2);
+    for (const item of await tools.locator('li').all()) {
+      const layout = await item.evaluate(node => ({ scrollWidth: node.scrollWidth,
+        clientWidth: node.clientWidth, whiteSpace: getComputedStyle(node).whiteSpace }));
+      expect(layout.whiteSpace).not.toBe('nowrap');
+      expect(layout.scrollWidth).toBeLessThanOrEqual(layout.clientWidth + 1);
+    }
+    await expectNoHorizontalOverflow(page);
+  });
 }
+
+test('@visual session-hub column scrollbar [dark]', async ({ page }) => {
+  const { mockSessionHub, expectNoHorizontalOverflow } = require('./helpers/session-hub');
+  await mockSessionHub(page, { longText: true });
+  await page.setViewportSize({ width: 1100, height: 700 });
+  await setTheme(page, 'dark');
+  await page.goto('/#manager');
+  await expect(page.locator('.session-hub-tools summary')).toContainText('도구 2회 사용');
+  // Exercise the capped column at 1100px without the sidebar's 280px allocation.
+  // 헤드리스는 스크롤바를 숨김 — 실제 스크롤바에선 오른쪽 끝이 스크롤바 폭만큼 안쪽
+  // (허용, 사용자 합의 후 단순화 결정). 이 기하 테스트에는 stabilize()를 적용하지 않는다.
+  await page.addStyleTag({ content: `
+    .session-hub-manager .session-hub-sidebar { display: none; }
+  ` });
+  await page.evaluate(() => document.fonts.ready);
+  const chat = page.locator('.session-hub-chat');
+  expect((await chat.boundingBox()).width).toBeGreaterThan(900);
+  await page.locator('.session-hub-tools summary').click();
+  const messages = page.locator('.session-hub-messages');
+  const dimensions = await messages.evaluate(node => ({ gutter: node.offsetWidth - node.clientWidth,
+    scrollHeight: node.scrollHeight, clientHeight: node.clientHeight }));
+  expect(dimensions.scrollHeight).toBeGreaterThan(dimensions.clientHeight);
+  const input = page.locator('.session-hub-input');
+  const user = await chat.locator('.manager-msg-row-user').boundingBox();
+  const assistant = await chat.locator('.manager-msg-row-assistant').boundingBox();
+  const textarea = input.locator('textarea'), send = input.locator('button[type="submit"]');
+  const textareaBox = await textarea.boundingBox(), sendBox = await send.boundingBox();
+  expect(Math.abs(sendBox.x + sendBox.width - user.x - user.width
+    - dimensions.gutter)).toBeLessThanOrEqual(1);
+  expect(Math.abs(assistant.x - textareaBox.x)).toBeLessThanOrEqual(1);
+  await textarea.fill('초점 표시 확인');
+  await expect(send).toBeEnabled();
+  for (const control of [textarea, send]) {
+    await control.focus();
+    await page.keyboard.press('ArrowLeft');
+    const focus = await control.evaluate(node => {
+      const style = getComputedStyle(node), box = node.getBoundingClientRect();
+      const form = node.closest('.session-hub-input'), formBox = form.getBoundingClientRect();
+      const left = formBox.left + form.clientLeft, top = formBox.top + form.clientTop;
+      return { visible: node.matches(':focus-visible'), outline: style.outlineStyle,
+        shadow: style.boxShadow, extent: Math.max(2,
+          parseFloat(style.outlineWidth) + Math.max(0, parseFloat(style.outlineOffset))),
+        clearance: Math.min(box.left - left, left + form.clientWidth - box.right,
+          box.top - top, top + form.clientHeight - box.bottom) };
+    });
+    expect(focus.visible).toBe(true);
+    expect(focus.outline !== 'none' || focus.shadow !== 'none').toBe(true);
+    expect(focus.clearance).toBeGreaterThanOrEqual(focus.extent);
+  }
+  await expectNoHorizontalOverflow(page);
+});

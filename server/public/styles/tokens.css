@@ -146,6 +146,7 @@
 
   /* Spacing/sizing */
   --sidebar-nav-width: 56px;
+  --session-hub-column-max: 900px;
   --manager-codebase-picker-width: 100%;
   --manager-codebase-picker-gap: 8px;
   --manager-codebase-picker-inline-padding: 16px;

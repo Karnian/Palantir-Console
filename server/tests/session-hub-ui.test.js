@@ -452,6 +452,99 @@ test('evidence uses sanitized text only; malformed tokens, code and attributes s
   assert.deepEqual(opened, [[key, REV]]);
 });
 
+test('session markdown table wrappers preserve table semantics', t => {
+  const env = setup(t);
+  const text = '```js\nconst value = 1;\n```\n\n| 이름 | 값 |\n| --- | --- |\n| 항목 | 내용 |'
+    + '\n\n| 상태 | 수량 |\n| --- | --- |\n| 완료 | 2 |';
+  env.render(env.h('div', {}, env.context.renderSessionMarkdown(text)), env.root);
+  const pre = env.root.querySelector('pre'), table = env.root.querySelector('table');
+  assert.ok(pre); assert.ok(table);
+  assert.equal(pre.getAttribute('tabindex'), '0');
+  assert.equal(table.hasAttribute('tabindex'), false);
+  assert.equal(table.hasAttribute('role'), false);
+  const wrapper = table.parentElement;
+  assert.ok(wrapper.matches('.session-hub-table-scroll[tabindex="0"]'));
+  assert.equal(wrapper.children.length, 1);
+  assert.equal(pre.querySelector('code').textContent.trim(), 'const value = 1;');
+  assert.equal(table.querySelectorAll('th').length, 2);
+  const wrappers = env.root.querySelectorAll('.session-hub-table-scroll');
+  assert.equal(wrappers.length, 2);
+  for (const node of wrappers) {
+    assert.equal(node.getAttribute('tabindex'), '0');
+    assert.equal(node.hasAttribute('role'), false);
+    assert.equal(node.hasAttribute('aria-label'), false);
+  }
+});
+
+test('session markdown strips source visibility and focus attributes before wrapping tables', t => {
+  const env = setup(t);
+  const text = '<div aria-hidden="true"><section ARIA-HIDDEN="false">'
+    + '<pre ArIa-HiDdEn="true" TABINDEX="-1"><code>code</code></pre>'
+    + '<table tabindex="5" title="data"><tbody><tr><td>cell</td></tr></tbody></table>'
+    + '</section></div>';
+  env.render(env.h('div', {}, env.context.renderSessionMarkdown(text)), env.root);
+  assert.equal(env.root.querySelectorAll('[aria-hidden]').length, 0);
+  assert.equal(env.root.querySelectorAll('[tabindex]:not([tabindex="0"])').length, 0);
+  assert.equal(env.root.querySelector('pre').getAttribute('tabindex'), '0');
+  const table = env.root.querySelector('table');
+  assert.equal(table.hasAttribute('tabindex'), false);
+  assert.ok(table.parentElement.matches('.session-hub-table-scroll[tabindex="0"]'));
+  assert.equal(table.getAttribute('title'), 'data');
+  assert.equal(table.querySelector('td').textContent, 'cell');
+});
+
+test('session markdown strips source tabindex from links and other elements', t => {
+  const env = setup(t);
+  const text = '<a tabindex="3" aria-hidden="true" href="https://example.com" title="link">link</a>'
+    + '<span TABINDEX="-1">text</span>';
+  env.render(env.h('div', {}, env.context.renderSessionMarkdown(text)), env.root);
+  assert.equal(env.root.querySelectorAll('[tabindex], [aria-hidden]').length, 0);
+  assert.equal(env.root.querySelector('a').getAttribute('href'), 'https://example.com');
+  assert.equal(env.root.querySelector('a').getAttribute('title'), 'link');
+  assert.equal(env.root.querySelector('span').textContent, 'text');
+});
+
+test('session markdown keeps pre focus across rerenders', t => {
+  const env = setup(t);
+  const render = text => env.render(env.h('div', {}, env.context.renderSessionMarkdown(text)), env.root);
+  render('<pre tabindex="-1"><code>first</code></pre>');
+  const pre = env.root.querySelector('pre');
+  assert.equal(pre.getAttribute('tabindex'), '0');
+  render('```\nnext\n```');
+  assert.equal(env.root.querySelector('pre'), pre);
+  assert.equal(pre.getAttribute('tabindex'), '0');
+  render('<pre tabindex="5">third</pre>');
+  assert.equal(pre.getAttribute('tabindex'), '0');
+  assert.equal(pre.textContent, 'third');
+  render('<pre TABINDEX="5">fourth</pre>\n\n<p tabindex="5">unchanged</p>');
+  assert.equal(pre.getAttribute('tabindex'), '0');
+  assert.equal(env.root.querySelector('p').hasAttribute('tabindex'), false);
+});
+
+test('session markdown scrollable HTML keeps sanitization and overrides supplied tabindex', t => {
+  const env = setup(t);
+  const text = '<pre tabindex="-1" title="code" onfocus="alert(1)"><code>safe code</code></pre>\n\n'
+    + '<table tabindex="-1" title="data" onclick="alert(2)" role="table" aria-label="원문 이름">'
+    + '<tbody><tr><td>safe cell</td></tr></tbody></table>\n\n'
+    + '<div class="session-hub-table-scroll" onclick="alert(3)" onfocus="alert(4)">forged</div>';
+  env.render(env.h('div', {}, env.context.renderSessionMarkdown(text)), env.root);
+  for (const node of env.root.querySelectorAll('*')) {
+    assert.equal(Array.from(node.attributes).some(attr => /^on/i.test(attr.name)), false);
+  }
+  const pre = env.root.querySelector('pre'), table = env.root.querySelector('table');
+  assert.ok(pre); assert.ok(table);
+  assert.equal(pre.getAttribute('tabindex'), '0');
+  assert.equal(table.hasAttribute('tabindex'), false);
+  assert.ok(table.parentElement.matches('.session-hub-table-scroll[tabindex="0"]'));
+  assert.equal(table.parentElement.hasAttribute('role'), false);
+  assert.equal(table.parentElement.hasAttribute('aria-label'), false);
+  assert.equal(pre.getAttribute('title'), 'code');
+  assert.equal(table.getAttribute('title'), 'data');
+  assert.equal(table.getAttribute('role'), 'table');
+  assert.equal(pre.textContent, 'safe code');
+  assert.equal(table.querySelector('td').textContent, 'safe cell');
+});
+
 test('evidence links become spans without link attributes or nested interactive elements', t => {
   const env = setup(t), key = 'k', token = `[[session:${key}@${REV}]]`, opened = [];
   const panel = { rev: REV, cards: [{ key, machine: { label: 'Mac' }, ai_title: 'Evidence' }] };
