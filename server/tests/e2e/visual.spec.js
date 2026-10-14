@@ -534,7 +534,7 @@ const HUB_VIEWPORTS = [
 for (const theme of THEMES) {
   for (const vp of HUB_VIEWPORTS) {
     test(`@visual session-hub manager [${theme}/${vp.name}]`, async ({ page }) => {
-      const { mockSessionHub, expectAssistantLayout, expectChatColumn } = require('./helpers/session-hub');
+      const { mockSessionHub, expectAssistantLayout, expectChatColumn, openSnapshotAnswer } = require('./helpers/session-hub');
       await mockSessionHub(page, { longText: true });
       await page.setViewportSize({ width: vp.width, height: vp.height });
       await setTheme(page, theme);
@@ -557,6 +557,10 @@ for (const theme of THEMES) {
       await expectAssistantLayout(page);
       await expectChatColumn(page);
       await expect(page).toHaveScreenshot(`session-hub-timeline-${theme}-${vp.name}.png`, {
+        maxDiffPixels: 100, threshold: 0.2,
+      });
+      await openSnapshotAnswer(page);
+      await expect(page).toHaveScreenshot(`session-hub-answer-${theme}-${vp.name}.png`, {
         maxDiffPixels: 100, threshold: 0.2,
       });
       await page.getByRole('button', { name: '오른쪽 칸 닫기', exact: true }).click();

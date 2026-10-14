@@ -90,12 +90,42 @@ async function mockSessionHub(page, { observe = true, clock = true, longText = f
   await page.route('**/api/health', route => route.fulfill({ json: { sessionHubActive: true } }));
   if (observe) await page.route('**/api/observe/snapshots**', route => {
     const url = new URL(route.request().url());
-    if (url.pathname.endsWith('/snapshots')) return route.fulfill({ json: { rev: REV, snapshots: [
+    if (url.pathname.endsWith('/snapshots')) return route.fulfill({ json: { rev: REV, answers: true, snapshots: [
       { machine_id: 'alpha', machine_label: alpha.machine.label, generated_at: alpha.generated_at, sha256: HASH },
       { machine_id: 'beta', machine_label: 'codev2', generated_at: beta.generated_at, sha256: HASH },
       { name_id: 'unreadable', error_code: 'parse_error' },
     ] } });
     return route.fulfill({ json: url.pathname.endsWith('/alpha') ? alpha : beta });
+  });
+  if (observe) await page.route('**/api/observe/answers**', route => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (url.pathname !== '/api/observe/answers') {
+      return route.fulfill({ status: 404, json: { error: 'not_found' } });
+    }
+    if (Object.keys(request.headers()).some(name => name.toLowerCase() === 'authorization')) {
+      return route.fulfill({ status: 403, json: { error: 'cookie auth required' } });
+    }
+    const raw = url.search.slice(1);
+    const parts = raw.split('&');
+    const keys = ['machine', 'key', 'instruction', 'rev'];
+    const invalid = () => route.fulfill({ status: 400, json: { error: 'invalid_query' } });
+    if (request.method() !== 'GET' || Buffer.byteLength(raw, 'utf8') > 2048
+      || parts.length !== keys.length) return invalid();
+    const query = Object.create(null);
+    for (const part of parts) {
+      const pair = part.split('=');
+      if (pair.length !== 2 || !keys.includes(pair[0]) || Object.hasOwn(query, pair[0])) return invalid();
+      try { query[pair[0]] = decodeURIComponent(pair[1]); }
+      catch { return invalid(); }
+    }
+    const snapshot = query.machine === 'alpha' ? alpha : query.machine === 'beta' ? beta : null;
+    if (query.rev !== HASH || !snapshot?.instructions.some(instruction =>
+      instruction.id === query.instruction && instruction.session_key === query.key)) return invalid();
+    return route.fulfill({ json: { status: 'final', reason: null,
+      text: '로그인 리다이렉트 테스트를 추가했습니다.\n**검토 결과**는 평문으로 표시합니다.\n' + 'long-answer-'.repeat(8),
+      truncated: true, redacted: true, shared_turn: true,
+      answer_at: '2026-10-10T03:00:00.000Z', observed_at: '2026-10-10T03:10:00.000Z' } });
   });
   await page.route('**/api/session-hub/snapshots/**', route => route.fulfill({ json: {
     enabled: true, targets: [
@@ -135,12 +165,15 @@ async function expectNoHorizontalOverflow(page) {
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth
     <= document.documentElement.clientWidth)).toBe(true);
   const clientWidth = await page.evaluate(() => document.documentElement.clientWidth);
-  for (const selector of ['.session-hub-chat', '.all-sessions-panel', '.work-search', '.session-row']) {
+  for (const selector of ['.session-hub-chat', '.all-sessions-panel', '.work-search', '.session-row', '.work-answer', '.work-answer-toggle']) {
     for (const element of await page.locator(selector).all()) {
       if (!await element.isVisible()) continue;
       const box = await element.boundingBox();
       expect(box.x).toBeGreaterThanOrEqual(0);
       expect(box.x + box.width).toBeLessThanOrEqual(clientWidth + 1);
+      if (selector === '.work-answer') {
+        expect(await element.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+      }
     }
   }
 }
@@ -271,4 +304,20 @@ async function expectChatColumn(page, { keyboard = false } = {}) {
   expect(overflowing).toBeGreaterThanOrEqual(1);
   expect(shortTables).toBeGreaterThanOrEqual(1);
 }
-module.exports = { mockSessionHub, expectNoHorizontalOverflow, expectAssistantLayout, expectChatColumn };
+async function openSnapshotAnswer(page) {
+  const { expect } = require('@playwright/test');
+  const toggle = page.locator('.work-answer-toggle').last();
+  await toggle.scrollIntoViewIfNeeded();
+  const before = await toggle.evaluate(node => node.closest('.session-hub-detail, .work-board').scrollTop);
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  const answer = page.getByRole('region', { name: '답변', exact: true });
+  await expect(answer.locator('.work-answer-text')).toContainText('로그인 리다이렉트 테스트를 추가했습니다.');
+  await expect(answer.locator('.work-answer-meta')).toContainText('답변 시각');
+  await expect(answer.locator('.work-answer-meta')).toContainText('조회 시각');
+  await expect(answer.locator('img, script, a, strong')).toHaveCount(0);
+  expect(await toggle.evaluate(node => node.closest('.session-hub-detail, .work-board').scrollTop)).toBe(before);
+  await answer.scrollIntoViewIfNeeded();
+  await expectNoHorizontalOverflow(page);
+}
+module.exports = { mockSessionHub, expectNoHorizontalOverflow, expectAssistantLayout, expectChatColumn, openSnapshotAnswer };

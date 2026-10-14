@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from '../../../vendor/hooks.module.js';
 import { apiFetch } from '../api.js';
 import { snapshotCards, loadSessionSnapshots } from '../workBoard.js';
 
-const emptyPanelLoad = () => ({ entries: [], snapshots: [], failures: [], done: 0, total: 0, rev: null });
+const emptyPanelLoad = () => ({ entries: [], snapshots: [], failures: [], done: 0, total: 0, rev: null, answers: false });
 
 export function useSessionSnapshots(onData) {
   const [load, setLoad] = useState(emptyPanelLoad);
@@ -31,5 +31,13 @@ export function useSessionSnapshots(onData) {
     const timer = setInterval(() => setNow(Date.now()), 60000);
     return () => { generation.current++; controller.abort(); clearInterval(timer); };
   }, [revision]);
-  return { load, loading, error, now, reload: () => setRevision(value => value + 1) };
+  const reload = () => {
+    generation.current++;
+    setLoad(emptyPanelLoad());
+    setLoading(true);
+    setError(false);
+    onData?.({ cards: [], rev: null });
+    setRevision(value => value + 1);
+  };
+  return { load, loading, error, now, reload };
 }

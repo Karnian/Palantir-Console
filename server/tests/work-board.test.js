@@ -705,7 +705,8 @@ function boardEnv(t, snapshotRequest = async () => ({ enabled: true, targets: []
     vm.runInContext(transformComponentSource(src), env.context);
   }
   env.loadComponent('Dropdown');
-  env.loadComponent('SessionSnapshotParts');
+  const parts = fs.readFileSync(path.join(__dirname, '../public/app/components/SessionSnapshotParts.js'), 'utf8');
+  vm.runInContext(transformComponentSource(parts.replace(/^export const /gm, 'const ')), env.context);
   env.loadComponent('SnapshotRefreshControls');
   env.loadComponent('SessionHubSidebar');
   require('./helpers/session-detail-cards').installDetailCards(env);
@@ -1383,4 +1384,102 @@ test('timeline chat order: manually expanded work card shows three instructions 
     ['지시 1', '지시 2', '지시 3']);
   assert.deepEqual(writes, []);
   assert.equal(root.scrollTop, 75);
+});
+
+test('snapshot loader carries the list answers switch and each machine sha256 into its cards', async t => {
+  const { loadSessionSnapshots, snapshotCards } = await logic;
+  const { alpha, beta } = fixtures(t);
+  const entries = [
+    { machine_id: 'alpha', sha256: 'a'.repeat(64) },
+    { machine_id: 'beta', sha256: 'b'.repeat(64) },
+  ];
+  for (const answers of [true, false, undefined, 'true']) {
+    const updates = [], calls = [];
+    await loadSessionSnapshots(async (url, options) => {
+      calls.push({ url, options });
+      return url === '/api/observe/snapshots' ? { snapshots: entries, rev: 'list-revision', answers }
+        : url.includes('/alpha?') ? alpha : beta;
+    }, new AbortController().signal, data => updates.push(data));
+    const load = updates.at(-1);
+    assert.equal(load.answers, answers === true);
+    assert.deepEqual(load.entries, entries);
+    const cards = load.snapshots.flatMap(snapshotCards);
+    assert.ok(cards.length > 0);
+    for (const card of cards) {
+      assert.equal(card.answers, answers === true);
+      assert.equal(card.machineRev, entries.find(entry => entry.machine_id === card.machine.id).sha256);
+      assert.ok(load.snapshots.includes(card.snapshotLoad));
+    }
+    assert.equal(calls.some(call => call.url.startsWith('/api/observe/answers')), false);
+  }
+  assert.equal(snapshotCards(alpha)[0].machineRev, null);
+  assert.equal(snapshotCards(alpha)[0].answers, false);
+  assert.equal(Object.hasOwn(alpha, 'machineRev'), false, 'list metadata must not mutate the raw snapshot');
+});
+
+test('work timeline answer expansion keeps oldest to newest order and does not scroll', async t => {
+  const { alpha } = fixtures(t);
+  const env = boardEnv(t), root = env.document.getElementById('root');
+  const card = { ...env.context.snapshotCards(alpha)[0], answers: true, machineRev: 'a'.repeat(64) };
+  env.context.apiFetch = async () => ({ status: 'final', text: '답변 본문',
+    observed_at: alpha.generated_at, answer_at: alpha.generated_at });
+  const writes = [];
+  Object.defineProperty(root, 'scrollTop', { get: () => 75, set: value => writes.push(value) });
+  env.window.HTMLElement.prototype.scrollIntoView = () => assert.fail('must not scroll outer layout');
+  t.mock.method(env.window, 'scrollTo', () => assert.fail('must not scroll window'));
+  env.render(env.h(env.context.SessionCard, { card, timeline: true, now: Date.parse(alpha.generated_at) }), root);
+  const before = Array.from(root.querySelectorAll('.work-instruction'), node => node.textContent);
+  assert.deepEqual(before, Array.from(card.instructions, instruction => instruction.text));
+  root.querySelector('.work-answer-toggle').click(); await flushEffects();
+  assert.equal(root.querySelector('.work-answer-text').textContent, '답변 본문');
+  assert.deepEqual(Array.from(root.querySelectorAll('.work-instruction'), node => node.textContent), before);
+  assert.equal(root.querySelectorAll('li.work-event').length, card.instructions.length);
+  assert.deepEqual(writes, []);
+  assert.equal(root.scrollTop, 75);
+});
+
+test('answer e2e mock enforces raw query pairs, byte limit, and cookie-only headers', async () => {
+  const { mockSessionHub } = require('./e2e/helpers/session-hub');
+  const routes = new Map();
+  await mockSessionHub({ addInitScript: async () => {},
+    route: async (pattern, handler) => routes.set(pattern, handler) }, { clock: false });
+  const invoke = async (handler, url, headers = {}) => {
+    let result;
+    await handler({ request: () => ({ url: () => url, method: () => 'GET', headers: () => headers }),
+      fulfill: async value => { result = value; } });
+    return result;
+  };
+  const snapshot = (await invoke(routes.get('**/api/observe/snapshots**'),
+    'http://localhost/api/observe/snapshots/alpha')).json;
+  const instruction = snapshot.instructions[0];
+  const pairs = ['machine=alpha', `key=${encodeURIComponent(instruction.session_key)}`,
+    `instruction=${encodeURIComponent(instruction.id)}`, `rev=${'a'.repeat(64)}`];
+  const handler = routes.get('**/api/observe/answers**');
+  const call = (raw, headers) => invoke(handler, `http://localhost/api/observe/answers?${raw}`, headers);
+  assert.equal((await call(pairs.join('&'))).json.status, 'final');
+  assert.equal((await call([...pairs].reverse().join('&'))).json.status, 'final');
+  for (const pathname of ['/api/observe/answers-extra', '/api/observe/answers/',
+    '/api/observe/answers/nested', '/api/observe/answers%2F']) {
+    const result = await invoke(handler, `http://localhost${pathname}?${pairs.join('&')}`);
+    assert.equal(result.status, 404, `wrong pathname must not return an answer: ${pathname}`);
+    assert.equal(result.json.error, 'not_found');
+  }
+  for (const raw of [
+    '', pairs.join('&') + '&', pairs.join('&') + '&extra=x',
+    ['%6dachine=alpha', ...pairs.slice(1)].join('&'),
+    ['machine=alpha', pairs[1], pairs[2], 'machine=alpha'].join('&'),
+    ['machine=alpha=', ...pairs.slice(1)].join('&'),
+    ['machine', ...pairs.slice(1)].join('&'),
+    ['machine=%', ...pairs.slice(1)].join('&'),
+    ['machine=' + 'a'.repeat(2049), ...pairs.slice(1)].join('&'),
+  ]) {
+    const result = await call(raw);
+    assert.equal(result.status, 400, `raw query must be rejected: ${raw.slice(0, 100)}`);
+    assert.equal(result.json.error, 'invalid_query');
+  }
+  for (const headers of [{ authorization: '' }, { Authorization: 'Bearer forbidden' },
+    { AUTHORIZATION: 'anything' }]) {
+    assert.equal((await call(pairs.join('&'), headers)).status, 403);
+    assert.equal((await call('invalid', headers)).status, 403, 'auth denial precedes query validation');
+  }
 });

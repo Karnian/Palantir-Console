@@ -113,6 +113,8 @@ export function snapshotCards(snapshot) {
       ...session,
       status: session.status || { state: 'unknown', source: 'none', evidence_at: null, reason: null },
       machine: snapshot.machine, instructions, recent, first,
+      answers: snapshot.answers === true, machineRev: snapshot.machineRev || null,
+      snapshotLoad: snapshot,
       ai_title: aiTitle, title, titleSource: aiTitle ? 'ai' : 'first',
       titleTransformed: aiTitle ? title !== aiTitle : instructionTransformed(titleInstruction),
       recentTransformed: instructionTransformed(instructions.at(-1)),
@@ -249,7 +251,7 @@ export async function loadSessionSnapshots(request, signal, publish) {
         { signal: controller.signal, allowAppForbidden: true });
       if (signal.aborted) return;
       const result = { entries: list.snapshots, snapshots: [], failures: [],
-        done: 0, total: list.snapshots.length, rev: null };
+        done: 0, total: list.snapshots.length, rev: null, answers: list.answers === true };
       const emit = () => publish({ ...result, snapshots: [...result.snapshots], failures: [...result.failures] });
       emit();
       let changed = false;
@@ -263,7 +265,8 @@ export async function loadSessionSnapshots(request, signal, publish) {
           const path = `/api/observe/snapshots/${encodeURIComponent(entry.machine_id)}`;
           const snapshot = await request(`${path}?sha256=${encodeURIComponent(entry.sha256)}`,
             { signal: controller.signal, allowAppForbidden: true });
-          if (!controller.signal.aborted) result.snapshots.push(snapshot);
+          if (!controller.signal.aborted) result.snapshots.push({ ...snapshot,
+            answers: result.answers, machineRev: entry.sha256 });
         } catch (error) {
           if (error.status === 409) { changed = true; controller.abort(); }
           else if (error.message === 'Not authenticated') throw error;

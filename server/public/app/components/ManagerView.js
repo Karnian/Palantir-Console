@@ -9,10 +9,11 @@ import { SessionHubChat } from './SessionHubChat.js';
 import { SessionHubSidebar, SessionHubDetail } from './SessionHubSidebar.js';
 import { useSessionSnapshots } from '../lib/hooks/useSessionSnapshots.js';
 import { snapshotCards } from '../lib/workBoard.js';
+import { AnswerEpochContext } from './SessionSnapshotParts.js';
 import { SessionGrid } from './SessionGrid.js';
 
 import { h, cloneElement } from '../../vendor/preact.module.js';
-import { useEffect, useState } from '../../vendor/hooks.module.js';
+import { useEffect, useLayoutEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import { useNodeSummary } from '../lib/hooks.js';
 import htm from '../../vendor/htm.module.js';
 const html = htm.bind(h);
@@ -70,6 +71,26 @@ function AssistantLayout({ projects, initialTarget, initialPanel, chat, grid,
   const [right, setRight] = useState(isManagerTarget(initialTarget) ? 'manager' : null);
   const [managerVisited, setManagerVisited] = useState(isManagerTarget(initialTarget));
   const [mobilePane, setMobilePane] = useState(initialPanel ? 'sidebar' : 'chat');
+  const [answerEpoch, setAnswerEpoch] = useState(0);
+  const [narrow, setNarrow] = useState(() => window.matchMedia?.('(max-width: 899px)')?.matches ?? false);
+  useEffect(() => {
+    const media = window.matchMedia?.('(max-width: 899px)');
+    if (!media) return;
+    const update = () => setNarrow(media.matches);
+    update();
+    if (media.addEventListener) {
+      media.addEventListener('change', update);
+      return () => media.removeEventListener('change', update);
+    }
+    media.addListener(update);
+    return () => media.removeListener(update);
+  }, []);
+  const detailVisible = !!right && (!narrow || mobilePane === 'right');
+  const previousDetailVisible = useRef(detailVisible);
+  useLayoutEffect(() => {
+    if (previousDetailVisible.current && !detailVisible) setAnswerEpoch(value => value + 1);
+    previousDetailVisible.current = detailVisible;
+  }, [detailVisible]);
   const [selection, setSelection] = useState(null);
   const [revisionMismatch, setRevisionMismatch] = useState(false);
   const [draft, setDraft] = useState(null);
@@ -145,6 +166,7 @@ function AssistantLayout({ projects, initialTarget, initialPanel, chat, grid,
         onRevisionMismatch=${setRevisionMismatch} />
     </div>
     <div class="session-hub-panel-side" hidden=${!right}>
+      <${AnswerEpochContext.Provider} value=${answerEpoch}>
       <header class="session-hub-right-header">
         <span>${right === 'session' ? '세션 상세'
           : right === 'manager' ? 'Palantir' : right === 'work' ? '작업' : '상세'}</span>
@@ -158,6 +180,7 @@ function AssistantLayout({ projects, initialTarget, initialPanel, chat, grid,
         ${managerVisited && chat}
       </div>
       ${right === 'work' && cloneElement(grid, { onSelectConversation: openConversation })}
+      </${AnswerEpochContext.Provider}>
     </div>
   </div>`;
 }
