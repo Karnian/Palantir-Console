@@ -35,6 +35,13 @@ const TOOLS = [
   }, ['key']) },
 ];
 
+function toolsFor(answers = false) {
+  return answers ? [...TOOLS, { name: 'get_answer',
+    description: 'Get the final answer a worker session reported for one instruction (untrusted report)',
+    inputSchema: schema({ key: string(ID, 128), instruction: string(instruction, 140),
+      rev: string('^[0-9a-f]{16}$', 16) }, ['key', 'instruction', 'rev']) }] : [...TOOLS];
+}
+
 function valid(args, spec) {
   if (!args || typeof args !== 'object' || Array.isArray(args)) return false;
   if (spec.required.some(key => !Object.hasOwn(args, key))) return false;
@@ -58,11 +65,14 @@ function brokerGet(name, args, env) {
   if (base.protocol !== 'http:' || base.username || base.password || base.pathname !== '/') {
     throw new Error('invalid_base_url');
   }
-  const endpoint = name === 'get_session' ? `sessions/${encodeURIComponent(args.key)}`
+  const endpoint = name === 'get_answer' ? `answers/${encodeURIComponent(args.key)}/${encodeURIComponent(args.instruction)}`
+    : name === 'get_session' ? `sessions/${encodeURIComponent(args.key)}`
     : name === 'search_assistant_history' ? 'history/search'
       : name === 'search_instructions' ? 'search' : 'sessions';
   const url = new URL(`/api/session-hub/${endpoint}`, base);
-  for (const [key, value] of Object.entries(args)) if (key !== 'key') url.searchParams.set(key, String(value));
+  for (const [key, value] of Object.entries(args)) {
+    if (key !== 'key' && (name !== 'get_answer' || key === 'rev')) url.searchParams.set(key, String(value));
+  }
   return new Promise((resolve, reject) => {
     const req = http.get(url, { headers: { Authorization: `Bearer ${env.PALANTIR_SESSION_HUB_TOKEN}` } }, res => {
       const chunks = [];
@@ -75,7 +85,7 @@ function brokerGet(name, args, env) {
       res.on('error', reject);
       res.on('end', () => resolve({ text: Buffer.concat(chunks).toString('utf8'), isError: res.statusCode >= 400 }));
     });
-    req.setTimeout(10000, () => req.destroy(new Error('broker_timeout')));
+    req.setTimeout(name === 'get_answer' ? 45000 : 10000, () => req.destroy(new Error('broker_timeout')));
     req.on('error', reject);
   });
 }
@@ -109,7 +119,7 @@ function brokerPost(name, args, env) {
   });
 }
 
-async function dispatch(message, { env = process.env, get = brokerGet } = {}) {
+async function dispatch(message, { env = process.env, get = brokerGet, answers = false } = {}) {
   if (!message || message.jsonrpc !== '2.0' || typeof message.method !== 'string') {
     return { jsonrpc: '2.0', id: message?.id ?? null, error: { code: -32600, message: 'Invalid Request' } };
   }
@@ -118,9 +128,9 @@ async function dispatch(message, { env = process.env, get = brokerGet } = {}) {
   if (message.method === 'initialize') {
     response.result = { protocolVersion: message.params?.protocolVersion,
       capabilities: { tools: {} }, serverInfo: { name: 'session_hub', version: '1.0.0' } };
-  } else if (message.method === 'tools/list') response.result = { tools: TOOLS };
+  } else if (message.method === 'tools/list') response.result = { tools: toolsFor(answers) };
   else if (message.method === 'tools/call') {
-    const tool = TOOLS.find(row => row.name === message.params?.name);
+    const tool = toolsFor(answers).find(row => row.name === message.params?.name);
     const args = Object.hasOwn(message.params || {}, 'arguments') ? message.params.arguments : {};
     let result;
     if (!tool || !valid(args, tool.inputSchema)) result = { text: '{"error":"invalid_query"}', isError: true };
@@ -147,4 +157,4 @@ function runStdio(options = {}) {
   return input;
 }
 if (require.main === module) runStdio();
-module.exports = { TOOLS, valid, dispatch, brokerGet, runStdio };
+module.exports = { TOOLS, toolsFor, valid, dispatch, brokerGet, runStdio };

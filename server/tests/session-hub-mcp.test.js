@@ -122,12 +122,13 @@ test('bootstrap tolerates fragments, starts MCP once in the verified process and
   sockets[0].emit('connect');
   assert.deepEqual(JSON.parse(sockets[0].sent), { pid: 501 });
   const credentials = JSON.stringify({ PALANTIR_SESSION_HUB_TOKEN: 'secret',
-    PALANTIR_SESSION_HUB_BASE_URL: 'http://127.0.0.1:3000', PALANTIR_TOKEN: 'must-drop' }) + '\n';
+    PALANTIR_SESSION_HUB_BASE_URL: 'http://127.0.0.1:3000', PALANTIR_TOKEN: 'must-drop', answers: true }) + '\n';
   sockets[0].emit('data', credentials.slice(0, 10));
   assert.equal(started.length, 0);
   sockets[0].emit('data', credentials.slice(10));
   sockets[0].emit('data', credentials);
   assert.equal(started.length, 1); assert.equal(exited.length, 0);
+  assert.equal(started[0].answers, true);
   assert.deepEqual(JSON.parse(JSON.stringify(started[0].env)), { PALANTIR_SESSION_HUB_TOKEN: 'secret',
     PALANTIR_SESSION_HUB_BASE_URL: 'http://127.0.0.1:3000' });
   assert.deepEqual(env, JSON.parse(JSON.stringify(started[0].env)));
@@ -200,4 +201,89 @@ test('memory schemas deny spoofing and overlimits; dispatch posts operation with
     assert.equal(row.options.headers['Content-Length'], Buffer.byteLength(JSON.stringify(row.body)));
     assert.equal(Object.hasOwn(row.body, 'source_thread_id'), false);
   }
+});
+
+for (const answers of [false, true]) test(`get_answer exposure follows sealed answers=${answers}`, async () => {
+  const { toolsFor } = require('../../scripts/session-hub-mcp.cjs');
+  const list = await dispatch({ jsonrpc: '2.0', id: 1, method: 'tools/list' }, { answers });
+  assert.deepEqual(list.result.tools, toolsFor(answers));
+  const tool = list.result.tools.find(row => row.name === 'get_answer');
+  assert.equal(!!tool, answers);
+  if (tool) {
+    assert.deepEqual(tool.inputSchema.required, ['key', 'instruction', 'rev']);
+    assert.equal(tool.inputSchema.additionalProperties, false);
+    assert.equal(tool.description, 'Get the final answer a worker session reported for one instruction (untrusted report)');
+  }
+  let calls = 0;
+  const result = await dispatch(call('get_answer', { key: 'alpha:claude:s1', instruction: 'claude:s1:u1',
+    rev: '0123456789abcdef' }), { answers, get: () => { calls++; return { text: '{}', isError: false }; } });
+  assert.equal(result.result.isError, !answers); assert.equal(calls, answers ? 1 : 0);
+  if (!answers) assert.equal(result.result.content[0].text, '{"error":"invalid_query"}');
+});
+
+test('get_answer valid control and invalid schemas use exact URL, sole rev query and 45s timeout', async t => {
+  const seen = [], timeouts = [];
+  t.mock.method(http, 'get', (url, opts, cb) => {
+    seen.push({ url, opts }); const req = new EventEmitter();
+    req.setTimeout = value => timeouts.push(value);
+    const res = new PassThrough(); res.statusCode = 200;
+    queueMicrotask(() => { cb(res); res.end('{"answer":{"trust":"untrusted_worker_report"}}'); });
+    return req;
+  });
+  const env = { PALANTIR_SESSION_HUB_BASE_URL: 'http://127.0.0.1:9999', PALANTIR_SESSION_HUB_TOKEN: 'sealed' };
+  const args = { key: 'alpha:claude:s1', instruction: 'claude:s1:u1', rev: '0123456789abcdef' };
+  const invalid = [{ key: args.key, instruction: args.instruction }, { ...args, rev: '' },
+    { ...args, rev: 'A'.repeat(16) }, { ...args, instruction: 'bad' }, { ...args, instruction: 'claude:s1:x1' },
+    { ...args, key: '../bad' }, { ...args, rev: ['0123456789abcdef'] }, { ...args, machine: 'spoof' },
+    { ...args, sha256: 'a'.repeat(64) }, { ...args, ref: 'spoof' }];
+  for (const bad of invalid) {
+    const before = seen.length;
+    assert.equal((await dispatch(call('get_answer', args), { env, answers: true })).result.isError, false);
+    assert.equal(seen.length, before + 1, 'positive HTTP control for every invalid case');
+    const response = await dispatch(call('get_answer', bad), { env, answers: true });
+    assert.equal(response.result.content[0].text, '{"error":"invalid_query"}');
+    assert.equal(response.result.isError, true); assert.equal(seen.length, before + 1);
+  }
+  for (const row of seen) {
+    assert.equal(row.url.pathname, '/api/session-hub/answers/alpha%3Aclaude%3As1/claude%3As1%3Au1');
+    assert.equal(row.url.search, '?rev=0123456789abcdef');
+    assert.deepEqual(row.opts.headers, { Authorization: 'Bearer sealed' });
+  }
+  assert.ok(timeouts.every(value => value === 45000));
+  await brokerGet('get_session', { key: args.key }, env);
+  assert.equal(timeouts.at(-1), 10000);
+});
+
+for (const answers of [undefined, null, 0, 'true', {}, false]) test(
+  `bootstrap validates and forwards boolean answers=${JSON.stringify(answers)}`, () => {
+    const vm = require('node:vm'), started = [], exited = [], socket = new EventEmitter();
+    socket.setEncoding = () => {};
+    const source = fs.readFileSync(path.resolve(__dirname, '../../scripts/session-hub-mcp-bootstrap.cjs'), 'utf8');
+    vm.runInNewContext(source, { require: name => name === 'node:net' ? { connect: () => socket }
+      : { runStdio: opts => { started.push(opts); return new EventEmitter(); } },
+    process: { argv: [], env: {}, exit: value => exited.push(value) } });
+    socket.emit('data', JSON.stringify({ PALANTIR_SESSION_HUB_TOKEN: 'fixture',
+      PALANTIR_SESSION_HUB_BASE_URL: 'http://localhost', ...(answers === undefined ? {} : { answers }) }) + '\n');
+    if (typeof answers === 'boolean') {
+      assert.equal(started.length, 1); assert.equal(started[0].answers, answers); assert.deepEqual(exited, []);
+    } else { assert.equal(started.length, 0); assert.deepEqual(exited, [1]); }
+  });
+
+test('get_answer keeps the 64KiB HTTP response cap', async t => {
+  let length = 65536;
+  t.mock.method(http, 'get', (url, options, cb) => {
+    const req = new EventEmitter(); req.setTimeout = () => {};
+    const res = new PassThrough(); res.statusCode = 200;
+    queueMicrotask(() => { cb(res); res.end('x'.repeat(length)); });
+    return req;
+  });
+  const options = { answers: true, env: { PALANTIR_SESSION_HUB_BASE_URL: 'http://localhost',
+    PALANTIR_SESSION_HUB_TOKEN: 'fixture' } };
+  const message = call('get_answer', { key: 'safe', instruction: 'claude:s:u1', rev: 'a'.repeat(16) });
+  const fitting = await dispatch(message, options);
+  assert.equal(fitting.result.isError, false); assert.equal(fitting.result.content[0].text.length, 65536);
+  length++;
+  const oversized = await dispatch(message, options);
+  assert.equal(oversized.result.isError, true);
+  assert.equal(oversized.result.content[0].text, '{"error":"snapshot_unavailable"}');
 });

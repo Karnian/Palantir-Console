@@ -462,14 +462,14 @@ test('real fixture group with SIGTERM-ignoring descendant is reaped after parent
   assert.throws(() => process.kill(descendant, 0), err => err.code === 'ESRCH');
 });
 
-function credentialFixture(t, execFile) {
+function credentialFixture(t, execFile, overrides = {}) {
   const { fakeNet } = require('./helpers/session-hub-service-fixture.cjs');
   const { EventEmitter } = require('node:events');
   let server;
   const net = fakeNet();
   const create = net.createServer;
   net.createServer = handler => { server = create(handler); return server; };
-  const fx = serviceFixture(t, { net, execFile });
+  const fx = serviceFixture(t, { net, execFile, ...overrides });
   function connect(pid, pgid) {
     const socket = new EventEmitter();
     socket.setTimeout = delay => { socket.timeout = delay; };
@@ -492,7 +492,7 @@ test('protected MCP checks PID with server ps, ignores claimed PGID and grants c
   const valid = fx.connect(42, 99);
   await tick();
   assert.deepEqual(JSON.parse(valid.payload), { PALANTIR_SESSION_HUB_TOKEN: fx.service.current(),
-    PALANTIR_SESSION_HUB_BASE_URL: 'http://127.0.0.1:3000' });
+    PALANTIR_SESSION_HUB_BASE_URL: 'http://127.0.0.1:3000', answers: false });
   assert.deepEqual(lookups, [{ command: '/bin/ps', argv: ['-o', 'pgid=', '-p', '42'] }]);
   const invalid = fx.connect(42, fx.service.diagnostics().pgid);
   await tick();
@@ -600,6 +600,7 @@ for (const action of ['stop', 'newThread', 'shutdown']) {
 
 for (const event of ['close', 'end', 'error']) {
   test(`MCP ${event} closes its generation, revokes token and permits a fresh start only`, async t => {
+    const timers = captureMcpGrace(t);
     const fx = credentialFixture(t, (command, argv, opts, callback) => {
       callback(null, String(fx.service.diagnostics().pgid));
     });
@@ -613,7 +614,9 @@ for (const event of ['close', 'end', 'error']) {
     assert.equal(fx.service.state().state, 'running');
     assert.equal(fx.service.current(), null);
     await assert.rejects(() => send(fx.service, 'unavailable'), code('session_hub_not_running'));
-    await until(() => fx.service.state().error === 'session_hub_mcp_lost', 3000);
+    assert.equal(timers.length, 1, 'disconnect schedules exactly one 2-second grace');
+    timers[0](); // Advance the captured 2000ms timer without waiting for wall-clock time.
+    assert.equal(fx.service.state().error, 'session_hub_mcp_lost');
     await fx.service.close();
     assert.equal(fx.service.state().state, 'idle');
     assert.equal(fs.existsSync(path.join(fx.root, 'mcp.json')), false);
@@ -1010,4 +1013,136 @@ test('partial output commits within two seconds and final commit sanitizes witho
   assert.equal(fx.store.get(reserved.user.thread_id, reserved.assistant.id).status, 'complete');
   assert.equal(JSON.stringify(fx.store.messages(reserved.user.thread_id)).includes('secret-value'), false);
   assert.equal(JSON.stringify(fx.store.messages(reserved.user.thread_id)).includes('sensitive-query'), false);
+});
+
+const answerRev = n => n.toString(16).padStart(16, '0');
+const answerRow = (key = 'a', n = 1, machineId = 'mac') => ({ key, rev: answerRev(n), machineId,
+  sha256: n.toString(16).padStart(64, '0'), label: machineId });
+async function answerTurn(fx) {
+  if (fx.service.state().state !== 'running') await fx.service.start();
+  await send(fx.service, '답변 확인');
+  return fx.service.captureHubTurn(fx.service.current());
+}
+
+test('answer scope capture, malformed bindings, reservation limits and byte clipping are synchronous', async t => {
+  const fx = serviceFixture(t), hub = fx.service;
+  assert.throws(() => hub.captureHubTurn('bad'), code('forbidden'));
+  await hub.start();
+  assert.throws(() => hub.captureHubTurn(hub.current()), code('turn_not_active'));
+  const handle = await answerTurn(fx);
+  assert.equal(Object.isFrozen(handle), true);
+  assert.throws(() => hub.captureHubTurn('bad'), code('forbidden'));
+  for (const invalid of [null, undefined, {}, { ...handle, token: 'bad' },
+    { ...handle, generation: -1 }, { ...handle, thread_id: 'bad' }, { ...handle, turn_id: 'bad' }]) {
+    hub.recordReturnedKeys(invalid, [answerRow()]);
+    assert.throws(() => hub.reserveAnswer(invalid, 'a'), code('turn_not_active'));
+    assert.throws(() => hub.completeAnswer(invalid, 'a', 0), code('turn_not_active'));
+    assert.throws(() => hub.answerBinding(invalid, 'a', answerRev(1)), code('turn_not_active'));
+  }
+  hub.recordReturnedKeys(handle, [null, {}, answerRow('../bad'), { ...answerRow(), rev: 'bad' },
+    { ...answerRow(), sha256: 'bad' }, { ...answerRow(), rev: answerRev(1) + '\n' },
+    { ...answerRow(), sha256: answerRow().sha256 + '\n' }]);
+  assert.throws(() => hub.reserveAnswer(handle, 'a'), code('answer_out_of_scope'));
+  hub.recordReturnedKeys(handle, ['a', 'b', 'c', 'd'].map(key => answerRow(key)));
+  assert.throws(() => hub.answerBinding(handle, 'unknown', answerRev(1)), code('answer_out_of_scope'));
+  assert.throws(() => hub.answerBinding(handle, 'a', answerRev(2)), code('snapshot_changed'));
+  for (const key of ['a', 'b', 'c']) hub.reserveAnswer(handle, key);
+  assert.throws(() => hub.reserveAnswer(handle, 'd'), code('answer_budget_exceeded'));
+  hub.reserveAnswer(handle, 'a'); hub.reserveAnswer(handle, 'a');
+  assert.throws(() => hub.reserveAnswer(handle, 'a'), code('answer_budget_exceeded'));
+  assert.deepEqual(hub.completeAnswer(handle, 'a', 24000), { budget_clipped: false });
+  assert.deepEqual(hub.completeAnswer(handle, 'a', 577), { budget_clipped: true });
+  assert.deepEqual(hub.completeAnswer(handle, 'a', 576), { budget_clipped: false });
+  assert.deepEqual(hub.completeAnswer(handle, 'a', 1), { budget_clipped: true });
+  hub.recordReturnedKeys(handle, [answerRow('new')]);
+  assert.throws(() => hub.reserveAnswer(handle, 'new'), code('answer_out_of_scope'));
+});
+
+for (const frozen of [false, true]) test(`binding revisions keep insertion order and machine identity, frozen=${frozen}`, async t => {
+  const fx = serviceFixture(t), hub = fx.service, handle = await answerTurn(fx);
+  hub.recordReturnedKeys(handle, [answerRow(), answerRow('a', 1, 'evil')]);
+  const captured = hub.answerBinding(handle, 'a', answerRev(1));
+  assert.equal(captured.machineId, 'mac');
+  captured.label = 'mutated copy';
+  assert.equal(hub.answerBinding(handle, 'a', answerRev(1)).label, 'mac');
+  if (frozen) hub.completeAnswer(handle, 'a', 0);
+  hub.recordReturnedKeys(handle, [answerRow('a', 2), answerRow('a', 3), answerRow('a', 4)]);
+  // Updating the oldest rev must not make it the newest inserted rev.
+  hub.recordReturnedKeys(handle, [{ ...answerRow(), label: 'updated' }]);
+  assert.equal(hub.answerBinding(handle, 'a', answerRev(1)).label, 'updated');
+  hub.recordReturnedKeys(handle, [answerRow('a', 5), answerRow('a', 6, 'evil'), answerRow('new')]);
+  assert.throws(() => hub.answerBinding(handle, 'a', answerRev(1)), code('snapshot_changed'));
+  for (const n of [2, 3, 4, 5]) assert.equal(hub.answerBinding(handle, 'a', answerRev(n)).machineId, 'mac');
+  assert.throws(() => hub.answerBinding(handle, 'a', answerRev(6)), code('snapshot_changed'));
+  assert.equal(captured.sha256, answerRow().sha256, 'in-flight copy survives eviction');
+  if (frozen) assert.throws(() => hub.reserveAnswer(handle, 'new'), code('answer_out_of_scope'));
+  // Rejected rev checks have not consumed any reservations.
+  for (let i = 0; i < 5; i++) hub.reserveAnswer(handle, 'a');
+  assert.throws(() => hub.reserveAnswer(handle, 'a'), code('answer_budget_exceeded'));
+});
+
+test('answer handles expire at turn end, new turn, close and generation replacement; partial commits retain scope', async t => {
+  const fx = serviceFixture(t), hub = fx.service;
+  const old = await answerTurn(fx);
+  hub.recordReturnedKeys(old, [answerRow()]);
+  fx.event({ type: 'assistant', message: { content: [{ type: 'text', text: 'partial\n' }] } });
+  assert.equal(hub.answerBinding(old, 'a', answerRev(1)).machineId, 'mac');
+  const expired = handle => {
+    hub.recordReturnedKeys(handle, [answerRow('leaked')]);
+    assert.throws(() => hub.reserveAnswer(handle, 'a'), code('turn_not_active'));
+    assert.throws(() => hub.completeAnswer(handle, 'a', 0), code('turn_not_active'));
+  };
+  fx.event({ type: 'result' }); expired(old);
+  const next = await answerTurn(fx); expired(old);
+  assert.throws(() => hub.reserveAnswer(next, 'leaked'), code('answer_out_of_scope'));
+  await hub.stop(); expired(next);
+  const replacement = await answerTurn(fx); expired(next);
+  assert.notEqual(replacement.generation, next.generation);
+  assert.throws(() => hub.reserveAnswer(replacement, 'a'), code('answer_out_of_scope'));
+});
+
+test('MCP loss immediately invalidates answer operations during the two-second turn grace', async t => {
+  const fx = credentialFixture(t, (cmd, argv, opts, cb) => cb(null, String(fx.service.diagnostics().pgid)));
+  await fx.service.start(); const socket = fx.connect(41); await tick();
+  const handle = await answerTurn(fx), hub = fx.service;
+  hub.recordReturnedKeys(handle, [answerRow()]); hub.reserveAnswer(handle, 'a');
+  socket.emit('end');
+  assert.equal(hub.current(), null); assert.equal(hub.state().turnInProgress, true);
+  hub.recordReturnedKeys(handle, [answerRow('new')]);
+  assert.throws(() => hub.reserveAnswer(handle, 'a'), code('turn_not_active'));
+  assert.throws(() => hub.completeAnswer(handle, 'a', 1), code('turn_not_active'));
+});
+
+for (const answers of [false, true]) test(`sealed answers=${answers} reaches actual spawn, prompt version and credentials`, async t => {
+  const { sessionHubArgv, TOOL_NAMES } = require('../services/sessionHubService');
+  const { sessionHubPrompt, sessionHubPromptVersion } = require('../services/sessionHubPrompt');
+  const fx = credentialFixture(t, (cmd, argv, opts, cb) => cb(null, String(fx.service.diagnostics().pgid)), { answers });
+  await fx.service.start();
+  const socket = fx.connect(41); await tick();
+  const argv = fx.calls[0].argv;
+  assert.deepEqual(argv, sessionHubArgv(path.join(fx.root, 'mcp.json'), { answers }));
+  assert.equal(argv[argv.indexOf('--allowedTools') + 1].includes('mcp__session_hub__get_answer'), answers);
+  assert.equal(TOOL_NAMES.includes('get_answer'), false);
+  assert.equal(argv[argv.indexOf('--append-system-prompt') + 1], sessionHubPrompt(answers));
+  assert.equal(fx.service.state().promptVersion, sessionHubPromptVersion(answers));
+  assert.equal(JSON.parse(socket.payload).answers, answers);
+  assert.equal(sessionHubPrompt(answers).includes('get_answer'), answers);
+  if (answers) for (const text of ['비신뢰', '사실 확인이 아니다', '추가 조회·기억 제안', '검증된 완료',
+    'answer_at·observed_at', '5회·3세션', 'budget_clipped', 'rev 없이 get_session', '한 번만 다시 시도']) {
+    assert.ok(sessionHubPrompt(true).includes(text), text);
+  }
+});
+
+test('get_answer protocol persists the exact tool name only and drops tool_result bodies', async t => {
+  const fx = serviceFixture(t), hub = fx.service;
+  await answerTurn(fx);
+  const name = 'mcp__session_hub__get_answer', secret = 'UNIQUE_UNTRUSTED_ANSWER_BODY_6_3';
+  fx.event({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'answer-1', name,
+    input: { key: 'a', instruction: 'claude:a:u1', rev: answerRev(1) } }] } });
+  fx.event({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'answer-1',
+    content: [{ type: 'text', text: secret }] }] } });
+  fx.event({ type: 'result' });
+  const messages = hub.state().messages;
+  assert.deepEqual(messages.filter(row => row.role === 'tool_note').map(row => row.content), [name]);
+  assert.equal(JSON.stringify(fx.db.prepare('SELECT * FROM assistant_messages').all()).includes(secret), false);
 });

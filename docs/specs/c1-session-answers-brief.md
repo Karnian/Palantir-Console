@@ -1,6 +1,6 @@
 # C1-A — 지시별 답변 보기 (화면 + 세션 비서) 구현 brief
 
-> **상태**: v7 (2026-10-14, A2a 구현 반영 — §4.1·§4.2·§11). v6 (2026-10-14). 사용자 요청 + codex 설계 검토 2회 합의 + brief 적대리뷰 R1·R2(NO-GO) 반영 — R2 뒤 범위 축소(§11).
+> **상태**: v8 (2026-10-14, A3 구현 반영 — §4.3·§6.1·§11). v7 (2026-10-14, A2a 구현 반영 — §4.1·§4.2·§11). v6 (2026-10-14). 사용자 요청 + codex 설계 검토 2회 합의 + brief 적대리뷰 R1·R2(NO-GO) 반영 — R2 뒤 범위 축소(§11).
 > **상위 문서**: `i0a-session-snapshot-board-brief.md` v11(스냅샷·반출 계약), `c1-session-hub-chat-brief.md` v8(broker·hub 토큰·게이트), `c1-personal-assistant-brief.md` v5(영구 대화·승인 기억 — v8 의 대화 저장·삭제 서술을 대체).
 > 이 문서는 세 문서의 **범위를 넓히는 부록**이다. 여기서 명시적으로 바꾼 것 말고는 기존 계약 그대로다.
 
@@ -169,6 +169,16 @@ i0a §2.3 의 번들·실행기·launcher·수신 검증 경로를 쓰되, **요
 - off 게이트(404)는 hub 게이트보다 앞(C1 v8 §1.1 순서).
 - §6 조건을 서버에서 강제한다.
 
+- **v8 구현 확정 (A3)**:
+  - **rev 결속**: 비서 도구가 아는 rev 는 broker `meta.rev`(16 hex, 전 머신 합산)다. 그대로 쓰면 다른 머신 갱신에도 409 가 나므로, 같은 턴에서 list/search/get_session 이 **최종 응답에 실제 담아 돌려준** 세션마다 `(key, rev) → {machineId, sha256, label}` 결속을 턴 scope 에 기록한다(key 당 rev 4개, key 의 machineId 는 첫 결속에서 고정). `get_answer` 는 `key`·`instruction`·`rev` 만 보내고, 서버는 결속의 머신 sha256 으로 `answerQueryService` 를 부른다. 대상 머신이 바뀐 경우에만 409.
+  - 경로 `GET /api/session-hub/answers/:key/:instructionId?rev=<16hex>` — 원본 쿼리는 정확히 `rev=` 한 쌍. off 게이트(`answers_off` 404)는 hub 토큰 게이트보다 앞(app.js).
+  - 범위·rev·쿼리 거부는 예산을 소비하지 않는다. 예약 뒤의 실패(409·429·404·503·unavailable)는 소비한다.
+  - 연결 종료 판정은 `res` close + `!writableEnded`(요청 본문 종료와 구분). 끊긴 요청의 결과는 completeAnswer·결속 기록 없이 버린다.
+  - scope 유효 조건에 살아 있는 hub 토큰·running 상태 포함(MCP 손실 2초 유예 동안 거부).
+  - MCP `get_answer` HTTP timeout 45초(서버 30초 + 회수 최대 10초 + 여유).
+  - 동결은 허용 key 집합에만 적용. 동결 뒤에도 기존 key 의 같은 머신 새 rev 결속은 허용(재조회 복구).
+  - 프롬프트 `c1-pa-pr-m-2a`(answers on) / `c1-pa-pr-m-2`(off). get_answer 의 snapshot_changed 는 rev 없이 get_session 재조회 후 1회 재시도.
+
 ### 4.4 기능 스위치 (롤백)
 - `PALANTIR_SESSION_ANSWERS` — 기본 on(`!== '0'`). `0` 이면 §4.2·§4.3 둘 다 404 `answers_off`, 화면에 "답변 보기" 없음, MCP 도구 목록에서 `get_answer` 제외.
 - `PALANTIR_SESSION_HUB_ANSWERS` — 기본 on. `0` 이면 §4.3 만 404, MCP 도구 제외, 프롬프트에서 해당 문장 제외. 화면 조회는 유지.
@@ -312,3 +322,4 @@ provider·CLI 버전별(Mac/codev2) 결과를 기록한다.
 - 2026-10-14 v5 (A1b 실데이터 정정): Claude 실제 transcript 에서 isMeta·isCompactSummary user 레코드가 사슬 중간 고리임을 확인(구조 실측). v4 의 "대상에서 제외"는 Mac 표본 B 전부를 chain_broken 으로 만들었다 → 투명 고리로 정정, chain_broken 범위 한정.
 - 2026-10-14 v6 (A1b 적대리뷰 R1·R2 + 실데이터): Codex 버려진 구간 규칙(닫히지 않은 앞 구간은 새 task_started 에서 끝남 — 실측상 흔함), 겹침 = 레코드 교차로 한정. Claude 병렬 도구 = 같은 message.id 묶음을 한 노드로, 결과 도착 순서 무관, 말단 결과만 예외(진짜 rewind 는 계속 branch_conflict).
 - 2026-10-14 v7 (A2a 구현 + 적대리뷰 R1~R5, R5 GO): rev = 머신 스냅샷 sha256, 원격 25초 deadline + ssh 실패 시 60초 머신 냉각(원격 종료를 서버가 확인할 수 없어 시간 상한으로 닫음 — 리뷰 3라운드 비수렴 뒤 범위 축소), 부모 사슬 메모이즈(O(n²) 제거), observe Authorization 헤더 전면 거부, 원본 쿼리 검증, 403 본문은 기존 observe 규칙 유지.
+- 2026-10-14 v8 (A3 구현 + 설계 교차검토 R1~R4 → R4 GO, 코드 적대리뷰 R1 NO-GO → R2 GO): 전역 rev 대신 턴 내부 (key, rev)→머신 sha256 결속(codex 권장안), off 게이트 위치, 45초 MCP timeout, 연결 종료·토큰 유예 처리, 동결 범위 = key 집합. 실데이터 1턴: list_sessions→get_session→get_answer, 세 상태 구분·근거 토큰 확인.
