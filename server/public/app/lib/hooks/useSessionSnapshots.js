@@ -34,6 +34,8 @@ export function useSessionSnapshots(onData) {
   const reload = () => {
     generation.current++;
     setLoad(emptyPanelLoad());
+    setLoading(true);
+    setError(false);
     onData?.({ cards: [], rev: null });
     setRevision(value => value + 1);
   };

@@ -99,10 +99,13 @@ async function mockSessionHub(page, { observe = true, clock = true, longText = f
   });
   if (observe) await page.route('**/api/observe/answers**', route => {
     const request = route.request();
+    const url = new URL(request.url());
+    if (url.pathname !== '/api/observe/answers') {
+      return route.fulfill({ status: 404, json: { error: 'not_found' } });
+    }
     if (Object.keys(request.headers()).some(name => name.toLowerCase() === 'authorization')) {
       return route.fulfill({ status: 403, json: { error: 'cookie auth required' } });
     }
-    const url = new URL(request.url());
     const raw = url.search.slice(1);
     const parts = raw.split('&');
     const keys = ['machine', 'key', 'instruction', 'rev'];

@@ -2935,3 +2935,37 @@ test('reload race: same-tick old answer resolution never inserts its body before
   assert.equal(env.root.querySelector('.work-answer'), null);
   assert.equal(env.root.querySelector('.work-answer-toggle').getAttribute('aria-expanded'), 'false');
 });
+
+for (const initialError of [false, true]) test(
+  `reload loading: effect-before render immediately shows loading and clears error after ${initialError ? 'failure' : 'success'}`, async t => {
+    const env = setup(t), { alpha } = fixture(t);
+    let snapshots, lists = 0;
+    env.context.apiFetch = async url => {
+      if (url === '/api/observe/snapshots') {
+        lists++;
+        if (initialError) throw new Error('snapshot failure');
+        return { rev: REV, snapshots: [{ machine_id: 'alpha', sha256: ANSWER_REV }] };
+      }
+      return alpha;
+    };
+    function View() {
+      snapshots = env.context.useSessionSnapshots();
+      return env.h(env.context.SessionHubDetail, {
+        data: { ...snapshots, cards: snapshots.load.snapshots.flatMap(env.context.snapshotCards) },
+        selection: { key: alpha.sessions[0].key },
+      });
+    }
+    env.render(env.h(View), env.root); await flushEffects(); await flushEffects();
+    assert.equal(snapshots.loading, false);
+    assert.equal(snapshots.error, initialError);
+    assert.equal(lists, 1);
+    snapshots.reload();
+    env.render(env.h(View), env.root);
+    // Force the first render synchronously, before the revision's passive effect.
+    assert.equal(lists, 1, 'reload effect must not have started a new list request yet');
+    assert.equal(snapshots.loading, true, 'first reload render must already be loading');
+    assert.equal(snapshots.error, false, 'first reload render must clear the previous error');
+    assert.equal(snapshots.load.snapshots.length, 0);
+    assert.ok(env.root.textContent.includes('읽는 중'));
+    assert.equal(env.root.textContent.includes('세션 확인 불가'), false);
+  });

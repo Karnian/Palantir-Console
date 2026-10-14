@@ -1457,6 +1457,12 @@ test('answer e2e mock enforces raw query pairs, byte limit, and cookie-only head
   const call = (raw, headers) => invoke(handler, `http://localhost/api/observe/answers?${raw}`, headers);
   assert.equal((await call(pairs.join('&'))).json.status, 'final');
   assert.equal((await call([...pairs].reverse().join('&'))).json.status, 'final');
+  for (const pathname of ['/api/observe/answers-extra', '/api/observe/answers/',
+    '/api/observe/answers/nested', '/api/observe/answers%2F']) {
+    const result = await invoke(handler, `http://localhost${pathname}?${pairs.join('&')}`);
+    assert.equal(result.status, 404, `wrong pathname must not return an answer: ${pathname}`);
+    assert.equal(result.json.error, 'not_found');
+  }
   for (const raw of [
     '', pairs.join('&') + '&', pairs.join('&') + '&extra=x',
     ['%6dachine=alpha', ...pairs.slice(1)].join('&'),
