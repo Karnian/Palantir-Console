@@ -24,7 +24,7 @@ function createAnswerQueryService(options = {}) {
     redacted: false, shared_turn: false, answer_at: null, observed_at: now() });
 
   async function execute(machineId, expectedTarget, target, run) {
-    let remoteTimedOut = false;
+    let remoteUncertain = true;
     try {
       const cli = prepareSnapshotCli({ ...options, env, source: 'answer-query:cli' });
       const argv = target.kind === 'ssh' ? ['remote', '--host', target.host] : [];
@@ -49,7 +49,7 @@ function createAnswerQueryService(options = {}) {
       if (!validateAnswerEnvelope(envelope, { allowDiag: false, expectedMachineId: machineId, expectedTarget }).ok) {
         return status('unavailable', 'exec_failed');
       }
-      remoteTimedOut = envelope.status === 'unavailable' && envelope.reason === 'timeout';
+      remoteUncertain = envelope.status === 'unavailable' && envelope.reason === 'timeout';
       return Object.fromEntries(FIELDS.map(key => [key, envelope[key]]));
     } catch (error) {
       if (error.code === 'reap_failed' || run.reaping && await run.reaping.then(() => false, () => true)) {
@@ -63,7 +63,7 @@ function createAnswerQueryService(options = {}) {
       // The remote overlap bound depends on the remote reader's cooperative 25s
       // deadline. A blocked readSync (disk/NFS stall), or a single operation stalled
       // between deadline checks, is outside the threat model. Cooling retains global capacity.
-      if (target.kind === 'ssh' && (run.cancelled || remoteTimedOut)) {
+      if (target.kind === 'ssh' && (run.cancelled || remoteUncertain)) {
         cooling.set(machineId, run.startedAt + 60000);
       }
     }
@@ -88,8 +88,9 @@ function createAnswerQueryService(options = {}) {
     const expectedTarget = { instrId: instruction.id, ref: instruction.ref, file_fp: session.file_fp };
     const key = JSON.stringify([machineId, instruction.id, instruction.ref, session.file_fp]);
     if (active.has(key)) return active.get(key).task;
-    // Unreaped groups retain their global capacity as well as their machine lock.
-    if (active.size + locked.size + cooling.size >= 2
+    // A machine reserved by both failed reaping and cooling owns just one slot.
+    const reservedMachines = new Set([...locked.keys(), ...cooling.keys()]);
+    if (active.size + reservedMachines.size >= 2
       || [...active.values()].some(entry => entry.machineId === machineId)) throw fail('answer_busy', 429);
     const run = { cancelled: null, pgid: null, startedAt };
     run.cancellation = new Promise(resolve => { run.resolveCancellation = resolve; });

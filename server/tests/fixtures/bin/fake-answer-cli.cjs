@@ -17,6 +17,7 @@ if (mode === 'hang') {
     text: 'ANSWER_SERVER_BODY_SENTINEL', truncated: false, redacted: false, shared_turn: false,
     answer_at: '2026-10-14T00:00:00.000Z', observed_at: '2026-10-14T01:00:00.000Z' };
   if (mode === 'failed') process.exit(7);
+  if (mode === 'ssh_failed') process.exit(255);
   if (mode === 'target') answer.target.ref = '0'.repeat(16);
   if (mode === 'fp') answer.target.file_fp = '0'.repeat(16);
   if (mode === 'instruction') answer.target.instrId = 'claude:other:uother';

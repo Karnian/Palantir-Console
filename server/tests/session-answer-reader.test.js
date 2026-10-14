@@ -426,24 +426,36 @@ test('40000 transparent parents shared by 40000 assistants are memoized within t
   t.diagnostic(`80001-record answer read: ${elapsed.toFixed(1)}ms`);
 });
 
-for (const provider of ['claude', 'codex']) test(`${provider} judgment loops check the deadline after EOF`, t => {
+for (const provider of ['claude', 'codex']) test(`${provider} judgment loops stop before state evaluation when a checkpoint expires`, t => {
   const f = setup(t, cases[provider]); const target = targetFor(f);
   const records = provider === 'claude' ? [user('Synthetic instruction A')] : [meta(), event('task_started'), message()];
   for (let index = 0; index < 5000; index++) records.push(provider === 'claude'
     ? assistant(`a${index}`, index ? `a${index - 1}` : 'u') : agent('commentary'));
   if (provider === 'codex') records.push(event('task_complete', 't', { last_agent_message: 'SAFE' }));
   writeRecords(f, records);
-  let eof = false, judgmentChecks = 0;
+  let eof = false, judgmentChecks = 0, stateCalls = 0;
   const original = snapshotReader.transcriptRecords;
   t.mock.method(snapshotReader, 'transcriptRecords', function* (...args) { yield* original(...args); eof = true; });
+  const core = require('../../scripts/lib/sessionTranscriptCore.cjs');
+  const method = provider === 'claude' ? 'claudeStatus' : 'codexStatus', state = core[method];
+  // The collector uses core.transcriptStatus internally; this export is called
+  // only after the answer judgment's node/segment loops have completed.
+  t.mock.method(core, method, (...args) => { stateCalls++; return state(...args); });
+  const complete = query(f, target, { deadlineAt: 1000, clock() { if (eof) judgmentChecks++; return 0; } });
+  assert.equal(complete.status, 'final'); assert.equal(stateCalls, 1);
+  const completeChecks = judgmentChecks, expireAt = 3;
+  assert.ok(completeChecks > expireAt, `full judgment needs loop checkpoints: ${completeChecks} clock calls, must exceed ${expireAt}`);
+  eof = false; judgmentChecks = 0; stateCalls = 0;
   const answer = query(f, target, { deadlineAt: 1000, clock() {
     if (!eof) return 0;
-    // The first post-parse check passes; the next must come from a judgment loop.
-    return ++judgmentChecks === 1 ? 0 : 1001;
+    return ++judgmentChecks >= expireAt ? 1001 : 0;
   } });
-  assert.equal(eof, true); assert.equal(judgmentChecks, 2);
+  assert.equal(eof, true);
+  assert.equal(judgmentChecks, expireAt, 'deadline must be reached inside the judgment loops');
+  assert.equal(stateCalls, 0, 'interruption must precede state evaluation, not follow the complete judgment');
   assert.equal(answer.status, 'unavailable'); assert.equal(answer.reason, 'timeout');
   assert.equal(answer.text, null); assert.equal(policy.validateAnswerEnvelope(answer).ok, true);
+  t.diagnostic(`${provider}: full judgment ${completeChecks} clock calls; interrupted at ${judgmentChecks}, state evaluations ${stateCalls}`);
 });
 
 // Captured before parent memoization; only the inode-dependent fingerprint is normalized.

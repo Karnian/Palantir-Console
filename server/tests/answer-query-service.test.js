@@ -221,3 +221,55 @@ test('ssh execution cannot start after the request-time budget even when launch 
   time = start + 60001;
   assert.equal((await service.query(input)).status, 'final'); assert.equal(fx.spawns(), 1);
 });
+
+test('ssh timeout with failed reaping reserves only one global slot when locked and cooling overlap', async t => {
+  const fx = setup(t); let denyReap = true, remotePgid;
+  const service = fx.newService({ timeoutMs: 500, clock: () => Date.parse('2026-10-14T00:00:00.000Z'),
+    env: { ...fx.env, PALANTIR_SNAPSHOT_TARGETS: JSON.stringify([
+      { name: 'remote', machineId: 'alpha', kind: 'ssh', host: 'user@host' },
+      { name: 'beta', machineId: 'beta', kind: 'local' }]) },
+    spawn(command, argv, options) {
+      const remote = argv.includes('remote');
+      const child = fx.options.spawn(command, argv, { ...options, env: { ...options.env, FAKE_ANSWER_MODE: remote ? 'hang' : 'ok' } });
+      if (remote) remotePgid = -child.pid;
+      return child;
+    },
+    reapOptions: { termMs: 5, reapMs: 30, pollMs: 1, kill(pgid, signal) {
+      if (pgid === remotePgid && denyReap) throw Object.assign(new Error('denied'), { code: 'EPERM' });
+      return process.kill(pgid, signal);
+    } } });
+  try {
+    failed(await service.query(fx.query()));
+    assert.equal(fx.spawns(), 1);
+    assert.throws(() => service.query(fx.query()), { code: 'answer_busy', status: 429 });
+    assert.equal(fx.spawns(), 1);
+    assert.equal((await service.query(fx.query('beta'))).status, 'final');
+    assert.equal(fx.spawns(), 2, 'locked and cooling must count as one reserved machine');
+  } finally { denyReap = false; await service.shutdown(); }
+  assert.throws(() => process.kill(remotePgid, 0), error => error.code === 'ESRCH');
+});
+
+for (const mode of ['ssh_failed', 'target', 'status', 'invalid_json', 'diag', 'padded', 'two_lines']) {
+  test(`ssh ${mode} failure cools the machine until request start + 60 seconds`, async t => {
+    const fx = setup(t, mode), start = Date.parse('2026-10-14T00:00:00.000Z'); let time = start;
+    const service = fx.newService({ clock: () => time, env: { ...fx.env,
+      PALANTIR_SNAPSHOT_TARGETS: JSON.stringify([{ name: 'remote', machineId: 'alpha', kind: 'ssh', host: 'user@host' }]) } });
+    const input = fx.query(); failed(await service.query(input)); assert.equal(fx.spawns(), 1);
+    assert.throws(() => service.query(input), { code: 'answer_busy', status: 429 }); assert.equal(fx.spawns(), 1);
+    time = start + 60001;
+    failed(await service.query(input)); assert.equal(fx.spawns(), 2);
+  });
+}
+
+test('ssh spawn exceptions also cool without a process, while valid answers permit immediate requery', async t => {
+  const fx = setup(t), start = Date.parse('2026-10-14T00:00:00.000Z'); let time = start, attempts = 0;
+  const remoteEnv = { ...fx.env, PALANTIR_SNAPSHOT_TARGETS: JSON.stringify([
+    { name: 'remote', machineId: 'alpha', kind: 'ssh', host: 'user@host' }]) };
+  const throwing = fx.newService({ clock: () => time, env: remoteEnv, spawn() { attempts++; throw Error('fixture_spawn_failed'); } });
+  failed(await throwing.query(fx.query())); assert.equal(attempts, 1);
+  assert.throws(() => throwing.query(fx.query()), { code: 'answer_busy', status: 429 }); assert.equal(attempts, 1);
+  time = start + 60001; failed(await throwing.query(fx.query())); assert.equal(attempts, 2);
+  const normal = fx.newService({ clock: () => time, env: remoteEnv });
+  assert.equal((await normal.query(fx.query())).status, 'final');
+  assert.equal((await normal.query(fx.query())).status, 'final'); assert.equal(fx.spawns(), 2);
+});
