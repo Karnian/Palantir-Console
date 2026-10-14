@@ -1436,3 +1436,43 @@ test('work timeline answer expansion keeps oldest to newest order and does not s
   assert.deepEqual(writes, []);
   assert.equal(root.scrollTop, 75);
 });
+
+test('answer e2e mock enforces raw query pairs, byte limit, and cookie-only headers', async () => {
+  const { mockSessionHub } = require('./e2e/helpers/session-hub');
+  const routes = new Map();
+  await mockSessionHub({ addInitScript: async () => {},
+    route: async (pattern, handler) => routes.set(pattern, handler) }, { clock: false });
+  const invoke = async (handler, url, headers = {}) => {
+    let result;
+    await handler({ request: () => ({ url: () => url, method: () => 'GET', headers: () => headers }),
+      fulfill: async value => { result = value; } });
+    return result;
+  };
+  const snapshot = (await invoke(routes.get('**/api/observe/snapshots**'),
+    'http://localhost/api/observe/snapshots/alpha')).json;
+  const instruction = snapshot.instructions[0];
+  const pairs = ['machine=alpha', `key=${encodeURIComponent(instruction.session_key)}`,
+    `instruction=${encodeURIComponent(instruction.id)}`, `rev=${'a'.repeat(64)}`];
+  const handler = routes.get('**/api/observe/answers**');
+  const call = (raw, headers) => invoke(handler, `http://localhost/api/observe/answers?${raw}`, headers);
+  assert.equal((await call(pairs.join('&'))).json.status, 'final');
+  assert.equal((await call([...pairs].reverse().join('&'))).json.status, 'final');
+  for (const raw of [
+    '', pairs.join('&') + '&', pairs.join('&') + '&extra=x',
+    ['%6dachine=alpha', ...pairs.slice(1)].join('&'),
+    ['machine=alpha', pairs[1], pairs[2], 'machine=alpha'].join('&'),
+    ['machine=alpha=', ...pairs.slice(1)].join('&'),
+    ['machine', ...pairs.slice(1)].join('&'),
+    ['machine=%', ...pairs.slice(1)].join('&'),
+    ['machine=' + 'a'.repeat(2049), ...pairs.slice(1)].join('&'),
+  ]) {
+    const result = await call(raw);
+    assert.equal(result.status, 400, `raw query must be rejected: ${raw.slice(0, 100)}`);
+    assert.equal(result.json.error, 'invalid_query');
+  }
+  for (const headers of [{ authorization: '' }, { Authorization: 'Bearer forbidden' },
+    { AUTHORIZATION: 'anything' }]) {
+    assert.equal((await call(pairs.join('&'), headers)).status, 403);
+    assert.equal((await call('invalid', headers)).status, 403, 'auth denial precedes query validation');
+  }
+});

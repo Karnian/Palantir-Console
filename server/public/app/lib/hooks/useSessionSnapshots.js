@@ -31,5 +31,11 @@ export function useSessionSnapshots(onData) {
     const timer = setInterval(() => setNow(Date.now()), 60000);
     return () => { generation.current++; controller.abort(); clearInterval(timer); };
   }, [revision]);
-  return { load, loading, error, now, reload: () => setRevision(value => value + 1) };
+  const reload = () => {
+    generation.current++;
+    setLoad(emptyPanelLoad());
+    onData?.({ cards: [], rev: null });
+    setRevision(value => value + 1);
+  };
+  return { load, loading, error, now, reload };
 }

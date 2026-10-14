@@ -2877,3 +2877,61 @@ for (const view of ['manager', 'work']) test(
     pending[1].resolve(response(answerEnvelope('final', '이전 로드의 답변'))); await flushEffects(20);
     assert.equal(container.querySelector('.work-answer'), null);
   });
+
+test('collapsed answer toggle omits aria-controls and expanded toggle references its live region', async t => {
+  const fx = answerHarness(t);
+  assert.equal(fx.toggle().hasAttribute('aria-controls'), false);
+  fx.toggle().click(); await flushEffects(20);
+  const controlled = fx.toggle().getAttribute('aria-controls');
+  assert.ok(controlled);
+  assert.equal(fx.document.getElementById(controlled), fx.root.querySelector('.work-answer'));
+  fx.toggle().click(); await flushEffects(20);
+  assert.equal(fx.toggle().hasAttribute('aria-controls'), false);
+  assert.equal(fx.document.getElementById(controlled), null);
+});
+
+test('reload race: same-tick old answer resolution never inserts its body before the reload effect', async t => {
+  const env = setup(t), { alpha } = fixture(t), pending = deferred(), updates = [];
+  let snapshots, answerSignal, lists = 0;
+  env.context.fetch = (url, options) => {
+    if (url.startsWith('/api/observe/answers?')) { answerSignal = options.signal; return pending.promise; }
+    if (url === '/api/observe/snapshots') {
+      lists++;
+      return Promise.resolve(response({ rev: REV, answers: true,
+        snapshots: [{ machine_id: 'alpha', sha256: ANSWER_REV }] }));
+    }
+    return Promise.resolve(response(alpha));
+  };
+  function View() {
+    snapshots = env.context.useSessionSnapshots(data => updates.push(data));
+    return env.h(env.context.SessionHubDetail, {
+      data: { ...snapshots, cards: snapshots.load.snapshots.flatMap(env.context.snapshotCards) },
+      selection: { key: alpha.sessions[0].key },
+    });
+  }
+  env.render(env.h(View), env.root); await flushEffects(); await flushEffects();
+  env.root.querySelector('.work-answer-toggle').click(); await flushEffects(20);
+  assert.equal(answerSignal.aborted, false);
+  const stale = 'STALE_ANSWER_MUST_NEVER_ENTER_DOM';
+  const inserted = [];
+  const observer = new env.window.MutationObserver(records => {
+    for (const record of records) {
+      for (const node of record.addedNodes) if (node.textContent.includes(stale)) inserted.push(node.textContent);
+      if (record.type === 'characterData' && record.target.textContent.includes(stale)) inserted.push(record.target.textContent);
+    }
+  });
+  observer.observe(env.root, { childList: true, characterData: true, subtree: true });
+  t.after(() => observer.disconnect());
+  snapshots.reload();
+  pending.resolve(response(answerEnvelope('final', stale)));
+  // No await between reload and resolve: the revision effect has not run yet.
+  const synchronousUpdate = updates.at(-1);
+  await flushEffects(); await flushEffects();
+  assert.deepEqual(inserted, [], 'old answer body must never appear in the DOM, even transiently');
+  assert.equal(synchronousUpdate.cards.length, 0);
+  assert.equal(synchronousUpdate.rev, null);
+  assert.equal(answerSignal.aborted, true);
+  assert.equal(lists, 2);
+  assert.equal(env.root.querySelector('.work-answer'), null);
+  assert.equal(env.root.querySelector('.work-answer-toggle').getAttribute('aria-expanded'), 'false');
+});

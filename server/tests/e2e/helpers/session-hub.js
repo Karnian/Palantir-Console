@@ -97,16 +97,28 @@ async function mockSessionHub(page, { observe = true, clock = true, longText = f
     ] } });
     return route.fulfill({ json: url.pathname.endsWith('/alpha') ? alpha : beta });
   });
-  if (observe) await page.route('**/api/observe/answers?**', route => {
-    const url = new URL(route.request().url());
-    const params = url.searchParams;
-    const snapshot = params.get('machine') === 'alpha' ? alpha : params.get('machine') === 'beta' ? beta : null;
-    if (route.request().method() !== 'GET' || [...params.keys()].length !== 4
-      || !['machine', 'key', 'instruction', 'rev'].every(name => params.getAll(name).length === 1)
-      || params.get('rev') !== HASH || !snapshot?.instructions.some(instruction =>
-        instruction.id === params.get('instruction') && instruction.session_key === params.get('key'))) {
-      return route.fulfill({ status: 400, json: { error: 'invalid_query' } });
+  if (observe) await page.route('**/api/observe/answers**', route => {
+    const request = route.request();
+    if (Object.keys(request.headers()).some(name => name.toLowerCase() === 'authorization')) {
+      return route.fulfill({ status: 403, json: { error: 'cookie auth required' } });
     }
+    const url = new URL(request.url());
+    const raw = url.search.slice(1);
+    const parts = raw.split('&');
+    const keys = ['machine', 'key', 'instruction', 'rev'];
+    const invalid = () => route.fulfill({ status: 400, json: { error: 'invalid_query' } });
+    if (request.method() !== 'GET' || Buffer.byteLength(raw, 'utf8') > 2048
+      || parts.length !== keys.length) return invalid();
+    const query = Object.create(null);
+    for (const part of parts) {
+      const pair = part.split('=');
+      if (pair.length !== 2 || !keys.includes(pair[0]) || Object.hasOwn(query, pair[0])) return invalid();
+      try { query[pair[0]] = decodeURIComponent(pair[1]); }
+      catch { return invalid(); }
+    }
+    const snapshot = query.machine === 'alpha' ? alpha : query.machine === 'beta' ? beta : null;
+    if (query.rev !== HASH || !snapshot?.instructions.some(instruction =>
+      instruction.id === query.instruction && instruction.session_key === query.key)) return invalid();
     return route.fulfill({ json: { status: 'final', reason: null,
       text: '로그인 리다이렉트 테스트를 추가했습니다.\n**검토 결과**는 평문으로 표시합니다.\n' + 'long-answer-'.repeat(8),
       truncated: true, redacted: true, shared_turn: true,

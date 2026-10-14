@@ -91,7 +91,7 @@ function InstructionAnswer({ machine, sessionKey, instructionId, machineRev, sna
         : W.answerStatuses.unavailable);
   const retry = body && (answer ? answer.status === 'unavailable' : body.errorStatus !== 409);
   return html`<button class="ghost work-answer-toggle" type="button"
-    aria-expanded=${expanded} aria-controls=${regionId} onClick=${toggle}>
+    aria-expanded=${expanded} aria-controls=${expanded ? regionId : undefined} onClick=${toggle}>
     ${expanded ? W.answerHide : W.answerShow}</button>
     ${expanded && html`<div id=${regionId} class="work-answer" role="region" aria-label=${W.answerRegion}>
       ${!body ? html`<p class="work-answer-status" role="status">${W.answerLoading}</p>`
