@@ -3169,3 +3169,12 @@ test('mobile answer epoch: missing matchMedia keeps narrow false', async t => {
   assert.equal(fx.requests[1].options.signal.aborted, false);
   assert.equal(fx.media.listeners.size, 0);
 });
+
+test('memory approval shows deleted source status instead of stale source content', t => {
+  const env = setup(t);
+  env.render(env.h(env.context.AssistantMemoryProposal, { proposal: { id: 'deleted-source',
+    operation: 'add', kind: 'fact', content: '승인 대기 기억', source_status: 'deleted',
+    source_content: 'STALE_DELETED_SOURCE' }, busy: false, onDecision() {} }), env.root);
+  assert.ok(env.root.querySelector('blockquote').textContent.includes('삭제된 대화'));
+  assert.equal(env.root.textContent.includes('STALE_DELETED_SOURCE'), false);
+});

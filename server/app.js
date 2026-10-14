@@ -1135,9 +1135,11 @@ function createApp(options = {}) {
   app.snapshotRefreshService = snapshotRefreshService;
   const sessionAnswers = options.sessionAnswers === undefined
     ? process.env.PALANTIR_SESSION_ANSWERS !== '0' : options.sessionAnswers === true;
-  const answerQueryService = sessionAnswers ? createAnswerQueryService({
+  const sessionHubAnswers = sessionAnswers && (options.sessionHubAnswers === undefined
+    ? process.env.PALANTIR_SESSION_HUB_ANSWERS !== '0' : options.sessionHubAnswers === true);
+  const answerQueryService = sessionAnswers ? (options.answerQueryService || createAnswerQueryService({
     ...options.answerQueryServiceOptions, observeState, store: options.observeSnapshotStore,
-  }) : null;
+  })) : null;
   app.answerQueryService = answerQueryService;
   const actorTokenOptions = {
     actorTokenSource: options.actorTokenSource,
@@ -1215,6 +1217,7 @@ function createApp(options = {}) {
       return `http://${host.includes(':') ? `[${host}]` : host}:${address.port}`;
     },
     ...options.sessionHubServiceOptions,
+    answers: sessionHubAnswers,
     store: options.sessionHubServiceOptions?.store || createAssistantStore(db),
     ...(options.sessionHubManagedPaths ? { managedPaths: options.sessionHubManagedPaths } : {}),
     ...(options.sessionHubResolveClaudeBinary ? { resolveBinary: options.sessionHubResolveClaudeBinary } : {}),
@@ -1842,6 +1845,11 @@ function createApp(options = {}) {
     if (req.path === '/snapshots/refresh' || req.path === '/snapshots/status') return next();
     return hubOffGate(req, res, next);
   });
+  app.use('/api/session-hub/answers', (req, res, next) => {
+    if (sessionHubAnswers) return next();
+    res.set('Cache-Control', 'no-store');
+    return res.status(404).json({ error: 'answers_off', reason: 'answers_off' });
+  });
   app.use('/api/observe', createObserveOffGate(observeState));
   app.use(createSessionHubTokenGate(sessionHubTokenProvider));
   app.use('/api/observe', (req, res, next) => {
@@ -1960,6 +1968,7 @@ function createApp(options = {}) {
   app.use('/api/session-hub', createSessionHubRouter({
     state: observeState, store: options.observeSnapshotStore, provider: sessionHubTokenProvider,
     clock: options.sessionHubClock, history: sessionHubService,
+    answers: sessionHubAnswers, answerService: answerQueryService, hub: sessionHubService,
   }));
   app.use('/api/session-hub', sessionHubErrorHandler);
   app.use('/api/observe', createObserveRouter({ state: observeState, store: options.observeSnapshotStore,

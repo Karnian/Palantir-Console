@@ -443,8 +443,13 @@ test('summary/search size clipping advances cursor by emitted rows and never cli
   });
   const broker = createSessionHubBroker({ state: fx.state,
     store: { readAllSnapshots: () => ({ ok: true, snapshots: entries }) } });
-  const list = await broker.list({ limit: '30' });
-  const search = await broker.search({ q: '검색', limit: '15' });
+  const recorded = [];
+  const list = await broker.list({ limit: '30' }, { onBindings: rows => recorded.push(rows) });
+  const search = await broker.search({ q: '검색', limit: '15' }, { onBindings: rows => recorded.push(rows) });
+  for (const [index, response] of [list, search].entries()) {
+    assert.deepEqual(recorded[index].map(row => row.key), response.sessions.map(row => row.key));
+    assert.ok(recorded[index].length < (index ? 15 : 30), 'clipped keys are never bound');
+  }
   for (const response of [list, search]) {
     assert.ok(bytes(response) <= 65536);
     assert.equal(response.clipped, true);
@@ -700,7 +705,201 @@ test('PR-S reader to broker byte search excludes assistant, tool and completion 
 
 test('PR-S assistant prompt distinguishes response end from completion and names both times', () => {
   const { SESSION_HUB_PROMPT, SESSION_HUB_PROMPT_VERSION } = require('../services/sessionHubPrompt');
-  assert.equal(SESSION_HUB_PROMPT_VERSION, 'c1-pa-pr-m-1');
+  assert.equal(SESSION_HUB_PROMPT_VERSION, 'c1-pa-pr-m-2');
   for (const phrase of ['응답 끝남을 일 완료라고 말하지 않는다', 'status.evidence_at',
     'meta.machines[].generated_at', 'unknown=알 수 없음']) assert.ok(SESSION_HUB_PROMPT.includes(phrase));
+});
+
+test('broker bindings use the same batch hashes, stay private and run synchronously before return', async t => {
+  const fx = fixture(t), batch = store.readAllSnapshots(fx.state);
+  let reads = 0;
+  const broker = createSessionHubBroker({ state: fx.state, store: { readAllSnapshots: () => { reads++; return batch; } } });
+  for (const kind of ['list', 'search', 'detail']) {
+    let recorded;
+    const options = { onBindings: bindings => { recorded = bindings; } };
+    const response = kind === 'detail' ? await broker.detail(fx.alpha.sessions[0].key, {}, options)
+      : await broker[kind](kind === 'search' ? { q: '인증' } : {}, options);
+    const sessions = response.session ? [response.session] : response.sessions;
+    assert.ok(sessions.length > 0);
+    assert.deepEqual(recorded.map(row => row.key), sessions.map(row => row.key));
+    for (const binding of recorded) {
+      const entry = batch.snapshots.find(row => row.snapshot.sessions.some(session => session.key === binding.key));
+      assert.deepEqual(binding, { key: binding.key, rev: response.meta.rev, machineId: entry.snapshot.machine.id,
+        sha256: entry.sha256, label: entry.snapshot.machine.label });
+    }
+    assert.equal(JSON.stringify(response).includes('sha256'), false);
+  }
+  assert.equal(reads, 3);
+});
+
+// Real router + broker + turn owner, driven by Node HTTP objects without binding sockets.
+async function answerRouterFixture(t, { query, broker: brokerOverride } = {}) {
+  const express = require('express');
+  const { serviceFixture } = require('./helpers/session-hub-service-fixture.cjs');
+  const { createSessionHubRouter, sessionHubErrorHandler, createSessionHubTokenGate } = require('../routes/sessionHub');
+  const fx = fixture(t), processFx = serviceFixture(t), hub = processFx.service;
+  await hub.start();
+  let turnNumber = 0;
+  const newTurn = async () => {
+    if (hub.state().turnInProgress) processFx.event({ type: 'result' });
+    await hub.message({ thread_id: hub.state().thread_id, request_id: `router-${++turnNumber}`, text: 'answer' });
+  };
+  await newTurn();
+  const broker = createSessionHubBroker({ state: fx.state });
+  const result = { status: 'final', text: 'worker report', truncated: false, redacted: false,
+    shared_turn: false, reason: null, answer_at: '2026-10-14T00:00:00Z', observed_at: '2026-10-14T00:01:00Z' };
+  const calls = [];
+  const app = express();
+  app.use(createSessionHubTokenGate(hub));
+  app.use('/api/session-hub', createSessionHubRouter({ state: fx.state, provider: hub, hub, answers: true,
+    broker: brokerOverride ? brokerOverride(broker, fx) : broker,
+    answerService: { query: input => { calls.push(input); return query ? query(input) : result; } } }));
+  app.use(sessionHubErrorHandler);
+  function pending(url) {
+    const http = require('node:http'), { Duplex } = require('node:stream');
+    const socket = new Duplex({ read() {}, write(chunk, enc, cb) { cb(); } });
+    const req = new http.IncomingMessage(socket);
+    req.method = 'GET'; req.url = url; req.headers = { host: 'localhost', authorization: `Bearer ${hub.current()}` };
+    const res = new http.ServerResponse(req);
+    let resolve;
+    const response = new Promise(done => { resolve = done; });
+    res.end = value => {
+      Object.defineProperty(res, 'writableEnded', { value: true });
+      resolve({ status: res.statusCode, body: JSON.parse(String(value)), text: String(value) }); return res;
+    };
+    app.handle(req, res);
+    req.push(null);
+    return { req, res, response, abort() { res.emit('close'); } };
+  }
+  const get = url => pending(url).response;
+  const answer = (key, rev) => `${BASE}/answers/${key}/claude:s:u1?rev=${rev}`;
+  return { ...fx, hub, processFx, broker, newTurn, result, calls, get, pending, answer };
+}
+const later = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; });
+  return { promise, resolve, reject }; };
+
+for (const outcome of ['normal', 'aborted-success', 'aborted-error']) test(
+  `answer connection ${outcome}: consumption persists and abandoned results cannot freeze or charge bytes`, async t => {
+    const task = later(); let entered;
+    const started = new Promise(done => { entered = done; });
+    const fx = await answerRouterFixture(t, { query: () => { entered(); return task.promise; } });
+    const list = await fx.get(`${BASE}/sessions?machine=alpha`), key = list.body.sessions[0].key, rev = list.body.meta.rev;
+    const original = fx.hub.completeAnswer; let completed = 0;
+    fx.hub.completeAnswer = (...args) => { completed++; return original(...args); };
+    const request = fx.pending(fx.answer(key, rev)); await started;
+    if (outcome === 'normal') request.req.emit('close'); // normal request body EOF must not cancel completion
+    else request.abort();
+    if (outcome === 'aborted-error') task.reject(Object.assign(new Error('answer_busy'), { code: 'answer_busy', status: 429 }));
+    else task.resolve({ ...fx.result, text: '한'.repeat(8000) });
+    await new Promise(done => setImmediate(done));
+    if (outcome === 'normal') {
+      assert.equal((await request.response).status, 200); assert.equal(completed, 1);
+    } else {
+      assert.equal(completed, 0);
+      // An abandoned reply did not freeze the set; a new key can still be returned and reserved.
+      const beta = await fx.get(`${BASE}/sessions?machine=beta`), next = beta.body.sessions[0].key;
+      const handle = fx.hub.captureHubTurn(fx.hub.current());
+      assert.equal(fx.hub.answerBinding(handle, next, beta.body.meta.rev).machineId, 'beta');
+      assert.deepEqual(fx.hub.completeAnswer(handle, key, 24576), { budget_clipped: false });
+    }
+    const handle = fx.hub.captureHubTurn(fx.hub.current());
+    for (let i = 0; i < 4; i++) fx.hub.reserveAnswer(handle, key);
+    assert.throws(() => fx.hub.reserveAnswer(handle, key), /answer_budget_exceeded/);
+  });
+
+for (const method of ['list', 'search', 'detail']) for (const boundary of ['new-turn', 'frozen', 'no-capture', 'aborted']) test(
+  `delayed ${method} bindings cannot cross ${boundary}`, async t => {
+    const gate = later(), entered = later();
+    const fx = await answerRouterFixture(t, { broker: broker => {
+      const wrapped = { ...broker };
+      wrapped[method] = async (...args) => { entered.resolve(); await gate.promise; return broker[method](...args); };
+      return wrapped;
+    } });
+    const key = fx.alpha.sessions[0].key;
+    if (boundary === 'no-capture') fx.processFx.event({ type: 'result' });
+    const url = method === 'list' ? `${BASE}/sessions?machine=alpha`
+      : method === 'search' ? `${BASE}/search?q=${encodeURIComponent('인증')}` : `${BASE}/sessions/${key}`;
+    const delayed = fx.pending(url); await entered.promise;
+    if (boundary === 'new-turn' || boundary === 'no-capture') await fx.newTurn();
+    if (boundary === 'frozen') {
+      // Use an unblocked endpoint to return only beta before completing its answer.
+      const betaKey = fx.beta.sessions[0].key;
+      const beta = method === 'detail' ? await fx.get(`${BASE}/sessions?machine=beta`)
+        : await fx.get(`${BASE}/sessions/${betaKey}`);
+      assert.equal((await fx.get(fx.answer(betaKey, beta.body.meta.rev))).status, 200);
+    }
+    if (boundary === 'aborted') delayed.abort();
+    gate.resolve();
+    await new Promise(done => setImmediate(done)); await new Promise(done => setImmediate(done));
+    if (boundary !== 'aborted') assert.equal((await delayed.response).status, 200);
+    const rev = (await fx.broker.detail(key, {})).meta.rev;
+    const rejected = await fx.get(fx.answer(key, rev));
+    assert.equal(rejected.status, 403); assert.equal(rejected.body.error, 'answer_out_of_scope');
+    await fx.newTurn();
+    const fresh = await fx.get(url); assert.equal(fresh.status, 200);
+    assert.equal((await fx.get(fx.answer(key, fresh.body.meta.rev))).status, 200,
+      'same real endpoint binds in a live unfrozen turn');
+  });
+
+for (const frozen of [false, true]) test(`real session reads preserve four revs and evict only the oldest inserted rev, frozen=${frozen}`, async t => {
+  const fx = await answerRouterFixture(t), key = fx.alpha.sessions[0].key, revs = [];
+  const detail = () => fx.get(`${BASE}/sessions/${key}`);
+  const first = await detail(); revs.push(first.body.meta.rev);
+  if (frozen) assert.equal((await fx.get(fx.answer(key, revs[0]))).status, 200);
+  for (let i = 0; i < 3; i++) {
+    fx.beta.instructions[0].text += ` rev-${i}`; fx.write(fx.beta);
+    revs.push((await detail()).body.meta.rev);
+  }
+  await detail(); // Same revision cannot consume a fifth slot.
+  const handle = fx.hub.captureHubTurn(fx.hub.current());
+  for (const rev of revs) assert.equal(fx.hub.answerBinding(handle, key, rev).machineId, 'alpha');
+  fx.beta.instructions[0].text += ' fifth'; fx.write(fx.beta);
+  revs.push((await detail()).body.meta.rev);
+  assert.equal((await fx.get(fx.answer(key, revs[0]))).body.error, 'snapshot_changed');
+  const remaining = frozen ? 4 : 5;
+  for (let i = 0; i < remaining; i++) assert.equal((await fx.get(fx.answer(key, revs[1 + i % 4]))).status, 200);
+  assert.equal((await fx.get(fx.answer(key, revs.at(-1)))).body.error, 'answer_budget_exceeded');
+  assert.equal(fx.calls.length, 5, 'evicted rev rejection never reserved an attempt');
+});
+
+test('in-flight answer uses its captured binding and requested meta.rev after rev eviction and machine refresh', async t => {
+  const task = later(), started = later();
+  const fx = await answerRouterFixture(t, { query: () => { started.resolve(); return task.promise; } });
+  const key = fx.alpha.sessions[0].key, initial = await fx.get(`${BASE}/sessions/${key}`), rev = initial.body.meta.rev;
+  const pending = fx.pending(fx.answer(key, rev)); await started.promise;
+  const originalHash = fx.calls[0].rev;
+  for (let i = 0; i < 5; i++) {
+    fx.alpha.instructions[0].text += ` update-${i}`; fx.write(fx.alpha);
+    assert.equal((await fx.get(`${BASE}/sessions/${key}`)).status, 200);
+  }
+  assert.equal((await fx.get(fx.answer(key, rev))).body.error, 'snapshot_changed');
+  task.resolve(fx.result);
+  const response = await pending.response;
+  assert.equal(response.status, 200); assert.equal(response.body.meta.rev, rev);
+  assert.equal(fx.calls.length, 1); assert.equal(fx.calls[0].rev, originalHash);
+  assert.notEqual(originalHash, store.readSnapshotHashed(fx.state, 'alpha').sha256);
+});
+
+for (const frozen of [false, true]) test(`same-key machine collision in real returned cards cannot rebind, frozen=${frozen}`, async t => {
+  const fx = await answerRouterFixture(t), key = fx.alpha.sessions[0].key;
+  const initial = await fx.get(`${BASE}/sessions/${key}`), rev = initial.body.meta.rev;
+  if (frozen) assert.equal((await fx.get(fx.answer(key, rev))).status, 200);
+  const betaKey = fx.beta.sessions[0].key;
+  fx.beta.sessions[0].key = key;
+  fx.beta.instructions.filter(row => row.session_key === betaKey).forEach(row => { row.session_key = key; });
+  assert.equal(validateSnapshot(fx.beta).ok, true);
+  fx.write(fx.beta);
+  const collision = await fx.get(`${BASE}/sessions?machine=beta`);
+  assert.ok(collision.body.sessions.some(row => row.key === key));
+  assert.equal((await fx.get(fx.answer(key, collision.body.meta.rev))).body.error, 'snapshot_changed');
+  assert.equal((await fx.get(fx.answer(key, rev))).status, 200);
+  assert.ok(fx.calls.every(input => input.machineId === 'alpha'));
+  // Now start with both collisions in a single real list response. The first returned one wins.
+  await fx.newTurn();
+  const together = await fx.get(`${BASE}/sessions`);
+  const duplicates = together.body.sessions.filter(row => row.key === key);
+  assert.equal(duplicates.length, 2);
+  assert.equal((await fx.get(fx.answer(key, together.body.meta.rev))).status, 200);
+  const firstMachine = duplicates[0].machine === fx.alpha.machine.label ? 'alpha' : 'beta';
+  assert.equal(fx.calls.at(-1).machineId, firstMachine);
 });

@@ -114,7 +114,7 @@ test('off activation combinations return 404 before auth/body with identical sto
   try {
     for (const app of apps) {
       for (const url of [`${BASE}/sessions`, `${BASE}/search`, `${BASE}/sessions/any`,
-        `${BASE}/chat/start`, `${BASE}/chat/message`, `${BASE}/unknown`]) {
+        `${BASE}/chat/start`, `${BASE}/chat/message`, `${BASE}/answers/a/claude:a:u1?rev=${'0'.repeat(16)}`, `${BASE}/unknown`]) {
         for (const method of ['get', 'post']) {
           const response = await request(app)[method](url).set('Authorization', 'Bearer bad')
             .set('Content-Type', 'application/json').send('{broken');
@@ -330,4 +330,297 @@ test('history token route is exact, generation-bound, byte capped and has its ow
   for (const method of ['post', 'delete', 'put']) {
     assert.equal((await bearer(request(app)[method](search))).status, 403);
   }
+});
+
+// Host-only createApp integration uses supertest; no real assistant is spawned.
+const supertest = require('supertest');
+const snapshotStore = require('../services/observeSnapshotStore');
+const answerResult = (text = '작업자가 보고한 답변') => ({ status: 'final', text, truncated: false,
+  redacted: false, shared_turn: false, reason: null, answer_at: '2026-10-14T00:00:00Z',
+  observed_at: '2026-10-14T00:01:00Z' });
+async function answersFixture(t, options = {}) {
+  const fx = fixture(t);
+  // Four distinct sessions with real snapshot cards and instructions.
+  const session = fx.alpha.sessions[0], instruction = fx.alpha.instructions[0];
+  fx.alpha.sessions = Array.from({ length: 4 }, (_, i) => ({ ...session,
+    key: `alpha:claude:a${i}`, session_id: `a${i}`, instruction_count: 1, instruction_total: 1 }));
+  fx.alpha.instructions = fx.alpha.sessions.map((row, i) => ({ ...instruction,
+    session_key: row.key, id: `claude:a${i}:u1`, text: `answer target ${i}`, seq: 1 }));
+  fx.write(fx.alpha);
+  const processFx = require('./helpers/session-hub-service-fixture.cjs').serviceFixture(t);
+  await processFx.service.stop(); // Finish the helper owner's namespace setup before createApp reuses its fake I/O.
+  const calls = [];
+  let implementation = input => {
+    const current = snapshotStore.readSnapshotHashed(fx.state, input.machineId);
+    assert.equal(current.ok, true);
+    if (current.sha256 !== input.rev) throw Object.assign(new Error('snapshot_changed'), { code: 'snapshot_changed', status: 409 });
+    if (!current.snapshot.instructions.some(row => row.id === input.instructionId && row.session_key === input.sessionKey)) {
+      throw Object.assign(new Error('not_found'), { code: 'not_found', status: 404 });
+    }
+    return answerResult();
+  };
+  const answerService = { query(input) { calls.push(input); return implementation(input); }, async shutdown() {} };
+  const app = fx.app({ ...options,
+    sessionHubServiceOptions: { ...processFx.options, store: undefined, ...options.sessionHubServiceOptions },
+    answerQueryService: answerService });
+  const hub = app.sessionHubService;
+  await hub.start();
+  let number = 0;
+  const newTurn = async () => {
+    if (hub.state().turnInProgress) processFx.children.at(-1).stdout.write('{"type":"result"}\n');
+    await hub.message({ thread_id: hub.state().thread_id, request_id: `answer-${++number}`, text: '답변 조회' });
+  };
+  await newTurn();
+  const get = url => supertest(app).get(url).set('Authorization', `Bearer ${hub.current()}`);
+  const url = (i, rev, instructionId = `claude:a${i}:u1`) =>
+    `${BASE}/answers/${fx.alpha.sessions[i].key}/${instructionId}?rev=${rev}`;
+  const list = () => get(`${BASE}/sessions?machine=alpha`);
+  return { ...fx, app, hub, calls, get, url, list, newTurn, processFx, answerService,
+    query(fn) { implementation = fn; } };
+}
+
+test('get_answer auth matrix, exact paths, private machine binding and exact untrusted envelope', async t => {
+  const fx = await answersFixture(t), listed = await fx.list(), rev = listed.body.meta.rev;
+  assert.equal(listed.status, 200);
+  const url = fx.url(0, rev), token = fx.hub.current();
+  const result = await fx.get(url);
+  assert.equal(result.status, 200); assert.equal(result.headers['cache-control'], 'no-store');
+  assert.deepEqual(result.body, { answer: { trust: 'untrusted_worker_report', source: {
+    machine: fx.alpha.machine.label, key: fx.alpha.sessions[0].key, instruction_id: 'claude:a0:u1' },
+  ...answerResult(), budget_clipped: false }, meta: { rev } });
+  assert.ok(Buffer.byteLength(result.text) <= 65536);
+  assert.deepEqual(fx.calls[0], { machineId: 'alpha', sessionKey: fx.alpha.sessions[0].key,
+    instructionId: 'claude:a0:u1', rev: snapshotStore.readSnapshotHashed(fx.state, 'alpha').sha256 });
+  const top = managerToken(fx.app, 'top', 'top'), operator = managerToken(fx.app, 'operator', 'operator:fixture');
+  const worker = fx.app.services.workerProposalTokenService.mint('run_answer', { projectId: 'fixture' });
+  for (const bearer of [TOKEN, PM, top, operator, worker, 'retired']) {
+    const response = await supertest(fx.app).get(url).set('Authorization', `Bearer ${bearer}`);
+    assert.equal(response.status, 403); assert.deepEqual(response.body, errorBody('forbidden'));
+  }
+  assert.equal((await supertest(fx.app).get(url).set('Cookie', COOKIE)).status, 403);
+  for (const bad of [url.replace('?rev=', '/extra?rev='), url.replace('/answers/', '/answers-extra/')]) {
+    assert.equal((await fx.get(bad)).status, 403);
+  }
+  assert.equal((await supertest(fx.app).head(url).set('Authorization', `Bearer ${token}`)).status, 403);
+  assert.equal(fx.calls.length, 1);
+  await fx.hub.stop();
+  assert.equal((await supertest(fx.app).get(url).set('Authorization', `Bearer ${token}`)).status, 403);
+});
+
+test('cookie lists do not bind; invalid scope/rev/raw queries do not consume answer budget', async t => {
+  const fx = await answersFixture(t);
+  const cookieList = await supertest(fx.app).get(`${BASE}/sessions?machine=alpha`).set('Cookie', COOKIE);
+  let rev = cookieList.body.meta.rev;
+  assert.equal((await fx.get(fx.url(0, rev))).body.error, 'answer_out_of_scope');
+  const listed = await fx.list(); rev = listed.body.meta.rev;
+  for (const [url, status, error] of [
+    [fx.url(0, '0'.repeat(16)), 409, 'snapshot_changed'],
+    [`${BASE}/answers/unlisted/claude:a0:u1?rev=${rev}`, 403, 'answer_out_of_scope'],
+    [fx.url(0, rev) + '&rev=' + rev, 400, 'invalid_query'],
+    [fx.url(0, rev) + '&machine=alpha', 400, 'invalid_query'],
+    [fx.url(0, rev).replace('?rev=', '?%72ev='), 400, 'invalid_query'],
+    [fx.url(0, rev).replace('?rev=', '?rev=%30'), 400, 'invalid_query'],
+    [fx.url(0, rev, 'bad'), 400, 'invalid_query'],
+    [fx.url(0, rev) + '&x=' + 'a'.repeat(300), 400, 'invalid_query'],
+  ]) {
+    const response = await fx.get(url); assert.equal(response.status, status);
+    assert.deepEqual(response.body, errorBody(error));
+  }
+  assert.equal(fx.calls.length, 0);
+  for (let i = 0; i < 5; i++) assert.equal((await fx.get(fx.url(0, rev))).status, 200);
+  const sixth = await fx.get(fx.url(0, rev));
+  assert.equal(sixth.status, 429); assert.equal(sixth.body.error, 'answer_budget_exceeded');
+  assert.equal(fx.calls.length, 5);
+});
+
+test('three-session limit is independent of five calls; complete freezes new keys and clips bytes without charging overflow', async t => {
+  const fx = await answersFixture(t), rev = (await fx.list()).body.meta.rev;
+  for (let i = 0; i < 3; i++) assert.equal((await fx.get(fx.url(i, rev))).status, 200);
+  const fourth = await fx.get(fx.url(3, rev));
+  assert.equal(fourth.status, 429); assert.equal(fourth.body.error, 'answer_budget_exceeded');
+  assert.equal(fx.calls.length, 3);
+  await fx.newTurn();
+  const detail = await fx.get(`${BASE}/sessions/${fx.alpha.sessions[0].key}`);
+  assert.equal(detail.status, 200);
+  fx.query(() => answerResult('한'.repeat(8000))); // 24,000 UTF-8 bytes
+  const first = await fx.get(fx.url(0, detail.body.meta.rev)); assert.equal(first.status, 200);
+  await fx.list();
+  assert.equal((await fx.get(fx.url(1, rev))).body.error, 'answer_out_of_scope');
+  fx.query(() => answerResult('x'.repeat(577)));
+  const overflow = await fx.get(fx.url(0, rev));
+  assert.equal(overflow.status, 200); assert.equal(overflow.body.answer.budget_clipped, true);
+  assert.equal(overflow.body.answer.text, null); assert.equal(overflow.body.answer.status, 'final');
+  fx.query(() => answerResult('x'.repeat(576)));
+  assert.equal((await fx.get(fx.url(0, rev))).body.answer.budget_clipped, false);
+});
+
+for (const failure of ['snapshot_changed', 'answer_busy', 'snapshot_unavailable', 'not_found', 'timeout']) test(
+  `reserved ${failure} consumes attempts, synchronous throws and promises both count`, async t => {
+    const fx = await answersFixture(t), rev = (await fx.list()).body.meta.rev;
+    const statuses = { snapshot_changed: 409, answer_busy: 429, snapshot_unavailable: 503, not_found: 404 };
+    let attempts = 0;
+    fx.query(() => {
+      attempts++;
+      if (failure === 'timeout') return { ...answerResult(null), status: 'unavailable',
+        reason: 'timeout', answer_at: null };
+      const error = Object.assign(new Error(failure), { code: failure, status: statuses[failure] });
+      if (attempts % 2) throw error;
+      return Promise.reject(error);
+    });
+    for (let i = 0; i < 5; i++) assert.equal((await fx.get(fx.url(0, rev))).status, statuses[failure] || 200);
+    const response = await fx.get(fx.url(0, rev));
+    assert.equal(response.status, 429); assert.equal(response.body.error, 'answer_budget_exceeded');
+    assert.equal(attempts, 5);
+  });
+
+test('global rev changes preserve the bound machine hash, target changes reject until detail refresh even after freezing', async t => {
+  const fx = await answersFixture(t), old = (await fx.list()).body.meta.rev;
+  fx.beta.instructions[0].text += ' other machine updated'; fx.write(fx.beta);
+  const newer = (await fx.list()).body.meta.rev; assert.notEqual(old, newer);
+  assert.equal((await fx.get(fx.url(0, old))).status, 200);
+  assert.equal((await fx.get(fx.url(0, newer))).status, 200);
+  fx.alpha.instructions[0].text += ' target updated'; fx.write(fx.alpha);
+  assert.equal((await fx.get(fx.url(0, old))).body.error, 'snapshot_changed');
+  const detail = await fx.get(`${BASE}/sessions/${fx.alpha.sessions[0].key}`);
+  const recovered = await fx.get(fx.url(0, detail.body.meta.rev));
+  assert.equal(recovered.status, 200); assert.equal(recovered.body.meta.rev, detail.body.meta.rev);
+  assert.equal(fx.calls.length, 4);
+});
+
+test('late answer success is discarded with 409 after its turn ends and cannot freeze the new turn', async t => {
+  const fx = await answersFixture(t), rev = (await fx.list()).body.meta.rev;
+  let resolve, started;
+  const entered = new Promise(done => { started = done; });
+  fx.query(() => { started(); return new Promise(done => { resolve = done; }); });
+  const pending = fx.get(fx.url(0, rev)).then(value => value); await entered;
+  await fx.newTurn(); resolve(answerResult());
+  const late = await pending; assert.equal(late.status, 409); assert.equal(late.body.error, 'turn_not_active');
+  fx.query(() => answerResult());
+  assert.equal((await fx.get(fx.url(0, rev))).body.error, 'answer_out_of_scope');
+  const search = await fx.get(`${BASE}/search?q=answer`); assert.equal(search.status, 200);
+  assert.equal((await fx.get(fx.url(1, search.body.meta.rev))).status, 200);
+  fx.processFx.children.at(-1).stdout.write('{"type":"result"}\n');
+  assert.equal((await fx.get(fx.url(0, rev))).body.error, 'turn_not_active');
+});
+
+test('broker bucket is shared by answers and lists, and minute resets never reset turn budget', async t => {
+  let time = 1000;
+  const fx = await answersFixture(t, { sessionHubClock: () => time }), rev = (await fx.list()).body.meta.rev;
+  for (let i = 0; i < 28; i++) assert.equal((await fx.list()).status, 200);
+  assert.equal((await fx.get(fx.url(0, rev))).status, 200); // 30th broker request
+  assert.equal((await fx.get(fx.url(0, rev))).body.error, 'session_hub_rate_limited');
+  time += 60000;
+  for (let i = 0; i < 4; i++) assert.equal((await fx.get(fx.url(0, rev))).status, 200);
+  assert.equal((await fx.get(fx.url(0, rev))).body.error, 'answer_budget_exceeded');
+  assert.equal((await fx.list()).status, 200);
+});
+
+for (const mode of ['session-env', 'hub-env', 'override']) test(`answers off ${mode} precedes authentication and exhausted buckets, seals startup`, async t => {
+  const saved = { global: process.env.PALANTIR_SESSION_ANSWERS, hub: process.env.PALANTIR_SESSION_HUB_ANSWERS };
+  t.after(() => {
+    for (const [name, value] of [['PALANTIR_SESSION_ANSWERS', saved.global], ['PALANTIR_SESSION_HUB_ANSWERS', saved.hub]]) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+  });
+  process.env.PALANTIR_SESSION_ANSWERS = mode === 'session-env' ? '0' : '1';
+  process.env.PALANTIR_SESSION_HUB_ANSWERS = mode === 'hub-env' ? '0' : '1';
+  const fx = await answersFixture(t, mode === 'override' ? { sessionHubAnswers: false } : {});
+  // Re-enabling env after boot cannot change route, argv or prompt.
+  process.env.PALANTIR_SESSION_ANSWERS = '1'; process.env.PALANTIR_SESSION_HUB_ANSWERS = '1';
+  const argv = fx.processFx.calls.at(-1).argv;
+  assert.equal(argv[argv.indexOf('--allowedTools') + 1].includes('get_answer'), false);
+  assert.equal(argv[argv.indexOf('--append-system-prompt') + 1].includes('get_answer'), false);
+  assert.equal(fx.hub.state().promptVersion, 'c1-pa-pr-m-2');
+  for (let i = 0; i < 31; i++) await fx.list();
+  const currentToken = fx.hub.current(), current = fx.hub.current;
+  let tokenChecks = 0, managerChecks = 0;
+  fx.hub.current = () => { tokenChecks++; return current(); };
+  const verify = fx.app.services.managerCapabilityTokenService.verify;
+  fx.app.services.managerCapabilityTokenService.verify = (...args) => { managerChecks++; return verify(...args); };
+  for (const token of [currentToken, 'retired', TOKEN, PM]) {
+    const response = await supertest(fx.app).get(fx.url(0, '0'.repeat(16))).set('Authorization', `Bearer ${token}`);
+    assert.equal(response.status, 404); assert.deepEqual(response.body, errorBody('answers_off'));
+    assert.equal(response.headers['cache-control'], 'no-store');
+  }
+  assert.equal((await supertest(fx.app).get(fx.url(0, '0'.repeat(16))).set('Cookie', COOKIE)).body.error, 'answers_off');
+  assert.equal(fx.calls.length, 0); assert.equal(tokenChecks, 0); assert.equal(managerChecks, 0);
+});
+
+test('app seals answers on after env mutation and service options cannot override the sealed value', async t => {
+  const previous = process.env.PALANTIR_SESSION_HUB_ANSWERS;
+  process.env.PALANTIR_SESSION_HUB_ANSWERS = '1';
+  t.after(() => { if (previous === undefined) delete process.env.PALANTIR_SESSION_HUB_ANSWERS;
+    else process.env.PALANTIR_SESSION_HUB_ANSWERS = previous; });
+  const fx = await answersFixture(t, { sessionHubAnswers: true, sessionHubServiceOptions: { answers: false } });
+  process.env.PALANTIR_SESSION_HUB_ANSWERS = '0';
+  const rev = (await fx.list()).body.meta.rev;
+  assert.equal((await fx.get(fx.url(0, rev))).status, 200);
+  const argv = fx.processFx.calls.at(-1).argv;
+  assert.ok(argv[argv.indexOf('--allowedTools') + 1].includes('get_answer'));
+  assert.equal(fx.hub.state().promptVersion, 'c1-pa-pr-m-2a');
+});
+
+async function abortHostGet(t, app, url, token, entered) {
+  let server;
+  const serverClosed = new Promise(resolve => {
+    server = require('node:http').createServer((req, res) => {
+      res.once('close', () => { if (!res.writableEnded) resolve(); });
+      app(req, res);
+    });
+  });
+  t.after(async () => { if (server.listening) await new Promise(resolve => server.close(resolve)); });
+  const client = supertest(server).get(url).set('Authorization', `Bearer ${token}`);
+  const response = client.then(value => value, error => error);
+  await entered;
+  client.abort();
+  assert.equal((await response).code, 'ABORTED');
+  await serverClosed; // Actual TCP disconnect has reached the server before the lookup settles.
+}
+
+for (const outcome of ['success', 'exception']) test(`real client abort discards late answer ${outcome} without completion`, async t => {
+  const fx = await answersFixture(t);
+  const detail = await fx.get(`${BASE}/sessions/${fx.alpha.sessions[0].key}`), rev = detail.body.meta.rev;
+  let resolve, reject, started;
+  const entered = new Promise(done => { started = done; });
+  fx.query(() => { started(); return new Promise((a, b) => { resolve = a; reject = b; }); });
+  let completes = 0;
+  const complete = fx.hub.completeAnswer;
+  fx.hub.completeAnswer = (...args) => { completes++; return complete(...args); };
+  await abortHostGet(t, fx.app, fx.url(0, rev), fx.hub.current(), entered);
+  if (outcome === 'success') resolve(answerResult('한'.repeat(8000)));
+  else reject(Object.assign(new Error('snapshot_unavailable'), { code: 'snapshot_unavailable', status: 503 }));
+  await new Promise(done => setImmediate(done));
+  assert.equal(completes, 0);
+  // A newly returned key remains usable, so the abandoned result did not freeze the scope.
+  await fx.list();
+  fx.query(() => answerResult('x'.repeat(24576)));
+  const first = await fx.get(fx.url(1, rev));
+  assert.equal(first.status, 200); assert.equal(first.body.answer.budget_clipped, false);
+  for (let i = 0; i < 3; i++) assert.equal((await fx.get(fx.url(0, rev))).status, 200);
+  assert.equal((await fx.get(fx.url(0, rev))).body.error, 'answer_budget_exceeded');
+  assert.equal(fx.calls.length, 5);
+});
+
+for (const method of ['list', 'search', 'detail']) test(`real aborted ${method} never grants an answer scope key`, async t => {
+  const fx = await answersFixture(t);
+  const { createSessionHubBroker } = require('../services/sessionHubBroker');
+  const { createSessionHubRouter, createSessionHubTokenGate, sessionHubErrorHandler } = require('../routes/sessionHub');
+  const broker = createSessionHubBroker({ state: fx.state }), delayed = { ...broker };
+  let release, started;
+  const gate = new Promise(done => { release = done; }), entered = new Promise(done => { started = done; });
+  delayed[method] = async (...args) => { started(); await gate; return broker[method](...args); };
+  const app = express();
+  app.use(createSessionHubTokenGate(fx.hub));
+  app.use(BASE, createSessionHubRouter({ state: fx.state, broker: delayed, hub: fx.hub, provider: fx.hub,
+    answers: true, answerService: fx.answerService }));
+  app.use(sessionHubErrorHandler);
+  const url = method === 'list' ? `${BASE}/sessions` : method === 'search' ? `${BASE}/search?q=answer`
+    : `${BASE}/sessions/${fx.alpha.sessions[0].key}`;
+  await abortHostGet(t, app, url, fx.hub.current(), entered);
+  release(); await new Promise(done => setImmediate(done)); await new Promise(done => setImmediate(done));
+  const rev = (await broker.list({})).meta.rev;
+  assert.equal((await fx.get(fx.url(0, rev))).body.error, 'answer_out_of_scope');
+  assert.equal(fx.calls.length, 0);
+  assert.equal((await fx.list()).status, 200);
+  assert.equal((await fx.get(fx.url(0, rev))).status, 200);
 });

@@ -88,7 +88,9 @@ function createSessionHubBroker({ state, store = storeDefault, now = () => new D
       unreadable: result.snapshots.length - readable.length,
       now: now().toISOString(),
     };
-    return { helpers, meta, cards: readable.flatMap(entry => helpers.snapshotCards(entry.snapshot)) };
+    return { helpers, meta, cards: readable.flatMap(entry => helpers.snapshotCards(entry.snapshot)),
+      machineEntries: new Map(readable.map(entry => [entry.snapshot.machine.id,
+        { sha256: entry.sha256, label: entry.snapshot.machine.label }])) };
   }
 
   function fullText(helpers, value) {
@@ -140,9 +142,14 @@ function createSessionHubBroker({ state, store = storeDefault, now = () => new D
       flags: instructionFlags(row, clipped) };
   }
 
-  async function list(query, search = false) {
+  function bindingsFor(cards, meta, machineEntries) {
+    return cards.map(card => ({ key: card.key, rev: meta.rev, machineId: card.machine.id,
+      sha256: machineEntries.get(card.machine.id).sha256, label: card.machine.label }));
+  }
+
+  async function list(query, search = false, { onBindings } = {}) {
     const options = queryOptions(query, search);
-    const { helpers, meta, cards } = await load();
+    const { helpers, meta, cards, machineEntries } = await load();
     if (options.rev && options.rev !== meta.rev) throw new Error('snapshot_changed');
     if (search && !helpers.normalizeSearch(options.q).compact) invalid();
     const ranked = helpers.rankCards(cards, search ? options.q : '', options.machine, options.provider);
@@ -164,6 +171,7 @@ function createSessionHubBroker({ state, store = storeDefault, now = () => new D
     while (size(response) > MAX_BYTES && sessions.length) {
       sessions.pop(); response.clipped = true; cursor();
     }
+    onBindings?.(bindingsFor(ranked.slice(options.offset, options.offset + sessions.length), meta, machineEntries));
     return response;
   }
 
@@ -175,10 +183,10 @@ function createSessionHubBroker({ state, store = storeDefault, now = () => new D
       unknown_blocks: row.unknown_blocks, clipped_text: clipped };
   }
 
-  async function detail(key, query) {
+  async function detail(key, query, { onBindings } = {}) {
     if (!isSafeId(key)) invalid();
     const options = queryOptions(query, false, true);
-    const { helpers, meta, cards } = await load();
+    const { helpers, meta, cards, machineEntries } = await load();
     if (options.rev && options.rev !== meta.rev) throw new Error('snapshot_changed');
     const card = cards.find(item => item.key === key);
     if (!card) throw new Error('not_found');
@@ -198,7 +206,10 @@ function createSessionHubBroker({ state, store = storeDefault, now = () => new D
       response.first = first ? instruction(first, helpers, cap) : null;
       response.instructions = rows.map(row => instruction(row, helpers, cap));
       response.clipped = !!response.first?.clipped_text || response.instructions.some(row => row.clipped_text);
-      if (size(response) <= MAX_BYTES) return response;
+      if (size(response) <= MAX_BYTES) {
+        onBindings?.(bindingsFor([card], meta, machineEntries));
+        return response;
+      }
     }
     const protectedIds = new Set([first?.id, options.around, latest?.id]);
     while (size(response) > MAX_BYTES) {
@@ -206,10 +217,12 @@ function createSessionHubBroker({ state, store = storeDefault, now = () => new D
       if (index < 0) throw new Error('snapshot_unavailable');
       response.instructions.splice(index, 1); response.clipped = true;
     }
+    onBindings?.(bindingsFor([card], meta, machineEntries));
     return response;
   }
 
-  return { list: query => list(query), search: query => list(query, true), detail };
+  return { list: (query, options) => list(query, false, options),
+    search: (query, options) => list(query, true, options), detail };
 }
 
 module.exports = { createSessionHubBroker, INCOMPLETE_KEYS, MAX_BYTES };

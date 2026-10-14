@@ -12,10 +12,11 @@ const { resolveClaudeBinary } = require('./streamJsonEngine');
 const { managedSettingsPresent } = require('./sessionHubActivation');
 const { resolveClaudeAuth, CLAUDE_AUTH_KEYS, CLAUDE_PROVIDER_AUTH_ENV_KEYS } = require('./authResolver');
 const { assertSpawnAllowed } = require('../utils/spawnGuard');
-const { SESSION_HUB_PROMPT, SESSION_HUB_PROMPT_VERSION } = require('./sessionHubPrompt');
+const { sessionHubPrompt, sessionHubPromptVersion } = require('./sessionHubPrompt');
 
 const { buildAssistantContext } = require('./assistantContext');
 const { utf8Prefix } = require('./assistantStore');
+const { isSafeId } = require('./observeSnapshotPolicy');
 const { redactSecrets, normalizeForScan } = require('./memorySanitize');
 const TOOL_NAMES = ['list_sessions', 'search_instructions', 'get_session', 'search_assistant_history',
   'propose_memory', 'propose_forget'];
@@ -24,15 +25,17 @@ const PRIVATE_BYTES = 1024 * 1024;
 const LINE_LIMIT = 1024 * 1024;
 const repoRoot = path.resolve(__dirname, '../..');
 
-function sessionHubArgv(configPath) {
+function sessionHubArgv(configPath, { answers = false } = {}) {
   return ['--print', '--output-format', 'stream-json', '--input-format', 'stream-json', '--verbose',
     '--include-hook-events', '--tools', '', '--setting-sources', '', '--settings', '{"disableAllHooks":true}',
     '--disable-slash-commands', '--strict-mcp-config', '--mcp-config', configPath, '--allowedTools',
-    TOOL_NAMES.map(name => `mcp__session_hub__${name}`).join(','), '--permission-mode', 'default',
-    '--append-system-prompt', SESSION_HUB_PROMPT];
+    [...TOOL_NAMES, ...(answers ? ['get_answer'] : [])].map(name => `mcp__session_hub__${name}`).join(','),
+    '--permission-mode', 'default',
+    '--append-system-prompt', sessionHubPrompt(answers)];
 }
 
 function createSessionHubService(options = {}) {
+  const answers = options.answers === true;
   const io = options.fs || fsp;
   const env = options.env || process.env;
   const home = options.home || env.HOME || os.homedir();
@@ -120,6 +123,70 @@ function createSessionHubService(options = {}) {
   const configPath = path.join(root, 'mcp.json');
   const ownedPath = path.join(root, 'owned-sessions');
 
+  function captureHubTurn(expectedToken) {
+    if (!token || token !== expectedToken) throw fail('forbidden', 403);
+    if (!turn || turn.generation !== generation || turn.user.thread_id !== boundThread) {
+      throw fail('turn_not_active');
+    }
+    return Object.freeze({ generation, thread_id: boundThread, turn_id: turn.user.turn_id, token });
+  }
+  function currentScope(handle) {
+    if (!handle || typeof handle !== 'object' || !token || state !== 'running' || !turn
+      || handle.generation !== generation || handle.thread_id !== boundThread
+      || handle.turn_id !== turn.user.turn_id || handle.token !== token) return null;
+    return turn.answerScope ||= { bindings: new Map(), keyMachine: new Map(), frozen: false,
+      calls: 0, sessions: new Set(), bytes: 0 };
+  }
+  // Map insertion order is the revision eviction order; updating a rev keeps its position.
+  function putBinding(scope, { key, rev, machineId, sha256, label }) {
+    if (!scope.keyMachine.has(key)) {
+      if (scope.frozen) return;
+      scope.keyMachine.set(key, machineId);
+      scope.bindings.set(key, new Map());
+    }
+    if (scope.keyMachine.get(key) !== machineId) return;
+    const revisions = scope.bindings.get(key);
+    revisions.set(rev, { machineId, sha256, label });
+    if (revisions.size > 4) revisions.delete(revisions.keys().next().value);
+  }
+  function recordReturnedKeys(handle, bindings) {
+    const scope = currentScope(handle);
+    if (!scope || !Array.isArray(bindings)) return;
+    for (const binding of bindings) {
+      if (!binding || !isSafeId(binding.key) || !isSafeId(binding.machineId)
+        || typeof binding.rev !== 'string' || binding.rev.length !== 16 || !/^[0-9a-f]{16}$/.test(binding.rev)
+        || typeof binding.sha256 !== 'string' || binding.sha256.length !== 64 || !/^[0-9a-f]{64}$/.test(binding.sha256)
+        || typeof binding.label !== 'string') continue;
+      putBinding(scope, binding);
+    }
+  }
+  function answerBinding(handle, key, rev) {
+    const scope = currentScope(handle);
+    if (!scope) throw fail('turn_not_active');
+    if (!scope.bindings.has(key)) throw fail('answer_out_of_scope', 403);
+    const binding = scope.bindings.get(key).get(rev);
+    if (!binding) throw fail('snapshot_changed');
+    return { rev, ...binding };
+  }
+  function reserveAnswer(handle, key) {
+    const scope = currentScope(handle);
+    if (!scope) throw fail('turn_not_active');
+    if (!scope.bindings.has(key)) throw fail('answer_out_of_scope', 403);
+    if (scope.calls >= 5 || !scope.sessions.has(key) && scope.sessions.size >= 3) {
+      throw fail('answer_budget_exceeded', 429);
+    }
+    scope.calls++;
+    scope.sessions.add(key);
+  }
+  function completeAnswer(handle, key, textBytes) {
+    const scope = currentScope(handle);
+    if (!scope) throw fail('turn_not_active');
+    scope.frozen = true;
+    if (scope.bytes + textBytes > 24 * 1024) return { budget_clipped: true };
+    scope.bytes += textBytes;
+    return { budget_clipped: false };
+  }
+
   function invalidateContext() { invalidationVersion++; rotateContext = true; }
 
   function snapshot() {
@@ -128,7 +195,7 @@ function createSessionHubService(options = {}) {
       catch (err) { storageFailed(err); }
     }
     return { state, epoch, version, generation, error, disabled, turnInProgress: !!turn,
-      promptVersion: SESSION_HUB_PROMPT_VERSION, thread_id: activeThread,
+      promptVersion: sessionHubPromptVersion(answers), thread_id: activeThread,
       transcripts_remaining: transcriptsRemaining, messages: cachedMessages, memory: memoryState };
   }
   function publish() {
@@ -305,7 +372,7 @@ function createSessionHubService(options = {}) {
           socket.setTimeout(0);
           options.onMcpProcess?.({ pid: hello.pid, pgid: Number(actual), kind: 'mcp' });
           socket.write(`${JSON.stringify({ PALANTIR_SESSION_HUB_TOKEN: token,
-            PALANTIR_SESSION_HUB_BASE_URL: getBaseUrl() })}\n`);
+            PALANTIR_SESSION_HUB_BASE_URL: getBaseUrl(), answers })}\n`);
           // Keep this one connection as MCP liveness evidence; close only the listener to forbid reconnection.
           socketServer.close(() => {});
         }).catch(() => {
@@ -460,7 +527,7 @@ function createSessionHubService(options = {}) {
       if (state !== 'starting' || gen !== generation) return snapshot();
       const binary = resolveBinary();
       if (!binary.executable) throw fail('session_hub_binary_unavailable', 503);
-      const argv = sessionHubArgv(configPath);
+      const argv = sessionHubArgv(configPath, { answers });
       const spawnOptions = { detached: true, cwd, env: spawnEnv() };
       token = crypto.randomBytes(32).toString('hex');
       guard({ command: binary.path, source: 'session-hub' });
@@ -822,6 +889,7 @@ function createSessionHubService(options = {}) {
   function shutdown() { return close({ shutdown: true }); }
   ensureBootCleanup().catch(() => {});
   return { start, message, stop, close, shutdown, newThread, deleteThread,
+    captureHubTurn, recordReturnedKeys, answerBinding, reserveAnswer, completeAnswer,
     listThreads: () => store.list(), messages: (id, query) => store.messages(id, query),
     getMessage: (id, mid) => store.get(id, mid),
     searchHistory: query => store.search(boundThread, query.q, query.limit === undefined ? 10 : Number(query.limit)),

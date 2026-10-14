@@ -21,8 +21,10 @@ socket.on('data', chunk => {
   const env = { PALANTIR_SESSION_HUB_TOKEN: credentials.PALANTIR_SESSION_HUB_TOKEN,
     PALANTIR_SESSION_HUB_BASE_URL: credentials.PALANTIR_SESSION_HUB_BASE_URL };
   if (Object.values(env).some(value => typeof value !== 'string' || !value)) return process.exit(1);
+  if (typeof credentials.answers !== 'boolean') return process.exit(1);
+  const answers = credentials.answers;
   for (const key of Object.keys(process.env)) delete process.env[key];
   Object.assign(process.env, env);
-  const input = require('./session-hub-mcp.cjs').runStdio({ env });
+  const input = require('./session-hub-mcp.cjs').runStdio({ env, answers });
   input.once('close', () => socket.end());
 });
