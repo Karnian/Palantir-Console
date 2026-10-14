@@ -45,11 +45,33 @@ curl -s http://codev2:4177/api/health    # gitSha 가 검토한 SHA 인지
 - 사내 TLS 가로채기 때문에 `npm ci` 는 사내 CA 를 **그 명령에만** 넘긴다(전역 npm 설정은 바꾸지 않았다). 없으면 better-sqlite3 네이티브 빌드가 `self-signed certificate in certificate chain` 으로 실패한다.
 - 갱신 롤백: 서비스 중지 → 이전 SHA checkout → `npm ci` → 백업 DB 복원(migration 이 돌았을 수 있으므로) → 시작.
 
+## 다른 서버 추가
+서버가 늘면 같은 화면에서 함께 본다. 코드 변경 없이 수집 대상 한 줄을 더한다. codev2 가 그 서버에 ssh 로 접속해 수집 코드를 표준입력으로 넘겨 `node -` 로 실행하므로, 대상 서버에는 Palantir 체크아웃이 필요 없다. 지시별 답변 조회도 같은 ssh 경로로 동작한다.
+
+대상 서버 요건: codev2 의 codev 사용자로 비대화형 ssh 접속(키 인증), Node 22 이상, Orca 세션을 보려면 Orca CLI. 비대화형 ssh 의 PATH 에 node·orca 가 없으면 절대경로를 대상 설정에 넣는다.
+
+1. codev2 에 ssh 키 만들기(최초 1회 — 2026-10-14 현재 codev2 에는 개인키가 없다):
+   `ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ''` → 공개키를 대상 서버의 `~/.ssh/authorized_keys` 에 등록.
+2. 접속 확인: `ssh -o BatchMode=yes <user>@<host> 'node --version; command -v orca'`
+3. 첫 수집으로 machine id 만들기(대상 서버에 `~/.config/palantir/observe.json` 이 생긴다. 이 파일은 지우지 말 것):
+   ```sh
+   cd /home/codev/palantir-console
+   d=$(mktemp -d)
+   node scripts/session-snapshot.mjs remote --host <user>@<host> snapshot --out-dir "$d" --label <이름> \
+     [--remote-node /절대경로/node] [--orca-bin /절대경로/orca]
+   ls "$d"     # <machine_id>.json — 파일 이름이 machine id
+   rm -rf "$d"
+   ```
+4. `~/.config/palantir/server.env` 의 `PALANTIR_SNAPSHOT_TARGETS` 배열에 대상 추가:
+   `{"name":"<이름>","kind":"ssh","host":"<user>@<host>","machineId":"<machine_id>","label":"<이름>"}`
+   (필요하면 `"remoteNode"`·`"orcaBin"` 절대경로). 이름·machine id 가 겹치거나 형식이 틀리면 수집 전체가 꺼진다.
+5. `systemctl --user restart palantir-console` → "상태 확인"의 수집 확인 절차로 새 machine 의 `last_result.code=ok` 를 본다.
+
 ## 철수
 `systemctl --user disable --now palantir-console` (데이터는 남는다).
 
 ## 알려진 한계
-- **Mac 세션은 보이지 않는다.** Mac 원격 로그인(sshd)이 꺼져 있어 codev2 → Mac ssh 수집이 불가하다(2026-10-14 실측: 22번 포트 refused). Mac 세션까지 보려면 Mac 원격 로그인을 켜고 codev2 공개키를 등록한 뒤 `PALANTIR_SNAPSHOT_TARGETS` 에 Mac ssh 대상을 추가하고 재시작한다.
+- **Mac 세션은 수집하지 않는다**(2026-10-14 사용자 결정 — 운영 대상에서 제외). 다른 서버가 생기면 "다른 서버 추가" 절차로 함께 본다.
 - 세션 비서는 codev2 의 Claude 자격(`~/.claude/.credentials.json`)으로 돈다.
 - tmux 가 없어 워커 실행 엔진은 SubprocessEngine 이다(현재 워커 기능은 꺼져 있음).
 
