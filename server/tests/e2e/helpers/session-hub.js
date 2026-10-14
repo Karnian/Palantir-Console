@@ -196,6 +196,7 @@ async function expectChatColumn(page, { keyboard = false } = {}) {
   const messages = page.locator('.session-hub-messages');
   const messageBox = await messages.boundingBox();
   expect(Math.abs(messageBox.width - box.width)).toBeLessThanOrEqual(1);
+  const scrollbarWidth = await messages.evaluate(node => node.offsetWidth - node.clientWidth);
   if (box.width > 900) {
     const left = box.x + (box.width - 900) / 2 + 16;
     const right = left + 900 - 32;
@@ -205,7 +206,7 @@ async function expectChatColumn(page, { keyboard = false } = {}) {
       expect(rowBox.x).toBeGreaterThanOrEqual(left - 1);
       expect(rowBox.x + rowBox.width).toBeLessThanOrEqual(right + 1);
       const isUser = await row.evaluate(node => node.classList.contains('manager-msg-row-user'));
-      expect(Math.abs(isUser ? rowBox.x + rowBox.width - right : rowBox.x - left))
+      expect(Math.abs(isUser ? rowBox.x + rowBox.width - (right - scrollbarWidth) : rowBox.x - left))
         .toBeLessThanOrEqual(2);
     }
     const textarea = await chat.locator('.session-hub-input textarea').boundingBox();
@@ -220,7 +221,8 @@ async function expectChatColumn(page, { keyboard = false } = {}) {
     for (const row of await chat.locator('.manager-msg-row-user').all()) {
       if (await row.isVisible()) {
         const rowBox = await row.boundingBox();
-        expect(Math.abs(send.x + send.width - rowBox.x - rowBox.width)).toBeLessThanOrEqual(2);
+        expect(Math.abs(send.x + send.width - rowBox.x - rowBox.width - scrollbarWidth))
+          .toBeLessThanOrEqual(2);
       }
     }
   } else {

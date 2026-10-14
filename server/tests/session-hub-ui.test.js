@@ -454,7 +454,8 @@ test('evidence uses sanitized text only; malformed tokens, code and attributes s
 
 test('session markdown table wrappers preserve table semantics', t => {
   const env = setup(t);
-  const text = '```js\nconst value = 1;\n```\n\n| 이름 | 값 |\n| --- | --- |\n| 항목 | 내용 |';
+  const text = '```js\nconst value = 1;\n```\n\n| 이름 | 값 |\n| --- | --- |\n| 항목 | 내용 |'
+    + '\n\n| 상태 | 수량 |\n| --- | --- |\n| 완료 | 2 |';
   env.render(env.h('div', {}, env.context.renderSessionMarkdown(text)), env.root);
   const pre = env.root.querySelector('pre'), table = env.root.querySelector('table');
   assert.ok(pre); assert.ok(table);
@@ -462,10 +463,15 @@ test('session markdown table wrappers preserve table semantics', t => {
   assert.equal(table.hasAttribute('tabindex'), false);
   assert.equal(table.hasAttribute('role'), false);
   const wrapper = table.parentElement;
-  assert.ok(wrapper.matches('.session-hub-table-scroll[tabindex="0"][role="region"][aria-label="표"]'));
+  assert.ok(wrapper.matches('.session-hub-table-scroll[tabindex="0"][role="region"][aria-label="표 1"]'));
   assert.equal(wrapper.children.length, 1);
   assert.equal(pre.querySelector('code').textContent.trim(), 'const value = 1;');
   assert.equal(table.querySelectorAll('th').length, 2);
+  const labels = () => Array.from(env.root.querySelectorAll('.session-hub-table-scroll'),
+    node => node.getAttribute('aria-label'));
+  assert.deepEqual(labels(), ['표 1', '표 2']);
+  env.render(env.h('div', {}, env.context.renderSessionMarkdown(text)), env.root);
+  assert.deepEqual(labels(), ['표 1', '표 2']);
 });
 
 test('session markdown keeps pre focus across rerenders', t => {
@@ -488,7 +494,7 @@ test('session markdown keeps pre focus across rerenders', t => {
 test('session markdown scrollable HTML keeps sanitization and overrides supplied tabindex', t => {
   const env = setup(t);
   const text = '<pre tabindex="-1" title="code" onfocus="alert(1)"><code>safe code</code></pre>\n\n'
-    + '<table tabindex="-1" title="data" onclick="alert(2)" role="table">'
+    + '<table tabindex="-1" title="data" onclick="alert(2)" role="table" aria-label="원문 이름">'
     + '<tbody><tr><td>safe cell</td></tr></tbody></table>\n\n'
     + '<div class="session-hub-table-scroll" onclick="alert(3)" onfocus="alert(4)">forged</div>';
   env.render(env.h('div', {}, env.context.renderSessionMarkdown(text)), env.root);
@@ -499,7 +505,7 @@ test('session markdown scrollable HTML keeps sanitization and overrides supplied
   assert.ok(pre); assert.ok(table);
   assert.equal(pre.getAttribute('tabindex'), '0');
   assert.equal(table.hasAttribute('tabindex'), false);
-  assert.ok(table.parentElement.matches('.session-hub-table-scroll[tabindex="0"][role="region"][aria-label="표"]'));
+  assert.ok(table.parentElement.matches('.session-hub-table-scroll[tabindex="0"][role="region"][aria-label="표 1"]'));
   assert.equal(pre.getAttribute('title'), 'code');
   assert.equal(table.getAttribute('title'), 'data');
   assert.equal(table.getAttribute('role'), 'table');

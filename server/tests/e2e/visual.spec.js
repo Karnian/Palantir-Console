@@ -642,12 +642,10 @@ test('@visual session-hub column scrollbar [dark]', async ({ page }) => {
   await page.goto('/#manager');
   await expect(page.locator('.session-hub-tools summary')).toContainText('도구 2회 사용');
   // Exercise the capped column at 1100px without the sidebar's 280px allocation.
-  // Keep native scrollbars visible; do not apply stabilize() in this geometry test.
+  // 헤드리스는 스크롤바를 숨김 — 실제 스크롤바에선 오른쪽 끝이 스크롤바 폭만큼 안쪽
+  // (허용, 사용자 합의 후 단순화 결정). 이 기하 테스트에는 stabilize()를 적용하지 않는다.
   await page.addStyleTag({ content: `
     .session-hub-manager .session-hub-sidebar { display: none; }
-    .session-hub-messages, .session-hub-input { scrollbar-width: auto; }
-    .session-hub-messages::-webkit-scrollbar,
-    .session-hub-input::-webkit-scrollbar { display: block; width: 16px; height: 16px; }
   ` });
   await page.evaluate(() => document.fonts.ready);
   const chat = page.locator('.session-hub-chat');
@@ -655,20 +653,15 @@ test('@visual session-hub column scrollbar [dark]', async ({ page }) => {
   await page.locator('.session-hub-tools summary').click();
   const messages = page.locator('.session-hub-messages');
   const dimensions = await messages.evaluate(node => ({ gutter: node.offsetWidth - node.clientWidth,
-    scrollHeight: node.scrollHeight, clientHeight: node.clientHeight,
-    scrollbarGutter: getComputedStyle(node).scrollbarGutter }));
+    scrollHeight: node.scrollHeight, clientHeight: node.clientHeight }));
   expect(dimensions.scrollHeight).toBeGreaterThan(dimensions.clientHeight);
-  expect(dimensions.gutter).toBeGreaterThan(0);
-  expect(dimensions.scrollbarGutter).toBe('stable');
   const input = page.locator('.session-hub-input');
-  expect(await input.evaluate(node => getComputedStyle(node).scrollbarGutter)).toBe('stable');
-  expect(Math.abs(await input.evaluate(node => node.offsetWidth - node.clientWidth)
-    - dimensions.gutter)).toBeLessThanOrEqual(1);
   const user = await chat.locator('.manager-msg-row-user').boundingBox();
   const assistant = await chat.locator('.manager-msg-row-assistant').boundingBox();
   const textarea = input.locator('textarea'), send = input.locator('button[type="submit"]');
   const textareaBox = await textarea.boundingBox(), sendBox = await send.boundingBox();
-  expect(Math.abs(user.x + user.width - sendBox.x - sendBox.width)).toBeLessThanOrEqual(1);
+  expect(Math.abs(sendBox.x + sendBox.width - user.x - user.width
+    - dimensions.gutter)).toBeLessThanOrEqual(1);
   expect(Math.abs(assistant.x - textareaBox.x)).toBeLessThanOrEqual(1);
   await textarea.fill('초점 표시 확인');
   await expect(send).toBeEnabled();
