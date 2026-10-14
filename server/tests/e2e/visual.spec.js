@@ -591,7 +591,7 @@ for (const theme of THEMES) {
       }
       await stabilize(page);
       await expectAssistantLayout(page);
-      await expectChatColumn(page);
+      await expectChatColumn(page, { keyboard: true });
       const chat = await page.locator('.session-hub-chat').boundingBox();
       expect(chat.width).toBeGreaterThan(900);
       const messages = page.locator('.session-hub-messages');
@@ -613,4 +613,81 @@ for (const theme of THEMES) {
         });
     });
   }
+  test(`@visual session-hub tools wrap [${theme}/mobile]`, async ({ page }) => {
+    const { mockSessionHub, expectNoHorizontalOverflow } = require('./helpers/session-hub');
+    await mockSessionHub(page, { longText: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await setTheme(page, theme);
+    await page.goto('/#manager');
+    const tools = page.locator('.session-hub-tools');
+    await expect(tools.locator('summary')).toContainText('도구 2회 사용');
+    await tools.locator('summary').click();
+    await expect(tools).toHaveAttribute('open', '');
+    await expect(tools.locator('li')).toHaveCount(2);
+    for (const item of await tools.locator('li').all()) {
+      const layout = await item.evaluate(node => ({ scrollWidth: node.scrollWidth,
+        clientWidth: node.clientWidth, whiteSpace: getComputedStyle(node).whiteSpace }));
+      expect(layout.whiteSpace).not.toBe('nowrap');
+      expect(layout.scrollWidth).toBeLessThanOrEqual(layout.clientWidth + 1);
+    }
+    await expectNoHorizontalOverflow(page);
+  });
 }
+
+test('@visual session-hub column scrollbar [dark]', async ({ page }) => {
+  const { mockSessionHub, expectNoHorizontalOverflow } = require('./helpers/session-hub');
+  await mockSessionHub(page, { longText: true });
+  await page.setViewportSize({ width: 1100, height: 700 });
+  await setTheme(page, 'dark');
+  await page.goto('/#manager');
+  await expect(page.locator('.session-hub-tools summary')).toContainText('도구 2회 사용');
+  // Exercise the capped column at 1100px without the sidebar's 280px allocation.
+  // Keep native scrollbars visible; do not apply stabilize() in this geometry test.
+  await page.addStyleTag({ content: `
+    .session-hub-manager .session-hub-sidebar { display: none; }
+    .session-hub-messages, .session-hub-input { scrollbar-width: auto; }
+    .session-hub-messages::-webkit-scrollbar,
+    .session-hub-input::-webkit-scrollbar { display: block; width: 16px; height: 16px; }
+  ` });
+  await page.evaluate(() => document.fonts.ready);
+  const chat = page.locator('.session-hub-chat');
+  expect((await chat.boundingBox()).width).toBeGreaterThan(900);
+  await page.locator('.session-hub-tools summary').click();
+  const messages = page.locator('.session-hub-messages');
+  const dimensions = await messages.evaluate(node => ({ gutter: node.offsetWidth - node.clientWidth,
+    scrollHeight: node.scrollHeight, clientHeight: node.clientHeight,
+    scrollbarGutter: getComputedStyle(node).scrollbarGutter }));
+  expect(dimensions.scrollHeight).toBeGreaterThan(dimensions.clientHeight);
+  expect(dimensions.gutter).toBeGreaterThan(0);
+  expect(dimensions.scrollbarGutter).toBe('stable');
+  const input = page.locator('.session-hub-input');
+  expect(await input.evaluate(node => getComputedStyle(node).scrollbarGutter)).toBe('stable');
+  expect(Math.abs(await input.evaluate(node => node.offsetWidth - node.clientWidth)
+    - dimensions.gutter)).toBeLessThanOrEqual(1);
+  const user = await chat.locator('.manager-msg-row-user').boundingBox();
+  const assistant = await chat.locator('.manager-msg-row-assistant').boundingBox();
+  const textarea = input.locator('textarea'), send = input.locator('button[type="submit"]');
+  const textareaBox = await textarea.boundingBox(), sendBox = await send.boundingBox();
+  expect(Math.abs(user.x + user.width - sendBox.x - sendBox.width)).toBeLessThanOrEqual(1);
+  expect(Math.abs(assistant.x - textareaBox.x)).toBeLessThanOrEqual(1);
+  await textarea.fill('초점 표시 확인');
+  await expect(send).toBeEnabled();
+  for (const control of [textarea, send]) {
+    await control.focus();
+    await page.keyboard.press('ArrowLeft');
+    const focus = await control.evaluate(node => {
+      const style = getComputedStyle(node), box = node.getBoundingClientRect();
+      const form = node.closest('.session-hub-input'), formBox = form.getBoundingClientRect();
+      const left = formBox.left + form.clientLeft, top = formBox.top + form.clientTop;
+      return { visible: node.matches(':focus-visible'), outline: style.outlineStyle,
+        shadow: style.boxShadow, extent: Math.max(2,
+          parseFloat(style.outlineWidth) + Math.max(0, parseFloat(style.outlineOffset))),
+        clearance: Math.min(box.left - left, left + form.clientWidth - box.right,
+          box.top - top, top + form.clientHeight - box.bottom) };
+    });
+    expect(focus.visible).toBe(true);
+    expect(focus.outline !== 'none' || focus.shadow !== 'none').toBe(true);
+    expect(focus.clearance).toBeGreaterThanOrEqual(focus.extent);
+  }
+  await expectNoHorizontalOverflow(page);
+});

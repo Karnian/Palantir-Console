@@ -8841,10 +8841,14 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 .nav-work-label { font-size: 13px; }
 .session-hub-messages {
   flex: 1; min-height: 0; overflow: auto; padding: 12px 16px;
+  scrollbar-gutter: stable;
   padding-inline: max(16px, calc((100% - var(--session-hub-column-max)) / 2 + 16px));
 }
 .session-hub-empty { color: var(--text-secondary); font-size: 13px; line-height: 1.6; }
-.session-hub-input { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--border); }
+.session-hub-input {
+  display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--border);
+  overflow: hidden; scrollbar-gutter: stable;
+}
 /* Container queries require a literal threshold; narrow chats retain their original padding. */
 @container session-hub-chat (width > 900px) {
   .session-hub-input {
@@ -8909,11 +8913,11 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 .session-hub-chat .manager-msg-row,
 .session-hub-chat .manager-msg,
 .session-hub-chat .manager-msg-content { min-width: 0; }
-.session-hub-chat .manager-msg-assistant .markdown-body table {
-  display: block; overflow-x: auto; max-width: 100%;
+.session-hub-chat .session-hub-table-scroll {
+  overflow-x: auto; max-width: 100%;
 }
 .session-hub-chat .markdown-body pre:focus-visible,
-.session-hub-chat .markdown-body table:focus-visible {
+.session-hub-chat .session-hub-table-scroll:focus-visible {
   outline: none; box-shadow: var(--focus-ring);
 }
 .all-sessions-panel .session-row {

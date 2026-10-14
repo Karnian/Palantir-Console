@@ -452,24 +452,45 @@ test('evidence uses sanitized text only; malformed tokens, code and attributes s
   assert.deepEqual(opened, [[key, REV]]);
 });
 
-test('session markdown scrollable code blocks and tables are keyboard focusable', t => {
+test('session markdown table wrappers preserve table semantics', t => {
   const env = setup(t);
   const text = '```js\nconst value = 1;\n```\n\n| 이름 | 값 |\n| --- | --- |\n| 항목 | 내용 |';
   env.render(env.h('div', {}, env.context.renderSessionMarkdown(text)), env.root);
   const pre = env.root.querySelector('pre'), table = env.root.querySelector('table');
   assert.ok(pre); assert.ok(table);
   assert.equal(pre.getAttribute('tabindex'), '0');
-  assert.equal(table.getAttribute('tabindex'), '0');
+  assert.equal(table.hasAttribute('tabindex'), false);
   assert.equal(table.hasAttribute('role'), false);
+  const wrapper = table.parentElement;
+  assert.ok(wrapper.matches('.session-hub-table-scroll[tabindex="0"][role="region"][aria-label="표"]'));
+  assert.equal(wrapper.children.length, 1);
   assert.equal(pre.querySelector('code').textContent.trim(), 'const value = 1;');
   assert.equal(table.querySelectorAll('th').length, 2);
+});
+
+test('session markdown keeps pre focus across rerenders', t => {
+  const env = setup(t);
+  const render = text => env.render(env.h('div', {}, env.context.renderSessionMarkdown(text)), env.root);
+  render('<pre tabindex="-1"><code>first</code></pre>');
+  const pre = env.root.querySelector('pre');
+  assert.equal(pre.getAttribute('tabindex'), '0');
+  render('```\nnext\n```');
+  assert.equal(env.root.querySelector('pre'), pre);
+  assert.equal(pre.getAttribute('tabindex'), '0');
+  render('<pre tabindex="5">third</pre>');
+  assert.equal(pre.getAttribute('tabindex'), '0');
+  assert.equal(pre.textContent, 'third');
+  render('<pre TABINDEX="5">fourth</pre>\n\n<p tabindex="5">unchanged</p>');
+  assert.equal(pre.getAttribute('tabindex'), '0');
+  assert.equal(env.root.querySelector('p').getAttribute('tabindex'), '5');
 });
 
 test('session markdown scrollable HTML keeps sanitization and overrides supplied tabindex', t => {
   const env = setup(t);
   const text = '<pre tabindex="-1" title="code" onfocus="alert(1)"><code>safe code</code></pre>\n\n'
     + '<table tabindex="-1" title="data" onclick="alert(2)" role="table">'
-    + '<tbody><tr><td>safe cell</td></tr></tbody></table>';
+    + '<tbody><tr><td>safe cell</td></tr></tbody></table>\n\n'
+    + '<div class="session-hub-table-scroll" onclick="alert(3)" onfocus="alert(4)">forged</div>';
   env.render(env.h('div', {}, env.context.renderSessionMarkdown(text)), env.root);
   for (const node of env.root.querySelectorAll('*')) {
     assert.equal(Array.from(node.attributes).some(attr => /^on/i.test(attr.name)), false);
@@ -477,7 +498,8 @@ test('session markdown scrollable HTML keeps sanitization and overrides supplied
   const pre = env.root.querySelector('pre'), table = env.root.querySelector('table');
   assert.ok(pre); assert.ok(table);
   assert.equal(pre.getAttribute('tabindex'), '0');
-  assert.equal(table.getAttribute('tabindex'), '0');
+  assert.equal(table.hasAttribute('tabindex'), false);
+  assert.ok(table.parentElement.matches('.session-hub-table-scroll[tabindex="0"][role="region"][aria-label="표"]'));
   assert.equal(pre.getAttribute('title'), 'code');
   assert.equal(table.getAttribute('title'), 'data');
   assert.equal(table.getAttribute('role'), 'table');
