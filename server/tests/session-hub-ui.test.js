@@ -463,15 +463,41 @@ test('session markdown table wrappers preserve table semantics', t => {
   assert.equal(table.hasAttribute('tabindex'), false);
   assert.equal(table.hasAttribute('role'), false);
   const wrapper = table.parentElement;
-  assert.ok(wrapper.matches('.session-hub-table-scroll[tabindex="0"][role="region"][aria-label="표 1"]'));
+  assert.ok(wrapper.matches('.session-hub-table-scroll[tabindex="0"]'));
   assert.equal(wrapper.children.length, 1);
   assert.equal(pre.querySelector('code').textContent.trim(), 'const value = 1;');
   assert.equal(table.querySelectorAll('th').length, 2);
-  const labels = () => Array.from(env.root.querySelectorAll('.session-hub-table-scroll'),
-    node => node.getAttribute('aria-label'));
-  assert.deepEqual(labels(), ['표 1', '표 2']);
-  env.render(env.h('div', {}, env.context.renderSessionMarkdown(text)), env.root);
-  assert.deepEqual(labels(), ['표 1', '표 2']);
+  const wrappers = env.root.querySelectorAll('.session-hub-table-scroll');
+  assert.equal(wrappers.length, 2);
+  for (const node of wrappers) {
+    assert.equal(node.getAttribute('tabindex'), '0');
+    assert.equal(node.hasAttribute('role'), false);
+    assert.equal(node.hasAttribute('aria-label'), false);
+  }
+});
+
+test('session markdown does not add focus to aria-hidden code blocks or tables', t => {
+  const env = setup(t);
+  const table = '<table title="hidden table"><tbody><tr><td>hidden cell</td></tr></tbody></table>';
+  const text = '<div aria-hidden="true"><div aria-hidden="false">'
+    + '<pre tabindex="-1"><code>hidden code</code></pre>' + table + '</div></div>';
+  const render = content => env.render(env.h('div', {}, env.context.renderSessionMarkdown(content)), env.root);
+  render(text);
+  assert.equal(env.root.querySelectorAll('[tabindex="0"]').length, 0);
+  assert.equal(env.root.querySelector('pre').hasAttribute('tabindex'), false);
+  assert.equal(env.root.querySelectorAll('.session-hub-table-scroll').length, 0);
+  assert.equal(env.root.querySelector('table').getAttribute('title'), 'hidden table');
+  // A hidden subtree does not affect later siblings or a subsequent render.
+  render(text + '<pre>visible sibling</pre>' + table);
+  assert.equal(env.root.querySelectorAll('pre')[1].getAttribute('tabindex'), '0');
+  assert.equal(env.root.querySelectorAll('.session-hub-table-scroll[tabindex="0"]').length, 1);
+  render('<pre tabindex="5">visible code</pre>' + table);
+  assert.equal(env.root.querySelector('pre').getAttribute('tabindex'), '0');
+  render('<pre aria-hidden="true" tabindex="5">hidden code</pre>'
+    + table.replace('<table ', '<table aria-hidden="true" '));
+  assert.equal(env.root.querySelectorAll('[tabindex="0"]').length, 0);
+  assert.equal(env.root.querySelector('pre').hasAttribute('tabindex'), false);
+  assert.equal(env.root.querySelectorAll('.session-hub-table-scroll').length, 0);
 });
 
 test('session markdown keeps pre focus across rerenders', t => {
@@ -505,7 +531,9 @@ test('session markdown scrollable HTML keeps sanitization and overrides supplied
   assert.ok(pre); assert.ok(table);
   assert.equal(pre.getAttribute('tabindex'), '0');
   assert.equal(table.hasAttribute('tabindex'), false);
-  assert.ok(table.parentElement.matches('.session-hub-table-scroll[tabindex="0"][role="region"][aria-label="표 1"]'));
+  assert.ok(table.parentElement.matches('.session-hub-table-scroll[tabindex="0"]'));
+  assert.equal(table.parentElement.hasAttribute('role'), false);
+  assert.equal(table.parentElement.hasAttribute('aria-label'), false);
   assert.equal(pre.getAttribute('title'), 'code');
   assert.equal(table.getAttribute('title'), 'data');
   assert.equal(table.getAttribute('role'), 'table');

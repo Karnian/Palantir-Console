@@ -235,6 +235,9 @@ async function expectChatColumn(page, { keyboard = false } = {}) {
   let overflowing = 0, shortTables = 0;
   for (const wrapper of await wrappers.all()) {
     await expect(wrapper).toBeVisible();
+    await expect(wrapper).toHaveAttribute('tabindex', '0');
+    expect(await wrapper.getAttribute('role')).toBeNull();
+    expect(await wrapper.getAttribute('aria-label')).toBeNull();
     const dimensions = await wrapper.evaluate(node => {
       const wrapperBox = node.getBoundingClientRect();
       const bubbleBox = node.closest('.manager-msg').getBoundingClientRect();
