@@ -1,6 +1,8 @@
 # CLAUDE.md
 
-Palantir Console — 여러 머신의 AI 코딩 세션(Claude Code, Codex)을 직접 띄우고, 하나의 채팅에서 지시·승인·상태·결과를 다루는 독립 관제 허브. 밖에서 시작한 세션은 벤더 공식 hooks 로 관측만 하고 지시하지 않는다. Orca 는 선택 연동(기본 꺼짐)이다.
+Palantir Console — **목표**: 여러 머신의 AI 코딩 세션(Claude Code, Codex)을 직접 띄우고, 하나의 채팅에서 지시·승인·상태·결과를 다루는 독립 관제 허브. 밖에서 시작한 세션은 관측만 하고 지시하지 않는다. Orca 는 선택 연동(기본 꺼짐)이다.
+
+**현재 구현**: 관측은 각 머신의 transcript 읽기(`scripts/lib/sessionSnapshotReader.cjs`) + 채팅 조회(C1 세션 비서)까지다. 세션 호스트(SH1)와 공식 hooks 수집(SH2~SH3)은 아직 없다.
 
 **현재 방향 소스**: `docs/specs/instruction-centric-direction-brief.md` §0.2 (v6, 2026-10-20 LOCKED, PR #609). 진행 순서 SH0~SH5(§0.2.10). 이 파일의 다른 서술과 충돌하면 §0.2 가 우선한다.
 - **의존 원칙**: 핵심 경로는 Orca·남의 비공개 계약 없이 성립해야 한다. 외부 인터페이스는 벤더 공식 문서(hooks, stream-json, `codex exec --json`) 우선. transcript JSONL 은 안정 계약이 아니므로 교체 가능한 보조로만. TUI 키 주입(tmux send-keys)은 자동 지시 경로로 쓰지 않는다. AGPL 코드 반입 금지.

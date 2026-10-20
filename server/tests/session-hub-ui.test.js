@@ -3178,3 +3178,28 @@ test('memory approval shows deleted source status instead of stale source conten
   assert.ok(env.root.querySelector('blockquote').textContent.includes('삭제된 대화'));
   assert.equal(env.root.textContent.includes('STALE_DELETED_SOURCE'), false);
 });
+
+test('session detail Orca badge follows its own machine coverage', async t => {
+  const env = setup(t), { alpha, beta } = fixture(t);
+  for (const [state, confirmed, expected] of [
+    ['off', false, null],
+    ['off', true, null],
+    ['unavailable', false, 'Orca 연결 미확정'],
+    ['partial', false, 'Orca 연결 미확정'],
+    ['ok', false, 'Orca 연결 미확정'],
+    ['ok', true, 'Orca 연결됨'],
+  ]) {
+    beta.coverage.orca = { state, code: state === 'off' ? 'orca_off' : state === 'ok' ? null : 'orca_unavailable' };
+    beta.sessions[0].orca_link.confirmed = confirmed;
+    const cards = [...env.context.snapshotCards(alpha), ...env.context.snapshotCards(beta)];
+    env.render(env.h(env.context.SessionHubDetail, {
+      data: { cards, load: { rev: REV }, now: Date.parse(beta.generated_at) },
+      selection: { key: beta.sessions[0].key },
+    }), env.root);
+    await flushEffects();
+    const badges = Array.from(env.root.querySelectorAll('.session-hub-detail-header .work-meta > span'))
+      .filter(node => node.textContent.startsWith('Orca 연결'));
+    assert.deepEqual(badges.map(node => node.textContent), expected ? [expected] : [],
+      `${state}, confirmed=${confirmed}: badge must follow the selected machine`);
+  }
+});

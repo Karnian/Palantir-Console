@@ -45,6 +45,12 @@ Orca 연동은 **기본 꺼짐**이다(방향 brief §0.2.1). 꺼져 있으면 O
 켜려면 `--orca`(PATH의 `orca`) 또는 `--orca-bin /home/<user>/.local/bin/orca`(그 경로)를 준다. 둘을 함께 주면 `request_invalid`다.
 켜졌는데 Orca를 쓸 수 없으면 기존처럼 `unavailable`로 표시하고 수집은 계속한다.
 
+**기존 사용자 전환(2026-10-21, SH0)**: 이전에는 플래그 없이도 Orca를 조회했다. 업데이트 뒤 플래그·대상 키 없이 수집하면 Orca 정보가 빠진다.
+- 빠지는 것: Orca 워크스페이스·터미널 연결(`orca_link` 확정), Orca 기준 세션 상태(상태 출처가 `기록`/`근거 없음`이 된다), 보드의 Orca agent 정보.
+- 남는 것: Claude Code·Codex 기록에서 읽는 세션·지시·답변 전부.
+- 이전처럼 쓰려면 CLI에 `--orca`(또는 `--orca-bin`), 서버 대상에 `"orca":true`(또는 `"orcaBin"`)를 넣고 다시 수집한다. 이미 만든 스냅샷 파일은 새로 수집하기 전까지 그대로다.
+- codev2 운영 설정은 `orcaBin`이 있어 켜진 상태가 유지된다([codev2 runbook](./runbook-codev2-ops.md)).
+
 `--out-dir <실제 절대경로>`로 출력 디렉터리를 명시할 수도 있다. 실행 실패나 수신 검증 실패 시
 기존 파일은 보존된다. 목록과 상세 응답에는 `Cache-Control: no-store`가 붙는다.
 

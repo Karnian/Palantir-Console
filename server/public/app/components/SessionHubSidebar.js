@@ -119,7 +119,8 @@ export function SessionHubDetail({ data, selection, revisionMismatch, onAsk }) {
           : card.status.source === 'transcript' ? '기록' : '근거 없음'}</span>
         <${SnapshotTime} value=${card.status.evidence_at} label="근거" now=${now} />
         ${String(card.status.reason || '').includes('conflict') && html`<span class="work-warning">상태 충돌</span>`}
-        <span>${card.orca_link.confirmed ? 'Orca 연결됨' : 'Orca 연결 미확정'}</span>
+        ${card.snapshotLoad?.coverage.orca.state !== 'off' && html`<span>${card.orca_link.confirmed
+          ? 'Orca 연결됨' : 'Orca 연결 미확정'}</span>`}
         <button class="ghost" type="button" onClick=${() => onAsk(card.key, load.rev)}>비서에게 묻기</button>
       </div>`}
     </header>

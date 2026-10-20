@@ -2,12 +2,12 @@
 
 [한국어](README.ko.md)
 
-An independent control hub that launches AI coding sessions (Claude Code, Codex) across machines and handles instructions, approvals, status, and results from a single chat.
+**Goal**: an independent control hub that launches AI coding sessions (Claude Code, Codex) across machines and handles instructions, approvals, status, and results from a single chat.
 
 > **Direction (revised 2026-10-20, [direction brief](docs/specs/instruction-centric-direction-brief.md) §0.2)**
-> - Sessions started elsewhere (a terminal, Orca, ...) are **observed only**, through the vendors' official hooks. Palantir does not send them instructions.
+> - Sessions started elsewhere (a terminal, Orca, ...) are **observed only**. Palantir does not send them instructions. Observation moves to the vendors' official hooks in SH2–SH3.
 > - **Orca is an optional integration and is off by default.** The core paths (observing sessions, status, instructions) work without Orca installed.
-> - Available today: observing sessions across machines and querying them from chat (session assistant). The session host that launches sessions and takes instructions from chat is built in SH1. The order is SH0–SH5 in brief §0.2.10.
+> - **Available today**: observing sessions by reading each machine's Claude Code and Codex transcripts, and querying them from chat (session assistant). Not built yet: the session host that launches sessions and takes instructions from chat (SH1), and hooks collection (SH2–SH3). The order is SH0–SH5 in brief §0.2.10.
 > - The 3-tier delegation below (Top → Operator → Worker) is **dormant**. The code stays and is not deleted, but no new features go into it.
 
 ```
