@@ -41,7 +41,15 @@ node scripts/session-snapshot.mjs remote --host codev@codev2 \
 
 `--label <name>`은 해당 머신의 표시 이름을 설정에 저장한다. 허용 문자는 영문·숫자·`.`·`_`·`-`이며,
 길이는 1~32자이고 `-`로 시작할 수 없다. 생략하면 기존 이름을 유지한다.
-원격 Orca가 비대화형 PATH에 없으면 `--orca-bin /home/<user>/.local/bin/orca`를 지정한다.
+Orca 연동은 **기본 꺼짐**이다(방향 brief §0.2.1). 꺼져 있으면 Orca를 실행하지 않고 coverage에 `off`로 표시한다.
+켜려면 `--orca`(PATH의 `orca`) 또는 `--orca-bin /home/<user>/.local/bin/orca`(그 경로)를 준다. 둘을 함께 주면 `request_invalid`다.
+켜졌는데 Orca를 쓸 수 없으면 기존처럼 `unavailable`로 표시하고 수집은 계속한다.
+
+**기존 사용자 전환(2026-10-21, SH0)**: 이전에는 플래그 없이도 Orca를 조회했다. 업데이트 뒤 플래그·대상 키 없이 수집하면 Orca 정보가 빠진다.
+- 빠지는 것: Orca 워크스페이스·터미널 연결(`orca_link` 확정), Orca 기준 세션 상태(상태 출처가 `기록`/`근거 없음`이 된다), 보드의 Orca agent 정보.
+- 남는 것: Claude Code·Codex 기록에서 읽는 세션·지시·답변 전부.
+- 이전처럼 쓰려면 CLI에 `--orca`(또는 `--orca-bin`), 서버 대상에 `"orca":true`(또는 `"orcaBin"`)를 넣고 다시 수집한다. 이미 만든 스냅샷 파일은 새로 수집하기 전까지 그대로다.
+- codev2 운영 설정은 `orcaBin`이 있어 켜진 상태가 유지된다([codev2 runbook](./runbook-codev2-ops.md)).
 
 `--out-dir <실제 절대경로>`로 출력 디렉터리를 명시할 수도 있다. 실행 실패나 수신 검증 실패 시
 기존 파일은 보존된다. 목록과 상세 응답에는 `Cache-Control: no-store`가 붙는다.
@@ -49,7 +57,8 @@ node scripts/session-snapshot.mjs remote --host codev@codev2 \
 ## 서버에서 새로 만들기·자동 수집
 
 이 Mac에서 실행하는 보드 서버가 로컬 CLI와 `codev@codev2` SSH를 실행한다.
-서버 사용자에게 비대화형 SSH 접속과 각 머신의 Orca 실행 권한이 있어야 한다.
+서버 사용자에게 비대화형 SSH 접속 권한이 있어야 한다. Orca를 켠 대상은 그 머신의 Orca 실행 권한도 필요하다.
+대상의 Orca는 `"orcaBin":"<절대경로>"` 또는 `"orca":true`(PATH의 `orca`)로 켠다. 둘 다 없으면 꺼짐이다.
 부팅 전에 대상과 예상 machine id를 고정한다.
 중복 machine id나 잘못된 설정은 서비스를 비활성화한다.
 
@@ -147,7 +156,8 @@ node scripts/session-snapshot.mjs exclude --session 'claude:<session_id>'
 | `target_not_found` | 현재 원본에 대상이 없음. 지정자와 머신 확인 |
 | `request_invalid` | 요청·설정·정책 검증 실패. 인자와 설정 확인 |
 | `internal_error` | 고정 코드로 보고된 내부 실패. 기존 파일 보존 상태에서 원인 점검 |
-| `orca_unavailable` | Orca 관측 실패. 스냅샷은 coverage에 실패를 표시하고 계속 생성할 수 있음 |
+| `orca_unavailable` | Orca를 켰는데 관측 실패. 스냅샷은 coverage에 실패를 표시하고 계속 생성할 수 있음 |
+| `orca_off` | Orca 연동이 꺼져 있음(기본). coverage에만 표시되며 실패가 아님 |
 
 `config_busy`는 기다리지 않고 끝난다. 잠금에는 자동 만료가 없다. 오래된 잠금을 지우려면
 **그 머신에서 실행 중인 snapshot/exclude 및 관련 번들 Node 프로세스가 없음을 확인한 뒤에만** 삭제한다.

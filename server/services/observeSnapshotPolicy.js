@@ -8,14 +8,14 @@ const INSTR_ID_RE = /^(claude|codex):[A-Za-z0-9_-]{1,64}:[uin][A-Za-z0-9_-]{1,64
 const ID_RE = /^[A-Za-z0-9:_-]{1,128}$/;
 const READER_BUILD_RE = /^[0-9a-f]{16}$/;
 const STATUS_CODES = Object.freeze(['ok', 'node_unsupported', 'config_busy', 'key_unavailable',
-  'target_changed', 'confirm_mismatch', 'target_not_found', 'request_invalid', 'internal_error', 'orca_unavailable']);
+  'target_changed', 'confirm_mismatch', 'target_not_found', 'request_invalid', 'internal_error', 'orca_unavailable', 'orca_off']);
 const ENUMS = Object.freeze({
   provider: ['claude', 'codex'],
   run_mode: ['interactive', 'exec', 'subagent', 'unsupported'],
   kind: ['human', 'slash', 'shell', 'reply'],
   first_instruction: ['recoverable', 'unrecoverable', 'unknown'],
   evidence: ['prompt_exact', 'prompt_trunc', 'prompt_prefix', 'cwd_only', 'ambiguous', 'none'],
-  state: ['ok', 'unavailable', 'partial'],
+  state: ['ok', 'unavailable', 'partial', 'off'],
   agent_state: ['working', 'blocked', 'waiting', 'done', 'unknown'],
   status: ['active', 'idle', 'archived', 'running', 'stopped', 'unknown'],
   agent_type: ['claude', 'codex', 'unknown'],

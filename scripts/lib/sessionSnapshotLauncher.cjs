@@ -71,8 +71,8 @@ function validRequest(value) {
     && isFinite(Date.parse(value.now)) && new Date(value.now).toISOString() === value.now
     && (!hasLabel || typeof value.machine_label === 'string'
       && /^[A-Za-z0-9._-]{1,32}$/.test(value.machine_label) && value.machine_label.charAt(0) !== '-')
-    && typeof value.include_exec === 'boolean' && typeof value.orca_bin === 'string'
-    && /^[A-Za-z0-9._/-]{1,512}$/.test(value.orca_bin) && value.orca_bin.charAt(0) !== '-'
+    && typeof value.include_exec === 'boolean' && (value.orca_bin === null || typeof value.orca_bin === 'string'
+    && /^[A-Za-z0-9._/-]{1,512}$/.test(value.orca_bin) && value.orca_bin.charAt(0) !== '-')
     && (value.op !== 'exclude_commit' || typeof value.token === 'string' && /^[0-9a-f]{64}$/.test(value.token));
 }
 function launch() {
@@ -91,8 +91,10 @@ function launch() {
   var reader = require('./sessionSnapshotReader.cjs');
   var home = require('node:os').homedir();
   var options = { homeDir: home, configDir: require('node:path').join(home, '.config', 'palantir'),
-    now: new Date(REQUEST.now), includeExec: REQUEST.include_exec, readerBuild: launcherBuild,
-    runOrca: function runOrca(args) { return reader.defaultRunOrca(args, REQUEST.orca_bin); } };
+    now: new Date(REQUEST.now), includeExec: REQUEST.include_exec, readerBuild: launcherBuild };
+  if (REQUEST.orca_bin !== null && REQUEST.op !== 'answer_query') {
+    options.runOrca = function runOrca(args) { return reader.defaultRunOrca(args, REQUEST.orca_bin); };
+  }
   if (REQUEST.op === 'snapshot' && Object.prototype.hasOwnProperty.call(REQUEST, 'machine_label')) {
     options.machineLabel = REQUEST.machine_label;
   }

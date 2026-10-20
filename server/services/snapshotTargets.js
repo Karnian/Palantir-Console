@@ -1,7 +1,7 @@
 'use strict';
 
 const { isSafeId } = require('./observeSnapshotPolicy');
-const KEYS = ['name', 'kind', 'host', 'machineId', 'label', 'remoteNode', 'orcaBin'];
+const KEYS = ['name', 'kind', 'host', 'machineId', 'label', 'remoteNode', 'orcaBin', 'orca'];
 const LABEL = /^[A-Za-z0-9._][A-Za-z0-9._-]{0,31}$/;
 const ABSOLUTE = /^\/[A-Za-z0-9._/-]+$/;
 const fail = (code, status = 400) => Object.assign(new Error(code), { code, status });
@@ -13,6 +13,7 @@ function parseSnapshotTargets(raw) {
   return values.map(value => {
     if (!value || typeof value !== 'object' || Array.isArray(value)
       || Object.keys(value).some(key => !KEYS.includes(key))
+      || Object.hasOwn(value, 'orca') && value.orca !== true
       || typeof value.name !== 'string' || !LABEL.test(value.name)
       || typeof value.machineId !== 'string' || !isSafeId(value.machineId)
       || !['local', 'ssh'].includes(value.kind) || names.has(value.name) || ids.has(value.machineId)) {

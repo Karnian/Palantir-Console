@@ -1443,7 +1443,11 @@ function readOrca(readerOptions, config, all, coverage, outputBudget) {
     worktrees: [],
     terminals: []
   };
-  const run = readerOptions.runOrca || defaultRunOrca;
+  if (typeof readerOptions.runOrca !== 'function') {
+    coverage.orca = { state: 'off', code: 'orca_off' };
+    return out;
+  }
+  const run = readerOptions.runOrca;
   let worktreeResponseData;
   let terminalResponseData;
   try {

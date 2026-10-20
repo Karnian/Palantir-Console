@@ -412,3 +412,75 @@ for (const signal of ['SIGTERM', 'SIGINT']) {
     assert.equal(process.listenerCount(signal), 0);
   });
 }
+
+test('CLI opt-in flags serialize identically for local and remote and off passes spawn guard', async t => {
+  const f = fixture(t);
+  const binDir = path.join(f.root, 'bin');
+  fs.mkdirSync(binDir);
+  fs.symlinkSync(f.request.orca_bin, path.join(binDir, 'orca'));
+  const previousPath = process.env.PATH;
+  process.env.PATH = binDir + path.delimiter + previousPath;
+  f.env.PATH = process.env.PATH;
+  t.after(() => { process.env.PATH = previousPath; });
+  for (const remote of [false, true]) {
+    for (const [flags, bin] of [[[], null], [['--orca'], 'orca'], [['--orca-bin', f.request.orca_bin], f.request.orca_bin]]) {
+      const argv = [...(remote ? ['remote', '--host', 'synthetic@host'] : []),
+        'snapshot', '--now', NOW, '--out-dir', f.out, ...flags];
+      let request;
+      const io = capture();
+      const code = await (await cli).main(argv, { ...io, env: f.env,
+        spawnImpl(command, args, options) {
+          const child = require('node:child_process').spawn(command, args, options);
+          const original = child.stdin.end.bind(child.stdin);
+          child.stdin.end = (data, ...rest) => {
+            request = JSON.parse(data.toString().split('\n')[0].slice('const REQUEST = '.length, -1));
+            return original(data, ...rest);
+          };
+          return child;
+        } });
+      assert.equal(code, 0, io.errors());
+      assert.equal(request.orca_bin, bin);
+    }
+  }
+  for (const flags of [['--orca', '--orca-bin', f.request.orca_bin], ['--orca', '--orca']]) {
+    const denied = recordingSpawn(t);
+    const result = await invoke(f, ['snapshot', '--out-dir', f.out, ...flags], '', f.env, denied.spawnImpl);
+    assert.equal(result.code, 2);
+    assert.match(result.errors(), /^request_invalid/);
+    assert.equal(denied.calls.length, 0);
+  }
+  for (const flag of ['--orca', '--orca-bin']) {
+    const result = await invoke(f, ['answer', '--instruction', 'claude:s:uu#' + 'a'.repeat(16),
+      '--file-fp', 'b'.repeat(16), flag, ...(flag === '--orca-bin' ? [f.request.orca_bin] : [])]);
+    assert.equal(result.code, 2);
+  }
+});
+
+test('U7 real local CLI collects transcripts without Orca installation or artifacts', t => {
+  const f = fixture(t);
+  const codex = path.join(f.home, '.codex/sessions/s.jsonl');
+  fs.mkdirSync(path.dirname(codex), { recursive: true });
+  fs.writeFileSync(codex, [
+    { type: 'session_meta', timestamp: NOW, payload: { id: 'cx', cwd: '/synthetic/repo', source: 'cli', thread_source: 'user' } },
+    { type: 'response_item', timestamp: NOW, payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Codex instruction' }] } }
+  ].map(JSON.stringify).join('\n'));
+  const emptyPath = path.join(f.root, 'empty-bin');
+  fs.mkdirSync(emptyPath);
+  const env = { ...f.env, PATH: emptyPath };
+  // The opt-in control must reach ENOENT rather than the test guard.
+  delete env.NODE_TEST_CONTEXT;
+  delete env.PALANTIR_BLOCK_REAL_SPAWN;
+  const entry = path.resolve(__dirname, '../../scripts/session-snapshot.mjs');
+  assert.equal(fs.existsSync(path.join(f.home, 'Library')), false);
+  assert.equal(fs.existsSync(path.join(f.home, 'orchestration.db')), false);
+  for (const flags of [[], ['--orca']]) {
+    const value = spawnSync(process.execPath, [entry, 'snapshot', '--now', NOW, '--out-dir', f.out, ...flags],
+      { env, encoding: 'utf8' });
+    assert.equal(value.status, 0, value.stderr);
+    const snapshot = JSON.parse(fs.readFileSync(path.join(f.out, fs.readdirSync(f.out).find(n => n.endsWith('.json')))));
+    assert.ok(snapshot.sessions.length > 0);
+    assert.ok(snapshot.instructions.length > 0);
+    assert.deepEqual(snapshot.sessions.map(s => s.provider).sort(), ['claude', 'codex']);
+    assert.equal(snapshot.coverage.orca.state, flags.length ? 'unavailable' : 'off');
+  }
+});

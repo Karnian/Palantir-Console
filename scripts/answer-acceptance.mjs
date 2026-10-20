@@ -32,7 +32,8 @@ function targetsFrom(raw) {
   const label = /^[A-Za-z0-9._][A-Za-z0-9._-]{0,31}$/, absolute = /^\/[A-Za-z0-9._/-]+$/;
   return values.map(value => {
     if (!value || typeof value !== 'object' || Array.isArray(value)
-      || Object.keys(value).some(k => !['name', 'kind', 'host', 'machineId', 'label', 'remoteNode', 'orcaBin'].includes(k))
+      || Object.keys(value).some(k => !['name', 'kind', 'host', 'machineId', 'label', 'remoteNode', 'orcaBin', 'orca'].includes(k))
+      || Object.hasOwn(value, 'orca') && value.orca !== true
       || typeof value.name !== 'string' || !label.test(value.name) || !policy.isSafeId(value.machineId)
       || !['local', 'ssh'].includes(value.kind) || names.has(value.name) || ids.has(value.machineId)
       || value.kind === 'ssh' && (typeof value.host !== 'string' || !/^[A-Za-z0-9._][A-Za-z0-9._-]*(?:@[A-Za-z0-9._-]+)?$/.test(value.host))

@@ -49,7 +49,7 @@ function parseArguments(argv, env) {
     if (item === 'snapshot' || item === 'exclude' || item === 'answer') {
       if (operation) invalidInput();
       operation = item;
-    } else if (item === '--include-exec' || item === '--diag' || item === '--emit-envelope') {
+    } else if (item === '--orca' || item === '--include-exec' || item === '--diag' || item === '--emit-envelope') {
       if (values[item]) invalidInput();
       values[item] = true;
     } else if (['--host', '--remote-node', '--now', '--out-dir', '--orca-bin',
@@ -73,13 +73,14 @@ function parseArguments(argv, env) {
   if (!Number.isFinite(+now) || !/^\d{4}-/.test(now.toISOString())) invalidInput('now_invalid');
   const label = values['--label'];
   if (label !== undefined && (!/^[A-Za-z0-9._-]{1,32}$/.test(label) || label.startsWith('-'))) invalidInput('label_invalid');
+  if (values['--orca'] && values['--orca-bin'] !== undefined) invalidInput();
   const request = { schema: 'palantir.snapshot-request/1', op: 'snapshot', now: now.toISOString(),
-    include_exec: values['--include-exec'] === true, orca_bin: values['--orca-bin'] ?? 'orca' };
+    include_exec: values['--include-exec'] === true, orca_bin: values['--orca-bin'] ?? (values['--orca'] ? 'orca' : null) };
   const outDir = values['--out-dir'] || env.PALANTIR_OBSERVE_SNAPSHOT_DIR;
   if (operation !== 'answer' && ['--diag', '--emit-envelope', '--file-fp'].some(key => values[key] !== undefined)) invalidInput();
   if (operation === 'answer') {
     if (values['--emit-envelope'] && values['--diag']) invalidInput();
-    if (['--session', '--out-dir', '--include-exec', '--label', '--orca-bin'].some(key => values[key] !== undefined)) invalidInput();
+    if (['--session', '--out-dir', '--include-exec', '--label', '--orca', '--orca-bin'].some(key => values[key] !== undefined)) invalidInput();
     const instruction = values['--instruction'];
     const separator = typeof instruction === 'string' ? instruction.lastIndexOf('#') : -1;
     const instrId = separator > 0 ? instruction.slice(0, separator) : '';
@@ -135,7 +136,7 @@ export async function main(argv, { stdin = process.stdin, stdout = process.stdou
   try {
     options = parseArguments(argv, env);
     if (options.request.op === 'snapshot') assertPrivateOutput(options.outDir);
-    if (isSpawnGuardActive() && options.request.op !== 'answer_query') {
+    if (isSpawnGuardActive() && options.request.op !== 'answer_query' && options.request.orca_bin !== null) {
       assertSpawnAllowed({ command: options.request.orca_bin, source: 'session-snapshot:orca_bin' });
     }
   } catch (error) {

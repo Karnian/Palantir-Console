@@ -725,3 +725,37 @@ test('PR1c D fake Orca executes actual envelopes through the bundle and projects
   assert.equal(envelope.sessions[0].orca_link.terminal_handle, 'term_fixture');
   assert.equal(JSON.stringify(envelope).includes('FAKE_ORCA_PRIVATE_TEXT'), false);
 });
+
+test('launcher accepts null Orca and rejects malformed executable values', async t => {
+  const f = fixture(t);
+  const off = await execute(f, { ...f.request, orca_bin: null });
+  assert.equal(off.envelope.schema, 'palantir.session-snapshot/1');
+  exactSnapshot(off.envelope);
+  assert.deepEqual(off.envelope.coverage.orca, { state: 'off', code: 'orca_off' });
+  assert.equal(fs.existsSync(f.env.FAKE_ORCA_SPAWN_LOG), false);
+  const m = await api;
+  assert.equal(m.receiveEnvelope(off.result, { expectedKinds: ['snapshot'],
+    expectedReaderBuild: off.bundle.readerBuild }).ok, true);
+  for (const orca_bin of [false, 1, {}, '', '-orca']) {
+    const value = await execute(f, { ...f.request, orca_bin });
+    assert.equal(value.envelope.code, 'request_invalid');
+  }
+  const enabled = await execute(f);
+  assert.equal(fs.existsSync(f.env.FAKE_ORCA_SPAWN_LOG), true);
+  enabled.envelope.coverage.orca = { state: 'unavailable', code: 'orca_unavailable' };
+  assert.equal(require('../services/observeSnapshotPolicy').validateSnapshot(enabled.envelope).ok, true);
+});
+
+test('snapshot validator and bundle receiver accept off and legacy unavailable coverage', async t => {
+  const f = fixture(t);
+  const value = await execute(f);
+  const m = await api;
+  const policy = require('../services/observeSnapshotPolicy');
+  for (const [state, code] of [['off', 'orca_off'], ['unavailable', 'orca_unavailable']]) {
+    value.envelope.coverage.orca = { state, code };
+    value.envelope.orca = { worktrees: [], terminals: [] };
+    assert.equal(policy.validateSnapshot(value.envelope).ok, true);
+    assert.equal(m.receiveEnvelope({ ...value.result, stdout: JSON.stringify(value.envelope) + '\n' },
+      { expectedKinds: ['snapshot'], expectedReaderBuild: value.bundle.readerBuild }).ok, true);
+  }
+});
