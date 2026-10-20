@@ -16,7 +16,7 @@
 | 데이터 | `/home/codev/.local/share/palantir/` (0700): `palantir.db`, `observe-snapshots/`, `session-hub/`, `tmp/`(TMPDIR·TMUX_TMPDIR 격리) |
 | 머신 설정 | `/home/codev/.config/palantir/observe.json` — machine_id `26de0b2b4038dfff`. **지우지 말 것**(지우면 새 ID → `machine_mismatch`). Mac 미리보기의 codev2 ssh 수집도 같은 파일을 쓴다. |
 
-환경 파일 주요 값: `PORT=4177`, `HOST=100.83.124.113`, `PALANTIR_SESSION_HUB=1`, `PALANTIR_SNAPSHOT_TARGETS`(codev2 local 하나, `orcaBin=/home/codev/.local/bin/orca`), `PALANTIR_MEMORY_DISTILL=0`, `PALANTIR_SHUTDOWN_WATCHDOG_MS=20000`, `PATH=/home/codev/.local/bin:...`. 경로는 모두 실제 절대경로(`~`·`$HOME` 확장 없음). JSON 값은 작은따옴표로 감싼다.
+환경 파일 주요 값: `PORT=4177`, `HOST=100.83.124.113`, `PALANTIR_SESSION_HUB=1`, `PALANTIR_SNAPSHOT_TARGETS`(codev2 local 하나, `orcaBin=/home/codev/.local/bin/orca` — 이 값이 있어서 Orca 연동이 켜져 있다. 빼면 꺼진다), `PALANTIR_MEMORY_DISTILL=0`, `PALANTIR_SHUTDOWN_WATCHDOG_MS=20000`, `PATH=/home/codev/.local/bin:...`. 경로는 모두 실제 절대경로(`~`·`$HOME` 확장 없음). JSON 값은 작은따옴표로 감싼다.
 
 unit 요점: `KillMode=mixed`(앱이 먼저 graceful shutdown, 남은 자식은 cgroup 으로 회수), `TimeoutStopSec=30`, `Restart=on-failure`(tailnet IP 가 아직 없어 listen 실패하면 10초 뒤 재시도), `UMask=0077`.
 
@@ -48,7 +48,7 @@ curl -s http://codev2:4177/api/health    # gitSha 가 검토한 SHA 인지
 ## 다른 서버 추가
 서버가 늘면 같은 화면에서 함께 본다. 코드 변경 없이 수집 대상 한 줄을 더한다. codev2 가 그 서버에 ssh 로 접속해 수집 코드를 표준입력으로 넘겨 `node -` 로 실행하므로, 대상 서버에는 Palantir 체크아웃이 필요 없다. 지시별 답변 조회도 같은 ssh 경로로 동작한다.
 
-대상 서버 요건: codev2 의 codev 사용자로 비대화형 ssh 접속(키 인증), Node 22 이상. **Orca 는 선택이다** — 세션·지시·답변은 그 서버의 Claude Code·Codex 기록(`~/.claude`, `~/.codex`)에서 읽으므로 Orca 없이도 보이고, Orca 가 없으면 Orca 연결 정보(어느 워크스페이스·터미널인지, Orca 상태)만 `orca_unavailable` 로 빠진다(2026-10-14 실측: Orca 없이 수집 성공, 세션 102·지시 965). 비대화형 ssh 의 PATH 에 node·orca 가 없으면 절대경로를 대상 설정에 넣는다.
+대상 서버 요건: codev2 의 codev 사용자로 비대화형 ssh 접속(키 인증), Node 22 이상. **Orca 는 선택이고 기본 꺼짐이다** — 세션·지시·답변은 그 서버의 Claude Code·Codex 기록(`~/.claude`, `~/.codex`)에서 읽으므로 Orca 없이도 보이고, Orca 연동을 켜지 않으면 Orca 를 실행하지 않고 Orca 연결 정보(어느 워크스페이스·터미널인지, Orca 상태)만 `off` 로 빠진다. 켰는데 Orca 를 쓸 수 없으면 `orca_unavailable` 로 빠지고 수집은 계속된다(2026-10-14 실측: Orca 없이 수집 성공, 세션 102·지시 965). 비대화형 ssh 의 PATH 에 node·orca 가 없으면 절대경로를 대상 설정에 넣는다.
 
 1. codev2 에 ssh 키 만들기(최초 1회 — 2026-10-14 현재 codev2 에는 개인키가 없다):
    `ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ''` → 공개키를 대상 서버의 `~/.ssh/authorized_keys` 에 등록.
@@ -58,13 +58,13 @@ curl -s http://codev2:4177/api/health    # gitSha 가 검토한 SHA 인지
    cd /home/codev/palantir-console
    d=$(mktemp -d)
    node scripts/session-snapshot.mjs remote --host <user>@<host> snapshot --out-dir "$d" --label <이름> \
-     [--remote-node /절대경로/node] [--orca-bin /절대경로/orca]
+     [--remote-node /절대경로/node] [--orca | --orca-bin /절대경로/orca]
    ls "$d"     # <machine_id>.json — 파일 이름이 machine id
    rm -rf "$d"
    ```
 4. `~/.config/palantir/server.env` 의 `PALANTIR_SNAPSHOT_TARGETS` 배열에 대상 추가:
    `{"name":"<이름>","kind":"ssh","host":"<user>@<host>","machineId":"<machine_id>","label":"<이름>"}`
-   (필요하면 `"remoteNode"`·`"orcaBin"` 절대경로). 이름·machine id 가 겹치거나 형식이 틀리면 수집 전체가 꺼진다.
+   (필요하면 `"remoteNode"` 절대경로. Orca 를 켜려면 `"orcaBin"` 절대경로 또는 `"orca":true`). 이름·machine id 가 겹치거나 형식이 틀리면 수집 전체가 꺼진다.
 5. `systemctl --user restart palantir-console` → "상태 확인"의 수집 확인 절차로 새 machine 의 `last_result.code=ok` 를 본다.
 
 ## 철수

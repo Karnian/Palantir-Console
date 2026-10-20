@@ -413,3 +413,23 @@ test('shutdown removes only the lock owned by that instance', async t => {
   await fx.service.shutdown();
   assert.equal(fs.readFileSync(lock, 'utf8'), other);
 });
+
+test('target Orca opt-in validates true only and gives explicit binary precedence', async t => {
+  const { parseSnapshotTargets } = require('../services/snapshotTargets');
+  for (const orca of [false, 'yes', null, 1]) {
+    assert.throws(() => parseSnapshotTargets(JSON.stringify([{ name: 'mac', kind: 'local',
+      machineId: 'alpha', orca }])), error => error.code === 'snapshot_targets_invalid');
+  }
+  for (const [extra, expected] of [[{}, []], [{ orca: true }, ['--orca']],
+    [{ orcaBin: '/synthetic/orca' }, ['--orca-bin', '/synthetic/orca']],
+    [{ orca: true, orcaBin: '/synthetic/orca' }, ['--orca-bin', '/synthetic/orca']]]) {
+    const fx = setup(t);
+    await fx.service.shutdown();
+    const service = createSnapshotRefreshService({ ...fx.options, env: { ...fx.env,
+      PALANTIR_SNAPSHOT_TARGETS: JSON.stringify([{ name: 'mac', kind: 'local', machineId: 'alpha', ...extra }]) } });
+    t.after(() => service.shutdown());
+    service.refresh(); await service.settled();
+    const argv = JSON.parse(fs.readFileSync(fx.log, 'utf8').trim()).args;
+    assert.deepEqual(argv.filter((v, i) => v.startsWith('--orca') || argv[i - 1] === '--orca-bin'), expected);
+  }
+});

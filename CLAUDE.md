@@ -1,6 +1,11 @@
 # CLAUDE.md
 
-Palantir Console — AI 코딩 에이전트(Claude Code, Codex)를 3계층(Main Manager → Operator → Worker)으로 운영하는 중앙 관제 허브. Main Manager가 여러 프로젝트와 Operator을 총괄, Operator이 프로젝트 내 워커들을 관리, Worker가 실제 코딩 작업을 수행.
+Palantir Console — 여러 머신의 AI 코딩 세션(Claude Code, Codex)을 직접 띄우고, 하나의 채팅에서 지시·승인·상태·결과를 다루는 독립 관제 허브. 밖에서 시작한 세션은 벤더 공식 hooks 로 관측만 하고 지시하지 않는다. Orca 는 선택 연동(기본 꺼짐)이다.
+
+**현재 방향 소스**: `docs/specs/instruction-centric-direction-brief.md` §0.2 (v6, 2026-10-20 LOCKED, PR #609). 진행 순서 SH0~SH5(§0.2.10). 이 파일의 다른 서술과 충돌하면 §0.2 가 우선한다.
+- **의존 원칙**: 핵심 경로는 Orca·남의 비공개 계약 없이 성립해야 한다. 외부 인터페이스는 벤더 공식 문서(hooks, stream-json, `codex exec --json`) 우선. transcript JSONL 은 안정 계약이 아니므로 교체 가능한 보조로만. TUI 키 주입(tmux send-keys)은 자동 지시 경로로 쓰지 않는다. AGPL 코드 반입 금지.
+- **C1 세션 비서**: 기능 확대 동결. 측정·오귀속·보안 결함 수정만 계속한다.
+- **휴면**: 3계층 자동 위임(Main Manager → Operator → Worker), goal 후속, 메모리 확장, action plane. 코드는 지우지 않지만 새 기능 투자는 하지 않는다. 아래 아키텍처 서술은 휴면 코드의 참고 자료다.
 
 ## Working style (autonomous mode default ON)
 

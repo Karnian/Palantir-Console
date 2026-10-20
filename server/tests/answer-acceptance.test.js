@@ -246,3 +246,16 @@ for (const kind of ['local', 'ssh']) for (const shell of [false, true]) test(`se
   assert.equal(report.machine_checks_passed, true);
   assert.equal(output.includes('ANSWER_BODY_SENTINEL'), false); assert.equal(output.includes('PRIVATE_'), false);
 });
+
+test('acceptance target permits Orca true and rejects other supplied values', async t => {
+  const f = setup(t);
+  fs.mkdirSync(f.out);
+  const api = await import('../../scripts/answer-acceptance.mjs');
+  for (const orca of [true, false, 'yes', null, 1]) {
+    const run = () => api.main(['--snapshot-dir', f.out, '--targets', JSON.stringify([
+      { name: 'fixture', kind: 'local', machineId: 'm', orca }
+    ]), '--out', path.join(f.root, 'orca-report.json')], { env: f.env, stdout: { write() {} } });
+    if (orca === true) assert.equal((await run()).accepted, false);
+    else await assert.rejects(run, /request_invalid/);
+  }
+});

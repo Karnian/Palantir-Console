@@ -6396,3 +6396,32 @@ for (const large of [false, true]) {
     });
   }
 }
+
+test('Orca off never invokes the default spawn path and preserves transcript collection', t => {
+  const fx = createFixture(t);
+  fx.file('claude', 's', [claudeUserRecord('Collect without Orca')]);
+  delete fx.options.runOrca;
+  const cp = require('node:child_process');
+  const readerPath = require.resolve('../../scripts/lib/sessionSnapshotReader.cjs');
+  const script = 'const cp = require("node:child_process"); let calls = 0;'
+    + 'cp.execFileSync = () => { calls++; return null; };'
+    + 'const reader = require(' + JSON.stringify(readerPath) + ');'
+    + 'reader.defaultRunOrca([], process.execPath); const controlCalls = calls; calls = 0;'
+    + 'const options = ' + JSON.stringify(fx.options) + '; options.now = new Date(options.now);'
+    + 'const snapshot = reader.runSnapshot(options);'
+    + 'process.stdout.write(JSON.stringify({ controlCalls, calls, snapshot }));';
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  delete env.PALANTIR_BLOCK_REAL_SPAWN;
+  const result = cp.spawnSync(process.execPath, ['-e', script], { env, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  const { controlCalls, calls, snapshot } = JSON.parse(result.stdout);
+  assert.equal(controlCalls, 1);
+  assert.equal(calls, 0);
+  assert.deepEqual(snapshot.coverage.orca, { state: 'off', code: 'orca_off' });
+  assert.deepEqual(snapshot.orca, { worktrees: [], terminals: [] });
+  assert.ok(snapshot.sessions.length > 0);
+  assert.ok(snapshot.instructions.length > 0);
+  assert.ok(snapshot.sessions.every(s => !s.orca_link.confirmed));
+  assert.equal(snapshotPolicy.validateSnapshot(snapshot).ok, true);
+});

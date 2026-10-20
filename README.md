@@ -2,7 +2,13 @@
 
 [한국어](README.ko.md)
 
-Central control hub for orchestrating AI coding agents (Claude Code and Codex) through a 3-tier hierarchy.
+An independent control hub that launches AI coding sessions (Claude Code, Codex) across machines and handles instructions, approvals, status, and results from a single chat.
+
+> **Direction (revised 2026-10-20, [direction brief](docs/specs/instruction-centric-direction-brief.md) §0.2)**
+> - Sessions started elsewhere (a terminal, Orca, ...) are **observed only**, through the vendors' official hooks. Palantir does not send them instructions.
+> - **Orca is an optional integration and is off by default.** The core paths (observing sessions, status, instructions) work without Orca installed.
+> - Available today: observing sessions across machines and querying them from chat (session assistant). The session host that launches sessions and takes instructions from chat is built in SH1. The order is SH0–SH5 in brief §0.2.10.
+> - The 3-tier delegation below (Top → Operator → Worker) is **dormant**. The code stays and is not deleted, but no new features go into it.
 
 ```
 Main Manager (Top)          ← oversees all projects and Operators

@@ -1383,7 +1383,7 @@ export const WORK_BOARD_LABELS = {
   kinds: { human: '사람 지시', slash: '슬래시 명령', shell: '셸 명령', reply: '답변' },
   states: { working: '작업 중', waiting: '입력 대기', ended: '응답 끝남',
     interrupted: '중단됨', unknown: '알 수 없음' },
-  orcaStates: { ok: '수집됨', unavailable: '수집 불가', partial: '부분 수집' },
+  orcaStates: { off: '꺼짐 · 선택 연동', ok: '수집됨', unavailable: '수집 불가', partial: '부분 수집' },
   coverageFields: { scanned: '스캔', skipped: '건너뜀', failed: '읽기 실패', excluded: '세션 제외',
     deleted: '지시 삭제',
     unknown: '판별 불명',

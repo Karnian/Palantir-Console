@@ -93,6 +93,7 @@ function createSnapshotRefreshService(options = {}) {
     argv.push('snapshot', '--out-dir', dir);
     if (target.label) argv.push('--label', target.label);
     if (target.orcaBin) argv.push('--orca-bin', target.orcaBin);
+    else if (target.orca === true) argv.push('--orca');
     return argv;
   }
   async function execute(entry, run) {
