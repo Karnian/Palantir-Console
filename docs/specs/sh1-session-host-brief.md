@@ -1,6 +1,6 @@
 # SH1 — 사람용 세션 호스트 (Claude 1개·머신 1대) 구현 brief
 
-상태: **초안 v4 (2026-10-23)** — codex 설계검토 R4 GO, **사용자 승인 대기**. 승인 전에는 구현하지 않는다. 사용자 판정 항목은 §1.4(기존 자격 경로)와 §10 R6(과금 잔여 위험) 두 가지다. S1-0 스파이크 결과로 v5 를 만들어 다시 검토한 뒤 S1-a 에 들어간다. "S1-0 에서 확정"으로 남긴 항목은 모두 **확정 전 안전 기본값**(대개 unknown·차단)을 함께 적었다 — 스파이크가 어느 쪽으로 나와도 기본값보다 덜 안전해지지 않는다.
+상태: **승인 v4.1 (2026-10-24)** — codex 설계검토 R4 GO + 사용자 승인("브리프 진행해보자"). 사용자 판정 두 항목은 닫혔다: §10 R6 은 사용자가 받아들였고("과금은 상관 없어"), §1.4 는 사용자 위임에 따라 codex 합의안으로 정했다. S1-0 스파이크 결과로 v5 를 만들어 다시 검토하고 사용자 승인을 받은 뒤 S1-a 에 들어간다. "S1-0 에서 확정"으로 남긴 항목은 모두 **확정 전 안전 기본값**(대개 unknown·차단)을 함께 적었다 — 스파이크가 어느 쪽으로 나와도 기본값보다 덜 안전해지지 않는다.
 상위 계약: `docs/specs/instruction-centric-direction-brief.md` §0.2 (v6 LOCKED). 이 문서와 충돌하면 §0.2 가 우선한다.
 
 ## 0. 목적과 범위
@@ -39,12 +39,12 @@
    - 자식 env 에서 인증 순위([authentication](https://code.claude.com/docs/en/authentication) "Authentication precedence")상 구독 로그인보다 앞서는 변수를 제거한다: `CLAUDE_CODE_USE_BEDROCK`·`CLAUDE_CODE_USE_VERTEX`·`CLAUDE_CODE_USE_FOUNDRY`·`ANTHROPIC_AUTH_TOKEN`·`ANTHROPIC_API_KEY`·`CLAUDE_CODE_OAUTH_TOKEN`·`ANTHROPIC_PROFILE`·`ANTHROPIC_BASE_URL`.
    - 설정 파일(`apiKeyHelper`, settings 의 `env` 블록, gateway 로그인)로도 다른 인증이 들어올 수 있으므로, **첫 지시를 보내기 전에** SDK `startup()` 으로 초기화만 끝내고 `initializationResult().account`(`tokenSource`·`apiKeySource`·`subscriptionType`)를 확인한다. 구독 로그인으로 판정되지 않으면 세션을 닫고 "구독 로그인이 아닌 인증 — 시작하지 않음"을 표시한다. 판정에 쓸 정확한 값은 S1-0 에서 실측해 고정한다.
    - **prompt 를 보낼 때마다 직전에 `accountInfo()` 로 다시 확인**한다. 달라졌거나 조회가 실패하거나 모르는 값이면 보내지 않는다(rejected).
-   - **보장 범위(낮춤)**: 인증을 실행 동안 고정하는 공식 수단은 없다. 위 확인은 "첫 모델 요청 전"과 "각 prompt 전"까지만 보장한다. 한 턴 안의 후속 모델 요청(승인 뒤 계속 등) 사이에 설정 파일·로그인이 바뀌면 감지하지 못할 수 있다. 결과·`system/api_retry` 의 인증 오류는 장애로 표시하지만 전환 자체를 막지는 못한다. **이 잔여 위험은 사용자 판정 항목이다(§10 R6).**
+   - **보장 범위(낮춤)**: 인증을 실행 동안 고정하는 공식 수단은 없다. 위 확인은 "첫 모델 요청 전"과 "각 prompt 전"까지만 보장한다. 한 턴 안의 후속 모델 요청(승인 뒤 계속 등) 사이에 설정 파일·로그인이 바뀌면 감지하지 못할 수 있다. 결과·`system/api_retry` 의 인증 오류는 장애로 표시하지만 전환 자체를 막지는 못한다. 이 잔여 위험은 사용자가 받아들였다(§10 R6).
    - startup 이전에도 프로젝트 hooks·MCP 는 실행된다 — 그래서 시작 전 확인 화면(§5-1)이 게이트보다 앞에 있다.
 4. **`--bare` 를 쓰지 않는다**: bare 는 OAuth·키체인을 읽지 않는다. 장래 `-p` 기본이 된다는 예고는 버전 고정(§2.3)과 3번 게이트가 막는다.
 5. **개인 사용**: Palantir 허브 인증(`PALANTIR_TOKEN` cookie)을 유지하고, 소유 세션 조작은 사람 cookie 로만 한다(§7).
 
-표시: **인증 수단과 청구 재원을 따로** 적는다. 인증 = "구독 로그인". 재원 = "구독 한도 / Max·Team 월간 API 크레딧(차감 순서 문서 미명시) / 한도 소진 뒤 계정에서 켠 경우 유료 사용 크레딧". 유료 사용 크레딧([usage credits](https://support.claude.com/en/articles/12429409-manage-usage-credits-for-paid-claude-plans))은 opt-in 이고 Claude Code 사용에도 적용되며, 월 상한·자동 충전은 계정 설정이다. Palantir 는 어느 재원이 쓰였는지 알 수 없으므로 **무과금을 보장하지 않는다.** 계정의 유료 사용 크레딧 설정은 사용자가 정하는 선행 조건이다(§10 R6).
+표시: **인증 수단과 청구 재원을 따로** 적는다. 인증 = "구독 로그인". 재원 = "구독 한도 / Max·Team 월간 API 크레딧(차감 순서 문서 미명시) / 한도 소진 뒤 계정에서 켠 경우 유료 사용 크레딧". 유료 사용 크레딧([usage credits](https://support.claude.com/en/articles/12429409-manage-usage-credits-for-paid-claude-plans))은 opt-in 이고 Claude Code 사용에도 적용되며, 월 상한·자동 충전은 계정 설정이다. Palantir 는 어느 재원이 쓰였는지 알 수 없으므로 **무과금을 보장하지 않는다.** 사용자는 이 과금 잔여 위험을 받아들였다(2026-10-24, §10 R6).
 
 ### 1.3 비용·한도·장애
 
@@ -53,14 +53,33 @@
 - 비서(C1) 비용과 소유 세션 비용을 섞지 않는다.
 - **재검토·중단 조건**: §1.1 의 문서 중 하나라도 개인 사용 허용·구독 차감 서술이 바뀌면, 오류가 나지 않더라도 SH1 사용을 멈추고 이 절을 다시 판정한다.
 
-### 1.4 기존 서버의 자격 처리 — SH1 수락 선행 조건 (사용자 판정 필요)
+### 1.4 기존 서버의 자격 처리 — S1-pre (판정 완료)
 
-서버가 뜨는 것만으로 §1.2-2 를 깨는 경로가 둘 있다. 새 호스트가 이 경로를 안 써도, SH1 을 쓰려면 서버를 켜야 하므로 해당된다.
-- **부팅 시 자격 저장·복원**: `server/index.js:31` → `authResolver.bootstrapClaudeAuthFromEnv`(`server/services/authResolver.js:381`). 서버 env 에 `CLAUDE_CODE_OAUTH_TOKEN`·`ANTHROPIC_API_KEY` 가 있으면 repo 루트 `.claude-auth.json` 에 저장하고, 다음 부팅에 `process.env` 로 되읽는다.
-- **사용량 조회의 토큰 조회**: `server/services/providers/claude-code.js:100` 이 env 또는 키체인·자격 파일에서 OAuth 토큰 값을 읽어, 문서화되지 않은 `api.anthropic.com/api/oauth/usage` 를 curl 로 호출한다. 토큰이 curl **argv 에 실려**(118행 부근) 같은 머신의 프로세스 목록에 보이는 보안 결함도 있다.
-- 키체인 **존재 확인**(`hasClaudeKeychainCredentials`, `-w` 없이 값 미조회)은 해당하지 않는다.
+서버가 뜨는 것만으로, 또는 기본 켜진 기능만으로 §1.2-2 를 깨는 경로가 있다. 새 호스트가 이 경로를 안 써도, SH1 을 쓰려면 서버를 켜야 하므로 해당된다. 2026-10-24 코드 대조로 찾은 Claude 자격 **값** 접촉 경로:
 
-권장안(사용자 판정): 두 경로를 **기본 꺼짐**으로 바꾸고(명시 opt-in 환경변수로만 켬), argv 노출은 opt-in 상태에서도 고친다. 휴면 manager 의 인증 동작이 바뀌는 결정이라 별도 PR(S1-pre)로 승인받는다. 판정이 나기 전에는 §1.2 충족도 미결이고 SH1 수락을 선언하지 않는다.
+| | 경로 | 위치 | 기본 동작 여부 |
+|---|---|---|---|
+| A | 부팅 시 env 토큰을 repo 루트 `.claude-auth.json` 에 저장·다음 부팅에 `process.env` 로 복원 | `server/index.js:31` → `authResolver.bootstrapClaudeAuthFromEnv` | 부팅마다 |
+| B | 사용량 조회 — env·키체인(`security -w`)·자격 파일 토큰으로 문서화되지 않은 `api.anthropic.com/api/oauth/usage` 호출, **토큰이 curl argv 에 실림** | `providers/claude-code.js:100` | 사용량 화면 |
+| B′ | 원격 노드 사용량 probe — pod 자격 파일 토큰으로 같은 endpoint | `remoteSshExecutor.js` `CLAUDE_OAUTH_USAGE_JS` | 노드 사용량 화면 |
+| C·C′ | `--bare` spawn 을 위해 키체인·자격 파일·env OAuth 토큰을 `ANTHROPIC_API_KEY` 로 변환(로컬·원격 일반·원격 detached) | `resolveClaudeAuth({bare})`, `remoteSshExecutor.js` `CLAUDE_BARE_AUTH_JS` | 휴면 bare 템플릿 |
+| D | isolated preset — 토큰을 apiKeyHelper 임시 파일로 | `resolveClaudeAuthForIsolated` | 휴면 preset |
+| D′ | **메모리 정제기 CLI backend** — 호출마다 D 로 키체인 토큰을 helper 에 써서 `--bare` 실행 | `app.js` 정제기 wiring, `distillers/liveDistiller.js` | **기본 켜짐**(API 키 없을 때) |
+| E | `.claude-auth.json`·env OAuth 를 자식 env 로 전달(세션 비서 C1 포함), profile allowlist 의 `buildManagerSpawnEnv` 직접 복사 | `resolveClaudeAuth`, `sessionHubService.spawnEnv`, `buildManagerSpawnEnv` | C1 시작 때 |
+| F | Linux "존재 확인"이 실제로는 자격 파일을 읽어 `accessToken` 을 파싱 | `hasClaudeLinuxCredentials` | 위 경로의 사전 판정마다 |
+
+키체인 존재 확인(`-w` 없음)과 `claude auth status`(CLI 스스로 조회)는 해당하지 않는다.
+
+**판정**(사용자가 "알아서 처리"를 위임 → codex 합의, 2026-10-24):
+1. 단일 레거시 스위치 `PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS=1`(정확히 `1` 만). **기본 꺼짐.**
+2. 기본 모드에서 A~F 의 **Claude OAuth 값 접근을 모두 막는다** — 저장·복원·HTTP 사용·자식 전달·API 키 슬롯 변환·helper 저장. **env 에 있는 OAuth 토큰도 예외가 아니다**: 사용자가 직접 넣은 값과 부모 Claude 세션에서 물려받은 값을 구별할 수 없다. resolver 뿐 아니라 최종 spawn env·원격 bootstrap 에서도 막고, profile allowlist 가 이를 다시 열 수 없다.
+3. 실제 Console API 키(`ANTHROPIC_API_KEY`, OAuth 토큰 형식이 아닌 값)와 cloud-provider 인증은 기존 기능에서 유지한다. API 키를 OAuth usage endpoint 에 Bearer 로 보내는 fallback 은 없앤다. SH1 자식은 §1.2-3 대로 API 키까지 전부 제거한다.
+4. 존재 확인은 값을 읽지 않게 고친다(F → `stat` 수준). 기존 `PALANTIR_SKIP_HOST_CREDENTIALS=1` 은 더 강한 기존 의미(존재 확인·status 까지 차단)를 유지하고 새 스위치보다 우선한다.
+5. 정제기는 backend 별로 부팅 때 판정한다. CLI backend 가 토큰 추출을 요구하면 scheduler 를 시작하지 않고 `missing_credential` + 이유를 표시한다. API 키가 있는 API backend 는 유지한다. 호출 때마다 정책을 다시 확인한다.
+6. 기존 `.claude-auth.json` 은 읽지도 지우지도 않는다. 존재만 확인해 부팅당 경고 한 번과 수동 정리 안내를 낸다.
+7. **레거시 스위치를 켠 구성은 SH1 수락 대상이 아니다.** SH1 호스트는 그 설정이면 시작을 거부한다. 스위치는 약관 준수 예외가 아니라 휴면 기능 복구용이다.
+8. 레거시 모드의 사용량 curl 도 고친다: 헤더를 stdin(`-H @-`, curl 7.55.0 이상)으로, 첫 인자 `-q`(사용자 curlrc 배제), 자식 env 에서 자격 변수 제거, CR/LF·NUL 거부, stdin 쓰기·EPIPE·timeout 처리. 구버전 curl 이면 argv 방식으로 되돌아가지 않고 실패한다.
+9. 영향: bare·isolated 휴면 기능과 정제기 CLI backend 는 기본 모드에서 의도대로 멈춘다. C1 세션 비서는 같은 HOME 의 CLI 로그인에 의존하는 구성이면 그대로 동작하고, 저장 파일·OAuth env 에 의존하던 구성은 `claude` 로그인으로 바꿔야 한다. codev2 는 `PALANTIR_MEMORY_DISTILL=0` 이고 C1 은 CLI 자격 파일을 CLI 가 직접 읽으므로 직접 영향이 없을 것으로 보지만 배포 때 확인한다.
 
 ### 1.5 Codex (SH5 참고)
 
@@ -320,8 +339,8 @@ lock-in 은 사용자가 실제 작업에 써 본 뒤 정한다. brief 는 화�
 
 | 단계 | 내용 | 증거 |
 |---|---|---|
-| **S1-pre** | §1.4 판정 → 승인 시 부팅 자격 저장·사용량 토큰 조회 기본 꺼짐 + argv 노출 수정 | 사용자 판정 기록, 테스트 |
-| **S1-0 스파이크** | 실제 SDK+동봉 CLI 로 확인: ① prompt 수신 신호(uuid echo 여부, 1:1 규칙 성립) ② 동봉 실행 파일의 키체인 로그인 사용 ③ `account`·`tokenSource`·`apiKeySource` 실제 값(구독·API 키·bearer 각각) ④ custom spawn 에서 pid·시작시각 확보, macOS 표지 조회 ⑤ 호스트 종료 시 자식 동작(stdin 닫힘·SIGTERM·진행 중 Bash·백그라운드 작업) ⑥ `canUseTool` 장시간 대기 ⑦ 인터럽트 영수증 ⑧ resume 뒤 사용자 설치 `claude --resume` 호환. 소량 LLM 호출(사용자 승인 후) | 관측 기록 문서 + **brief v5**(§1.2-3·§2.3·§3.3·§4.3 의 "S1-0 확정" 칸을 채움) → codex 재검토 → 사용자 승인 |
+| **S1-pre** | §1.4 판정 1~9 구현(레거시 스위치 기본 꺼짐, A~F 차단, argv 노출 수정, 정제기 backend 판정, 문서) | 판정 기록(§1.4), 경로별 회귀 테스트 |
+| **S1-0 스파이크** | 실제 SDK+동봉 CLI 로 확인(소량 LLM 호출, 2026-10-24 사용자 승인): ① prompt 수신 신호(uuid echo 여부, 1:1 규칙 성립) ② 동봉 실행 파일의 키체인 로그인 사용 ③ `account`·`tokenSource`·`apiKeySource` 실제 값(구독·API 키·bearer 각각) ④ custom spawn 에서 pid·시작시각 확보, macOS 표지 조회 ⑤ 호스트 종료 시 자식 동작(stdin 닫힘·SIGTERM·진행 중 Bash·백그라운드 작업) ⑥ `canUseTool` 장시간 대기 ⑦ 인터럽트 영수증 ⑧ resume 뒤 사용자 설치 `claude --resume` 호환. | 관측 기록 문서 + **brief v5**(§1.2-3·§2.3·§3.3·§4.3 의 "S1-0 확정" 칸을 채움) → codex 재검토 → 사용자 승인 |
 | **S1-a** | 호스트 프로세스(잠금·handshake·유휴 종료) + 저장소 + 상태 기계 + 결함 주입, 가짜 어댑터 | §8.1-(a) |
 | **S1-b** | SDK 어댑터(custom spawn·신원·버전쌍 확인·env 허용 목록·인증 게이트·능력 판정) | §8.1-(b) |
 | **S1-c** | 서버 브리지(handshake·seq 재생·읽기 전용 장애 경로·cookie-only·origin) + 최소 화면(상태·전달 배지·승인 카드) | 서버 재시작·장애 사례 |
@@ -336,7 +355,7 @@ lock-in 은 사용자가 실제 작업에 써 본 뒤 정한다. brief 는 화�
 - **R2 SDK 비공개 라이선스**: 개인 설치만. 재배포·vendoring 은 Anthropic 약관 확인 전 금지.
 - **R3 같은 UID**: 작업 세션은 호스트 DB·capability 파일을 읽을 수 있다(§0.2.7). 격리를 주장하지 않는다.
 - **R4 표지 조회 의존**: §3.3 복구 중 spawn 직후 크래시 처리는 macOS 에서 같은 UID 프로세스의 env 를 읽을 수 있다는 전제에 선다. 안 되면 기본값은 그 경우 항상 liveness_unknown(사람 판정)이고, 대안(자식 argv 표지, 별도 감시 프로세스)은 v5 에서 정한다. pid·시작시각 신원 판정은 표지와 무관하게 동작한다.
-- **R6 과금 잔여 위험 (사용자 판정)**: ① 한 턴 안의 인증 전환은 감지하지 못할 수 있다(§1.2-3). ② 구독 한도 소진 뒤 계정에서 켠 유료 사용 크레딧으로 이어질 수 있고 Palantir 는 이를 구별하지 못한다(§1.2 표시). SH1 착수 전에 사용자가 이 두 가지를 받아들이는지, 계정 설정(유료 사용 크레딧 끔/월 상한)을 어떻게 둘지 정한다.
+- **R6 과금 잔여 위험 (사용자 수락, 2026-10-24)**: ① 한 턴 안의 인증 전환은 감지하지 못할 수 있다(§1.2-3). ② 구독 한도 소진 뒤 계정에서 켠 유료 사용 크레딧으로 이어질 수 있고 Palantir 는 이를 구별하지 못한다(§1.2 표시). 사용자 판정: "과금은 상관 없어" — 두 가지를 받아들이고 계정 설정을 선행 조건으로 두지 않는다. §1.2-3 의 구독 로그인 게이트와 인증 표시는 그대로 둔다(자격 중계 금지와 표시 정확성 때문).
 - **R5 1:1 규칙의 사용성**: 진행 중 턴 합류를 막는 것이 실사용에서 불편할 수 있다. S1-d 에서 사용자 판정으로 다시 본다(합류를 열려면 uuid 단위 수신 증거가 먼저 있어야 한다).
 - **Q1 호스트 자동 기동**: 서버가 setsid 로 띄우는 안(권장) vs launchd 등록. 후자는 SH4 원격·로그인 시 상시 기동과 맞지만 설치 단계가 늘어난다.
 
@@ -353,3 +372,4 @@ lock-in 은 사용자가 실제 작업에 써 본 뒤 정한다. brief 는 화�
   - SERIOUS — abort 는 효과 전 요청만 무효화, 효과 뒤면 전달 상태 유지 + "결정 뒤 도구 취소됨"(§4.5·§5-3), `attribution_uncertain`·interrupt 불명은 incarnation 안에서 해제 안 함(§5-5), 표지 남은 하위·조회 실패면 resume·넘기기 차단(§3.4), 최종 env 검사를 표지 1개·다른 `PALANTIR_*` 0 으로(§7), 넘기기 명령이 인증 변수 제거·HOME·`CLAUDE_CONFIG_DIR` 유무까지 재현 + 넘긴 뒤 보장 범위 명시(§5-8), request_key 유효기간을 호스트 시계 기준 `[now−24h, now+5분]` 으로(§4.4).
   - MODERATE — accepted 는 durable 기록 뒤에만, 무응답은 "접수 미확인"(§3.1), 삭제 `deleting` 상태와 재기동 재개(§4.6), 정상 경로 최소 성공 기준·새 반례·소켓 장애 사례 정정·v 번호 정리(§8·§9).
 - codex **R4**: **GO** (R3 9건 중 닫힘 8 / 부분 1, SERIOUS 0). MODERATE 2 / MINOR 1 반영: 넘기기 명령의 `env` 옵션 순서(`-u` 먼저) + argv 순서 검증(§5-8·§8.1), 사람 확인 우회 문구가 남은 수락 기준 삭제(§8.1), 호스트 상실 resume 버튼 조건을 §3.4 와 통일(§5-7). 이 GO 는 설계 단계 판정이며 구현·실사용 수락이 아니다.
+- v4.1 (2026-10-24): 사용자 승인. R6 사용자 수락. §1.4 를 사용자 위임에 따라 codex 합의로 판정 — codex 가 초안의 결함 2건(Linux 존재 확인이 값을 읽음, "env 의 OAuth 는 사용자 명시"는 구별 불가)과 SERIOUS 4건(최종 spawn env·원격 두 bootstrap·정제기 부팅 판정·opt-in 을 수락 예외로 쓰지 않기)을 짚었고 모두 판정에 넣었다(VERDICT: AGREE).
