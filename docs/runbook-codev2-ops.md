@@ -72,7 +72,7 @@ curl -s http://codev2:4177/api/health    # gitSha 가 검토한 SHA 인지
 
 ## 알려진 한계
 - **Mac 세션은 수집하지 않는다**(2026-10-14 사용자 결정 — 운영 대상에서 제외). 다른 서버가 생기면 "다른 서버 추가" 절차로 함께 본다.
-- 세션 비서는 codev2 의 Claude 자격(`~/.claude/.credentials.json`)으로 돈다.
+- 세션 비서는 codev2 의 Claude 자격(`~/.claude/.credentials.json`)으로 돈다. 이 파일은 claude CLI 가 직접 읽는다 — S1-pre(2026-10-24) 이후 Palantir 는 자격 값을 읽지 않는다. 서비스 env 에 `CLAUDE_CODE_OAUTH_TOKEN` 을 넣어 두었다면 부팅 때 지워지므로 CLI 로그인(`claude` 한 번 실행)으로 바꾼다. 노드 사용량의 Claude 쿼터 카드는 "쿼터 조회 꺼짐 또는 미지원"으로 보인다(레거시 스위치 `PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS=1` 에서만 조회).
 - tmux 가 없어 워커 실행 엔진은 SubprocessEngine 이다(현재 워커 기능은 꺼져 있음).
 
 ## 배포 기록

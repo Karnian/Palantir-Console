@@ -1,3 +1,4 @@
+require('./helpers/host-credential-discovery').enableLegacyClaudeCredentialAccessForFile();
 process.env.PALANTIR_SKIP_HOST_CREDENTIALS = '1';
 
 const test = require('node:test');
@@ -248,7 +249,7 @@ test('StreamJsonEngine.listSessions returns empty array initially', async (t) =>
 
 // --- PR2: authResolver ---
 
-test('resolveClaudeAuth returns canAuth=true when CLAUDE_CODE_OAUTH_TOKEN is set', async (t) => {
+test('resolveClaudeAuth returns canAuth=true when CLAUDE_CODE_OAUTH_TOKEN is set', async (t) => require('./helpers/host-credential-discovery').withLegacyClaudeCredentialAccess(async () => {
   const { resolveClaudeAuth } = require('../services/authResolver');
   const orig = process.env.CLAUDE_CODE_OAUTH_TOKEN;
   const origKey = process.env.ANTHROPIC_API_KEY;
@@ -264,7 +265,7 @@ test('resolveClaudeAuth returns canAuth=true when CLAUDE_CODE_OAUTH_TOKEN is set
   assert.ok(r.sources.includes('env:CLAUDE_CODE_OAUTH_TOKEN'));
   assert.equal(r.env.CLAUDE_CODE_OAUTH_TOKEN, 'sk-oauth-fake');
   assert.deepEqual(r.diagnostics, []);
-});
+}));
 
 test('resolveClaudeAuth returns canAuth=false with diagnostics when no creds', async (t) => {
   const { resolveClaudeAuth } = require('../services/authResolver');
@@ -384,7 +385,7 @@ test('resolveClaudeAuth flips canAuth true on keychain only and does not leak to
   assert.deepEqual(r.diagnostics, []);
 });
 
-test('resolveClaudeAuth materializes Keychain-only auth when --bare requires env auth', () => {
+test('resolveClaudeAuth materializes Keychain-only auth when --bare requires env auth', () => require('./helpers/host-credential-discovery').withLegacyClaudeCredentialAccess(() => {
   const { resolveClaudeAuth } = require('../services/authResolver');
   const r = resolveClaudeAuth({
     envAllowlist: ['NO_AUTH_ENV'],
@@ -400,9 +401,9 @@ test('resolveClaudeAuth materializes Keychain-only auth when --bare requires env
     r.sources.includes('materialize:bare:keychain:claudeAiOauth.accessToken'),
   );
   assert.deepEqual(r.diagnostics, []);
-});
+}));
 
-test('resolveClaudeAuth fails closed when --bare native auth cannot be materialized', () => {
+test('resolveClaudeAuth fails closed when --bare native auth cannot be materialized', () => require('./helpers/host-credential-discovery').withLegacyClaudeCredentialAccess(() => {
   const { resolveClaudeAuth } = require('../services/authResolver');
   const r = resolveClaudeAuth({
     envAllowlist: ['NO_AUTH_ENV'],
@@ -415,7 +416,7 @@ test('resolveClaudeAuth fails closed when --bare native auth cannot be materiali
   assert.equal(r.canAuth, false);
   assert.equal(r.env.ANTHROPIC_API_KEY, undefined);
   assert.match(r.diagnostics[0], /--bare requires a materialized ANTHROPIC_API_KEY/);
-});
+}));
 
 test('resolveClaudeAuth accepts explicit --settings as a --bare apiKeyHelper contract', () => {
   const { resolveClaudeAuth } = require('../services/authResolver');
@@ -537,7 +538,7 @@ test('resolveCodexAuth canAuth=true when CODEX_API_KEY set and allowed', async (
   assert.equal(r.env.CODEX_API_KEY, 'codex-fake-2');
 });
 
-test('buildManagerSpawnEnv keeps only the manager baseline plus explicit additions', async (t) => {
+test('buildManagerSpawnEnv keeps only the manager baseline plus explicit additions', async (t) => require('./helpers/host-credential-discovery').withLegacyClaudeCredentialAccess(async () => {
   const { buildManagerSpawnEnv } = require('../services/authResolver');
   const base = {
     PATH: '/usr/bin',
@@ -565,7 +566,7 @@ test('buildManagerSpawnEnv keeps only the manager baseline plus explicit additio
     false,
     'unregistered variables must be absent',
   );
-});
+}));
 
 test('resolveManagerAuth dispatches by type', async (t) => {
   const { resolveManagerAuth } = require('../services/authResolver');

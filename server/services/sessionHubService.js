@@ -10,7 +10,7 @@ const childProcess = require('node:child_process');
 const { StringDecoder } = require('node:string_decoder');
 const { resolveClaudeBinary } = require('./streamJsonEngine');
 const { managedSettingsPresent } = require('./sessionHubActivation');
-const { resolveClaudeAuth, CLAUDE_AUTH_KEYS, CLAUDE_PROVIDER_AUTH_ENV_KEYS } = require('./authResolver');
+const { stripClaudeOAuthEnv, resolveClaudeAuth, CLAUDE_AUTH_KEYS, CLAUDE_PROVIDER_AUTH_ENV_KEYS } = require('./authResolver');
 const { assertSpawnAllowed } = require('../utils/spawnGuard');
 const { sessionHubPrompt, sessionHubPromptVersion } = require('./sessionHubPrompt');
 
@@ -422,7 +422,7 @@ function createSessionHubService(options = {}) {
       if (authEnv[key] !== undefined) result[key] = authEnv[key];
     }
     result.CLAUDE_CODE_DISABLE_AUTO_MEMORY = '1';
-    return result;
+    return stripClaudeOAuthEnv(result);
   }
   function live(gen) { return gen === generation && state === 'running'; }
   function recordOwned(id) {

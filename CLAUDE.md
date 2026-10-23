@@ -307,10 +307,11 @@ server/
 - **중요**: `useSSE` 의 channels 배열은 hard-coded. 새 SSE 채널 추가 시 반드시 `server/public/app/lib/hooks/sse.js` 의 channels 배열에도 추가할 것. Phase 5/7 에서 `run:needs_input` / `dispatch_audit:recorded` 를 까먹어 dead code 되는 회귀가 있었음.
 - 클라는 `run:status` 를 pure reload 로만 쓴다. 우선순위 알림은 dedicated 채널(`run:needs_input`, `run:completed`) 이 전담해야 duplicate 알림 안 생김.
 
-### Auth 전달
-- `.claude-auth.json`에 OAuth 토큰 저장 (mode 0o600, gitignored)
-- Claude Code 세션 내 서버 시작 시 자동 저장 → 이후 독립 실행 시 로드
-- 환경변수: `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `CODEX_API_KEY`, `OPENAI_API_KEY`
+### Auth 전달 (S1-pre — Claude OAuth 값 미접촉이 기본)
+- **기본 모드: Palantir 는 Claude OAuth 자격 값을 읽거나 저장하거나 자식에 넘기거나 변환하지 않는다** (`docs/specs/sh1-session-host-brief.md` §1.4). 부팅 시 서버 env 의 `CLAUDE_CODE_OAUTH_TOKEN`·OAuth 형식(`sk-ant-oat*`) `ANTHROPIC_API_KEY` 를 지우고, `.claude-auth.json` 은 읽지도 쓰지도 않는다(있으면 경고만). 키체인·`~/.claude/.credentials.json` 은 존재만 확인하고 값은 claude CLI 가 스스로 읽는다. 최종 spawn env(manager·worker·세션 비서·원격 ssh)에서도 OAuth 를 지운다 — profile allowlist 로 다시 열 수 없다.
+- 그래서 기본 모드에서는 `--bare` manager/worker, isolated preset, 메모리 정제기 CLI backend, Claude 사용량(로컬·원격 노드) 조회가 의도대로 멈춘다. 실제 API 키(`ANTHROPIC_API_KEY`, OAuth 형식 아님)와 cloud-provider 인증은 그대로 쓴다. 세션 비서 C1 은 같은 HOME 의 CLI 로그인으로 동작한다.
+- `PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS=1`(정확히 `1`) = 예전 동작 복원(`.claude-auth.json` 저장·복원, 토큰 materialize, 사용량 조회). 휴면 기능 복구용이며 **SH1 수락 대상 구성이 아니다.** `PALANTIR_SKIP_HOST_CREDENTIALS=1` 이 항상 우선한다. 사용량 curl 은 레거시 모드에서도 헤더를 stdin(`-H @-`)으로 넘겨 argv 에 토큰이 없다.
+- 환경변수: `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_OAUTH_TOKEN`(기본 모드에서 제거됨), `ANTHROPIC_API_KEY`, `CODEX_API_KEY`, `OPENAI_API_KEY`
 - `authResolver.resolveManagerAuth(type, { envAllowlist, hasKeychain })` 가 preflight. 테스트는 `authResolverOpts: { hasKeychain: true }` 로 주입 가능.
 - `buildManagerSpawnEnv({ authEnv, envAllowlist })` 가 credential leak 방지 필터링 env 생성.
 

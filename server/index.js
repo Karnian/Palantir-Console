@@ -25,9 +25,8 @@ const { createApp } = require('./app');
 const { bootstrapClaudeAuthFromEnv } = require('./services/authResolver');
 const { cleanupStaleTmuxStartupArtifacts } = require('./services/executionEngine');
 
-// PR2: Claude auth bootstrap now lives in authResolver. The behavior is
-// identical: if running inside a Claude Code session, persist credentials to
-// .claude-auth.json; otherwise load them back into process.env.
+// Bootstrap removes inherited OAuth by default. Only the explicit legacy
+// mode persists credentials to .claude-auth.json or restores them from it.
 bootstrapClaudeAuthFromEnv();
 
 // A SIGKILL between persisting a worker's stdin/capability and the tmux

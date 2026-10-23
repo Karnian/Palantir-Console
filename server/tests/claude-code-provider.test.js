@@ -1,3 +1,4 @@
+require('./helpers/host-credential-discovery').enableLegacyClaudeCredentialAccessForFile();
 'use strict';
 
 // #423: this file exists to verify that host credential discovery HAPPENS —
@@ -14,6 +15,7 @@ const { promisify } = require('node:util');
 function loadProviderWithExecFile(responder, authReaders = {}) {
   const modulePath = require.resolve('../services/providers/claude-code');
   const originalExecFile = childProcess.execFile;
+  const originalSpawn = childProcess.spawn;
   const authResolver = require('../services/authResolver');
   const originalAuthReaders = {
     readClaudeKeychainToken: authResolver.readClaudeKeychainToken,
@@ -32,12 +34,28 @@ function loadProviderWithExecFile(responder, authReaders = {}) {
 
   delete require.cache[modulePath];
   childProcess.execFile = fakeExecFile;
+  childProcess.spawn = (command, args, options) => {
+    const { EventEmitter } = require('node:events');
+    const { PassThrough, Writable } = require('node:stream');
+    const child = new EventEmitter();
+    child.stdout = new PassThrough(); child.stderr = new PassThrough();
+    child.stdin = new Writable({ write(chunk, encoding, cb) {
+      const call = { command, args, options, header: chunk.toString() };
+      calls.push(call);
+      Promise.resolve().then(() => responder(call)).then(result => {
+        child.stdout.end(result.stdout); child.emit('close', 0);
+      }, error => child.emit('error', error));
+      cb();
+    } });
+    return child;
+  };
   Object.assign(authResolver, authReaders);
   let provider;
   try {
     provider = require(modulePath);
   } finally {
     childProcess.execFile = originalExecFile;
+    childProcess.spawn = originalSpawn;
     Object.assign(authResolver, originalAuthReaders);
   }
 
@@ -47,6 +65,7 @@ function loadProviderWithExecFile(responder, authReaders = {}) {
     restore() {
       delete require.cache[modulePath];
       childProcess.execFile = originalExecFile;
+    childProcess.spawn = originalSpawn;
     },
   };
 }
@@ -101,27 +120,13 @@ test('fetchClaudeCodeUsage asynchronously reads account info and OAuth usage wit
   });
   assert.equal(result.limits[0].label, '5h limit');
   assert.equal(result.limits[0].remainingPct, 75);
-  assert.deepEqual(harness.calls, [
-    {
-      command: 'claude',
-      args: ['auth', 'status'],
-      options: { encoding: 'utf-8', timeout: 5000 },
-    },
-    {
-      command: 'curl',
-      args: [
-        '-s',
-        '-H',
-        'Authorization: Bearer test-oauth-token',
-        '-H',
-        'anthropic-beta: oauth-2025-04-20',
-        '-H',
-        'Accept: application/json',
-        'https://api.anthropic.com/api/oauth/usage',
-      ],
-      options: { encoding: 'utf-8', timeout: 10000 },
-    },
-  ]);
+  assert.deepEqual(harness.calls.map(call => call.command), ['claude', 'curl']);
+  const curl = harness.calls[1];
+  assert.equal(curl.args[0], '-q');
+  assert.ok(curl.args.includes('@-'));
+  assert.ok(!curl.args.join(' ').includes('test-oauth-token'));
+  assert.equal(curl.header, 'Authorization: Bearer test-oauth-token\n');
+  assert.equal(curl.options.env.CLAUDE_CODE_OAUTH_TOKEN, undefined);
 });
 
 test('fetchClaudeCodeUsage silently ignores an account-info failure', async (t) => {
@@ -165,7 +170,7 @@ test('fetchClaudeCodeUsage awaits the async native credential fallback when env 
   assert.equal(result.limits[0].remainingPct, 90);
   assert.deepEqual(authCalls, ['keychain:start', 'keychain:done']);
   const curlCall = harness.calls.find(call => call.command === 'curl');
-  assert.ok(curlCall.args.includes('Authorization: Bearer async-keychain-token'));
+  assert.equal(curlCall.header, 'Authorization: Bearer async-keychain-token\n');
 });
 
 test('fetchClaudeCodeUsage returns the existing fallback envelope when curl fails', async (t) => {
@@ -202,5 +207,5 @@ test('fetchClaudeCodeUsage redacts the OAuth token from curl failure messages', 
 
   assert.equal(errorMessage.includes(token), false);
   assert.equal(errorMessage.includes('literal-secret$characters'), false);
-  assert.match(errorMessage, /Authorization: Bearer \[redacted\]/);
+  assert.match(errorMessage, /TLS handshake failed/);
 });

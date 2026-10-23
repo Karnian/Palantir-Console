@@ -68,6 +68,30 @@ const PROXY_URL_ENV_KEYS = Object.freeze([
   'all_proxy',
 ]);
 
+// Value access is opt-in; the older host-isolation switch always wins.
+function legacyClaudeCredentialAccessEnabled() {
+  return process.env.PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS === '1'
+    && !hostCredentialDiscoveryDisabled();
+}
+
+function isClaudeOAuthTokenValue(value) {
+  return typeof value === 'string' && value.startsWith('sk-ant-oat');
+}
+
+function resolveActualAnthropicApiKey(value) {
+  return !legacyClaudeCredentialAccessEnabled() && isClaudeOAuthTokenValue(value) ? null : value;
+}
+
+function stripClaudeOAuthEnv(env) {
+  if (!legacyClaudeCredentialAccessEnabled()) {
+    delete env.CLAUDE_CODE_OAUTH_TOKEN;
+    if (isClaudeOAuthTokenValue(env.ANTHROPIC_API_KEY)) delete env.ANTHROPIC_API_KEY;
+  }
+  return env;
+}
+
+let warnedClaudeAuthFile = false;
+
 function proxyUrlContainsUserinfo(value) {
   if (typeof value !== 'string' || !value) return false;
 
@@ -245,7 +269,8 @@ function hasClaudeKeychainCredentials() {
  * no keychain integration here either and would otherwise be silently
  * broken (Codex adversarial re-review of PR #374 follow-up, round 4).
  *
- * Existence-only, mirroring the keychain path: we don't validate expiry
+ * Stat-only: a regular, nonempty file is sufficient. No contents are read;
+ * like the keychain existence probe, we don't validate expiry
  * here. The spawned `claude` subprocess inherits HOME, reads this same
  * file itself, and can use the refresh token — an expired accessToken
  * doesn't mean canAuth should be false. (Expiry DOES matter for the
@@ -256,9 +281,8 @@ function hasClaudeLinuxCredentials() {
   if (hostCredentialDiscoveryDisabled()) return false;
   if (process.platform === 'darwin') return false;
   try {
-    const raw = fs.readFileSync(CLAUDE_LINUX_CREDENTIALS_FILE, 'utf-8');
-    const parsed = JSON.parse(raw);
-    return typeof parsed?.claudeAiOauth?.accessToken === 'string' && !!parsed.claudeAiOauth.accessToken;
+    const stat = fs.statSync(CLAUDE_LINUX_CREDENTIALS_FILE);
+    return stat.isFile() && stat.size > 0;
   } catch {
     return false;
   }
@@ -281,7 +305,7 @@ function parseClaudeOAuthAccessToken(raw) {
  * spawn is therefore part of the auth preflight contract.
  */
 function readClaudeKeychainTokenSync() {
-  if (hostCredentialDiscoveryDisabled()) return null;
+  if (!legacyClaudeCredentialAccessEnabled()) return null;
   if (process.platform !== 'darwin') return null;
   for (const args of claudeKeychainLookupArgs(true)) {
     try {
@@ -307,7 +331,7 @@ function readClaudeKeychainTokenSync() {
 }
 
 function readClaudeLinuxCredentialsTokenSync() {
-  if (hostCredentialDiscoveryDisabled()) return null;
+  if (!legacyClaudeCredentialAccessEnabled()) return null;
   if (process.platform === 'darwin') return null;
   try {
     return parseClaudeOAuthAccessToken(
@@ -332,7 +356,7 @@ function readClaudeLinuxCredentialsTokenSync() {
  * subprocess can refresh itself from the same file's refreshToken.
  */
 async function readClaudeLinuxCredentialsToken() {
-  if (hostCredentialDiscoveryDisabled()) return null;
+  if (!legacyClaudeCredentialAccessEnabled()) return null;
   if (process.platform === 'darwin') return null;
   try {
     return parseClaudeOAuthAccessToken(
@@ -352,7 +376,7 @@ async function readClaudeLinuxCredentialsToken() {
  * non-object payload).
  */
 function readClaudeAuthFile(allowSet) {
-  if (hostCredentialDiscoveryDisabled()) return {};
+  if (!legacyClaudeCredentialAccessEnabled()) return {};
   try {
     const raw = fs.readFileSync(CLAUDE_AUTH_FILE, 'utf-8');
     const parsed = JSON.parse(raw);
@@ -379,6 +403,17 @@ function readClaudeAuthFile(allowSet) {
  * Mirrors the logic that previously lived inline in server/index.js.
  */
 function bootstrapClaudeAuthFromEnv({ logger = console } = {}) {
+  if (!legacyClaudeCredentialAccessEnabled()) {
+    const hadOAuth = Object.prototype.hasOwnProperty.call(process.env, 'CLAUDE_CODE_OAUTH_TOKEN')
+      || isClaudeOAuthTokenValue(process.env.ANTHROPIC_API_KEY);
+    stripClaudeOAuthEnv(process.env);
+    if (hadOAuth) logger.log('[authResolver] Removed Claude OAuth environment credentials.');
+    if (!hostCredentialDiscoveryDisabled() && !warnedClaudeAuthFile && fs.existsSync(CLAUDE_AUTH_FILE)) {
+      warnedClaudeAuthFile = true;
+      logger.warn('[authResolver] Saved Claude auth file is not read. Delete it manually if unnecessary. Legacy switch: PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS=1');
+    }
+    return false;
+  }
   // Never persist to, or hydrate from, the repo-root auth file under isolation.
   if (hostCredentialDiscoveryDisabled()) return false;
   if (process.env.CLAUDE_CODE_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY) {
@@ -561,11 +596,11 @@ function resolveClaudeAuth({
   );
 
   // (1) Direct env vars
-  if (process.env.CLAUDE_CODE_OAUTH_TOKEN && allow.has('CLAUDE_CODE_OAUTH_TOKEN')) {
+  if (legacyClaudeCredentialAccessEnabled() && process.env.CLAUDE_CODE_OAUTH_TOKEN && allow.has('CLAUDE_CODE_OAUTH_TOKEN')) {
     env.CLAUDE_CODE_OAUTH_TOKEN = process.env.CLAUDE_CODE_OAUTH_TOKEN;
     sources.push('env:CLAUDE_CODE_OAUTH_TOKEN');
   }
-  if (process.env.ANTHROPIC_API_KEY && allow.has('ANTHROPIC_API_KEY')) {
+  if (process.env.ANTHROPIC_API_KEY && (legacyClaudeCredentialAccessEnabled() || !isClaudeOAuthTokenValue(process.env.ANTHROPIC_API_KEY)) && allow.has('ANTHROPIC_API_KEY')) {
     env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
     sources.push('env:ANTHROPIC_API_KEY');
   }
@@ -584,7 +619,7 @@ function resolveClaudeAuth({
   let fileEnv = {};
   let fileExists = false;
   try {
-    fileExists = !hostCredentialDiscoveryDisabled() && fs.existsSync(CLAUDE_AUTH_FILE);
+    fileExists = legacyClaudeCredentialAccessEnabled() && fs.existsSync(CLAUDE_AUTH_FILE);
   } catch { /* ignore */ }
   if (fileExists) {
     fileEnv = readClaudeAuthFile(allow);
@@ -618,12 +653,13 @@ function resolveClaudeAuth({
   const declaredProviderAuth = resolveProviderAuthSources(
     providerEnv,
     allow,
-    ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY'],
+    legacyClaudeCredentialAccessEnabled() ? ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']
+      : (isClaudeOAuthTokenValue(process.env.ANTHROPIC_API_KEY) ? [] : ['ANTHROPIC_API_KEY']),
   );
   sources.push(...declaredProviderAuth.map((entry) => entry.source));
-  const hasDeclaredProviderAuth = declaredProviderAuth.length > 0;
+  const hasDeclaredProviderAuth = legacyClaudeCredentialAccessEnabled() && declaredProviderAuth.length > 0;
 
-  if (bare && !env.ANTHROPIC_API_KEY) {
+  if (legacyClaudeCredentialAccessEnabled() && bare && !env.ANTHROPIC_API_KEY) {
     let token = env.CLAUDE_CODE_OAUTH_TOKEN || null;
     if (token) {
       sources.push('materialize:bare:CLAUDE_CODE_OAUTH_TOKEN');
@@ -666,6 +702,7 @@ function resolveClaudeAuth({
       || hasDeclaredProviderAuth
       || !!(env.CLAUDE_CODE_OAUTH_TOKEN || env.ANTHROPIC_API_KEY || keychain || credentialsFile);
   if (!canAuth) {
+    if (!legacyClaudeCredentialAccessEnabled()) diagnostics.push('OAuth credential access disabled unless PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS=1. Use an actual ANTHROPIC_API_KEY.');
     diagnostics.push(bare
       ? 'Claude --bare requires a materialized ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN, an allowlisted Claude cloud-provider auth mode, or apiKeyHelper via --settings, but none was available.'
       : 'No Claude credentials found. Enable an allowlisted Claude cloud-provider auth mode, set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY, run `claude login`, or seed .claude-auth.json.');
@@ -774,7 +811,7 @@ function resolveCodexAuth({
  * data; the legacy bare-string fallback below is unaffected.
  */
 async function readClaudeKeychainToken() {
-  if (hostCredentialDiscoveryDisabled()) return null;
+  if (!legacyClaudeCredentialAccessEnabled()) return null;
   if (process.platform !== 'darwin') return null;
   for (const args of claudeKeychainLookupArgs(true)) {
     try {
@@ -885,12 +922,13 @@ async function resolveClaudeAuthForIsolated({
 
   let token = null;
 
-  if (process.env.ANTHROPIC_API_KEY && allow.has('ANTHROPIC_API_KEY')) {
+  if (process.env.ANTHROPIC_API_KEY && (legacyClaudeCredentialAccessEnabled() || !isClaudeOAuthTokenValue(process.env.ANTHROPIC_API_KEY)) && allow.has('ANTHROPIC_API_KEY')) {
     token = process.env.ANTHROPIC_API_KEY;
     sources.push('env:ANTHROPIC_API_KEY');
   }
   if (
     !token
+    && legacyClaudeCredentialAccessEnabled()
     && process.env.CLAUDE_CODE_OAUTH_TOKEN
     && allow.has('CLAUDE_CODE_OAUTH_TOKEN')
   ) {
@@ -904,7 +942,8 @@ async function resolveClaudeAuthForIsolated({
   const declaredProviderAuth = resolveProviderAuthSources(
     providerEnv,
     allow,
-    ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY'],
+    legacyClaudeCredentialAccessEnabled() ? ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']
+      : (isClaudeOAuthTokenValue(process.env.ANTHROPIC_API_KEY) ? [] : ['ANTHROPIC_API_KEY']),
   );
   sources.push(...declaredProviderAuth.map((entry) => entry.source));
 
@@ -932,7 +971,7 @@ async function resolveClaudeAuthForIsolated({
   // itself and no env policy can stop it -- the isolated path materializes the
   // credential HERE, so this is the layer that can and should decline. Derived
   // from the same decision the allow-set used, never a parallel rule.
-  const nativeFallbackAllowed = shouldUseDefaultAuth(envAllowlist, allowDefaultAuth);
+  const nativeFallbackAllowed = legacyClaudeCredentialAccessEnabled() && shouldUseDefaultAuth(envAllowlist, allowDefaultAuth);
 
   if (!token && nativeFallbackAllowed) {
     if (hasKeychain()) {
@@ -958,6 +997,7 @@ async function resolveClaudeAuthForIsolated({
   }
 
   if (!token) {
+    if (!legacyClaudeCredentialAccessEnabled()) diagnostics.push('OAuth credential access disabled unless PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS=1. Use an actual ANTHROPIC_API_KEY.');
     diagnostics.push(
       'Isolated preset requires an allowlisted ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN or Claude cloud-provider auth mode. Alternatively seed .claude-auth.json or run `claude login` (macOS keychain, or ~/.claude/.credentials.json on Linux/Windows).',
     );
@@ -1089,6 +1129,7 @@ function buildManagerSpawnEnv({
     }
   }
 
+  stripClaudeOAuthEnv(env);
   warnForwardedProxyUserinfo(env, { diagnosticContext, vendor });
 
   if (diagnosticContext && baseEnv) {
@@ -1155,6 +1196,10 @@ function resolveBearerForPreflight(envVarName) {
 }
 
 module.exports = {
+  legacyClaudeCredentialAccessEnabled,
+  isClaudeOAuthTokenValue,
+  resolveActualAnthropicApiKey,
+  stripClaudeOAuthEnv,
   bootstrapClaudeAuthFromEnv,
   resolveClaudeAuth,
   resolveClaudeAuthForIsolated,

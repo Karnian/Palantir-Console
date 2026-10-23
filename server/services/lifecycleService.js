@@ -9,6 +9,7 @@
  * - Status transitions (run completes → task moves to review)
  */
 
+const { stripClaudeOAuthEnv } = require('./authResolver');
 const path = require('node:path');
 const {
   createLocalNodeExecutor,
@@ -707,6 +708,7 @@ function createLifecycleService({
     try {
       const { execFileSync } = require('node:child_process');
       const out = execFileSync('claude', ['--version'], {
+        env: stripClaudeOAuthEnv({ ...process.env }),
         stdio: 'pipe', timeout: 3000, encoding: 'utf8',
       }).trim();
       const match = out.match(/(\d+\.\d+\.\d+)/);
@@ -1259,11 +1261,11 @@ function createLifecycleService({
         'Only one pending question per run. Never put secrets in the question.',
       ].filter(Boolean).join('\n\n');
     }
-    const buildWorkerEnv = (explicitEnv) => applyWorkerCredentialPolicy(explicitEnv, {
+    const buildWorkerEnv = (explicitEnv) => stripClaudeOAuthEnv(applyWorkerCredentialPolicy(explicitEnv, {
       workerToken: workerProposalToken,
       apiBase: workerProposalToken ? proposalApiBase : null,
       actorTokens,
-    });
+    }));
     const profile = agentProfileService.getProfile(agentProfileId);
     const profileEnvPolicy = typeof agentProfileService.resolveEnvPolicy === 'function'
       ? agentProfileService.resolveEnvPolicy(profile)
@@ -1861,7 +1863,7 @@ function createLifecycleService({
             err.status = 400;
             throw err;
           }
-          spawnEnv = { ...spawnEnv, ...auth.env };
+          spawnEnv = stripClaudeOAuthEnv({ ...spawnEnv, ...auth.env });
         }
         if (presetResolution && presetResolution.isolated) {
           const auth = await _authResolver.resolveClaudeAuthForIsolated({
@@ -1889,7 +1891,7 @@ function createLifecycleService({
             settingSources: presetResolution.settingSources || '',
             onCleanup: presetAuthCleanup,
           };
-          spawnEnv = { ...spawnEnv, ...auth.env };
+          spawnEnv = stripClaudeOAuthEnv({ ...spawnEnv, ...auth.env });
         }
 
         try {

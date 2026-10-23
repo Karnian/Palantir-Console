@@ -941,7 +941,7 @@ export const NODES_LABELS = {
     transport_lost: '노드 연결 끊김',
     no_data: '데이터 없음',
     not_logged_in: '미로그인',
-    quota_unsupported: '쿼터 조회 미지원(v2)',
+    quota_unsupported: '쿼터 조회 꺼짐 또는 미지원',
   },
 };
 

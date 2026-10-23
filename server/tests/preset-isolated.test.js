@@ -1,3 +1,4 @@
+require('./helpers/host-credential-discovery').enableLegacyClaudeCredentialAccessForFile();
 // Phase 10D — Tier 2 (Claude isolated) spawn wiring + auth materialization.
 //
 // Verifies:
@@ -12,7 +13,7 @@
 //      * fail-closed when auth is unavailable (run failed, 400 thrown)
 //      * onCleanup invoked on process exit (apiKeyHelper temp dir removed)
 
-process.env.PALANTIR_SKIP_HOST_CREDENTIALS = '1';
+delete process.env.PALANTIR_SKIP_HOST_CREDENTIALS;
 
 const test = require('node:test');
 const assert = require('node:assert/strict');

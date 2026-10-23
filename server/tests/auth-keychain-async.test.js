@@ -1,3 +1,4 @@
+require('./helpers/host-credential-discovery').enableLegacyClaudeCredentialAccessForFile();
 'use strict';
 
 // #423: this file exists to verify that host credential discovery HAPPENS —

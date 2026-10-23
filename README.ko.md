@@ -544,7 +544,8 @@ PATCH  /api/runs/:id/skill-packs/checks — 팩 체크 업데이트
 | `HOST` | 자동 | 바인딩 주소 명시적 오버라이드. 토큰 없이 `0.0.0.0` 이면 경고 로그 |
 | `PALANTIR_ALLOWED_COMMANDS` | (없음) | 추가 허용 CLI 명령어 (쉼표 구분) |
 | `PALANTIR_DEFAULT_PM_ADAPTER` | `codex` | 인스턴스 CLI가 자동이고 프로젝트 preference도 없을 때 사용하는 전역 Operator 어댑터 fallback |
-| `ANTHROPIC_BASE_URL` / `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` | — | Claude Code 인증 (서버 시작 시 감지되면 `.claude-auth.json` 에 저장) |
+| `ANTHROPIC_BASE_URL` / `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` | — | Claude Code 인증. 기본 모드에서는 OAuth 값(`CLAUDE_CODE_OAUTH_TOKEN`, `sk-ant-oat*` 키)을 부팅 때 지우고 자식에 넘기지 않는다. claude CLI 가 자기 로그인을 직접 읽는다. 실제 API 키는 그대로 쓴다 |
+| `PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS` | (꺼짐) | 정확히 `1` 이면 예전 Claude 자격 처리 복원(`.claude-auth.json` 저장·복원, `--bare`·isolated·정제기용 토큰 materialize, 사용량 조회). SH1 수락 대상 구성이 아님 |
 | `CODEX_API_KEY` / `OPENAI_API_KEY` | — | Codex 인증 (`~/.codex/auth.json` preflight 체크) |
 | `CODEX_BIN` | `codex` | Codex CLI 경로 |
 | `CODEX_HOME` | `~/.codex` | Codex config home |
@@ -588,7 +589,7 @@ npm run dev       # 개발 서버
 - 에이전트 명령어는 allowlist 로 제한 (임의 명령 실행 불가)
 - tmux 세션에서 에이전트 실행 시 shell injection 방지 (execFileSync + temp script)
 - git worktree 로 에이전트 간 파일시스템 격리
-- `.claude-auth.json` 은 mode `0o600` + gitignore — 절대 커밋 금지
+- `.claude-auth.json` 은 mode `0o600` + gitignore — 절대 커밋 금지. 기본 모드에서는 읽지도 쓰지도 않는다(레거시 스위치에서만)
 
 ## 라이선스
 

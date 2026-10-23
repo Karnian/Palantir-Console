@@ -549,6 +549,9 @@ async function getSshClaudeCard(node, spawnInteractive, opts, readClaudeUsage) {
     } catch {
       throw new UsageProbeError('probe_failed', 'claude quota probe returned invalid JSON');
     }
+    if (data.state === 'quota_unsupported') {
+      return errorCard('claude', 'quota_unsupported', data.error, { installed: true, version, authStatus });
+    }
     return card('claude', {
       installed: true,
       version,

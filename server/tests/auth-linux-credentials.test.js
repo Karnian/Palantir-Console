@@ -1,3 +1,4 @@
+require('./helpers/host-credential-discovery').enableLegacyClaudeCredentialAccessForFile();
 // Follow-up to PR #374 (Linux Claude Code CLI credential file recognition).
 // Codex adversarial re-review of the merged commit found the shipped tests
 // only exercised the negative path (hasCredentialsFile: () => false) — there
@@ -97,6 +98,14 @@ function withFakeLinuxCredsFile(content, fn) {
   const savedSkipFlag = process.env.PALANTIR_SKIP_HOST_CREDENTIALS;
   delete process.env.PALANTIR_SKIP_HOST_CREDENTIALS;
   const orig = fs.readFileSync;
+  const origStat = fs.statSync;
+  fs.statSync = function (p, ...rest) {
+    if (p === CLAUDE_LINUX_CREDENTIALS_FILE) {
+      if (content == null) throw new Error('ENOENT');
+      return { isFile: () => true, size: Buffer.byteLength(content) };
+    }
+    return origStat.call(fs, p, ...rest);
+  };
   fs.readFileSync = function (p, ...rest) {
     if (p === CLAUDE_LINUX_CREDENTIALS_FILE) {
       if (content == null) {
@@ -110,6 +119,7 @@ function withFakeLinuxCredsFile(content, fn) {
   };
   try { return fn(); } finally {
     fs.readFileSync = orig;
+    fs.statSync = origStat;
     if (savedSkipFlag === undefined) delete process.env.PALANTIR_SKIP_HOST_CREDENTIALS;
     else process.env.PALANTIR_SKIP_HOST_CREDENTIALS = savedSkipFlag;
   }
@@ -290,21 +300,21 @@ test('hasClaudeLinuxCredentials: true for a valid non-empty accessToken', () => 
   });
 });
 
-test('hasClaudeLinuxCredentials: false on malformed JSON', () => {
+test('hasClaudeLinuxCredentials: true for a nonempty malformed file (stat only)', () => {
   withPlatform('linux', () => {
     withFakeLinuxCredsFile('{not valid json', () => {
-      assert.equal(hasClaudeLinuxCredentials(), false);
+      assert.equal(hasClaudeLinuxCredentials(), true);
     });
   });
 });
 
-test('hasClaudeLinuxCredentials: false when accessToken missing or empty', () => {
+test('hasClaudeLinuxCredentials: true for nonempty files regardless of JSON fields', () => {
   withPlatform('linux', () => {
     withFakeLinuxCredsFile(JSON.stringify({ claudeAiOauth: { accessToken: '' } }), () => {
-      assert.equal(hasClaudeLinuxCredentials(), false);
+      assert.equal(hasClaudeLinuxCredentials(), true);
     });
     withFakeLinuxCredsFile(JSON.stringify({ other: 'shape' }), () => {
-      assert.equal(hasClaudeLinuxCredentials(), false);
+      assert.equal(hasClaudeLinuxCredentials(), true);
     });
   });
 });

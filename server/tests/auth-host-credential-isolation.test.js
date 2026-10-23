@@ -38,6 +38,7 @@ const ENV_KEYS = [
   'PALANTIR_SKIP_HOST_CREDENTIALS',
   'PALANTIR_CLAUDE_AUTH_FILE',
   'ANTHROPIC_API_KEY',
+  'PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS',
   'CLAUDE_CODE_OAUTH_TOKEN',
   'ANTHROPIC_BASE_URL',
   // resolveCodexAuth reads these straight from the environment, so leaving
@@ -191,8 +192,9 @@ test('isolation stops .claude-auth.json from hydrating process.env', (t) => {
   assert.equal(process.env.ANTHROPIC_API_KEY, undefined);
 });
 
-test('without the switch the same file still hydrates process.env (no behaviour change)', (t) => {
+test('legacy mode still hydrates process.env from the saved file', (t) => {
   const box = sandbox(t);
+  process.env.PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS = '1';
   box.plant({ ANTHROPIC_API_KEY: 'sk-ant-fixture' });
 
   assert.equal(loadResolver().bootstrapClaudeAuthFromEnv(SILENT), true);
@@ -264,6 +266,7 @@ function asDarwinHost(t) {
 test('isolation suppresses the keychain probes on a Darwin-shaped host', async (t) => {
   sandbox(t);
   asDarwinHost(t);
+  process.env.PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS = '1';
   process.env.PALANTIR_SKIP_HOST_CREDENTIALS = '1';
   const probes = spyOnNativeProbes(t);
   const resolver = loadResolver();
@@ -277,6 +280,7 @@ test('isolation suppresses the keychain probes on a Darwin-shaped host', async (
 // because the spy is blind, and a deleted guard would go unnoticed.
 test('positive control: unisolated keychain probes are observable', async (t) => {
   sandbox(t);
+  process.env.PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS = '1';
   asDarwinHost(t);
   t.mock.method(os, 'userInfo', () => ({ username: 'fixture-account' }));
   const probes = spyOnNativeProbes(t);
@@ -349,16 +353,17 @@ test('isolation suppresses the CLI credential store on a Linux-shaped host', asy
 
 test('positive control: unisolated CLI credential reads are observable', async (t) => {
   sandbox(t);
+  process.env.PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS = '1';
   asLinuxHostWithCredentials(t);
   const probes = spyOnNativeProbes(t);
   const resolver = loadResolver();
 
-  assert.equal(resolver.hasClaudeLinuxCredentials(), true);          // readFileSync
+  assert.equal(resolver.hasClaudeLinuxCredentials(), true);          // statSync
   assert.equal(await resolver.readClaudeLinuxCredentialsToken(), 'oauth-fixture-token'); // readFile
   assert.equal(
     probes.credentialFileReads().length,
-    2,
-    'both the sync existence probe and the async token read must be observable',
+    1,
+    'only the async token reader reads contents; existence uses stat',
   );
 });
 
@@ -416,6 +421,7 @@ test('positive control: unisolated resolvers do probe both auth files', (t) => {
   // Keeps the three assertions above honest — without this, they would also
   // pass if the resolvers simply never looked at these paths.
   const box = sandbox(t);
+  process.env.PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS = '1';
   withCodexCredentialFixture(t, 'palantir-codexauth-pc-');
 
   box.plant({ ANTHROPIC_API_KEY: 'sk-ant-fixture' });

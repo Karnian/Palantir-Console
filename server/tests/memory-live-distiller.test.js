@@ -1,3 +1,4 @@
+require('./helpers/host-credential-discovery').enableLegacyClaudeCredentialAccessForFile();
 // ML PR3b — live batch-LLM distiller (unit). The model call is injected so
 // these run with zero network/LLM. All safety lives in the writer
 // (promoteCandidatesBatchTx); the distiller only generates content and the

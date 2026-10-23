@@ -1,3 +1,4 @@
+require('./helpers/host-credential-discovery').enableLegacyClaudeCredentialAccessForFile();
 // ML PR3a — batch distill pipeline: memory_jobs CAS lease + candidate->active
 // promotion (single tx, lease re-check) + memoryDistillService.runOnce with an
 // injected fake distiller (zero LLM calls).

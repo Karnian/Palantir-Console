@@ -1,3 +1,4 @@
+require('./helpers/host-credential-discovery').enableLegacyClaudeCredentialAccessForFile();
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const childProcess = require('node:child_process');
@@ -3662,4 +3663,65 @@ test('readClaudeVersion rejects untrusted path segments and returns null for bad
     /pathPrefix must be one or more absolute POSIX paths/,
   );
   assert.equal(await exec.readClaudeVersion({ pathPrefix: '/opt/claude/bin' }), null);
+});
+
+test('default credential policy removes readers from both remote bare bootstraps and blocks OAuth forwarding', async t => {
+  const saved = { ...process.env };
+  delete process.env.PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS;
+  delete process.env.PALANTIR_SKIP_HOST_CREDENTIALS;
+  t.after(() => {
+    for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+    Object.assign(process.env, saved);
+  });
+  const spawn = makeSpawn((call, child) => {
+    const script = scriptOf(call);
+    if (script.startsWith("exec 'realpath'")) return complete(child, { stdout: '/real/root\n' });
+  });
+  const executor = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+  await executor.spawnInteractive('claude', ['--bare'], { claudeBareAuth: true,
+    env: {},
+    envAllowlist: ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_USE_BEDROCK'] });
+  const regular = spawn.calls.map(scriptOf).find(script => script.includes('sk-ant-oat*'));
+  assert.ok(regular);
+  assert.doesNotMatch(regular, /\.credentials\.json|ANTHROPIC_API_KEY=\$CLAUDE_CODE_OAUTH_TOKEN/);
+  const workerSpawn = workerSpawnHarness('default_bare');
+  const worker = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: workerSpawn });
+  await worker.spawnWorker('default_bare', { command: 'claude', args: ['--bare'], cwd: '/srv/root/project',
+    claudeBareAuth: true, envAllowlist: ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_USE_BEDROCK'],
+    env: { CLAUDE_CODE_OAUTH_TOKEN: 'controller-oauth-canary', ANTHROPIC_API_KEY: 'sk-ant-oat-controller' } });
+  const detached = workerSpawn.calls.map(scriptOf).find(script => script.includes('tmux new-session'));
+  assert.ok(detached);
+  const workerScript = tmuxInnerScript(detached, 'default_bare');
+  const workerInvocation = workerScript.slice(workerScript.indexOf('set --'),
+    workerScript.indexOf(" > '/srv/root/.palantir-runs/default_bare/stdout.log'"));
+  for (const generated of [regular, workerInvocation]) {
+    const invocation = generated.replace(/'claude' '--bare'/g, "'/usr/bin/printenv'");
+    assert.doesNotMatch(invocation, /'claude'/);
+    for (const fixture of [
+      { env: { ANTHROPIC_API_KEY: 'sk-ant-oat-pod' }, status: 78 },
+      { env: { CLAUDE_CODE_OAUTH_TOKEN: 'pod-oauth' }, status: 78 },
+      { env: { ANTHROPIC_API_KEY: 'sk-ant-api-pod', CLAUDE_CODE_OAUTH_TOKEN: 'strip-this-token' }, status: 0, output: 'ANTHROPIC_API_KEY=sk-ant-api-pod' },
+      { env: { CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_OAUTH_TOKEN: 'strip-this-token' }, status: 0, output: 'CLAUDE_CODE_USE_BEDROCK=1' },
+    ]) {
+      // Only /bin/sh and printenv run locally; no Claude executable is invoked.
+      const result = childProcess.spawnSync('/bin/sh', ['-c', invocation], {
+        encoding: 'utf8', env: { PATH: '/usr/bin:/bin', ...fixture.env },
+      });
+      assert.equal(result.status, fixture.status, result.stderr);
+      if (fixture.status === 78) {
+        assert.equal(result.stdout, '', 'child must not execute');
+        assert.match(result.stderr, /PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS/);
+      } else {
+        assert.ok(result.stdout.includes(fixture.output), result.stdout);
+        assert.doesNotMatch(result.stdout, /CLAUDE_CODE_OAUTH_TOKEN|strip-this-token/);
+      }
+    }
+  }
+  for (const shell of [regular, detached]) {
+    assert.doesNotMatch(shell, /\.credentials\.json|ANTHROPIC_API_KEY=\$CLAUDE_CODE_OAUTH_TOKEN/);
+    assert.doesNotMatch(shell, /controller-oauth-canary|sk-ant-oat-controller/);
+    assert.match(shell, /sk-ant-oat\*/);
+    assert.match(shell, /exit 78/);
+    assert.match(shell, /PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS/);
+  }
 });

@@ -221,7 +221,7 @@ test('claude worker forwards structured permission_mode to the stream-json spec'
   assert.equal(harness.streamJsonEngine.spawned[0].opts.permissionMode, 'acceptEdits');
 });
 
-test('claude worker carries security template options into the stream-json spec', async (t) => {
+test('claude worker carries security template options into the stream-json spec', async (t) => require('./helpers/host-credential-discovery').withLegacyClaudeCredentialAccess(async () => {
   const harness = await createHarness(t);
   const profileId = insertProfile(harness.db, {
     command: 'claude',
@@ -258,9 +258,9 @@ test('claude worker carries security template options into the stream-json spec'
   const maxTurnsIndex = args.indexOf('--max-turns');
   assert.notEqual(maxTurnsIndex, -1);
   assert.equal(args[maxTurnsIndex + 1], '5');
-});
+}));
 
-test('claude --bare worker fails before spawn when native auth cannot be materialized', async (t) => {
+test('claude --bare worker fails before spawn when native auth cannot be materialized', async (t) => require('./helpers/host-credential-discovery').withLegacyClaudeCredentialAccess(async () => {
   const harness = await createHarness(t, { bareToken: null });
   const profileId = insertProfile(harness.db, {
     command: 'claude',
@@ -273,7 +273,7 @@ test('claude --bare worker fails before spawn when native auth cannot be materia
     /--bare requires a materialized ANTHROPIC_API_KEY/,
   );
   assert.equal(harness.streamJsonEngine.spawned.length, 0);
-});
+}));
 
 test('claude --bare worker starts when explicit settings provides apiKeyHelper auth', async (t) => {
   const harness = await createHarness(t, { bareToken: null });
