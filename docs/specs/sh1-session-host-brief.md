@@ -342,7 +342,7 @@ lock-in 은 사용자가 실제 작업에 써 본 뒤 정한다. brief 는 화�
 - `accepted` 응답 직전 크래시 → 서버 "접수 미확인" → 같은 키 재시도로 기존 결과, 효과 1회.
 - `deleting` 직후 크래시 → 재기동 시 삭제 재개, `deleted` 전에는 "삭제 완료" 표시 0.
 
-**정상 경로 최소 성공 기준**: 결함을 주입하지 않은 실행에서는 지시·승인·거부·질문 응답이 **전부** observed(또는 completed)에 도달해야 한다(승인 실측은 성공하는 도구 명령으로 한다 — 오류 결과는 규칙상 unknown 이다). unknown 은 결함 주입 사례에서만 허용한다 — 모든 것을 unknown 으로 남기는 구현은 수락되지 않는다. (b)·(c) 에서 정상 지시 20회·승인 10회 중 unknown 이 하나라도 나오면 실패다(S1-0 에서 prompt·tool_decision·interrupt 모두 관측 신호가 확인됐으므로 예외 kind 는 없다. question_answer 는 S1-e 에서 실측한다).
+**정상 경로 최소 성공 기준**: 결함을 주입하지 않은 실행에서는 지시·승인·거부·질문 응답이 **전부** observed(또는 completed)에 도달해야 한다(승인 실측은 성공하는 도구 명령으로 한다 — 오류 결과는 규칙상 unknown 이다). 이와 별도로 **자연 발생 오류 사례**(허용한 도구가 파일 부재·잘못된 인자로 실패)는 결함 주입이 아니어도 전달 unknown + "도구 끝남(오류)" 표시·다시 보내기 0 이면 통과로 본다. unknown 은 결함 주입 사례에서만 허용한다 — 모든 것을 unknown 으로 남기는 구현은 수락되지 않는다. (b)·(c) 에서 정상 지시 20회·승인 10회 중 unknown 이 하나라도 나오면 실패다(S1-0 에서 prompt·tool_decision·interrupt 모두 관측 신호가 확인됐으므로 예외 kind 는 없다. question_answer 는 S1-e 에서 실측한다).
 
 **"효과 1회"의 정의**: 호스트의 SDK 호출 횟수가 아니라 **provider 쪽 효과**로 센다. (b) 에서는 가짜 실행 파일이 자기 로그에 기록한 수신·도구 실행 횟수, (c) 에서는 독립된 도구 효과(예: 지시마다 파일에 한 줄 추가하게 하고 줄 수를 센다).
 
@@ -392,3 +392,4 @@ lock-in 은 사용자가 실제 작업에 써 본 뒤 정한다. brief 는 화�
 - v5 (2026-10-24): S1-0 스파이크 결과 반영(`docs/sh1-s1-0-spike-record.md`). 바뀐 설계: 인증 게이트를 빈 입력 스트리밍 `query()` 로(WarmQuery 에 `initializationResult` 없음) + 통과 조건 고정(§1.2-3), 필수 capability(§2.3), prompt 관측 = `command_lifecycle`·완료 = `user_message_uuids` 정확 일치(§4.3), 허용 결정 관측을 Palantir 인터럽트 기록으로 가름(§4.3), 호스트가 죽어도 고아 자식이 턴을 끝까지 수행·호스트 정상 종료는 자식을 죽임(§3.1), claude 정상 종료가 `&` 백그라운드를 남김(§3.4), 사용자 hooks·MCP 도 실행됨(§1.2-3·§5-1), SDK env 세 변수(§7), 유료 사용 크레딧 사용 표시(§1.2·§6). R4 해소.
 - codex **R5**(v5): **NO-GO** (SERIOUS 4 / MODERATE 2). 반영(v5.1) — 보충 실측 3건을 더 해서 닫았다(`docs/sh1-s1-0-spike-record.md` "보충 실측"): 허용 결정 관측을 "결정 → 결과 구간에 Palantir 인터럽트·abort·exit 없음"으로 좁히고 근거를 적음(§4.3), `provider_observed` 의 호스트 상실 복구 = `outcome_unknown`(§4.3), 게이트에 `resolveSettings` 사전 검사(settings env 의 `ANTHROPIC_BASE_URL` 은 account 로 안 보임 — 실측)·`subscriptionType` 허용 목록·초기화 응답의 pid·버전·권한 모드·원격 제어 확인·실측하지 않은 인증 경로 명시·게이트 실패 정리 절차(§1.2-3), 필수 capability 는 첫 prompt 전에 알 수 없음(실측) → 버전 고정이 1차 보장 + 첫 init 확인(§2.3), `PermissionRequest` hook 경고(§5-1).
 - codex **R6**(v5.1): **NO-GO** (SERIOUS 2 / MODERATE 2, R5 6건 중 닫힘 4 / 부분 2). 반영(v5.2) — 범위를 줄여 닫았다: 허용 결정 관측을 "원인이 세 사건뿐" 이라는 완전성 주장 대신 **정상 결과라는 양성 증거**로만 인정하고 오류 결과는 unknown(§4.3), prompt 의 결과를 별도 `outcome` 필드로·kind 별 종결·idle 은 incarnation 안에서만(§4.3·§5-7), `resolveSettings` fail-closed(기한·구조 검증·예외 → spawn 0, §1.2-3·§8.1), 시작 전 게이트와 첫 prompt 뒤 capability 확인을 분리해 §5-1·§8.1 정리.
+- codex **R7**(v5.2): **GO** (R6 4건 모두 닫힘). MINOR 1(자연 발생 오류 사례를 정상 경로 기준과 분리) 반영. 이 GO 는 설계 단계 판정이다.
