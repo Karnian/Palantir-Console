@@ -1,6 +1,6 @@
 # SH1 — 사람용 세션 호스트 (Claude 1개·머신 1대) 구현 brief
 
-상태: **v5.1 (2026-10-24)** — v4.1(사용자 승인) + S1-0 스파이크 결과 반영(`docs/sh1-s1-0-spike-record.md`). codex 재검토 → 사용자 승인 뒤 S1-a 에 들어간다. v4.1 에서 "S1-0 에서 확정"으로 남긴 칸은 모두 실측값으로 채웠다. 사용자 판정 두 항목은 닫혔다: §10 R6 은 사용자가 받아들였고("과금은 상관 없어"), §1.4 는 사용자 위임에 따라 codex 합의안으로 정했다(구현 S1-pre).
+상태: **v5.2 (2026-10-24)** — v4.1(사용자 승인) + S1-0 스파이크 결과 반영(`docs/sh1-s1-0-spike-record.md`). codex 재검토 → 사용자 승인 뒤 S1-a 에 들어간다. v4.1 에서 "S1-0 에서 확정"으로 남긴 칸은 모두 실측값으로 채웠다. 사용자 판정 두 항목은 닫혔다: §10 R6 은 사용자가 받아들였고("과금은 상관 없어"), §1.4 는 사용자 위임에 따라 codex 합의안으로 정했다(구현 S1-pre).
 상위 계약: `docs/specs/instruction-centric-direction-brief.md` §0.2 (v6 LOCKED). 이 문서와 충돌하면 §0.2 가 우선한다.
 
 ## 0. 목적과 범위
@@ -38,7 +38,7 @@
 3. **구독 로그인 강제 (경고가 아니라 차단)**:
    - 자식 env 에서 인증 순위([authentication](https://code.claude.com/docs/en/authentication) "Authentication precedence")상 구독 로그인보다 앞서는 변수를 제거한다: `CLAUDE_CODE_USE_BEDROCK`·`CLAUDE_CODE_USE_VERTEX`·`CLAUDE_CODE_USE_FOUNDRY`·`ANTHROPIC_AUTH_TOKEN`·`ANTHROPIC_API_KEY`·`CLAUDE_CODE_OAUTH_TOKEN`·`ANTHROPIC_PROFILE`·`ANTHROPIC_BASE_URL`.
    - 설정 파일(`apiKeyHelper`, settings 의 `env` 블록, gateway 로그인)로도 다른 인증이 들어올 수 있으므로, **첫 지시를 보내기 전에** 입력이 비어 있는 스트리밍 `query()` 를 열어 초기화만 끝내고 `initializationResult().account` 를 확인한다(S1-0: 모델 요청 0, 약 1초. `startup()` 이 돌려주는 WarmQuery 에는 이 메서드가 없다). 구독 로그인으로 판정되지 않으면 세션을 닫고 "구독 로그인이 아닌 인증 — 시작하지 않음"을 표시한다.
-   - **spawn 전 설정 검사**: SDK `resolveSettings({cwd})`(CLI 를 띄우지 않음, alpha)로 실제 적용될 설정을 읽어, `effective.env` 에 위 인증 변수(`ANTHROPIC_BASE_URL` 포함)가 하나라도 있거나 `effective.apiKeyHelper` 가 있으면 시작하지 않고 출처(`provenance` 의 파일 경로)를 보인다. S1-0 보충 실측: settings `env` 의 API 키·bearer·OAuth·Bedrock 은 아래 account 에도 드러나지만, **`ANTHROPIC_BASE_URL` 은 account 가 구독과 똑같이 보여 이 검사로만 잡힌다.** `resolveSettings()` 는 `policyHelper`·server-managed settings 를 실행·조회하지 않는다 — 그 경로는 아래 account 게이트에만 기댄다.
+   - **spawn 전 설정 검사**: SDK `resolveSettings({cwd})`(CLI 를 띄우지 않음, alpha)로 실제 적용될 설정을 읽어, `effective.env` 에 위 인증 변수(`ANTHROPIC_BASE_URL` 포함)가 하나라도 있거나 `effective.apiKeyHelper` 가 있으면 시작하지 않고 출처(`provenance` 의 파일 경로)를 보인다. S1-0 보충 실측: settings `env` 의 API 키·bearer·OAuth·Bedrock 은 아래 account 에도 드러나지만, **`ANTHROPIC_BASE_URL` 은 account 가 구독과 똑같이 보여 이 검사로만 잡힌다.** `resolveSettings()` 는 `policyHelper`·server-managed settings 를 실행·조회하지 않는다 — 그 경로는 아래 account 게이트에만 기댄다. **이 검사는 fail-closed 다**: 기한 10초, 반환 구조 검증(`effective` 가 객체, `effective.env` 는 없거나 문자열 값만 든 객체, `sources` 가 배열, `provenance` 가 객체), 예외·기한 초과·구조 불일치·SDK 에 함수가 없음 중 하나라도 있으면 spawn 하지 않고 "설정 확인 실패 — 시작하지 않음"을 보인다. 빈 설정으로 대체하거나 경고만 남기고 진행하는 경로를 두지 않는다(테스트로 고정).
    - **account 통과 조건(S1-0 실측으로 고정, 전부 만족)**: `apiProvider === 'firstParty'`, `subscriptionType` 이 **허용 목록의 값과 정확히 같음**(설치 때 사용자 계정에서 관측한 값으로 시작 — 이번 실측은 `"Claude Max"` 하나), `tokenSource` 필드 **없음**, `apiKeySource` 필드 **없음**. 실측에서 API 키는 `apiKeySource:"ANTHROPIC_API_KEY"`, bearer·OAuth env·apiKeyHelper 는 각각 `tokenSource` 값, cloud provider 는 `apiProvider:"bedrock"` 등으로 나와 모두 걸러진다(env 로 넣든 settings `env` 로 넣든 같다). 이 밖의 모양·필드 누락·모르는 값은 거부한다(버전을 올려 모양이 바뀌면 시작이 거부되는 쪽으로 실패한다).
    - **같은 초기화 응답에서 함께 확인**(S1-0 보충): `pid` 가 custom spawn 이 띄운 pid 와 같음, `claude_code_version` 이 고정 버전과 같음, `current_permission_mode === 'default'`, `remote_control_auto_enable === false`(다른 제어 경로가 붙으면 1:1 귀속이 깨진다). 하나라도 다르면 시작하지 않는다.
    - **이 게이트가 실측으로 증명하지 않은 것**: gateway 로그인, 유효한 Console 로그인과 구독 메타데이터가 함께 있는 계정, MDM·server-managed 설정. 이 경우 account 모양이 구독처럼 보일 가능성을 배제하지 못한다. 첫 prompt 뒤 `system/init` 의 `apiKeySource` 가 `'none'` 이 아니면 그 턴을 장애로 표시하고 세션을 닫는다(사후 탐지). 잔여 위험은 R6(사용자 수락)에 포함한다.
@@ -192,7 +192,7 @@ pid 와 pgid 는 그것만으로 신원이 아니다(owner-exit 트랙 교훈 �
 |---|---|
 | `owned_sessions` | id, cwd, claude_session_id, title, state(active/handed_off/closed/deleting/deleted), created_at |
 | `incarnations` | id(=예약 id), session_id, host_boot_id, state(spawning/alive/exited/orphaned/never_started/liveness_unknown), pid, pid_started_at, sdk_version, cli_path, cli_sha256, account_snapshot, capabilities, started_at, ended_at, end_reason |
-| `deliveries` | id, session_id, incarnation_id, kind(prompt/tool_decision/question_answer/interrupt), body, target_tool_use_id, turn_gen, request_key, fingerprint, message_uuid, state, 상태별 시각·seq, reason |
+| `deliveries` | id, session_id, incarnation_id, kind(prompt/tool_decision/question_answer/interrupt), body, target_tool_use_id, turn_gen, request_key, fingerprint, message_uuid, state, outcome(prompt 만: null/completed/interrupted/outcome_unknown, §4.3), 상태별 시각·seq, reason |
 | `tool_requests` | id, incarnation_id, tool_use_id, tool_name, input(원문), state(pending/decided/cancelled/expired), decision(allow/deny/answer + 내용), answer_delivery_id — **사람의 결정 확정(state=decided)과 provider 전달(delivery state)은 별도 필드** |
 | `events` | incarnation_id, seq, 원문 JSON(SDK 메시지 전문 — 화면 절단과 분리, §0.2.12) |
 | `request_tombstones` | request_key, fingerprint 해시, 원래 전달 최종 state(unknown 포함), session_deleted 여부, 만료 시각 — 삭제 뒤 멱등 유지(§4.6) |
@@ -205,7 +205,7 @@ pid 와 pgid 는 그것만으로 신원이 아니다(owner-exit 트랙 교훈 �
 - **sending**: 외부 효과(SDK 입력 yield, 콜백 resolve, `interrupt()`) **직전에 커밋**한다. 효과는 이 커밋 뒤에만 일어난다.
 - **written**: 효과 호출이 반환된 뒤 커밋.
 - **단조성**: 상태는 앞으로만 간다. 모든 전이는 `UPDATE … WHERE state IN (<허용 이전 상태>)` 조건부다. 예: 관측 이벤트가 `written` 커밋보다 먼저 처리되면 `sending → provider_observed` 로 바로 가고, 늦은 `written` 커밋은 조건에서 떨어진다.
-- 복구: `queued` 는 그대로 남아도 된다(효과 없음 보장). **`sending`·`written` 인데 관측이 없는 것은 전부 `unknown`** 이다. **`provider_observed` 인데 completed 가 아닌 것**(CLI 수신은 확인, 결과는 못 봄)은 전달 상태를 그대로 두고 결과를 `outcome_unknown` 으로 기록한다 — 화면 "받음 · 결과 불명(호스트 상실 중 계속 실행됐을 수 있음)". queued 는 실행 보장이 아니고, 호스트가 죽으면 고아 자식이 그 턴을 끝까지 수행할 수 있다(S1-0 ⑤). 이 항목에는 "다시 보내기"가 없다(이미 받았다). resume 뒤 대화 기록에 그 턴이 있을 수 있음을 함께 보인다. `sending` 을 `queued` 로 되돌리지 않는다. 승인 카드는 `decided` 를 유지하고 "결정 기록됨 · 전달 불명"으로 보인다. 같은 요청에 다시 답할 수 없다.
+- 복구: `queued` 는 그대로 남아도 된다(효과 없음 보장). **`sending`·`written` 인데 관측이 없는 것은 전부 `unknown`** 이다. **prompt 의 결과는 전달 상태와 별도 필드 `outcome`** 에 둔다: `null`(진행 중) / `completed` / `interrupted`(lifecycle `cancelled` + `error_during_execution`) / `outcome_unknown`. 전달이 `provider_observed`(CLI 수신 확인)인데 그 incarnation 이 끝날 때까지 결과를 못 봤으면 전달 상태는 그대로 두고 `outcome = outcome_unknown` — 화면 "받음 · 결과 불명(호스트 상실 중 계속 실행됐을 수 있음)". queued 는 실행 보장이 아니고, 호스트가 죽으면 고아 자식이 그 턴을 끝까지 수행할 수 있다(S1-0 ⑤). 이 항목에는 "다시 보내기"가 없다(이미 받았다). tool_decision·question_answer 는 observed 가 곧 종결이라 `outcome` 이 없고, interrupt 의 종결은 아래 표대로다. **idle 판정(§5-2)은 incarnation 안에서만 한다** — 이전 incarnation 의 `outcome_unknown` 은 새 incarnation 의 idle 을 막지 않고, 새 incarnation 시작 화면에 "이전 실행에서 결과를 못 본 지시 N건 — 대화 기록에서 확인"으로 보인다(§5-7). `sending` 을 `queued` 로 되돌리지 않는다. 승인 카드는 `decided` 를 유지하고 "결정 기록됨 · 전달 불명"으로 보인다. 같은 요청에 다시 답할 수 없다.
 - **unknown 은 자동 재전송하지 않고, 같은 incarnation 에서는 다시 보내기도 막는다.** 원본이 provider 안에 남아 늦게 실행될 수 있기 때문이다.
   - incarnation 이 살아 있으면 세션은 `attribution_uncertain` 상태가 되어 새 prompt 를 막는다. 사람의 선택지: "기다리기"(관측이 오면 해제) 또는 "세션 끝내고 이어서 시작"(종료 확인 → resume).
   - incarnation 이 끝난 뒤(대화 실행 종료 확인, §3.4)에만 "다시 보내기"가 열린다. 새 incarnation 에서 새 request_key 로 보내며, 화면에 "원본이 실행됐을 수 있음 — 대화 기록을 먼저 확인"을 보인다.
@@ -215,7 +215,7 @@ kind 별 관측 증거 — **상관 ID 로 특정되는 증거만 인정**한다
 | kind | provider_observed | completed |
 |---|---|---|
 | prompt | `command_lifecycle` 이벤트의 `command_uuid` = 그 message uuid, `state: "queued"`(CLI 가 받음). 이어 `started`. 사용자 메시지 replay 는 오지 않는다(S1-0 ①) | `result` 의 `user_message_uuids` 가 **정확히 [그 uuid]** 이고 lifecycle `completed`. 목록에 다른 uuid 가 섞이면(합쳐진 턴) 귀속하지 않고 `attribution_uncertain`. lifecycle `cancelled` 는 completed 가 아니다(인터럽트 결과 `error_during_execution` 과 함께 "중단됨") |
-| tool_decision | 같은 `tool_use_id` 의 `tool_result` 이고 **그 결과가 이번 결정에서 나왔다고 구별될 때만**: 거부 → `is_error: true` 이고 내용이 거부 메시지 그대로(요청 nonce 포함, S1-0 실측). 허용 → 그 `tool_use_id` 의 `tool_result` 가 도착했고, **이 결정의 `sending` 커밋부터 그 `tool_result` 까지** Palantir 인터럽트·`canUseTool` signal abort·자식 exit 가 하나도 없었다. 근거: `canUseTool` 에 도달한 요청은 응답이 올 때까지 무기한 막힌다(SDK 문서 "permission prompts don't time out", S1-0 ⑥ 300초, ⑤ 승인 대기 중 고아는 도구를 실행하지 않고 끝남) — 그래서 그 구간에 결과를 만들 다른 원인은 Palantir 가 기록하는 세 사건뿐이다. hook 차단·권한 규칙·CLI 자체 차단(`Blocked: sleep …`)·`PermissionRequest` hook 의 대리 결정은 `canUseTool` **전에** 일어나 승인 요청 자체가 생기지 않으므로 결정에 귀속될 일이 없다(S1-0: CLI 차단은 `canUseTool` 호출 없이 `tool_result` 만 냈다. hook 차단은 S1-e 에서 실측). 세 사건 중 하나가 그 구간에 있었으면 전달은 unknown, 도구 종료는 따로 "도구 끝남"으로 표시. 앞선 턴·다른 결정의 인터럽트는 이 판정에 영향을 주지 않는다 | 별도 단계 없음 — observed 가 "결정이 전달됨"이다 |
+| tool_decision | 같은 `tool_use_id` 의 `tool_result` 이고 **그 결과가 이번 결정에서 나왔다고 구별될 때만**: 거부 → `is_error: true` 이고 내용이 거부 메시지 그대로(요청 nonce 포함, S1-0 실측). 허용 → **양성 증거만 인정**: 그 `tool_use_id` 의 `tool_result` 가 `is_error` 가 아닌 결과(도구가 실제로 실행된 출력)이고, 이 결정의 `sending` 커밋부터 그 결과까지 Palantir 인터럽트·`canUseTool` signal abort·자식 exit 가 없었다. 승인 대기 중이던 도구가 정상 결과를 냈다면 실행된 것이고, 실행은 허용 없이 일어나지 않는다(S1-0 ⑥ 300초 보류 동안 실행 없음, ⑤ 승인 대기 중 고아는 실행 없이 끝남). **오류 결과(`is_error: true`)는 결정에서 나왔는지 가를 근거가 없으므로 전달 unknown + "도구 끝남(오류)"** 으로 둔다 — 도구 자체 실패와 다른 원인의 차단을 구별하지 못하기 때문이다. 인터럽트·abort·exit 가 그 구간에 있었어도 unknown + "도구 끝남". 앞선 턴·다른 결정의 인터럽트는 이 판정에 영향을 주지 않는다. hook 차단·권한 규칙·CLI 자체 차단(`Blocked: sleep …`)·`PermissionRequest` hook 대리 결정이 `canUseTool` 앞에서 일어난다는 순서는 문서·S1-0(CLI 차단은 `canUseTool` 호출 없이 결과만 냄)에 기댄 것이고, hook 차단은 S1-e 에서 실측한다 | 별도 단계 없음 — observed 가 "결정이 전달됨"이다 |
 | question_answer | 같은 `tool_use_id`(AskUserQuestion)의 `tool_result` 에 보낸 답이 보임 | 같음 |
 | interrupt | 영수증 수신(`interrupt_receipt_v1`, S1-0 ⑦: `{"still_queued":[…]}`) | 대상 턴 세대(`turn_gen`)의 `result`(중단이면 `error_during_execution`, `user_message_uuid` = 그 턴의 prompt) 관측 |
 
@@ -258,7 +258,7 @@ kind 별 관측 증거 — **상관 ID 로 특정되는 증거만 인정**한다
 
 ## 5. 흐름별 계약
 
-1. **시작**: 사람이 cwd 를 고른다(로컬 노드 DirectoryPicker). `claude -p` 계열은 workspace trust 대화상자를 건너뛰고 프로젝트 hooks·MCP 를 실행한다(headless 문서) → 시작 화면에 "이 폴더의 `.claude/settings.json` hooks·`.mcp.json` 이 실행됨"과 "사용자 설정(`~/.claude`)의 hooks·MCP 도 터미널 `claude` 와 똑같이 실행됨"을 보이고 사람이 확인해야 시작한다. 목록은 `resolveSettings()` 의 hooks·`provenance` 로 만든다. **`PermissionRequest` hook 이 있으면** "이 hook 이 Palantir 승인 카드보다 먼저 허용·거부할 수 있음"을 경고로 보인다(그 결정은 카드로 오지 않는다). `settingSources` 는 user/project/local 전부. `permissionMode: 'default'`. `bypassPermissions`·`allowDangerouslySkipPermissions` 는 **코드 경로에 두지 않는다**(테스트로 고정). custom spawn 은 받은 argv 에 `--bare`·`--dangerously-skip-permissions`·`--permission-mode=bypassPermissions` 가 없고 `--permission-mode=default` 가 있는지 확인한다(S1-0 ④ 의 argv 모양). 예약 → spawn → 빈 입력 스트리밍 `query()` → 인증 게이트·필수 capability(§1.2-3·§2.3) → idle.
+1. **시작**: 사람이 cwd 를 고른다(로컬 노드 DirectoryPicker). `claude -p` 계열은 workspace trust 대화상자를 건너뛰고 프로젝트 hooks·MCP 를 실행한다(headless 문서) → 시작 화면에 "이 폴더의 `.claude/settings.json` hooks·`.mcp.json` 이 실행됨"과 "사용자 설정(`~/.claude`)의 hooks·MCP 도 터미널 `claude` 와 똑같이 실행됨"을 보이고 사람이 확인해야 시작한다. 목록은 `resolveSettings()` 의 hooks·`provenance` 로 만든다. **`PermissionRequest` hook 이 있으면** "이 hook 이 Palantir 승인 카드보다 먼저 허용·거부할 수 있음"을 경고로 보인다(그 결정은 카드로 오지 않는다). `settingSources` 는 user/project/local 전부. `permissionMode: 'default'`. `bypassPermissions`·`allowDangerouslySkipPermissions` 는 **코드 경로에 두지 않는다**(테스트로 고정). custom spawn 은 받은 argv 에 `--bare`·`--dangerously-skip-permissions`·`--permission-mode=bypassPermissions` 가 없고 `--permission-mode=default` 가 있는지 확인한다(S1-0 ④ 의 argv 모양). 순서: `resolveSettings` 검사 → 예약 → spawn → 빈 입력 스트리밍 `query()` → 초기화 응답 게이트(account·pid·버전·권한 모드·원격 제어, §1.2-3) → idle. 필수 capability 는 **첫 prompt 뒤 `system/init`** 에서 확인한다(§2.3 — prompt 전에는 알 수 없다).
 2. **지시 — 한 번에 하나**: 세션이 idle(직전 턴의 result 관측, 미완료 prompt 없음)일 때만 prompt 를 쓴다. 턴 진행 중에는 입력창이 "중단하고 보내기" 또는 "턴 끝나면 보내기(Palantir 대기열)"만 제공한다. Palantir 대기열의 항목은 `queued` 로 남고, idle 이 되면 사람이 아니라 큐가 순서대로 보내되 재검증을 다시 거친다. 이 규칙으로 prompt 와 턴이 1:1 로 묶인다(S1-0 ①: 앞 result 뒤에 보낸 메시지는 매번 `user_message_uuids` 가 자기 하나였다. 턴 중 보낸 메시지는 `priority` 기본값에서 같은 턴에 흡수될 수 있다고 문서에 있다 — 그래서 턴 중에는 쓰지 않는다).
 3. **도구 승인**(S1-0 ⑥: 300초 보류에도 timeout·abort 없음, 허용 뒤 도구 1회 실행): `canUseTool` → `tool_requests(pending)` 커밋 → 화면 카드(도구명, 입력 전문, cwd, 요청 시각) → 사람의 허용/거부(사유 입력 가능) → 큐에서 조건부 `pending → decided` + delivery(tool_decision) `sending` → 선형화 확인(§4.5) → resolve → `written` → §4.3 의 구별 신호가 있는 tool_result 일 때만 observed. abort 처리는 §4.5 를 따른다(효과 전이면 cancelled·카드 비활성, 효과 뒤면 전달 상태 유지 + "결정 뒤 도구 취소됨").
 4. **질문**: `AskUserQuestion` → 선택지 카드 + 직접 입력 → delivery(question_answer), 재검증·관측 규칙은 3과 같다.
@@ -270,7 +270,7 @@ kind 별 관측 증거 — **상관 ID 로 특정되는 증거만 인정**한다
    - 진행 중인 interrupt 가 있으면 추가 버튼은 같은 요청을 돌려준다.
    - "중단하고 보내기" = interrupt completed **그리고** 세션 idle·`attribution_uncertain` 아님일 때만 prompt 를 보낸다.
 6. **서버 재시작**: 호스트·자식 유지. 서버가 뜨면 handshake → snapshot(seq_high) → 이어 받기 → 화면 "재연결됨". 서버가 없는 동안 생긴 승인 요청은 pending 으로 남아 있다. 서버가 응답을 못 받은 제출은 같은 request_key 재시도로 결과를 받는다.
-7. **호스트 상실**(크래시·머신 재부팅): 재기동 시 §3.3 복구. 이전 실행이 죽었으면 `end_reason=host_lost`, pending 승인 `expired`, 관측 없는 sending·written `unknown`. 살아 있으면 `orphaned`(§3.4). 화면의 "이어서 시작"은 **resume**(새 incarnation 이 이력을 이어받음)이며 재연결과 다른 문구로 보인다(§0.2.7). 버튼은 이전 실행의 대화 실행 종료 확인 **그리고** §3.4 하위 프로세스 확인 통과 전에는 비활성이다.
+7. **호스트 상실**(크래시·머신 재부팅): 재기동 시 §3.3 복구. 이전 실행이 죽었으면 `end_reason=host_lost`, pending 승인 `expired`, 관측 없는 sending·written `unknown`. 살아 있으면 `orphaned`(§3.4). 이전 incarnation 의 prompt 중 `provider_observed` 이고 결과를 못 본 것은 `outcome_unknown`(§4.3). 화면의 "이어서 시작"은 **resume**(새 incarnation 이 이력을 이어받음)이며 재연결과 다른 문구로 보인다(§0.2.7). 버튼은 이전 실행의 대화 실행 종료 확인 **그리고** §3.4 하위 프로세스 확인 통과 전에는 비활성이다.
 8. **터미널로 넘기기(한 방향)**: interrupt → close → **대화 실행 종료 확인 + 하위 프로세스 확인 통과**(§3.4) → 세션 `handed_off` → 복사할 명령 표시. 명령은 호스트 실행과 같은 실행 파일·설정·인증 환경을 재현한다:
    `cd <cwd> && env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u CLAUDE_CODE_OAUTH_TOKEN -u ANTHROPIC_BASE_URL -u ANTHROPIC_PROFILE -u CLAUDE_CODE_USE_BEDROCK -u CLAUDE_CODE_USE_VERTEX -u CLAUDE_CODE_USE_FOUNDRY [-u CLAUDE_CONFIG_DIR] HOME=<호스트가 쓴 HOME> [CLAUDE_CONFIG_DIR=<값>] <동봉 실행 파일 절대 경로> --resume <session_id>`
    `env` 는 모든 `-u` 옵션이 `name=value` 보다 앞에 와야 한다(macOS `env(1)`). `CLAUDE_CONFIG_DIR` 은 둘 중 하나만 나온다. 모든 값은 shell-quote 한다. 설정 디렉터리가 없었다는 사실도 `-u CLAUDE_CONFIG_DIR` 로 재현한다. S1-0 ⑧: 사용자 설치 `claude -p --resume <SDK 세션 id>`(같은 2.1.308)가 같은 세션 id 로 대화를 이었다. 대화형 TUI `--resume` 은 S1-e 실측에서 확인한다. **넘긴 뒤의 보장 범위**: Palantir 는 그 실행을 제어·관측하지 않고 인증 게이트도 없다. 사용자가 명령을 바꿔 실행하면 위 재현은 깨진다 — 화면에 그대로 적는다. 종료 확인이 안 되면 넘기지 않는다(§0.2.4). 넘긴 세션은 Palantir 에서 읽기 전용이고 다시 열지 않는다. Palantir 에서 다시 작업하려면 새 세션을 연다.
@@ -324,14 +324,15 @@ lock-in 은 사용자가 실제 작업에 써 본 뒤 정한다. brief 는 화�
 - 24시간 지난 키 → 실행 0. tombstone 만료 뒤 오래된 키 → 실행 0.
 - 잠금 FD 가 자식에 상속되지 않음. 유휴 종료 중 도착 요청 → `not_accepted` 후 재시도 성공, 중복 0.
 - 인증: account 조회 실패·모르는 값 → 시작·전송 0. S1-0 의 여섯 모양(구독·API 키·bearer·OAuth env·apiKeyHelper·Bedrock) 각각 → 구독만 통과.
-- 필수 capability(`msg_lifecycle_v1`·`interrupt_receipt_v1`) 누락 → 시작 0.
+- 시작 전 게이트(§1.2-3)를 통과하지 못하면 → 시작 0. 필수 capability(`msg_lifecycle_v1`·`interrupt_receipt_v1`)는 시작 전 게이트가 아니라 첫 `system/init` 에서 확인한다(아래 사례).
 - 합쳐진 턴(`user_message_uuids` 에 둘 이상) → 귀속 0, `attribution_uncertain`.
 - 허용 결정 뒤 Palantir 인터럽트 → 그 결정 전달 unknown + "도구 끝남", observed 0. 앞선 턴에서 인터럽트한 뒤 다음 턴의 정상 허용 → observed(이전 인터럽트가 번지지 않음).
-- `resolveSettings` 의 `env` 에 `ANTHROPIC_BASE_URL`·인증 변수, 또는 `apiKeyHelper` → spawn 0.
+- `resolveSettings` 의 `env` 에 `ANTHROPIC_BASE_URL`·인증 변수, 또는 `apiKeyHelper` → spawn 0. `resolveSettings` 가 throw·10초 정체·구조 불일치(`effective` 없음, `env` 값이 문자열 아님, `sources` 배열 아님)·함수 없음 → spawn 0.
 - 초기화 응답의 `pid` 불일치·버전 불일치·`current_permission_mode` ≠ default·`remote_control_auto_enable` ≠ false → 시작 0.
 - 게이트 실패·초기화 기한 초과 → close → exit 확인, exit 안 하는 가짜 → SIGTERM → 표지 조회, 정리 미확인이면 `liveness_unknown`.
-- 첫 `system/init` 에 필수 capability 누락(가짜) → 그 턴 뒤 세션 닫힘, 새 prompt 0.
-- `provider_observed` 직후 호스트 크래시 → 재기동 뒤 그 delivery 는 observed 유지 + `outcome_unknown`, 다시 보내기 0.
+- 첫 `system/init` 에 필수 capability 누락(가짜) → 첫 prompt 의 전달은 그때까지의 증거대로(lifecycle 없으면 `written` → 실행 종료 시 `unknown`), 그 턴 뒤 세션 닫힘, 새 prompt 0.
+- 허용 결정 뒤 `is_error: true` 결과 → 전달 unknown + "도구 끝남(오류)", observed 0. 정상 결과 → observed.
+- prompt 가 `provider_observed` 인 직후 호스트 크래시 → 재기동 뒤 그 delivery 는 observed 유지 + `outcome = outcome_unknown`, 다시 보내기 0, 새 incarnation 의 idle 은 막히지 않음. 이미 observed 인 tool_decision 은 크래시 뒤에도 observed 그대로(`outcome` 없음).
 - abort 가 효과 뒤에 옴(`written` 뒤 인터럽트) → 전달 상태 유지, "결정 뒤 도구 취소됨" 기록, `cancelled` 로 덮어쓰기 0.
 - `attribution_uncertain` → 사람 확인으로 해제 0, 새 prompt 0, 종료 확인 → resume 경로만 성공.
 - 표지 남은 하위 프로세스 / 하위 조회 `query_failed` → 사람 확인 유무와 무관하게 resume·넘기기 0.
@@ -341,7 +342,7 @@ lock-in 은 사용자가 실제 작업에 써 본 뒤 정한다. brief 는 화�
 - `accepted` 응답 직전 크래시 → 서버 "접수 미확인" → 같은 키 재시도로 기존 결과, 효과 1회.
 - `deleting` 직후 크래시 → 재기동 시 삭제 재개, `deleted` 전에는 "삭제 완료" 표시 0.
 
-**정상 경로 최소 성공 기준**: 결함을 주입하지 않은 실행에서는 지시·승인·거부·질문 응답이 **전부** observed(또는 completed)에 도달해야 한다. unknown 은 결함 주입 사례에서만 허용한다 — 모든 것을 unknown 으로 남기는 구현은 수락되지 않는다. (b)·(c) 에서 정상 지시 20회·승인 10회 중 unknown 이 하나라도 나오면 실패다(S1-0 에서 prompt·tool_decision·interrupt 모두 관측 신호가 확인됐으므로 예외 kind 는 없다. question_answer 는 S1-e 에서 실측한다).
+**정상 경로 최소 성공 기준**: 결함을 주입하지 않은 실행에서는 지시·승인·거부·질문 응답이 **전부** observed(또는 completed)에 도달해야 한다(승인 실측은 성공하는 도구 명령으로 한다 — 오류 결과는 규칙상 unknown 이다). unknown 은 결함 주입 사례에서만 허용한다 — 모든 것을 unknown 으로 남기는 구현은 수락되지 않는다. (b)·(c) 에서 정상 지시 20회·승인 10회 중 unknown 이 하나라도 나오면 실패다(S1-0 에서 prompt·tool_decision·interrupt 모두 관측 신호가 확인됐으므로 예외 kind 는 없다. question_answer 는 S1-e 에서 실측한다).
 
 **"효과 1회"의 정의**: 호스트의 SDK 호출 횟수가 아니라 **provider 쪽 효과**로 센다. (b) 에서는 가짜 실행 파일이 자기 로그에 기록한 수신·도구 실행 횟수, (c) 에서는 독립된 도구 효과(예: 지시마다 파일에 한 줄 추가하게 하고 줄 수를 센다).
 
@@ -390,3 +391,4 @@ lock-in 은 사용자가 실제 작업에 써 본 뒤 정한다. brief 는 화�
 - v4.1 (2026-10-24): 사용자 승인. R6 사용자 수락. §1.4 를 사용자 위임에 따라 codex 합의로 판정 — codex 가 초안의 결함 2건(Linux 존재 확인이 값을 읽음, "env 의 OAuth 는 사용자 명시"는 구별 불가)과 SERIOUS 4건(최종 spawn env·원격 두 bootstrap·정제기 부팅 판정·opt-in 을 수락 예외로 쓰지 않기)을 짚었고 모두 판정에 넣었다(VERDICT: AGREE).
 - v5 (2026-10-24): S1-0 스파이크 결과 반영(`docs/sh1-s1-0-spike-record.md`). 바뀐 설계: 인증 게이트를 빈 입력 스트리밍 `query()` 로(WarmQuery 에 `initializationResult` 없음) + 통과 조건 고정(§1.2-3), 필수 capability(§2.3), prompt 관측 = `command_lifecycle`·완료 = `user_message_uuids` 정확 일치(§4.3), 허용 결정 관측을 Palantir 인터럽트 기록으로 가름(§4.3), 호스트가 죽어도 고아 자식이 턴을 끝까지 수행·호스트 정상 종료는 자식을 죽임(§3.1), claude 정상 종료가 `&` 백그라운드를 남김(§3.4), 사용자 hooks·MCP 도 실행됨(§1.2-3·§5-1), SDK env 세 변수(§7), 유료 사용 크레딧 사용 표시(§1.2·§6). R4 해소.
 - codex **R5**(v5): **NO-GO** (SERIOUS 4 / MODERATE 2). 반영(v5.1) — 보충 실측 3건을 더 해서 닫았다(`docs/sh1-s1-0-spike-record.md` "보충 실측"): 허용 결정 관측을 "결정 → 결과 구간에 Palantir 인터럽트·abort·exit 없음"으로 좁히고 근거를 적음(§4.3), `provider_observed` 의 호스트 상실 복구 = `outcome_unknown`(§4.3), 게이트에 `resolveSettings` 사전 검사(settings env 의 `ANTHROPIC_BASE_URL` 은 account 로 안 보임 — 실측)·`subscriptionType` 허용 목록·초기화 응답의 pid·버전·권한 모드·원격 제어 확인·실측하지 않은 인증 경로 명시·게이트 실패 정리 절차(§1.2-3), 필수 capability 는 첫 prompt 전에 알 수 없음(실측) → 버전 고정이 1차 보장 + 첫 init 확인(§2.3), `PermissionRequest` hook 경고(§5-1).
+- codex **R6**(v5.1): **NO-GO** (SERIOUS 2 / MODERATE 2, R5 6건 중 닫힘 4 / 부분 2). 반영(v5.2) — 범위를 줄여 닫았다: 허용 결정 관측을 "원인이 세 사건뿐" 이라는 완전성 주장 대신 **정상 결과라는 양성 증거**로만 인정하고 오류 결과는 unknown(§4.3), prompt 의 결과를 별도 `outcome` 필드로·kind 별 종결·idle 은 incarnation 안에서만(§4.3·§5-7), `resolveSettings` fail-closed(기한·구조 검증·예외 → spawn 0, §1.2-3·§8.1), 시작 전 게이트와 첫 prompt 뒤 capability 확인을 분리해 §5-1·§8.1 정리.
