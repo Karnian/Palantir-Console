@@ -8,8 +8,13 @@ function assertSafeShellFixture(script) {
     'credential commands and readers must be rejected before executing a generated shell');
 }
 
-function runGuardedShellFixture(script, { directory, env = {}, spawnSync = childProcess.spawnSync }) {
-  assertSafeShellFixture(script);
+function runGuardedShellFixture(guard, { expectedGuard, directory, env = {}, spawnSync = childProcess.spawnSync }) {
+  assert.equal(typeof expectedGuard, 'string', 'a literal expected guard is required');
+  assert.deepEqual(Buffer.from(guard), Buffer.from(expectedGuard), 'authentication guard bytes changed; refusing execution');
+  assertSafeShellFixture(guard);
+  // Never accept a generated invocation or command tail. The only child is
+  // the fixed probe stub inside the caller's fixture directory.
+  const script = guard + '\nexec ./probe';
   assertSpawnAllowed({ command: process.execPath, source: 'guarded-shell-fixture' });
   const runner = `const fs=require('node:fs'),cp=require('node:child_process');
 const input=JSON.parse(fs.readFileSync(0,'utf8'));

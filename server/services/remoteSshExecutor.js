@@ -2366,5 +2366,6 @@ module.exports = {
   // Exported for tests: the trap/quoting contract here is security-relevant
   // and is easier to pin directly than through a mocked mktemp path.
   buildMaterializedEnvBootstrap,
+  buildClaudeBareAuthShell,
   CLAUDE_OAUTH_USAGE_JS,
 };
