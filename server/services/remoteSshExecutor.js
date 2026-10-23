@@ -147,11 +147,15 @@ function hasExplicitClaudeSettings(args) {
     && args[index + 1].length > 0;
 }
 
+// Match JavaScript trim's leading whitespace without invoking a pod utility.
+const CLAUDE_API_KEY_TRIM_SHELL = 'claude_api_key_check=${ANTHROPIC_API_KEY:-}; '
+  + 'claude_api_key_check=${claude_api_key_check#"${claude_api_key_check%%[![:space:]\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]*}"};';
+
 function buildClaudeBareAuthShell(args) {
   const settingsAuth = hasExplicitClaudeSettings(args);
   if (!legacyClaudeCredentialAccessEnabled()) {
     return [
-      'case "${ANTHROPIC_API_KEY:-}" in sk-ant-oat*) echo "Claude OAuth credential access disabled: PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS" >&2; exit 78;; esac;',
+      `${CLAUDE_API_KEY_TRIM_SHELL} case "$claude_api_key_check" in sk-ant-oat*) echo "Claude OAuth credential access disabled: PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS" >&2; exit 78;; esac;`,
       `if { ${CLAUDE_PROVIDER_AUTH_SHELL}; } || [ -n "\${ANTHROPIC_API_KEY:-}" ]${settingsAuth ? ' || true' : ''}; then :; else echo "Claude --bare auth unavailable: PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS" >&2; exit 78; fi`,
     ].join(' ');
   }
@@ -383,7 +387,7 @@ function buildCleanEnvPrefix(keys, {
     parts.push(
       `for k in ${loopKeys.map((key) => shq(key)).join(' ')}`,
       'do eval "v=\\${$k+x}"',
-      ...(!legacyClaudeCredentialAccessEnabled() ? ['if [ "$k" = ANTHROPIC_API_KEY ]; then case "${ANTHROPIC_API_KEY:-}" in sk-ant-oat*) continue;; esac; fi'] : []),
+      ...(!legacyClaudeCredentialAccessEnabled() ? [ `if [ "$k" = ANTHROPIC_API_KEY ]; then ${CLAUDE_API_KEY_TRIM_SHELL} case "$claude_api_key_check" in sk-ant-oat*) continue;; esac; fi` ] : []),
       '[ -n "$v" ] && eval "set -- \\"\\$@\\" \\"$k=\\$$k\\""',
       'done',
     );

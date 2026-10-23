@@ -75,7 +75,7 @@ function legacyClaudeCredentialAccessEnabled() {
 }
 
 function isClaudeOAuthTokenValue(value) {
-  return typeof value === 'string' && value.startsWith('sk-ant-oat');
+  return typeof value === 'string' && value.trim().startsWith('sk-ant-oat');
 }
 
 function resolveActualAnthropicApiKey(value) {

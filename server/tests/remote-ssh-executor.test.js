@@ -3691,22 +3691,34 @@ test('default credential policy removes readers from both remote bare bootstraps
     env: { CLAUDE_CODE_OAUTH_TOKEN: 'controller-oauth-canary', ANTHROPIC_API_KEY: 'sk-ant-oat-controller' } });
   const detached = workerSpawn.calls.map(scriptOf).find(script => script.includes('tmux new-session'));
   assert.ok(detached);
+  const { assertSafeShellFixture, runGuardedShellFixture } = require('./helpers/guarded-shell-fixture.cjs');
+  const fixturePath = await fs.mkdtemp(path.join(os.tmpdir(), 'bare-shell-stubs-'));
+  t.after(() => fs.rm(fixturePath, { recursive: true, force: true }));
+  // PATH contains only these controlled stubs. env is a fixed trampoline for
+  // the generated env -i invocation; probe prints only fixture variables.
+  const tracePath = path.join(fixturePath, 'commands.log');
+  await fs.writeFile(path.join(fixturePath, 'env'), `#!/bin/sh\nprintf 'env\\n' >> ${shq(tracePath)}\n[ "$1" = -i ] || exit 96\nexec /usr/bin/env "$@"\n`, { mode: 0o700 });
+  await fs.writeFile(path.join(fixturePath, 'probe'), `#!/bin/sh\nprintf 'probe\\n' >> ${shq(tracePath)}\n`
+    + 'printf "%s\\n" "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY-}" "CLAUDE_CODE_USE_BEDROCK=${CLAUDE_CODE_USE_BEDROCK-}"\n', { mode: 0o700 });
   const workerScript = tmuxInnerScript(detached, 'default_bare');
   const workerInvocation = workerScript.slice(workerScript.indexOf('set --'),
     workerScript.indexOf(" > '/srv/root/.palantir-runs/default_bare/stdout.log'"));
   for (const generated of [regular, workerInvocation]) {
-    const invocation = generated.replace(/'claude' '--bare'/g, "'/usr/bin/printenv'");
+    assertSafeShellFixture(generated);
+    const invocation = generated.replace(/'claude' '--bare'/g, "'probe'");
     assert.doesNotMatch(invocation, /'claude'/);
     for (const fixture of [
       { env: { ANTHROPIC_API_KEY: 'sk-ant-oat-pod' }, status: 78 },
+      { env: { ANTHROPIC_API_KEY: ' \t sk-ant-oat-pod \r\n' }, status: 78 },
+      { env: { ANTHROPIC_API_KEY: '\u00a0\ufeffsk-ant-oat-pod\u3000' }, status: 78 },
       { env: { CLAUDE_CODE_OAUTH_TOKEN: 'pod-oauth' }, status: 78 },
       { env: { ANTHROPIC_API_KEY: 'sk-ant-api-pod', CLAUDE_CODE_OAUTH_TOKEN: 'strip-this-token' }, status: 0, output: 'ANTHROPIC_API_KEY=sk-ant-api-pod' },
       { env: { CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_OAUTH_TOKEN: 'strip-this-token' }, status: 0, output: 'CLAUDE_CODE_USE_BEDROCK=1' },
     ]) {
-      // Only /bin/sh and printenv run locally; no Claude executable is invoked.
-      const result = childProcess.spawnSync('/bin/sh', ['-c', invocation], {
-        encoding: 'utf8', env: { PATH: '/usr/bin:/bin', ...fixture.env },
-      });
+      await fs.writeFile(tracePath, '');
+      const result = runGuardedShellFixture(invocation, { directory: fixturePath, env: fixture.env });
+      const trace = await fs.readFile(tracePath, 'utf8');
+      assert.equal(trace.includes('probe\n'), fixture.status === 0, 'blocked auth must not execute the child stub');
       assert.equal(result.status, fixture.status, result.stderr);
       if (fixture.status === 78) {
         assert.equal(result.stdout, '', 'child must not execute');
@@ -3724,4 +3736,31 @@ test('default credential policy removes readers from both remote bare bootstraps
     assert.match(shell, /exit 78/);
     assert.match(shell, /PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS/);
   }
+});
+
+test('r3: unsafe generated shell is rejected before any process can run', () => {
+  const { runGuardedShellFixture } = require('./helpers/guarded-shell-fixture.cjs');
+  let spawns = 0;
+  for (const forbidden of ['security', 'curl', '.credentials.json', 'claudeAiOauth', 'find-generic-password']) {
+    assert.throws(() => runGuardedShellFixture(`echo ${forbidden}`, {
+      directory: '/unused-fixture', spawnSync: () => { spawns++; throw new Error('must not execute'); },
+    }), /credential commands and readers/);
+  }
+  assert.equal(spawns, 0);
+});
+
+test('r3: shell fixture runner uses the allowed Node trampoline and a minimal stub-only env', () => {
+  const { runGuardedShellFixture } = require('./helpers/guarded-shell-fixture.cjs');
+  const calls = [];
+  runGuardedShellFixture('printf fixture', { directory: '/temporary-stub-directory',
+    env: { PATH: '/usr/bin', HOME: '/host-home', NODE_OPTIONS: '--require /host-hook',
+      HOST_SECRET: 'never-forward', ANTHROPIC_API_KEY: 'fixture-api' },
+    spawnSync: (command, args, options) => {
+      calls.push({ command, args, options });
+      return { status: 0, stdout: '{"status":0,"stdout":"","stderr":""}', stderr: '' };
+    },
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, process.execPath);
+  assert.deepEqual(calls[0].options.env, { PATH: '/temporary-stub-directory', HOME: '/temporary-stub-directory', ANTHROPIC_API_KEY: 'fixture-api' });
 });

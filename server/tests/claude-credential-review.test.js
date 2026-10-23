@@ -19,6 +19,13 @@ function setup(t) {
     for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
     Object.assign(process.env, saved);
     fs.rmSync(root, { recursive: true, force: true });
+    t.mock.restoreAll();
+    // Remove captured mocks and every production module that could retain them.
+    const serverRoot = path.resolve(__dirname, '..') + path.sep;
+    const testRoot = __dirname + path.sep;
+    for (const id of Object.keys(require.cache)) {
+      if (id.startsWith(serverRoot) && !id.startsWith(testRoot)) delete require.cache[id];
+    }
   });
   return root;
 }
@@ -166,4 +173,61 @@ test('review: local executor probes cannot implicitly inherit OAuth env', t => {
   assert.equal(calls[0].options.env.ANTHROPIC_API_KEY, undefined);
   executor.spawnInteractive('claude', ['auth', 'status'], { env: { ANTHROPIC_API_KEY: 'sk-ant-api-probe' } });
   assert.equal(calls[1].options.env.ANTHROPIC_API_KEY, 'sk-ant-api-probe');
+});
+
+for (const whitespace of [' ', '\t\r\n', '\u00a0\u2003\ufeff']) {
+  test(`r3: OAuth whitespace ${JSON.stringify(whitespace)} is blocked at every local boundary`, async t => {
+    setup(t);
+    const auth = fresh('../services/authResolver');
+    const value = `${whitespace}sk-ant-oat-fixture${whitespace}`;
+    assert.equal(auth.isClaudeOAuthTokenValue(value), true);
+    assert.equal(auth.resolveActualAnthropicApiKey(value), null);
+    process.env.ANTHROPIC_API_KEY = value;
+    const predicates = { hasKeychain: () => false, hasCredentialsFile: () => false };
+    assert.equal(auth.resolveClaudeAuth({ ...predicates, bare: true }).canAuth, false);
+    assert.equal((await auth.resolveClaudeAuthForIsolated({ ...predicates, prefer: 'env' })).canAuth, false);
+    assert.equal(auth.stripClaudeOAuthEnv({ ANTHROPIC_API_KEY: value }).ANTHROPIC_API_KEY, undefined);
+    assert.equal(auth.buildManagerSpawnEnv({ baseEnv: process.env, envAllowlist: ['ANTHROPIC_API_KEY'] }).ANTHROPIC_API_KEY, undefined);
+    auth.bootstrapClaudeAuthFromEnv({ logger: { log() {}, warn() {} } });
+    assert.equal(process.env.ANTHROPIC_API_KEY, undefined);
+    assert.equal(fs.existsSync(auth.CLAUDE_AUTH_FILE), false);
+    process.env.PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS = '1';
+    assert.equal(auth.resolveActualAnthropicApiKey(value), value);
+    assert.equal(auth.resolveActualAnthropicApiKey(' sk-ant-api-fixture '), ' sk-ant-api-fixture ');
+  });
+}
+
+for (const mode of ['api', 'BEDROCK', 'VERTEX', 'FOUNDRY']) {
+  test(`r3: explicit CLI distiller runs with extraction-free ${mode} auth`, async t => {
+    const root = setup(t);
+    if (mode === 'api') process.env.ANTHROPIC_API_KEY = 'sk-ant-api-fixture';
+    else process.env[`CLAUDE_CODE_USE_${mode}`] = '1';
+    const live = require('../services/distillers/liveDistiller');
+    const create = live.createLiveDistiller;
+    const configured = [];
+    t.mock.method(live, 'createLiveDistiller', options => { configured.push(options); return create(options); });
+    const { createApp } = fresh('../app');
+    const app = createApp({ storageRoot: root, fsRoot: root, dbPath: path.join(root, 'test.db'),
+      authToken: 'fixture', operatorSchedulerEnabled: false, memoryDistillEnabled: true,
+      memoryDistillBackend: 'cli', memoryDistillClaudeBin: '/fixture/claude',
+      authResolverOpts: { hasKeychain: () => false, hasCredentialsFile: () => false } });
+    t.after(() => app.shutdown());
+    assert.equal(app.services.getMemoryDistillStatus().state, 'running');
+    assert.equal(app.services.getMemoryDistillStatus().backend, 'claude_cli');
+    assert.equal(configured.length, 1);
+    const auth = fresh('../services/authResolver');
+    const isolated = await auth.resolveClaudeAuthForIsolated({ envAllowlist: configured[0].envAllowlist, prefer: 'env' });
+    assert.equal(isolated.canAuth, true, 'the per-call resolver must receive the same provider policy');
+    if (mode !== 'api') assert.equal(isolated.env[`CLAUDE_CODE_USE_${mode}`], '1');
+  });
+}
+
+test('r3: teardown removes modules that captured mocks and their dependents', t => {
+  setup(t);
+  t.mock.method(cp, 'execFile', () => { throw new Error('captured mock must not escape'); });
+  const modules = ['../services/authResolver', '../services/providers/claude-code', '../services/nodeExecutor', '../app'];
+  for (const file of modules) fresh(file);
+  t.after(() => {
+    for (const file of modules) assert.equal(require.cache[require.resolve(file)], undefined, file);
+  });
 });

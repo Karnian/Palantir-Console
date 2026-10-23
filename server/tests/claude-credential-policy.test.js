@@ -111,9 +111,9 @@ test('B: default usage never reads native tokens or spawns curl; actual API key 
   process.env.ANTHROPIC_API_KEY = 'sk-ant-oat-ignored';
   let calls = 0;
   const fail = () => { calls++; throw new Error('forbidden'); };
+  const statusCalls = [];
   const opts = { execFile: async (command, args, options) => {
-    assert.equal(options.env.CLAUDE_CODE_OAUTH_TOKEN, undefined);
-    assert.equal(options.env.ANTHROPIC_API_KEY, process.env.ANTHROPIC_API_KEY?.startsWith('sk-ant-oat') ? undefined : process.env.ANTHROPIC_API_KEY);
+    statusCalls.push({ command, args, env: { ...options.env } });
     return { stdout: '{"loggedIn":true,"email":"fixture"}' };
   },
     spawn: fail, readKeychainToken: fail, readCredentialsFileToken: fail };
@@ -123,11 +123,25 @@ test('B: default usage never reads native tokens or spawns curl; actual API key 
   assert.equal(result.limits[0].remainingPct, null);
   assert.match(result.limits[0].errorMessage, /PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS/);
   assert.equal(result.account.email, 'fixture');
+  assert.equal(statusCalls.length, 1);
+  assert.equal(statusCalls[0].env.CLAUDE_CODE_OAUTH_TOKEN, undefined);
+  assert.equal(statusCalls[0].env.ANTHROPIC_API_KEY, undefined);
   delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
   process.env.ANTHROPIC_API_KEY = 'sk-ant-api-fixture';
-  await provider().fetchClaudeCodeUsage(opts);
-  await withLegacyClaudeCredentialAccess(() => provider().fetchClaudeCodeUsage({ ...opts,
+  const actualKeyResult = await provider().fetchClaudeCodeUsage(opts);
+  assert.equal(statusCalls.length, 2);
+  assert.equal(statusCalls[1].env.ANTHROPIC_API_KEY, 'sk-ant-api-fixture');
+  assert.equal(statusCalls[1].env.CLAUDE_CODE_OAUTH_TOKEN, undefined);
+  assert.equal(actualKeyResult.account.email, 'fixture');
+  const legacyResult = await withLegacyClaudeCredentialAccess(() => provider().fetchClaudeCodeUsage({ ...opts,
     readKeychainToken: () => null, readCredentialsFileToken: () => null }));
+  assert.equal(statusCalls.length, 3);
+  assert.equal(statusCalls[2].env.ANTHROPIC_API_KEY, 'sk-ant-api-fixture');
+  assert.equal(legacyResult.account.email, 'fixture');
+  for (const status of statusCalls) {
+    assert.equal(status.command, 'claude');
+    assert.deepEqual(status.args, ['auth', 'status']);
+  }
   assert.equal(calls, 0);
 });
 

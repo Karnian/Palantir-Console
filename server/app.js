@@ -98,7 +98,7 @@ const { createMemoryService } = require('./services/memoryService');
 const { createMasterMemoryService } = require('./services/masterMemoryService');
 const { createMemoryDistillService } = require('./services/memoryDistillService');
 const { createLiveDistiller, resolveClaudeCliBinary } = require('./services/distillers/liveDistiller');
-const { legacyClaudeCredentialAccessEnabled, resolveActualAnthropicApiKey, resolveClaudeAuth, CLAUDE_AUTH_KEYS } = require('./services/authResolver');
+const { legacyClaudeCredentialAccessEnabled, resolveActualAnthropicApiKey, resolveClaudeAuth, CLAUDE_AUTH_KEYS, CLAUDE_PROVIDER_AUTH_ENV_KEYS } = require('./services/authResolver');
 const { createMemoryRouter } = require('./routes/memory');
 const { createMemoryDiagnosticsRouter } = require('./routes/memoryDiagnostics');
 const { createMemoryProposalsRouter } = require('./routes/memoryProposals');
@@ -1689,13 +1689,14 @@ function createApp(options = {}) {
           ? options.memoryDistillClaudeAuth
           : resolveClaudeAuth({
               ...normalizeAuthProbes(options.authResolverOpts || {}),
-              envAllowlist: CLAUDE_AUTH_KEYS,
+              envAllowlist: [...CLAUDE_AUTH_KEYS, ...CLAUDE_PROVIDER_AUTH_ENV_KEYS],
+              bare: !legacyClaudeCredentialAccessEnabled(),
             });
         const cliBin = options.memoryDistillClaudeBin !== undefined
           ? options.memoryDistillClaudeBin
           : resolveClaudeCliBinary();
         selectedBackend = 'claude_cli';
-        if (!legacyClaudeCredentialAccessEnabled() && !options.memoryDistillClaudeAuth && !options.memoryDistillIsolatedAuth) {
+        if (!legacyClaudeCredentialAccessEnabled() && !cliAuth?.canAuth && !options.memoryDistillClaudeAuth && !options.memoryDistillIsolatedAuth) {
           missingReason = 'Claude CLI credential access disabled: PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS';
         } else if (!cliBin) {
           missingReason = 'Claude Code CLI binary is not available';
@@ -1703,13 +1704,11 @@ function createApp(options = {}) {
           missingReason = (cliAuth && cliAuth.diagnostics && cliAuth.diagnostics[0])
             || 'Claude Code CLI credentials are not available';
         } else {
-          // cliAuth above only answers "are there credentials at all", for the
-          // status surface. The token itself is materialized per call inside
-          // the distiller — `--bare` cannot read the keychain or OAuth env, so
-          // it has to arrive as an apiKeyHelper settings file.
+          // Default-mode preflight requires auth usable under --bare. The
+          // isolated resolver checks the policy again on every distill call.
           distiller = createLiveDistiller({
             cliBin,
-            envAllowlist: CLAUDE_AUTH_KEYS,
+            envAllowlist: [...CLAUDE_AUTH_KEYS, ...CLAUDE_PROVIDER_AUTH_ENV_KEYS],
             resolveIsolatedAuth: options.memoryDistillIsolatedAuth,
           });
         }
