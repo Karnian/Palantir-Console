@@ -113,3 +113,29 @@ SDK 세션 `bb1c6e8f…` 를 사용자 설치 `claude -p --resume bb1c6e8f… --
 - 긴 Bash 는 CLI 가 백그라운드 작업(`system/task_started`, `task_notification`)으로 옮길 수 있다. 인터럽트하면 `stopped` 로 정지됐다.
 - **`rate_limit_event.rate_limit_info`** 에 `status`, `resetsAt`, `rateLimitType`(`five_hour` 등), `overageStatus`(`rejected`), `overageDisabledReason`(`out_of_credits`), `isUsingOverage`(false) 가 온다 — 유료 사용 크레딧(overage) 사용 여부는 Palantir 가 표시할 수 있다. Max 월간 API 크레딧과 구독 한도의 차감 순서는 여전히 알 수 없다.
 - 결과의 `total_cost_usd`(haiku 짧은 턴 $0.003~0.013)는 클라이언트 추정치다.
+
+## 보충 실측 (codex R5 지적 후, 모델 요청 0)
+
+### settings `env` 로 들어오는 인증 (`s9-gate2.mjs <variant> close`)
+
+SDK `settings` 옵션의 `env` 블록(= 플래그 설정 계층, 파일 settings 의 `env` 와 같은 병합 경로)에 인증 변수를 넣고 초기화만 했다.
+
+| settings `env` | `account` | 게이트 |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | `{"tokenSource":"claude.ai","apiKeySource":"ANTHROPIC_API_KEY","apiProvider":"firstParty"}` | 걸러짐 |
+| `ANTHROPIC_AUTH_TOKEN` | `{"tokenSource":"ANTHROPIC_AUTH_TOKEN",…}` | 걸러짐 |
+| `CLAUDE_CODE_OAUTH_TOKEN` | `{"tokenSource":"CLAUDE_CODE_OAUTH_TOKEN",…}` | 걸러짐 |
+| `CLAUDE_CODE_USE_BEDROCK` | `{"apiProvider":"bedrock"}` | 걸러짐 |
+| **`ANTHROPIC_BASE_URL`** | **구독과 똑같음**(`subscriptionType:"Claude Max"`, `apiProvider:"firstParty"`) | **account 로는 못 거름** |
+
+### `resolveSettings()` (`s10-resolve.mjs`, CLI 미실행)
+
+임시 cwd 의 `.claude/settings.json` 에 `env.ANTHROPIC_BASE_URL`·`apiKeyHelper`·`PreToolUse` hook 을 넣고 `resolveSettings({cwd})` → `effective.env` 키 `["ANTHROPIC_BASE_URL"]`, `effective.apiKeyHelper` 값, `provenance.env`·`provenance.apiKeyHelper` = 그 파일 경로(`source:"project"`), `effective.hooks` 의 이벤트 목록, `sources` = user + project 파일. 깨끗한 cwd 에서는 `env` 비어 있음, hooks 출처 = 사용자 설정. **사용자 설정에 `PermissionRequest` hook 이 있다**(Orca agent hook — `ORCA_*` env 가 없으면 `{}` 만 출력하므로 결정하지 않는다).
+
+### 정리 동작
+
+`q.close()` 와 `abortController.abort()` 모두 자식이 약 0.2~1.1초 안에 `exit 0`(7회 반복).
+
+### 초기화 응답의 다른 필드 (`s11-initfields.mjs`)
+
+`initializationResult()` 에 `pid`(custom spawn 의 pid 와 같음), `claude_code_version:"2.1.308"`, `current_permission_mode:"default"`, `session_state:"idle"`, `remote_control_available:true`, `remote_control_auto_enable:false`, `fast_mode_state:"off"`, `capabilities:["ui_surface_v1","mcp_call_result_not_for_model_v1"]` 가 있다. **`msg_lifecycle_v1`·`interrupt_receipt_v1` 은 이 목록에 없고, 첫 prompt 전에는 `system/init` 이 오지 않는다**(5초 대기에도 없음) — 두 capability 는 첫 prompt 뒤에만 확인된다.
