@@ -28,6 +28,7 @@ const DEFAULTS = {
 };
 
 const env = { ...process.env };
+delete env.PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS;
 for (const [key, value] of Object.entries(DEFAULTS)) {
   if (env[key] === undefined) env[key] = value;
 }

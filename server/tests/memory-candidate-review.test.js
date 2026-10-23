@@ -637,3 +637,23 @@ test('mixed option and ambient actor tokens are reported as unverified', async (
     .expect(200);
   assert.equal(status.body.approval.actor_boundary, 'run_capabilities_unverified');
 });
+
+test('default credential policy disables CLI distill scheduler despite native login; API backend remains available', t => {
+  const savedLegacy = process.env.PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS;
+  const savedSkip = process.env.PALANTIR_SKIP_HOST_CREDENTIALS;
+  delete process.env.PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS;
+  delete process.env.PALANTIR_SKIP_HOST_CREDENTIALS;
+  t.after(() => {
+    for (const [key, value] of [['PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS', savedLegacy], ['PALANTIR_SKIP_HOST_CREDENTIALS', savedSkip]]) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  });
+  const app = setupApp(t, { memoryDistillEnabled: true, memoryDistillApiKey: null,
+    memoryDistillClaudeBin: '/fixture/claude', authResolverOpts: { hasKeychain: () => true, hasCredentialsFile: () => false } });
+  const status = app.services.getMemoryDistillStatus();
+  assert.equal(status.state, 'missing_credential');
+  assert.equal(status.interval_ms, null);
+  assert.match(status.reason, /PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS/);
+  const api = setupApp(t, { memoryDistillEnabled: true, memoryDistillApiKey: 'sk-ant-api-fixture' });
+  assert.equal(api.services.getMemoryDistillStatus().backend, 'anthropic_api');
+});

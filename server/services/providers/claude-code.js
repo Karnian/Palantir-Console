@@ -1,19 +1,18 @@
 /**
  * Claude Code provider adapter — desktop OAuth flavor.
  *
- * Distinct from anthropic.js: this path resolves the auth token from the
- * Claude Code desktop OAuth flow (CLAUDE_CODE_OAUTH_TOKEN env, then falls back
- * to ANTHROPIC_API_KEY, then the native platform credential store — macOS
- * Keychain, or ~/.claude/.credentials.json on Linux/Windows — via
- * authResolver's shared readers). It also tries `claude auth status`
- * to enrich the response with account info. Both paths still hit the Anthropic
- * OAuth usage endpoint, but the auth source matters — collapsing them would
- * silently break Claude Code installs that don't have ANTHROPIC_API_KEY exported.
+ * OAuth value access is disabled by default. Legacy mode resolves env OAuth,
+ * then native credential stores; actual API keys are never sent to this endpoint.
+ * Account status remains CLI-owned in both modes.
  */
 
-const { execFile } = require('node:child_process');
+const { execFile, spawn } = require('node:child_process');
 const { promisify } = require('node:util');
 const {
+  legacyClaudeCredentialAccessEnabled,
+  isClaudeOAuthTokenValue,
+  CLAUDE_AUTH_KEYS,
+  stripClaudeOAuthEnv,
   readClaudeKeychainToken,
   readClaudeLinuxCredentialsToken,
   hostCredentialDiscoveryDisabled,
@@ -68,7 +67,12 @@ function parseOAuthUsageLimits(data) {
   return limits;
 }
 
-async function fetchClaudeCodeUsage() {
+async function fetchClaudeCodeUsage({
+  spawn: spawnFn = spawn,
+  execFile: execFileFn = execFileAsync,
+  readKeychainToken = readClaudeKeychainToken,
+  readCredentialsFileToken = readClaudeLinuxCredentialsToken,
+} = {}) {
   const now = new Date().toISOString();
   const base = { id: 'anthropic', name: 'claude' };
 
@@ -78,7 +82,7 @@ async function fetchClaudeCodeUsage() {
   let account = null;
   try {
     if (hostCredentialDiscoveryDisabled()) throw new Error('host credential discovery disabled');
-    const { stdout } = await execFileAsync('claude', ['auth', 'status'], { encoding: 'utf-8', timeout: 5000 });
+    const { stdout } = await execFileFn('claude', ['auth', 'status'], { encoding: 'utf-8', timeout: 5000, env: stripClaudeOAuthEnv({ ...process.env }) });
     const authInfo = JSON.parse(stdout.trim());
     if (authInfo.loggedIn) {
       account = {
@@ -97,8 +101,13 @@ async function fetchClaudeCodeUsage() {
   // that logic here (this file used to have its own darwin-only keychain
   // reader, which silently returned null — and this "No Claude auth token
   // found" error — on any non-macOS box regardless of actual login state).
-  const token = process.env.CLAUDE_CODE_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY
-    || await readClaudeKeychainToken() || await readClaudeLinuxCredentialsToken();
+  if (!legacyClaudeCredentialAccessEnabled()) {
+    return { ...base, account, updatedAt: now, limits: [{ label: 'usage', remainingPct: null, resetAt: null,
+      errorMessage: '자격 조회 꺼짐: PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS=1 required' }] };
+  }
+  const token = process.env.CLAUDE_CODE_OAUTH_TOKEN
+    || (isClaudeOAuthTokenValue(process.env.ANTHROPIC_API_KEY) ? process.env.ANTHROPIC_API_KEY : null)
+    || await readKeychainToken() || await readCredentialsFileToken();
   if (!token) {
     return {
       ...base,
@@ -110,20 +119,23 @@ async function fetchClaudeCodeUsage() {
 
   // We use curl rather than fetch() to dodge Node TLS cert issues we hit on some envs.
   try {
-    const { stdout: raw } = await execFileAsync(
-      'curl',
-      [
-        '-s',
-        '-H',
-        `Authorization: Bearer ${token}`,
-        '-H',
-        'anthropic-beta: oauth-2025-04-20',
-        '-H',
-        'Accept: application/json',
-        'https://api.anthropic.com/api/oauth/usage',
-      ],
-      { encoding: 'utf-8', timeout: 10000 },
-    );
+    if (/[\r\n\0]/.test(token)) throw new Error('Invalid OAuth token header');
+    const env = { ...process.env };
+    for (const key of CLAUDE_AUTH_KEYS) delete env[key];
+    stripClaudeOAuthEnv(env);
+    const raw = await new Promise((resolve, reject) => {
+      const child = spawnFn('curl', ['-q', '-s', '-H', '@-', '-H', 'anthropic-beta: oauth-2025-04-20',
+        '-H', 'Accept: application/json', 'https://api.anthropic.com/api/oauth/usage'],
+      { env, stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000 });
+      let output = '';
+      child.stdout.on('data', chunk => { output += chunk; });
+      child.stderr.on('data', () => {});
+      child.on('error', reject);
+      child.stdin.on('error', reject);
+      child.on('close', (code, signal) => code === 0 && !signal
+        ? resolve(output) : reject(new Error('OAuth usage curl failed')));
+      child.stdin.end(`Authorization: Bearer ${token}\n`);
+    });
     const limits = parseOAuthUsageLimits(JSON.parse(raw));
     return { ...base, account, limits, updatedAt: now };
   } catch (err) {

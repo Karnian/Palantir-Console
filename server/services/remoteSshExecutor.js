@@ -10,7 +10,7 @@ const {
   isWorkerApiBaseKey,
   normalizeWorkerApiBase,
 } = require('./actorTokenPolicy');
-const { CLAUDE_PROVIDER_AUTH_ENV_KEYS } = require('./authResolver');
+const { CLAUDE_PROVIDER_AUTH_ENV_KEYS, legacyClaudeCredentialAccessEnabled, stripClaudeOAuthEnv } = require('./authResolver');
 const { execEnvKeys, projectTestEnvKeys } = require('./execEnvPolicy');
 
 const WORKER_OUTPUT_MAX_LINES = 500;
@@ -147,8 +147,18 @@ function hasExplicitClaudeSettings(args) {
     && args[index + 1].length > 0;
 }
 
+// Match JavaScript trim's leading whitespace without invoking a pod utility.
+const CLAUDE_API_KEY_TRIM_SHELL = 'claude_api_key_check=${ANTHROPIC_API_KEY:-}; '
+  + 'claude_api_key_check=${claude_api_key_check#"${claude_api_key_check%%[![:space:]\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]*}"};';
+
 function buildClaudeBareAuthShell(args) {
   const settingsAuth = hasExplicitClaudeSettings(args);
+  if (!legacyClaudeCredentialAccessEnabled()) {
+    return [
+      `${CLAUDE_API_KEY_TRIM_SHELL} case "$claude_api_key_check" in sk-ant-oat*) echo "Claude OAuth credential access disabled: PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS" >&2; exit 78;; esac;`,
+      `if { ${CLAUDE_PROVIDER_AUTH_SHELL}; } || [ -n "\${ANTHROPIC_API_KEY:-}" ]${settingsAuth ? ' || true' : ''}; then :; else echo "Claude --bare auth unavailable: PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS" >&2; exit 78; fi`,
+    ].join(' ');
+  }
   return [
     `if { ${CLAUDE_PROVIDER_AUTH_SHELL}; }; then`,
     ':;',
@@ -257,7 +267,7 @@ function normalizeMode(mode) {
 
 function normalizeEnv(env) {
   if (!env) return [];
-  return Object.entries(env)
+  return Object.entries(stripClaudeOAuthEnv({ ...env }))
     .filter(([, value]) => value !== undefined)
     .map(([key, value]) => {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
@@ -269,7 +279,7 @@ function normalizeEnv(env) {
 
 function normalizeMaterializedEnv(env) {
   if (!env) return [];
-  return Object.entries(env)
+  return Object.entries(stripClaudeOAuthEnv({ ...env }))
     .filter(([, value]) => value !== undefined)
     .map(([key, value]) => {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw envKeyInvalidError(key);
@@ -341,6 +351,7 @@ function normalizeEnvKeyList(keys, { allowPath = false } = {}) {
     // explicitly after env -i, from stdin or a mode-0600 file.
     if (
       (!allowPath && key === 'PATH')
+      || (!legacyClaudeCredentialAccessEnabled() && key === 'CLAUDE_CODE_OAUTH_TOKEN')
       || isWorkerApiBaseKey(key)
       || isActorCredentialKey(key)
       || seen.has(key)
@@ -376,6 +387,7 @@ function buildCleanEnvPrefix(keys, {
     parts.push(
       `for k in ${loopKeys.map((key) => shq(key)).join(' ')}`,
       'do eval "v=\\${$k+x}"',
+      ...(!legacyClaudeCredentialAccessEnabled() ? [ `if [ "$k" = ANTHROPIC_API_KEY ]; then ${CLAUDE_API_KEY_TRIM_SHELL} case "$claude_api_key_check" in sk-ant-oat*) continue;; esac; fi` ] : []),
       '[ -n "$v" ] && eval "set -- \\"\\$@\\" \\"$k=\\$$k\\""',
       'done',
     );
@@ -449,7 +461,7 @@ function buildCommandScript(command, args = [], {
     // is the sole remote PATH input and is assembled once below.
     ? Object.fromEntries(Object.entries(env || {}).filter(([key]) => key !== 'PATH'))
     : env;
-  const envParts = normalizeEnv(explicitEnv);
+  const envParts = normalizeEnv(stripClaudeOAuthEnv({ ...explicitEnv }));
   const argv = [shq(command), ...(args || []).map((arg) => shq(arg))];
   // Optional PATH prepend for binaries that live outside the pod's minimal
   // non-interactive-ssh PATH (codex/claude under ~/.npm-global/bin). The prefix
@@ -701,7 +713,7 @@ function createRemoteSshNodeExecutor(node, {
 
   function runRemoteScript(script, { timeoutMs, maxBuffer, input } = {}) {
     return new Promise((resolve, reject) => {
-      const child = spawnFn('ssh', sshArgsFor(script), { stdio: ['pipe', 'pipe', 'pipe'] });
+      const child = spawnFn('ssh', sshArgsFor(script), { stdio: ['pipe', 'pipe', 'pipe'], env: stripClaudeOAuthEnv({ ...process.env }) });
       const hasInput = input !== undefined && input !== null && input !== '';
       const stdoutChunks = [];
       const stderrChunks = [];
@@ -1154,7 +1166,7 @@ function createRemoteSshNodeExecutor(node, {
       child = spawnFn(
         'ssh',
         sshArgsFor(bootstrapScript, { keepAlive: true }),
-        { stdio: ['pipe', 'pipe', 'pipe'] },
+        { stdio: ['pipe', 'pipe', 'pipe'], env: stripClaudeOAuthEnv({ ...process.env }) },
       );
     } catch (err) {
       await cleanupMaterialized();
@@ -1205,6 +1217,9 @@ function createRemoteSshNodeExecutor(node, {
    * SSH transport failure rejects with code='SSH_TRANSPORT'.
    */
   async function readClaudeOAuthUsage({ timeoutMs = 15000, maxBuffer = 256 * 1024, pathPrefix } = {}) {
+    if (!legacyClaudeCredentialAccessEnabled()) {
+      return { code: 0, stdout: JSON.stringify({ state: 'quota_unsupported', error: '자격 조회 꺼짐: PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS' }), stderr: '' };
+    }
     let script = CLAUDE_OAUTH_USAGE_SCRIPT;
     if (pathPrefix !== undefined && pathPrefix !== null) {
       // node_prefix may be a single dir or a `:`-joined list (multiple CLIs
@@ -2351,5 +2366,6 @@ module.exports = {
   // Exported for tests: the trap/quoting contract here is security-relevant
   // and is easier to pin directly than through a mocked mktemp path.
   buildMaterializedEnvBootstrap,
+  buildClaudeBareAuthShell,
   CLAUDE_OAUTH_USAGE_JS,
 };

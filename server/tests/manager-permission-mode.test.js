@@ -241,7 +241,7 @@ test('Manager profile permission_mode reaches Claude CLI and NULL matches the wo
   assert.equal(JSON.parse(response.text).error, 'manager_profile_vendor_mismatch');
 });
 
-test('Top Manager materializes Keychain-only auth for a real --bare child contract', async (t) => {
+test('Top Manager materializes Keychain-only auth for a real --bare child contract', async (t) => require('./helpers/host-credential-discovery').withLegacyClaudeCredentialAccess(async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'palantir-manager-bare-auth-'));
   const argsFile = path.join(root, 'claude-args.json');
   const contractFile = path.join(root, 'claude-auth-contract.json');
@@ -323,7 +323,7 @@ test('Top Manager materializes Keychain-only auth for a real --bare child contra
     bare: true,
     hasAnthropicApiKey: true,
   });
-});
+}));
 
 test('Top Manager clears its starting guard when Claude template parsing fails', async (t) => {
   const {

@@ -655,3 +655,22 @@ test('ssh claude quota keeps malformed exit sentinels fail-closed', async () => 
   const snapshot = await service.getUsageSnapshot('pod');
   assert.equal(snapshot.clis.find((c) => c.id === 'claude').error.code, 'probe_failed');
 });
+
+test('disabled Claude credential probe remains an informational quota_unsupported card', async () => {
+  const executor = makeExecutor({
+    'codex --version': () => new FakeChild({ code: 127 }),
+    'claude --version': () => new FakeChild({ stdout: '2.1.179\n' }),
+    'claude auth status': () => new FakeChild({ stdout: '{"loggedIn":true}\n' }),
+  });
+  const service = createNodeUsageService({ nodeService: {
+    getNode: () => ({ id: 'pod', name: 'Pod', kind: 'ssh', reachable: 1 }),
+    pickExecutor: () => executor,
+  }, readClaudeOAuthUsageFn: async () => ({ code: 0, stderr: '', stdout: JSON.stringify({
+    state: 'quota_unsupported', error: '자격 조회 꺼짐: PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS',
+  }) }) });
+  const snapshot = await service.getUsageSnapshot('pod');
+  const claude = snapshot.clis.find(item => item.id === 'claude');
+  assert.equal(claude.error.code, 'quota_unsupported');
+  assert.match(claude.error.message, /PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS/);
+  assert.equal(claude.authStatus.loggedIn, true);
+});

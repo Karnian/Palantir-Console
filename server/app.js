@@ -98,7 +98,7 @@ const { createMemoryService } = require('./services/memoryService');
 const { createMasterMemoryService } = require('./services/masterMemoryService');
 const { createMemoryDistillService } = require('./services/memoryDistillService');
 const { createLiveDistiller, resolveClaudeCliBinary } = require('./services/distillers/liveDistiller');
-const { resolveClaudeAuth, CLAUDE_AUTH_KEYS } = require('./services/authResolver');
+const { legacyClaudeCredentialAccessEnabled, resolveActualAnthropicApiKey, resolveClaudeAuth, CLAUDE_AUTH_KEYS, CLAUDE_PROVIDER_AUTH_ENV_KEYS } = require('./services/authResolver');
 const { createMemoryRouter } = require('./routes/memory');
 const { createMemoryDiagnosticsRouter } = require('./routes/memoryDiagnostics');
 const { createMemoryProposalsRouter } = require('./routes/memoryProposals');
@@ -1391,7 +1391,7 @@ function createApp(options = {}) {
   // since spawn gates that on goalJudgeActive()).
   let goalJudgeService = options.goalJudgeService || null;
   if (!goalJudgeService && require('./services/goalMode').goalJudgeActive(goalModeEnv)) {
-    const judgeApiKey = process.env.ANTHROPIC_API_KEY;
+    const judgeApiKey = resolveActualAnthropicApiKey(process.env.ANTHROPIC_API_KEY);
     if (judgeApiKey) {
       try { goalJudgeService = createGoalJudge({ apiKey: judgeApiKey }); }
       catch (err) { console.warn(`[goal-judge] failed to create: ${err.message}`); }
@@ -1661,9 +1661,9 @@ function createApp(options = {}) {
     const distillEnabled = options.memoryDistillEnabled ?? (process.env.PALANTIR_MEMORY_DISTILL !== '0');
     if (distillEnabled) {
       let distiller = options.distiller || null;
-      const apiKey = options.memoryDistillApiKey !== undefined
+      const apiKey = resolveActualAnthropicApiKey(options.memoryDistillApiKey !== undefined
         ? options.memoryDistillApiKey
-        : process.env.ANTHROPIC_API_KEY;
+        : process.env.ANTHROPIC_API_KEY);
       const requestedBackend = options.memoryDistillBackend
         ?? process.env.PALANTIR_MEMORY_DISTILL_BACKEND
         ?? 'auto';
@@ -1689,25 +1689,26 @@ function createApp(options = {}) {
           ? options.memoryDistillClaudeAuth
           : resolveClaudeAuth({
               ...normalizeAuthProbes(options.authResolverOpts || {}),
-              envAllowlist: CLAUDE_AUTH_KEYS,
+              envAllowlist: [...CLAUDE_AUTH_KEYS, ...CLAUDE_PROVIDER_AUTH_ENV_KEYS],
+              bare: !legacyClaudeCredentialAccessEnabled(),
             });
         const cliBin = options.memoryDistillClaudeBin !== undefined
           ? options.memoryDistillClaudeBin
           : resolveClaudeCliBinary();
         selectedBackend = 'claude_cli';
-        if (!cliBin) {
+        if (!legacyClaudeCredentialAccessEnabled() && !cliAuth?.canAuth && !options.memoryDistillClaudeAuth && !options.memoryDistillIsolatedAuth) {
+          missingReason = 'Claude CLI credential access disabled: PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS';
+        } else if (!cliBin) {
           missingReason = 'Claude Code CLI binary is not available';
         } else if (!cliAuth || !cliAuth.canAuth) {
           missingReason = (cliAuth && cliAuth.diagnostics && cliAuth.diagnostics[0])
             || 'Claude Code CLI credentials are not available';
         } else {
-          // cliAuth above only answers "are there credentials at all", for the
-          // status surface. The token itself is materialized per call inside
-          // the distiller — `--bare` cannot read the keychain or OAuth env, so
-          // it has to arrive as an apiKeyHelper settings file.
+          // Default-mode preflight requires auth usable under --bare. The
+          // isolated resolver checks the policy again on every distill call.
           distiller = createLiveDistiller({
             cliBin,
-            envAllowlist: CLAUDE_AUTH_KEYS,
+            envAllowlist: [...CLAUDE_AUTH_KEYS, ...CLAUDE_PROVIDER_AUTH_ENV_KEYS],
             resolveIsolatedAuth: options.memoryDistillIsolatedAuth,
           });
         }
@@ -1795,7 +1796,7 @@ function createApp(options = {}) {
     const specialistEnabled = options.operatorSpecialistEnabled ?? (process.env.PALANTIR_OPERATOR_SPECIALIST === '1');
     if (specialistEnabled) {
       let backend = options.specialistBackend || null;
-      const apiKey = process.env.ANTHROPIC_API_KEY;
+      const apiKey = resolveActualAnthropicApiKey(process.env.ANTHROPIC_API_KEY);
       if (!backend && !apiKey && !options.specialistCallModel) {
         console.warn('[operator-specialist] PALANTIR_OPERATOR_SPECIALIST=1 but no ANTHROPIC_API_KEY / injected backend — specialist disabled');
       } else {

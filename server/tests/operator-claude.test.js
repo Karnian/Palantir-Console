@@ -1,3 +1,4 @@
+require('./helpers/host-credential-discovery').enableLegacyClaudeCredentialAccessForFile();
 // Fleet P5-S4a — local Claude Operator spawn lifecycle.
 
 const test = require('node:test');

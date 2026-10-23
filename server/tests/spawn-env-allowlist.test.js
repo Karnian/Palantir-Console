@@ -1,3 +1,4 @@
+require('./helpers/host-credential-discovery').enableLegacyClaudeCredentialAccessForFile();
 'use strict';
 
 const test = require('node:test');
@@ -1004,7 +1005,7 @@ test('MUTATION: Claude auth contract accepts an allowlisted cloud mode, while ar
 
 test('MUTATION: normal and isolated Claude auth use the same provider policy contract', async () => {
   const baseEnv = {
-    PALANTIR_SKIP_HOST_CREDENTIALS: '1',
+    PALANTIR_SKIP_HOST_CREDENTIALS: undefined,
     CLAUDE_CODE_OAUTH_TOKEN: undefined,
     ANTHROPIC_API_KEY: undefined,
     CLAUDE_CODE_USE_BEDROCK: undefined,

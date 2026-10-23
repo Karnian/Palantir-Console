@@ -1,4 +1,5 @@
 const childProcess = require('node:child_process');
+const { stripClaudeOAuthEnv } = require('./authResolver');
 const fsp = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
@@ -463,7 +464,9 @@ function createLocalNodeExecutor({ executionEngine, streamJsonEngine } = {}) {
   }
 
   function spawnInteractive(command, args = [], { cwd, env } = {}) {
-    return childProcess.spawn(command, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
+    return childProcess.spawn(command, args, {
+      cwd, env: stripClaudeOAuthEnv({ ...(env == null ? process.env : env) }), stdio: ['pipe', 'pipe', 'pipe'],
+    });
   }
 
   api = {

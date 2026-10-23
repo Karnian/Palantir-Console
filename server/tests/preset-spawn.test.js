@@ -1,3 +1,4 @@
+require('./helpers/host-credential-discovery').enableLegacyClaudeCredentialAccessForFile();
 // Phase 10C — preset spawn wiring integration tests.
 //
 // Drives lifecycleService.executeTask with stubbed spawn engines and asserts
@@ -735,4 +736,57 @@ test('M4-a: http preset preflight failure (bearer env missing) → run failed + 
   // Payload contains env *name*, never value
   assert.equal(payload.bearer_env, 'PALANTIR_TEST_M4_TOKEN_MISSING');
   assert.equal(JSON.stringify(payload).includes('test-token'), false);
+});
+
+test('default credential policy strips OAuth from final worker env despite profile allowlist', async t => {
+  const saved = { ...process.env };
+  delete process.env.PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS;
+  delete process.env.PALANTIR_SKIP_HOST_CREDENTIALS;
+  process.env.CLAUDE_CODE_OAUTH_TOKEN = 'worker-oauth-fixture';
+  process.env.ANTHROPIC_API_KEY = 'sk-ant-oat-worker-fixture';
+  t.after(() => {
+    for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+    Object.assign(process.env, saved);
+  });
+  const db = await mkdb(t);
+  const { lc, sje } = buildLifecycle(db);
+  const project = seedProject(db), task = seedTask(db, project.id), profile = seedProfile(db, 'claude');
+  db.prepare('UPDATE agent_profiles SET env_allowlist=? WHERE id=?')
+    .run(JSON.stringify(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']), profile.id);
+  await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'fixture' });
+  assert.equal(sje.spawned.length, 1);
+  assert.equal(sje.spawned[0].opts.env.CLAUDE_CODE_OAUTH_TOKEN, undefined);
+  assert.equal(sje.spawned[0].opts.env.ANTHROPIC_API_KEY, undefined);
+});
+
+test('review: local Claude version probe explicitly sanitizes inherited OAuth env', async t => {
+  const saved = { ...process.env };
+  delete process.env.PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS;
+  delete process.env.PALANTIR_SKIP_HOST_CREDENTIALS;
+  process.env.CLAUDE_CODE_OAUTH_TOKEN = 'version-oauth-fixture';
+  t.after(() => {
+    for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+    Object.assign(process.env, saved);
+  });
+  const calls = [];
+  t.mock.method(require('node:child_process'), 'execFileSync', (command, args, options) => {
+    if (command !== 'claude') throw new Error('unexpected external command');
+    calls.push({ args, options }); return '2.1.200';
+  });
+  const db = await mkdb(t);
+  const presetService = createPresetService(db, { pluginsRoot: mkPluginsRoot(t) });
+  const { lc } = buildLifecycle(db, { presetService });
+  const project = seedProject(db), profile = seedProfile(db, 'claude');
+  const preset = presetService.createPreset({ name: 'VersionProbe', min_claude_version: '2.0.0' });
+  for (const key of ['sk-ant-oat-version', 'sk-ant-api-version']) {
+    process.env.ANTHROPIC_API_KEY = key;
+    const task = seedTask(db, project.id);
+    await lc.executeTask(task.id, { agentProfileId: profile.id, prompt: 'fixture', presetId: preset.id });
+    const probe = calls.at(-1);
+    assert.deepEqual(probe.args, ['--version']);
+    assert.ok(probe.options.env, 'explicit env required');
+    assert.equal(probe.options.env.CLAUDE_CODE_OAUTH_TOKEN, undefined);
+    assert.equal(probe.options.env.ANTHROPIC_API_KEY, key.startsWith('sk-ant-oat') ? undefined : key);
+  }
+  assert.equal(calls.length, 2);
 });

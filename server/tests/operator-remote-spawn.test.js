@@ -905,7 +905,7 @@ test('local Operator still fails closed when control-plane Codex auth is unavail
   assert.throws(() => spawn.ensureLiveOperator({ projectId: project.id }), /PM auth unavailable/);
 });
 
-test('P5-S4c: LOCAL Claude operator boot-resume uses adapter auth (not hardcoded codex) + resumeSessionId', async (t) => {
+test('P5-S4c: LOCAL Claude operator boot-resume uses adapter auth (not hardcoded codex) + resumeSessionId', async (t) => require('./helpers/host-credential-discovery').withLegacyClaudeCredentialAccess(async () => {
   // The operator boot-resume loop now admits claude-code (P5-S4c); auth must be
   // resolved for the run's ACTUAL adapter, not a hardcoded 'codex' (Codex
   // BLOCKER). Covers the LOCAL claude boot path the remote-only tests missed
@@ -952,4 +952,4 @@ test('P5-S4c: LOCAL Claude operator boot-resume uses adapter auth (not hardcoded
   assert.equal(adapter._starts[0].opts.resumeSessionId, 'sess-local');
   assert.equal(adapter._starts[0].opts.resumeThreadId, undefined);
   assert.equal(Object.prototype.hasOwnProperty.call(adapter._starts[0].opts, 'executor'), false);
-});
+}));

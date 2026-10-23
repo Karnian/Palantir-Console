@@ -499,12 +499,13 @@ machines. Spec: `docs/specs/worker-preset-and-plugin-injection.md`.
 
 ### Auth in isolated mode
 
-`--bare` Claude ignores OAuth and the macOS keychain, so the preset
-service materializes the token. Default path is an `apiKeyHelper` shell
-script + `--settings <temp>` (token never lands in env). Token sources
-tried in order: env `ANTHROPIC_API_KEY` → `.claude-auth.json` → keychain
-`claudeAiOauth.accessToken`. Fail-closed with a 400 + diagnostic when
-none are available.
+`--bare` Claude ignores OAuth and the macOS keychain. By default Palantir
+does not read, store, forward, or convert Claude OAuth credentials, so an
+isolated preset only authenticates with an actual `ANTHROPIC_API_KEY` (not an
+`sk-ant-oat*` OAuth token) or a cloud-provider auth mode; otherwise it fails
+closed with a 400 + diagnostic. `PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS=1`
+restores the old materialization (env → `.claude-auth.json` → keychain
+`claudeAiOauth.accessToken`, written to a temporary `apiKeyHelper`).
 
 ### Snapshot semantics
 
@@ -536,7 +537,8 @@ flag.
 | `HOST` | auto | Override the bind address. `0.0.0.0` without a token logs a security warning |
 | `PALANTIR_ALLOWED_COMMANDS` | (none) | Additional allowed CLI commands (comma-separated) |
 | `PALANTIR_DEFAULT_PM_ADAPTER` | `codex` | Global Operator adapter fallback when an instance uses Auto and its project has no `preferred_pm_adapter` |
-| `ANTHROPIC_BASE_URL` / `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` | — | Claude Code auth (persisted to `.claude-auth.json` when set at server start) |
+| `ANTHROPIC_BASE_URL` / `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` | — | Claude Code auth. By default OAuth values (`CLAUDE_CODE_OAUTH_TOKEN`, `sk-ant-oat*` keys) are removed at boot and never forwarded; the claude CLI reads its own login. An actual API key is still used |
+| `PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS` | (off) | Exactly `1` restores legacy Claude credential handling (`.claude-auth.json` save/restore, token materialization for `--bare`/isolated/distiller, usage lookup). Not an SH1-supported configuration |
 | `CODEX_API_KEY` / `OPENAI_API_KEY` | — | Codex auth (preflight checks `~/.codex/auth.json`) |
 | `CODEX_BIN` | `codex` | Codex CLI path |
 | `CODEX_HOME` | `~/.codex` | Codex config home |

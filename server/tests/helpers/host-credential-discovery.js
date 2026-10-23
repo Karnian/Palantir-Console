@@ -46,4 +46,30 @@ function enableHostCredentialDiscoveryForFile() {
   delete process.env.PALANTIR_SKIP_HOST_CREDENTIALS;
 }
 
-module.exports = { withHostCredentialDiscovery, enableHostCredentialDiscoveryForFile };
+function withLegacyClaudeCredentialAccess(fn) {
+  const saved = process.env.PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS;
+  process.env.PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS = '1';
+  const restore = () => {
+    if (saved === undefined) delete process.env.PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS;
+    else process.env.PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS = saved;
+  };
+  try {
+    const result = withHostCredentialDiscovery(fn);
+    if (result && typeof result.then === 'function') return result.finally(restore);
+    restore();
+    return result;
+  } catch (error) { restore(); throw error; }
+}
+function enableLegacyClaudeCredentialAccessForFile() {
+  const savedLegacy = process.env.PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS;
+  const savedSkip = process.env.PALANTIR_SKIP_HOST_CREDENTIALS;
+  enableHostCredentialDiscoveryForFile();
+  process.env.PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS = '1';
+  require('node:test').after(() => {
+    for (const [key, value] of [['PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS', savedLegacy], ['PALANTIR_SKIP_HOST_CREDENTIALS', savedSkip]]) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  });
+}
+
+module.exports = { withLegacyClaudeCredentialAccess, enableLegacyClaudeCredentialAccessForFile, withHostCredentialDiscovery, enableHostCredentialDiscoveryForFile };

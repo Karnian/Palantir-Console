@@ -30,6 +30,11 @@ import { mkdtempSync, writeFileSync, rmSync, mkdirSync, chmodSync } from 'node:f
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+if (process.env.PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS !== '1' || process.env.PALANTIR_SKIP_HOST_CREDENTIALS === '1') {
+  console.error('Credential access disabled: PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS=1 required');
+  process.exit(1);
+}
+
 const VERBOSE = process.argv.includes('--verbose');
 const KEYCHAIN_SERVICE = 'Claude Code-credentials';
 

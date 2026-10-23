@@ -1,3 +1,4 @@
+require('./helpers/host-credential-discovery').enableLegacyClaudeCredentialAccessForFile();
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const childProcess = require('node:child_process');
@@ -3662,4 +3663,124 @@ test('readClaudeVersion rejects untrusted path segments and returns null for bad
     /pathPrefix must be one or more absolute POSIX paths/,
   );
   assert.equal(await exec.readClaudeVersion({ pathPrefix: '/opt/claude/bin' }), null);
+});
+
+
+// Independently pinned guard bytes: changing either literal requires review.
+const EXPECTED_BARE_AUTH_GUARD = "claude_api_key_check=${ANTHROPIC_API_KEY:-}; claude_api_key_check=${claude_api_key_check#\"${claude_api_key_check%%[![:space:]\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]*}\"}; case \"$claude_api_key_check\" in sk-ant-oat*) echo \"Claude OAuth credential access disabled: PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS\" >&2; exit 78;; esac; if { [ \"${CLAUDE_CODE_USE_BEDROCK:-}\" = \"1\" ] || [ \"${CLAUDE_CODE_USE_VERTEX:-}\" = \"1\" ] || [ \"${CLAUDE_CODE_USE_FOUNDRY:-}\" = \"1\" ]; } || [ -n \"${ANTHROPIC_API_KEY:-}\" ]; then :; else echo \"Claude --bare auth unavailable: PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS\" >&2; exit 78; fi";
+const EXPECTED_SETTINGS_AUTH_GUARD = "claude_api_key_check=${ANTHROPIC_API_KEY:-}; claude_api_key_check=${claude_api_key_check#\"${claude_api_key_check%%[![:space:]\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]*}\"}; case \"$claude_api_key_check\" in sk-ant-oat*) echo \"Claude OAuth credential access disabled: PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS\" >&2; exit 78;; esac; if { [ \"${CLAUDE_CODE_USE_BEDROCK:-}\" = \"1\" ] || [ \"${CLAUDE_CODE_USE_VERTEX:-}\" = \"1\" ] || [ \"${CLAUDE_CODE_USE_FOUNDRY:-}\" = \"1\" ]; } || [ -n \"${ANTHROPIC_API_KEY:-}\" ] || true; then :; else echo \"Claude --bare auth unavailable: PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS\" >&2; exit 78; fi";
+
+function useDefaultClaudeCredentialPolicy(t) {
+  const keys = ['PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS', 'PALANTIR_SKIP_HOST_CREDENTIALS'];
+  const saved = keys.map(key => process.env[key]);
+  for (const key of keys) delete process.env[key];
+  t.after(() => keys.forEach((key, i) => {
+    if (saved[i] === undefined) delete process.env[key]; else process.env[key] = saved[i];
+  }));
+}
+
+for (const settings of [false, true]) {
+  test(`default credential policy checks both remote scripts without executing them (settings=${settings})`, async t => {
+    useDefaultClaudeCredentialPolicy(t);
+    const { buildClaudeBareAuthShell } = require('../services/remoteSshExecutor');
+    const { assertSafeShellFixture } = require('./helpers/guarded-shell-fixture.cjs');
+    const args = settings ? ['--bare', '--settings', '/fixture/settings.json'] : ['--bare'];
+    const expected = settings ? EXPECTED_SETTINGS_AUTH_GUARD : EXPECTED_BARE_AUTH_GUARD;
+    const guard = buildClaudeBareAuthShell(args);
+    assert.deepEqual(Buffer.from(guard), Buffer.from(expected), 'authentication guard bytes changed');
+    let executions = 0;
+    t.mock.method(childProcess, 'spawnSync', () => { executions++; throw new Error('full scripts must never execute'); });
+    const spawn = makeSpawn(() => {});
+    const executor = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: spawn });
+    await executor.spawnInteractive('claude', args, { claudeBareAuth: true,
+      env: {}, envAllowlist: ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_USE_BEDROCK'] });
+    const regular = spawn.calls.map(scriptOf).find(script => script.includes('exec env -i'));
+    assert.ok(regular);
+    const runId = settings ? 'default_bare_settings' : 'default_bare';
+    const workerSpawn = workerSpawnHarness(runId);
+    const worker = createRemoteSshNodeExecutor(nodeRow(), { spawnFn: workerSpawn });
+    await worker.spawnWorker(runId, { command: 'claude', args, cwd: '/srv/root/project', claudeBareAuth: true,
+      envAllowlist: ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_USE_BEDROCK'],
+      env: { CLAUDE_CODE_OAUTH_TOKEN: 'controller-oauth-canary', ANTHROPIC_API_KEY: 'sk-ant-oat-controller' } });
+    const detached = workerSpawn.calls.map(scriptOf).find(script => script.includes('tmux new-session'));
+    assert.ok(detached);
+    for (const shell of [regular, detached]) {
+      assert.ok(shell.includes(expected), 'the exact pinned auth guard must appear in each remote path');
+      assertSafeShellFixture(shell);
+      assert.doesNotMatch(shell, /ANTHROPIC_API_KEY\s*=\s*["']?\$\{?CLAUDE_CODE_OAUTH_TOKEN/);
+      assert.doesNotMatch(shell, /controller-oauth-canary|sk-ant-oat-controller/);
+    }
+    assert.equal(executions, 0);
+  });
+
+  test(`literal default bare auth guard executes only the fixed fixture probe (settings=${settings})`, async t => {
+    useDefaultClaudeCredentialPolicy(t);
+    const { buildClaudeBareAuthShell } = require('../services/remoteSshExecutor');
+    const { runGuardedShellFixture } = require('./helpers/guarded-shell-fixture.cjs');
+    const args = settings ? ['--bare', '--settings', '/fixture/settings.json'] : ['--bare'];
+    const expectedGuard = settings ? EXPECTED_SETTINGS_AUTH_GUARD : EXPECTED_BARE_AUTH_GUARD;
+    const guard = buildClaudeBareAuthShell(args);
+    // No process may run unless the production fragment matches these literal bytes.
+    assert.deepEqual(Buffer.from(guard), Buffer.from(expectedGuard), 'authentication guard bytes changed');
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'bare-guard-only-'));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    await fs.writeFile(path.join(directory, 'probe'), '#!/bin/sh\nprintf "probe\\n" > ./child.marker\n'
+      + 'printf "%s\\n" "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY-}" "CLAUDE_CODE_USE_BEDROCK=${CLAUDE_CODE_USE_BEDROCK-}" "CLAUDE_CODE_USE_VERTEX=${CLAUDE_CODE_USE_VERTEX-}" "CLAUDE_CODE_USE_FOUNDRY=${CLAUDE_CODE_USE_FOUNDRY-}"\n', { mode: 0o700 });
+    for (const fixture of [
+      { env: {}, status: settings ? 0 : 78 },
+      { env: { ANTHROPIC_API_KEY: 'sk-ant-oat-pod' }, status: 78 },
+      { env: { ANTHROPIC_API_KEY: ' \t sk-ant-oat-pod \r\n' }, status: 78 },
+      { env: { ANTHROPIC_API_KEY: '\u00a0\ufeffsk-ant-oat-pod\u3000' }, status: 78 },
+      { env: { CLAUDE_CODE_OAUTH_TOKEN: 'pod-oauth' }, status: settings ? 0 : 78 },
+      { env: { ANTHROPIC_API_KEY: 'sk-ant-api-pod' }, status: 0, output: 'ANTHROPIC_API_KEY=sk-ant-api-pod' },
+      ...['BEDROCK', 'VERTEX', 'FOUNDRY'].map(provider => ({
+        env: { [`CLAUDE_CODE_USE_${provider}`]: '1' }, status: 0, output: `CLAUDE_CODE_USE_${provider}=1`,
+      })),
+    ]) {
+      await fs.rm(path.join(directory, 'child.marker'), { force: true });
+      const result = runGuardedShellFixture(guard, { expectedGuard, directory, env: fixture.env });
+      let childRan = true;
+      try { await fs.stat(path.join(directory, 'child.marker')); } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+        childRan = false;
+      }
+      assert.deepEqual({ status: result.status, childRan }, { status: fixture.status, childRan: fixture.status === 0 },
+        'auth guard must return the expected exit status and child execution state');
+      if (fixture.status === 78) {
+        assert.equal(result.stdout, '');
+        assert.match(result.stderr, /PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS/);
+      } else if (fixture.output) assert.ok(result.stdout.includes(fixture.output), result.stdout);
+    }
+  });
+}
+
+test('unreviewed guard bytes are rejected before any process can run', () => {
+  const { runGuardedShellFixture } = require('./helpers/guarded-shell-fixture.cjs');
+  let spawns = 0;
+  for (const extra of ['security', 'curl', '.credentials.json', 'claudeAiOauth', 'find-generic-password',
+    '/bin/rm -rf /host', '/usr/bin/osascript -e fixture', 'printf hacked > /host/file']) {
+    assert.throws(() => runGuardedShellFixture(EXPECTED_BARE_AUTH_GUARD + '; ' + extra, {
+      expectedGuard: EXPECTED_BARE_AUTH_GUARD, directory: '/unused-fixture',
+      spawnSync: () => { spawns++; throw new Error('must not execute'); },
+    }), /authentication guard bytes changed/);
+  }
+  assert.equal(spawns, 0);
+});
+
+test('guard fixture runner uses the allowed Node trampoline, fixed probe tail and minimal env', () => {
+  const { runGuardedShellFixture } = require('./helpers/guarded-shell-fixture.cjs');
+  const calls = [];
+  runGuardedShellFixture(EXPECTED_BARE_AUTH_GUARD, { expectedGuard: EXPECTED_BARE_AUTH_GUARD,
+    directory: '/temporary-stub-directory',
+    env: { PATH: '/usr/bin', HOME: '/host-home', NODE_OPTIONS: '--require /host-hook',
+      HOST_SECRET: 'never-forward', ANTHROPIC_API_KEY: 'fixture-api' },
+    spawnSync: (command, args, options) => {
+      calls.push({ command, args, options });
+      return { status: 0, stdout: '{"status":0,"stdout":"","stderr":""}', stderr: '' };
+    },
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, process.execPath);
+  assert.deepEqual(calls[0].options.env, { PATH: '/temporary-stub-directory', HOME: '/temporary-stub-directory', ANTHROPIC_API_KEY: 'fixture-api' });
+  assert.equal(JSON.parse(calls[0].options.input).script, EXPECTED_BARE_AUTH_GUARD + '\nexec ./probe');
 });
