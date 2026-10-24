@@ -8,7 +8,7 @@ const startPattern = /^(Sun|Mon|Tue|Wed|Thu|Fri|Sat) (Jan|Feb|Mar|Apr|May|Jun|Ju
 function normalizeStart(value, psOutput = false) {
   if (typeof value !== 'string') return null;
   // ps adds one line terminator; the timestamp itself must contain no line breaks.
-  const line = psOutput && value.endsWith('\n') ? value.slice(0, -1) : value;
+  const line = (psOutput && value.endsWith('\n') ? value.slice(0, -1) : value).replace(/ +$/, '');
   if (/[\r\n]/.test(line)) return null;
   const match = startPattern.exec(line);
   if (!match || Number(match[3]) < 1 || Number(match[3]) > 31 ||
@@ -72,8 +72,49 @@ function createPsIdentityProbe({ pinnedPath, execFileSync = childProcess.execFil
     if (found.status !== 'ok') return 'query_failed';
     return found.startedAt === normalized ? 'match' : 'mismatch_confirmed';
   }
+  function scanOnce(id, budget) {
+    // Global command output is only an existence hint: argv may contain arbitrary newlines.
+    const output = run(['-E', '-ww', '-A', '-o', 'pid=,command='], budget);
+    if (typeof output !== 'string' || !output.trim()) return failed();
+    const globalMarker = markerState(output, id);
+    if (globalMarker.partial) return failed();
+    if (!globalMarker.exact) return { status: 'ok', marked: [] };
+    const pidOutput = run(['-A', '-o', 'pid='], budget);
+    if (typeof pidOutput !== 'string' || !pidOutput.trim()) return failed();
+    const lines = (pidOutput.endsWith('\n') ? pidOutput.slice(0, -1) : pidOutput).split('\n');
+    if (budget.pidCount + lines.length > maxPids) return failed();
+    const pids = lines.map(line => /^ *[1-9]\d* *$/.test(line) ? Number(line) : NaN);
+    if (pids.some(pid => !Number.isSafeInteger(pid)) || new Set(pids).size !== pids.length) return failed();
+    budget.pidCount += pids.length;
+    const marked = [];
+    for (const pid of pids) {
+      // Read before every command: whether this PID is marked is not known yet.
+      const before = start(pid, budget);
+      if (before.status === 'absent') continue;
+      if (before.status !== 'ok') return failed();
+      const command = readProcess(['-E', '-ww', '-o', 'command=', '-p', String(pid)], budget);
+      if (command.status === 'absent') continue;
+      if (command.status !== 'ok') return failed();
+      const marker = markerState(command.output, id);
+      if (marker.partial) return failed();
+      if (!marker.exact) continue;
+      const markers = command.output.split(/\s+/).filter(token => token.startsWith('PALANTIR_OWNED_INCARNATION='));
+      if (markers.length !== 1) return failed();
+      const parent = readProcess(['-o', 'ppid=', '-p', String(pid)], budget);
+      if (parent.status === 'absent') continue;
+      if (parent.status !== 'ok') return failed();
+      const parentLine = parent.output.endsWith('\n') ? parent.output.slice(0, -1) : parent.output;
+      const ppid = /^ *\d+ *$/.test(parentLine) ? Number(parentLine) : NaN;
+      if (!Number.isSafeInteger(ppid)) return failed();
+      const after = start(pid, budget);
+      if (after.status === 'absent') continue;
+      if (after.status !== 'ok' || before.startedAt !== after.startedAt) return failed();
+      marked.push({ pid, startedAt: before.startedAt, ppid, command: command.output });
+    }
+    return { status: marked.length ? 'ok' : 'inconsistent', marked };
+  }
   function scan(id) {
-    const budget = { started: clock(), queryCount: 0 };
+    const budget = { started: clock(), queryCount: 0, pidCount: 0 };
     function finish(result) {
       const elapsedMs = Math.max(0, clock() - budget.started);
       const diagnostics = { elapsedMs, queryCount: budget.queryCount };
@@ -82,40 +123,11 @@ function createPsIdentityProbe({ pinnedPath, execFileSync = childProcess.execFil
     if (!validId(id) || !Number.isSafeInteger(maxPids) || maxPids < 1 || maxPids > 4096 ||
         !Number.isFinite(deadlineMs) || deadlineMs <= 0 || deadlineMs > 10000) return finish(failed());
     try {
-      // Global command output is only an existence hint: argv may contain arbitrary newlines.
-      const output = run(['-E', '-ww', '-A', '-o', 'pid=,command='], budget);
-      if (typeof output !== 'string' || !output.trim()) return finish(failed());
-      const globalMarker = markerState(output, id);
-      if (globalMarker.partial) return finish(failed());
-      if (!globalMarker.exact) return finish({ status: 'ok', marked: [] });
-      const pidOutput = run(['-A', '-o', 'pid='], budget);
-      if (typeof pidOutput !== 'string' || !pidOutput.trim()) return finish(failed());
-      const lines = (pidOutput.endsWith('\n') ? pidOutput.slice(0, -1) : pidOutput).split('\n');
-      if (lines.length > maxPids) return finish(failed());
-      const pids = lines.map(line => /^ *[1-9]\d* *$/.test(line) ? Number(line) : NaN);
-      if (pids.some(pid => !Number.isSafeInteger(pid)) || new Set(pids).size !== pids.length) return finish(failed());
-      const marked = [];
-      for (const pid of pids) {
-        const command = readProcess(['-E', '-ww', '-o', 'command=', '-p', String(pid)], budget);
-        if (command.status === 'absent') continue;
-        if (command.status !== 'ok') return finish(failed());
-        const marker = markerState(command.output, id);
-        if (marker.partial) return finish(failed());
-        if (!marker.exact) continue;
-        const markers = command.output.split(/\s+/).filter(token => token.startsWith('PALANTIR_OWNED_INCARNATION='));
-        if (markers.length !== 1) return finish(failed());
-        const identity = start(pid, budget);
-        if (identity.status === 'absent') continue;
-        if (identity.status !== 'ok') return finish(failed());
-        const parent = readProcess(['-o', 'ppid=', '-p', String(pid)], budget);
-        if (parent.status === 'absent') continue;
-        if (parent.status !== 'ok') return finish(failed());
-        const parentLine = parent.output.endsWith('\n') ? parent.output.slice(0, -1) : parent.output;
-        const ppid = /^ *\d+ *$/.test(parentLine) ? Number(parentLine) : NaN;
-        if (!Number.isSafeInteger(ppid)) return finish(failed());
-        marked.push({ pid, startedAt: identity.startedAt, ppid, command: command.output });
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const result = scanOnce(id, budget);
+        if (result.status !== 'inconsistent') return finish(result);
       }
-      return finish({ status: 'ok', marked });
+      return finish(failed());
     } catch {
       return finish(failed());
     }

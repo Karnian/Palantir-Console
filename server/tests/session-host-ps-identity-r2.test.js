@@ -41,7 +41,7 @@ test('R2-01 unrelated multiline argv and marked multiline argv use per-PID attri
   assert.deepEqual(result.pids, [{ pid: 10, startedAt }]);
   assert.ok(state.calls.some(call => call.args.join(' ') === '-A -o pid='));
   assert.ok(state.calls.some(call => call.args.join(' ') === '-E -ww -o command= -p 20'));
-  assert.deepEqual(result.diagnostics, { elapsedMs: 0, queryCount: 6 });
+  assert.deepEqual(result.diagnostics, { elapsedMs: 0, queryCount: 8 });
 });
 test('R2-01 global no-token multiline output succeeds empty without per-PID queries', () => {
   const { state, probe } = fixture();

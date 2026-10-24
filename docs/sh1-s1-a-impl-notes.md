@@ -541,3 +541,73 @@ R2 픽스처 6개 및 기존 순수·픽스처 181개가 통과했다.
 실제 ps 회귀 테스트는 통과 대조부터 이 샌드박스에서 query_failed다.
 이 결과로 실제 macOS 결함이 해결됐다고 단정하지 않는다. 호스트에서 두 실제 ps 테스트를 포함해 재검증해야 한다.
 SDK 설치·실제 claude 실행·npm test·git 조작은 하지 않았다.
+
+## S1-b1 수정 라운드 3 — lstart 열 맞춤·신원 구간·조회 불일치
+
+호스트 실측으로 macOS lstart 출력의 끝에 열 맞춤 공백이 있음을 확인받았다.
+실제 값 `"Sat Oct 24 17:40:20 2026    \n"`을 기존 엄격 검사가 거부한 것은 구현 결함이다.
+normalizeStart는 마지막 LF 하나를 제거한 뒤 끝의 ASCII 공백(0x20)만 제거한다.
+탭·NBSP·CR·추가 줄바꿈은 제거하지 않으며 기존 형식·범위 검사로 거부한다.
+공백 정규화와 check의 문자열 3값 인터페이스는 유지한다.
+호스트는 process.execPath와 ps command가 모두 Node의 realpath임도 확인했다. 테스트의 고정 경로 주입을 유지한다.
+
+PID 재사용을 막기 위해 모든 개별 command 조회 전에 lstart를 먼저 읽는다.
+표지 후보에는 `lstart 전 → command → ppid → lstart 후` 순서를 요구한다.
+두 정규화 시작시각이 같을 때만 command·부모·시작시각을 같은 신원으로 확정한다.
+다르면 query_failed다. 표지 여부를 아직 모르는 PID도 command 전 시작시각 조회가 필요하다.
+후보 확인 도중 PID가 사라지면 그 PID는 버리고, 조회 오류는 기존대로 query_failed다.
+단, 모든 후보가 사라졌다고 곧바로 빈 목록으로 확정하지 않는다.
+
+전역 표지가 양성인데 개별 조회로 표지 신원을 하나도 확정하지 못하면 내부적으로 inconsistent다.
+이 경우에만 전역 조회부터 전체 스캔을 한 번 다시 한다.
+다시 불일치하면 query_failed다. 재조회 전역이 정상 음성이면 그 시점의 빈 목록을 인정한다.
+형식 오류·권한 오류·시작시각 불일치는 불일치 재시도로 감추지 않고 즉시 실패한다.
+재시도는 최초의 10000ms 기한과 누적 4096 PID 예산을 공유한다.
+diagnostics의 조회 횟수와 시간도 두 시도를 합쳐 반환한다.
+호스트가 측정한 이전 구현의 545 PID 약 3.3초는 새 이중 신원 검사 성능의 실측값이 아니다.
+추가 lstart 조회 비용을 포함한 실제 macOS 실행 시간은 호스트에서 재확인해야 한다.
+
+account의 일반 필드는 own property로 확인하지만 인증 출처는 예외다.
+tokenSource·apiKeySource는 `in`으로 검사하여 own·상속·undefined 값 모두 존재하면 거부한다.
+Object.prototype 또는 null prototype만 허용하는 규칙은 유지한다.
+Object.prototype에 두 필드를 각각 임시로 심는 테스트는 try/finally로 원래 descriptor를 복원하거나 삭제한다.
+
+### 남은 한계와 ps 계약 가정
+
+R1-01: ps 출력만으로 argv와 env를 구분할 수 없다.
+코어 randomUUID()로 만든 추측 불가능한 UUID v4와 본체 command의 고정 실행 파일 경로 두 조건을 함께 요구한다.
+이것은 같은 UID 프로세스에 대한 격리가 아니다. 같은 UID는 격리 경계가 아니다(brief §3.2).
+하위 도구는 어떤 실행 파일이든 가능하므로 표지와 신원 구간 검사로 판정한다.
+lstart는 초 단위이므로 같은 초 안의 PID 재사용이나 신호와 조회 사이의 커널 수준 원자성을 보장하지 않는다.
+
+R1-02: `-ww`는 폭 제한 없는 출력을 요청한다. 표지 앞에서의 잘림은 ps 계약상 일어나지 않는다고 가정한다.
+따라서 검출 가능한 줄 끝 표지 진접두만 검사한다. 앞 잘림까지 검출한다는 보장은 하지 않는다.
+버퍼 상한·명령 기한 초과·명령 실패는 성공한 잘린 출력으로 취급하지 않고 query_failed다.
+
+### 실패 선확인
+
+제품 수정 전 `node --test server/tests/session-host-gate-review-r3.test.js`:
+tests 9, pass 0, fail 9. 아래 9개 모두 수정 전 실패를 확인했다.
+
+- R3-01 actual macOS lstart literal accepts ASCII padding and rejects other trailing whitespace
+- R3-02 candidate command and parent are bracketed by equal lstart reads
+- R3-02 reused PID between command and parent cannot establish main or descendant identity
+- R3-03 persistent global-positive individual-negative mismatch retries once and rejects
+- R3-03 retry resolves transient mismatch by rerunning global and individual queries
+- R3-03 retry may confirm globally absent marker but never returns empty on persistent disappearance
+- R3-03 retries share the original deadline and PID budget
+- R3-04 inherited Object.prototype.tokenSource rejects initialization and recheck with cleanup
+- R3-04 inherited Object.prototype.apiKeySource rejects initialization and recheck with cleanup
+
+각 거부 사례는 같은 조건의 통과 대조를 포함한다.
+수정 후 위 9개가 모두 통과했다. 기존 R2 진단 횟수 기대값은 추가 lstart 조회를 반영해 갱신했다.
+
+### 전체 검증
+
+`PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-*.test.js`:
+tests 212, pass 196, fail 16, cancelled 0, skipped 0.
+R3 신규 9개를 포함한 순수·픽스처 테스트 196개가 통과했다.
+실패는 기존 X 14개(ps EPERM 13개·host_start_timeout 1개)와 실제 ps 테스트 2개다.
+실측 리터럴에 대한 수정은 검증했지만 이 샌드박스에서 실제 macOS ps 통합의 통과를 확인한 것은 아니다.
+호스트에서 전체 212개와 실제 조회 시간을 재검증해야 한다.
+SDK 설치·실제 claude 실행·npm test·git 조작은 하지 않았다.

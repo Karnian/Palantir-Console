@@ -13,7 +13,7 @@ function validAccount(account, pin = defaultPin) {
   return Object.keys(account).every(key => known.includes(key)) &&
     own(account, 'apiProvider') && account.apiProvider === 'firstParty' &&
     own(account, 'subscriptionType') && pin.allowedSubscriptionTypes.includes(account.subscriptionType) &&
-    !own(account, 'tokenSource') && !own(account, 'apiKeySource') &&
+    !('tokenSource' in account) && !('apiKeySource' in account) &&
     ['email', 'organization'].every(key => own(account, key) && typeof account[key] === 'string' && account[key].trim().length > 0);
 }
 
