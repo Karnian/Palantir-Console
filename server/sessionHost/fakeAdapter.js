@@ -3,15 +3,17 @@ const { EventEmitter } = require('node:events');
 
 function createFakeAdapter(options = {}) {
   const events = new EventEmitter(), children = new Map(), pending = [], toolSignals = new Map();
-  const log = { starts: [], received: [], executions: [], decisions: [], interrupts: [], closes: [], signals: [] };
+  const log = { starts: [], startRequests: [], received: [], executions: [], decisions: [], interrupts: [], closes: [], signals: [] };
   let pid = 1000;
   const emit = (incarnation_id, type, data = {}) => events.emit('event', { incarnation_id, type, ...data });
   const api = {
     events, log, children, pending, toolSignals, options,
     settingsCheck() { return typeof options.settings === 'function' ? options.settings() : options.settings !== false; },
     authCheck() { return typeof options.auth === 'function' ? options.auth() : options.auth !== false; },
-    start({ incarnation_id, session_id }) {
+    start({ incarnation_id, session_id, resume, claude_session_id }) {
+      if (resume === true ? typeof claude_session_id !== 'string' || !claude_session_id : resume !== undefined || claude_session_id !== undefined) throw new Error('invalid_resume_contract');
       log.starts.push(incarnation_id);
+      log.startRequests.push({ incarnation_id, session_id, ...(resume ? { resume, claude_session_id } : {}) });
       if (options.spawnError) throw new Error(options.spawnError);
       const identity = { pid: ++pid, startedAt: `fake-${pid}` };
       children.set(incarnation_id, { ...identity, exited: false, session_id });
@@ -29,7 +31,11 @@ function createFakeAdapter(options = {}) {
       const batch = pending.splice(0);
       if (!batch.length) return;
       for (const m of batch) {
-        emit(m.id, 'system_init', { capabilities: options.capabilities || ['msg_lifecycle_v1', 'interrupt_receipt_v1'], apiKeySource: 'none' });
+        const child = children.get(m.id);
+        if (!child.initialized) {
+          child.initialized = true;
+          emit(m.id, 'system_init', { capabilities: options.capabilities || ['msg_lifecycle_v1', 'interrupt_receipt_v1'], apiKeySource: 'none' });
+        }
         if (!options.omitLifecycle) {
           emit(m.id, 'lifecycle', { command_uuid: m.uuid, state: 'queued' });
           emit(m.id, 'lifecycle', { command_uuid: m.uuid, state: 'started' });
@@ -48,9 +54,9 @@ function createFakeAdapter(options = {}) {
         is_error: decision.behavior === 'deny' || !!options.toolError,
         content: decision.behavior === 'deny' ? decision.message : decision.behavior === 'answer' ? decision.answer : 'ok' });
     },
-    interrupt(id) {
+    interrupt(id, interruptId) {
       log.interrupts.push(id);
-      if (!options.noReceipt) emit(id, 'interrupt_receipt', { still_queued: options.stillQueued || [] });
+      if (!options.noReceipt) emit(id, 'interrupt_receipt', { interrupt_id: interruptId, still_queued: options.stillQueued || [] });
       if (options.interruptUuid) {
         emit(id, 'result', { user_message_uuids: [options.interruptUuid], is_error: true, subtype: 'error_during_execution' });
         emit(id, 'lifecycle', { command_uuid: options.interruptUuid, state: 'cancelled' });

@@ -1,7 +1,7 @@
 'use strict';
 const Database = require('better-sqlite3');
 
-function openStore(dbPath, { faults, now = Date.now } = {}) {
+function openStore(dbPath, { faults, now = Date.now, readHooks } = {}) {
   if (!dbPath) throw new Error('host_db_path_required');
   const db = new Database(dbPath);
   let failed = false;
@@ -44,12 +44,19 @@ function openStore(dbPath, { faults, now = Date.now } = {}) {
         session_deleted INTEGER NOT NULL, expires_at INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS event_session ON events(session_id,seq);
       CREATE INDEX IF NOT EXISTS delivery_incarnation ON deliveries(incarnation_id,state);`);
-    if (db.prepare('SELECT MAX(version) v FROM host_schema_versions').get().v !== 1) throw new Error('host_schema_unsupported');
+    const version = db.prepare('SELECT MAX(version) v FROM host_schema_versions').get().v;
+    if (![1, 2].includes(version)) throw new Error('host_schema_unsupported');
+    if (version === 1) {
+      db.exec(`CREATE TABLE request_aliases(request_key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL,
+        target_delivery_id TEXT NOT NULL, session_id TEXT NOT NULL, created_at INTEGER NOT NULL);
+        INSERT INTO host_schema_versions VALUES(2);`);
+    }
   })();
   const store = {
     db,
     get failed() { return failed; },
     read(fn) { return db.transaction(fn).deferred(); },
+    readCheckpoint() { readHooks?.afterState?.(); },
     write(fn) {
       if (failed) throw new Error('storage_unavailable');
       try { return db.transaction(() => { faults?.hit?.('db_write'); return fn(); }).immediate(); }

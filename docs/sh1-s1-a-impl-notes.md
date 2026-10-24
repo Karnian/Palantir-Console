@@ -16,7 +16,7 @@
 
 ## 저장과 복구
 
-호스트 전용 스키마 버전 1과 WAL을 사용한다. 상태 변경 helper는 허용 이전 상태를 명시한 UPDATE와 replay 이벤트를 같은 트랜잭션에 쓴다. 원문 SDK 이벤트와 상태 전이는 events의 AUTOINCREMENT seq를 공유한다. snapshot은 read transaction 하나로 상태와 seq를 읽으며 replay의 삭제 구멍은 `snapshot_required:true`다. 마이그레이션 실패는 생성자를 실패시키고 쓰기 실패는 해당 인스턴스를 fail-closed로 고정한다. `faults.hit('db_write')`에서 일반 오류를 던지면 저장 실패를 재현한다.
+호스트 전용 스키마 버전 2와 WAL을 사용한다. 버전 1에서 2로의 마이그레이션은 본문 없는 `request_aliases`를 추가한다. 상태 변경 helper는 허용 이전 상태를 명시한 UPDATE와 replay 이벤트를 같은 트랜잭션에 쓴다. 원문 SDK 이벤트와 상태 전이는 events의 AUTOINCREMENT seq를 공유한다. snapshot은 read transaction 하나로 상태와 seq를 읽으며 replay의 삭제 구멍은 `snapshot_required:true`다. 마이그레이션 실패는 생성자를 실패시키고 쓰기 실패는 해당 인스턴스를 fail-closed로 고정한다. `faults.hit('db_write')`에서 일반 오류를 던지면 저장 실패를 재현한다.
 
 세션 큐는 동기 명령만 소유하며 provider의 비동기 완료를 기다리지 않는다. sending 커밋·facts·효과 호출 사이에는 await가 없다. SDK exit/abort의 무효화는 큐 밖에서 즉시 기록한다. 재기동 시 새 코어를 만들고 `recover()`를 호출한다. spawn 예약을 재사용해 spawn하지 않으며 3값 신원 판정만으로 orphaned/exited/never_started/liveness_unknown을 정한다. pending 카드는 expired, decided는 유지한다. 미관측 sending/written은 unknown이며 재전송하지 않는다.
 
@@ -68,5 +68,39 @@
 각 provider 호출은 가짜의 공통 transport 함수에서 로그를 남긴다. 호출 억제 검사는 같은 테스트의 성공 경로 또는 시작·수신·결정 로그의 양성 대조를 사용한다. 테스트별 DB는 os.tmpdir 아래 별도 디렉터리에 만들고 종료 시 제거한다.
 
 ## 후속 범위와 제한
+
+## 수정 라운드 1 — 적대리뷰 A/B
+
+resume의 start 인자에는 `{resume:true,claude_session_id}`를 포함하며 일반 start에는 두 필드를 생략한다. 가짜의 `log.startRequests`는 이 두 필드를 기록·검증한다. interrupt 효과는 `interrupt(incarnationId,interruptId)`이고 영수증도 `interrupt_id`를 싣는다. 호출과 무관한 영수증은 상태를 바꾸지 않는다. `INTERRUPT_RECEIPT_TIMEOUT_MS=10000`이며 `tick()`에서 주입 clock으로 기한을 검사한다. 효과 반환 뒤에는 written, 기한 뒤에만 unknown이다. 기한 이후 영수증은 전달 관측 증거가 될 수 있지만 중단 여부 불명 장벽은 대상 turn_gen의 result만 해제한다.
+
+진행 중 interrupt에 대한 새 키는 request_aliases에 키·fingerprint·대상 id·세션 id·접수 시각만 저장한다. 같은 키는 완료·재기동 뒤에도 원래 요청을 돌려준다. 세션 삭제 때 별칭도 tombstone으로 옮긴다. deleting/deleted 대상 새 요청은 본문·원문 이벤트 없이 tombstone에 거부 상태만 남긴다. capability 누락의 자동 close는 호스트 키와 고정 reason `capability_missing`을 가진 control_requests로 기록하고 수동 close와 같은 stage·복구 경로를 쓴다. lifecycle 최초 종결은 SQL의 `outcome IS NULL` 조건으로 고정한다. 오류 result의 subtype은 prompt reason에 남긴다.
+
+호스트의 이번 명확화(#10)에 따라, 이미 해당 tool_result가 도착한 허용 결정의 unknown(`tool_finished_error`/`tool_finished`)은 도구가 끝났으므로 attribution_uncertain을 걸지 않는다. 이는 §4.3의 “원본이 provider 안에 남아 늦게 실행될 수 있음”과 다른 경우다. 결과 없는 결정은 복구 시 unknown과 decided를 유지하며 같은 incarnation에서 재결정·재전송할 수 없다. 효과 뒤 예외로 prompt 원본이 남은 경우는 장벽을 걸되, 정확한 원본 UUID의 lifecycle 증거로만 해소한다. 복수 UUID/비어 있지 않은 still_queued의 장벽은 그 incarnation에서 해제하지 않는다. 내부 attribution_uncertain 값 1은 영구 장벽, 2는 원본 증거 대기이며 둘 다 boolean 조회에서는 참이다.
+
+system_init은 가짜의 첫 prompt에서 incarnation당 한 번만 발생한다. 코어도 첫 capability 판정을 유지한다. 테스트 전용 `readHooks.afterState`는 store의 read transaction 안에서 상태 조회와 seq 조회 사이에 호출한다. 별도 WAL 연결의 실제 커밋을 이 지점에 넣어 snapshot/replay 누락을 검사한다.
+
+수정 전 `session-host-review-r1.test.js`는 20개 중 16개 실패·4개 통과였다. #10·#12·#13과 #7의 completed 우선 방향은 이미 올바른 동작이므로 수정 전에도 통과했다. 이 사실을 RED로 포장하지 않는다. 각 번호별 테스트명은 다음과 같다(접두어 뒤 전체 설명은 테스트 파일에 있다).
+
+| 결함 | 테스트명 접두어 | 수정 전 |
+|---|---|---|
+| 1 | R1-01 resume carries saved Claude session identity | 실패 |
+| 2 | R1-02 receipts correlate request id | 실패 |
+| 3 | R1-03 interrupt stays written until injected-clock receipt deadline | 실패 |
+| 4 | R1-04 duplicate interrupt key alias is durable | 실패 |
+| 5 | R1-05 deleting/deleted rejects new requests without retaining body | 두 경우 실패 |
+| 6 | R1-06 capability auto-close has durable close_sent intent | 실패 |
+| 7 | R1-07 first terminal cancelled/completed survives late opposite lifecycle | cancelled 우선 실패, completed 우선 통과 |
+| 8 | R1-08 pending start recovery | match/query_failed/mismatch_confirmed 모두 실패; 수정 후 resume 네 분기도 추가 검증 |
+| 9 | R1-09-17 error subtype is retained | 실패 |
+| 10 | R1-10 finished tool error unknown has no attribution barrier | 통과, 현행 유지 |
+| 11 | R1-11 missing capability plus missing lifecycle | 실패 |
+| 12 | R1-12 abort at after_sending_commit | 통과, 기존 최종 SDK 검사 실효화 |
+| 13 | R1-13 observed committed before written cannot regress | 통과, 기존 sending 조건 실효화 |
+| 14 | R1-14 delayed unknown original executes once | 실패 |
+| 15 | R1-15 system_init emitted only for first prompt | 실패 |
+| 16 | R1-16 WAL writer between snapshot state and seq | 실패 |
+| 17 | R1-09-17 error subtype is retained | 실패 |
+
+각 테스트는 해당 결함의 재발을 막는다. 특히 #12는 abort 검사 제거 시 decide가 발생하고, #13은 늦은 written의 이전 상태 조건 제거 시 observed가 written으로 역행하며, #16은 read transaction 제거 시 상태에는 없는 이벤트가 seq_high 뒤 replay에서도 누락된다.
 
 S1-a2: 호스트 잠금·동시 기동·FD 상속·소켓·handshake·유휴 종료·서버 생존 분리. S1-b: 실제 SDK/가짜 CLI 프로토콜, account 여섯 모양/버전/pid/권한모드/원격 제어 검사, resolveSettings 구조·10초 기한, 초기화 60초 및 종료 유예 5초, env allowlist와 capability 값 유출 검사, 실제 ps·신호 transport. S1-c: cookie·origin·bearer 거부와 소켓 장애 화면. S1-e: 넘기기 shell argv·환경·실제 CLI와 hook 실측. 이 검증은 이번 라이브러리 테스트로 대체하지 않는다.

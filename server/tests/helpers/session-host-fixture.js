@@ -24,7 +24,7 @@ function fixture(t, options = {}) {
     prompt(body = 'hello') { return core.submit(f.req('prompt', { body })); },
     state() { return core.snapshot(f.sid).state; },
     d(id) { return f.state().deliveries.find(d => d.id === id); },
-    reboot() { core?.close(); core = createHostCore({ dbPath, adapter, identityProbe: probe, faults, clock: () => time, hostBootId: `boot-${++boot}` }); return core; }
+    reboot() { core?.close(); core = createHostCore({ dbPath, adapter, identityProbe: probe, faults, readHooks: options.readHooks, clock: () => time, hostBootId: `boot-${++boot}` }); return core; }
   };
   f.reboot();
   t.after(() => { core.close(); fs.rmSync(dir, { recursive: true, force: true }); });

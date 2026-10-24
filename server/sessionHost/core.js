@@ -6,6 +6,7 @@ const { SimulatedCrash } = require('./faults');
 const CONTROLS = new Set(['start', 'resume', 'stop', 'close', 'handoff', 'delete']);
 const KINDS = new Set([...CONTROLS, 'prompt', 'tool_decision', 'question_answer', 'interrupt']);
 const DAY = 86400000;
+const INTERRUPT_RECEIPT_TIMEOUT_MS = 10000;
 function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical);
   if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map(k => [k, canonical(value[k])]));
@@ -13,9 +14,9 @@ function canonical(value) {
 }
 const hash = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
 
-function createHostCore({ dbPath, adapter, identityProbe, clock = Date.now, hostBootId = randomUUID(), faults } = {}) {
+function createHostCore({ dbPath, adapter, identityProbe, clock = Date.now, hostBootId = randomUUID(), faults, readHooks } = {}) {
   const now = typeof clock === 'function' ? clock : () => clock.now();
-  const store = openStore(dbPath, { now, faults }), db = store.db;
+  const store = openStore(dbPath, { now, faults, readHooks }), db = store.db;
   const queues = new Map(), signals = new Map();
   let crashed = false;
   const one = (sql, ...args) => db.prepare(sql).get(...args);
@@ -31,17 +32,17 @@ function createHostCore({ dbPath, adapter, identityProbe, clock = Date.now, host
   const control = key => one('SELECT * FROM control_requests WHERE request_key=?', key);
 
   // A transition and its replay record always share the caller's write transaction.
-  function change(table, key, from, values, s, i) {
+  function change(table, key, from, values, s, i, guard = '') {
     const column = table === 'control_requests' ? 'request_key' : 'id';
     const keys = Object.keys(values);
-    const result = run(`UPDATE ${table} SET ${keys.map(k => `${k}=?`).join(',')} WHERE ${column}=? AND state IN (${from.map(() => '?').join(',')})`, ...keys.map(k => values[k]), key, ...from);
+    const result = run(`UPDATE ${table} SET ${keys.map(k => `${k}=?`).join(',')} WHERE ${column}=? AND state IN (${from.map(() => '?').join(',')}) ${guard}`, ...keys.map(k => values[k]), key, ...from);
     if (result.changes) {
       const seq = event(s, i, 'transition', { table, id: key, ...values });
       if (table === 'deliveries' || table === 'control_requests') run(`UPDATE ${table} SET seq=?,updated_at=? WHERE ${column}=?`, seq, now(), key);
     }
     return result.changes;
   }
-  const dc = (d, from, values) => change('deliveries', d.id, from, values, d.session_id, d.incarnation_id);
+  const dc = (d, from, values) => change('deliveries', d.id, from, values, d.session_id, d.incarnation_id, Object.hasOwn(values, 'outcome') ? 'AND outcome IS NULL' : '');
   const ic = (i, from, values) => change('incarnations', i.id, from, values, i.session_id, i.id);
   const cc = (c, values) => change('control_requests', c.request_key, ['accepted'], values, c.session_id, c.incarnation_id);
   function sc(s, values) { return change('owned_sessions', s.id, [s.state], values, s.id, null); }
@@ -67,7 +68,10 @@ function createHostCore({ dbPath, adapter, identityProbe, clock = Date.now, host
   function identityCheck(i) {
     try { return identityProbe.check(i.pid, i.pid_started_at); } catch { return 'query_failed'; }
   }
-  function uncertain(i) { ic(i, ['alive', 'orphaned'], { attribution_uncertain: 1 }); }
+  function uncertain(i, permanent = true) {
+    // 1 is an irreversible mixed-turn barrier; 2 can be resolved by that UUID's evidence.
+    ic(i, ['alive', 'orphaned'], { attribution_uncertain: permanent || incarnation(i.id).attribution_uncertain === 1 ? 1 : 2 });
+  }
   function taint(i) {
     for (const d of all("SELECT * FROM deliveries WHERE incarnation_id=? AND kind IN ('tool_decision','question_answer') AND state IN ('sending','written')", i.id)) {
       dc(d, ['sending', 'written'], { tainted: 1 });
@@ -79,7 +83,7 @@ function createHostCore({ dbPath, adapter, identityProbe, clock = Date.now, host
       if (d.state === 'queued') dc(d, ['queued'], { state: 'expired', reason: 'incarnation_ended' });
       if (d.kind === 'prompt' && d.outcome === null && ['sending', 'written', 'provider_observed'].includes(d.state)) {
         const r = d.result_json && JSON.parse(d.result_json);
-        dc(d, ['sending', 'written', 'provider_observed', 'unknown'], { outcome: r ? r.subtype === 'error_during_execution' ? 'interrupted' : r.is_error ? 'errored' : 'completed' : 'outcome_unknown' });
+        dc(d, ['sending', 'written', 'provider_observed', 'unknown'], { outcome: r ? r.subtype === 'error_during_execution' ? 'interrupted' : r.is_error ? 'errored' : 'completed' : 'outcome_unknown', ...(r?.is_error ? { reason: r.subtype || null } : {}) });
       }
     }
     for (const t of all("SELECT * FROM tool_requests WHERE incarnation_id=? AND state='pending'", i.id)) tc(t, ['pending'], { state: 'expired' }, i);
@@ -129,19 +133,24 @@ function createHostCore({ dbPath, adapter, identityProbe, clock = Date.now, host
     }
     try {
       if (d.kind === 'prompt') adapter.send(i.id, d.message_uuid, JSON.parse(d.body));
-      else if (d.kind === 'interrupt') adapter.interrupt(i.id);
+      else if (d.kind === 'interrupt') adapter.interrupt(i.id, d.id);
       else adapter.decide(i.id, d.target_tool_use_id, decision);
     } catch (e) {
       if (e instanceof SimulatedCrash) throw e;
-      write(() => { dc(d, ['sending', 'written'], { state: 'unknown', reason: 'effect_failed' }); uncertain(i); });
+      write(() => { dc(d, ['sending', 'written'], { state: 'unknown', reason: 'effect_failed' }); uncertain(i, false); });
       return;
     }
     hit('after_effect_before_written');
     write(() => {
       dc(d, ['sending'], { state: 'written' });
-      if (d.kind === 'interrupt' && delivery(id).state === 'written') {
+    });
+  }
+  function tick() {
+    if (crashed) throw new SimulatedCrash('core_crashed');
+    write(() => {
+      for (const d of all("SELECT * FROM deliveries WHERE kind='interrupt' AND state='written' AND updated_at<=?", now() - INTERRUPT_RECEIPT_TIMEOUT_MS)) {
         dc(d, ['written'], { state: 'unknown', reason: 'interrupt_unconfirmed' });
-        ic(i, ['alive'], { interrupt_unknown: 1 });
+        ic(incarnation(d.incarnation_id), ['alive'], { interrupt_unknown: 1 });
       }
     });
   }
@@ -160,6 +169,8 @@ function createHostCore({ dbPath, adapter, identityProbe, clock = Date.now, host
   }
   function erase(sid) {
     write(() => {
+      for (const a of all('SELECT a.*,d.state FROM request_aliases a JOIN deliveries d ON d.id=a.target_delivery_id WHERE a.session_id=?', sid)) run('INSERT OR REPLACE INTO request_tombstones VALUES(?,?,?,?,?)', a.request_key, a.fingerprint, a.state, 1, now() + 30 * DAY);
+      run('DELETE FROM request_aliases WHERE session_id=?', sid);
       for (const d of all('SELECT * FROM deliveries WHERE session_id=?', sid)) run('INSERT OR REPLACE INTO request_tombstones VALUES(?,?,?,?,?)', d.request_key, d.fingerprint, d.state, 1, now() + 30 * DAY);
       run('DELETE FROM events WHERE session_id=?', sid);
       run('DELETE FROM tool_requests WHERE incarnation_id IN (SELECT id FROM incarnations WHERE session_id=?)', sid);
@@ -192,7 +203,8 @@ function createHostCore({ dbPath, adapter, identityProbe, clock = Date.now, host
     if (c.kind === 'start' || c.kind === 'resume') {
       write(() => cc(c, { stage: 'spawn_sent' })); hit('after_spawn_sent_before_spawn');
       let p;
-      try { p = adapter.start({ incarnation_id: i.id, session_id: c.session_id, cwd: session(c.session_id).cwd }); }
+      try { p = adapter.start({ incarnation_id: i.id, session_id: c.session_id, cwd: session(c.session_id).cwd,
+        ...(c.kind === 'resume' ? { resume: true, claude_session_id: session(c.session_id).claude_session_id } : {}) }); }
       catch (e) {
         if (e instanceof SimulatedCrash) throw e;
         write(() => { ic(i, ['spawning'], { state: 'never_started' }); cc(c, { state: 'failed', reason: 'spawn_failed' }); }); return;
@@ -225,17 +237,28 @@ function createHostCore({ dbPath, adapter, identityProbe, clock = Date.now, host
           taint(i);
           for (const t of all("SELECT * FROM tool_requests WHERE incarnation_id=? AND state='pending'", i.id)) tc(t, ['pending'], { state: 'cancelled' }, i);
         });
-        adapter.interrupt(i.id);
+        adapter.interrupt(i.id, c.request_key);
       }
       if (incarnation(i.id).state !== 'exited') adapter.close(i.id);
     }
     finishControl(key);
+  }
+  function autoClose(i) {
+    if (session(i.session_id).state !== 'active' || one("SELECT request_key FROM control_requests WHERE incarnation_id=? AND reason='capability_missing'", i.id) || one("SELECT request_key FROM control_requests WHERE session_id=? AND state='accepted'", i.session_id)) return;
+    const key = `rk_${now()}_${hash(['capability_missing', i.id])}`;
+    write(() => {
+      run('INSERT INTO control_requests(request_key,fingerprint,kind,session_id,incarnation_id,stage,state,reason,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)', key, hash(['close', i.id]), 'close', i.session_id, i.id, 'requested', 'accepted', 'capability_missing', now(), now());
+      event(i.session_id, i.id, 'control_accepted', { request_key: key, reason: 'capability_missing' });
+    });
+    executeControl(key);
   }
   function fingerprint(req) { return hash([req.kind, req.session_id || null, req.incarnation_id || null, req.target_tool_use_id || null, hash(req.body ?? null), hash(req.cwd ?? null)]); }
   function submit(req) {
     if (crashed) throw new SimulatedCrash('core_crashed');
     if (store.failed) throw new Error('storage_unavailable');
     const fp = fingerprint(req);
+    const alias = one('SELECT * FROM request_aliases WHERE request_key=?', req.request_key);
+    if (alias) return alias.fingerprint === fp ? delivery(alias.target_delivery_id) : { state: 'rejected', reason: 'fingerprint_conflict', status: 409 };
     const existing = one('SELECT * FROM deliveries WHERE request_key=?', req.request_key) || control(req.request_key) || one('SELECT * FROM request_tombstones WHERE request_key=?', req.request_key);
     if (existing) {
       if (existing.fingerprint !== fp) return { state: 'rejected', reason: 'fingerprint_conflict', status: 409 };
@@ -250,6 +273,10 @@ function createHostCore({ dbPath, adapter, identityProbe, clock = Date.now, host
     const sid = req.kind === 'start' ? randomUUID() : req.session_id;
     enqueue(sid, () => {
       let s = sid && session(sid), i = s && latest(sid), reason;
+      if (s && ['deleting', 'deleted'].includes(s.state)) {
+        write(() => run('INSERT INTO request_tombstones VALUES(?,?,?,?,?)', req.request_key, fp, 'rejected', 1, now() + 30 * DAY));
+        result = one('SELECT * FROM request_tombstones WHERE request_key=?', req.request_key); return;
+      }
       if (req.kind !== 'start' && (!s || ['deleting', 'deleted'].includes(s.state))) reason = 'session_unavailable';
       if (isControl) {
         if (!reason && one("SELECT request_key FROM control_requests WHERE session_id=? AND state='accepted'", sid)) reason = 'busy';
@@ -284,7 +311,13 @@ function createHostCore({ dbPath, adapter, identityProbe, clock = Date.now, host
         if (!reason && (s.state !== 'active' || !i || req.incarnation_id !== i.id)) reason = 'incarnation_mismatch';
         if (!reason && req.kind === 'interrupt') {
           const pending = one("SELECT * FROM deliveries WHERE incarnation_id=? AND kind='interrupt' AND state IN ('queued','sending','written','provider_observed','unknown') ORDER BY rowid DESC LIMIT 1", i.id);
-          if (pending) { result = pending; return; }
+          if (pending) {
+            write(() => {
+              run('INSERT INTO request_aliases VALUES(?,?,?,?,?)', req.request_key, fp, pending.id, sid, now());
+              event(sid, i.id, 'request_alias', { request_key: req.request_key, target_delivery_id: pending.id });
+            });
+            result = pending; return;
+          }
         }
         const id = randomUUID();
         write(() => {
@@ -320,18 +353,19 @@ function createHostCore({ dbPath, adapter, identityProbe, clock = Date.now, host
           }
         } else if (e.type === 'lifecycle') {
           const d = one("SELECT * FROM deliveries WHERE incarnation_id=? AND kind='prompt' AND message_uuid=?", i.id, e.command_uuid);
-          if (!d || incarnation(i.id).attribution_uncertain) return;
+          if (!d || d.outcome !== null || incarnation(i.id).attribution_uncertain === 1) return;
+          if (incarnation(i.id).attribution_uncertain === 2 && d.state === 'unknown') ic(i, ['alive'], { attribution_uncertain: 0 });
           if (['queued', 'started'].includes(e.state)) dc(d, ['sending', 'written', 'unknown'], { state: 'provider_observed' });
           if (e.state === 'completed') {
             const r = d.result_json && JSON.parse(d.result_json);
-            dc(d, ['sending', 'written', 'provider_observed', 'unknown'], { state: 'completed', outcome: r ? r.is_error ? 'errored' : 'completed' : 'outcome_unknown' });
+            dc(d, ['sending', 'written', 'provider_observed', 'unknown'], { state: 'completed', outcome: r ? r.is_error ? 'errored' : 'completed' : 'outcome_unknown', ...(r?.is_error ? { reason: r.subtype || null } : {}) });
           }
           if (e.state === 'cancelled') dc(d, ['sending', 'written', 'provider_observed', 'unknown'], { state: 'provider_observed', outcome: 'interrupted' });
         } else if (e.type === 'result') {
           const uuids = e.user_message_uuids || [];
           if (uuids.length !== 1) { if (uuids.length > 1) uncertain(i); return; }
           const d = one("SELECT * FROM deliveries WHERE incarnation_id=? AND kind='prompt' AND message_uuid=?", i.id, uuids[0]);
-          if (!d || incarnation(i.id).attribution_uncertain) return;
+          if (!d || incarnation(i.id).attribution_uncertain === 1) return;
           dc(d, ['sending', 'written', 'provider_observed', 'unknown', 'completed'], { result_json: JSON.stringify(e) });
           for (const int of all("SELECT * FROM deliveries WHERE incarnation_id=? AND kind='interrupt' AND turn_gen=? AND state IN ('sending','written','provider_observed','unknown')", i.id, d.turn_gen)) {
             dc(int, ['sending', 'written', 'provider_observed', 'unknown'], { state: 'completed' }); ic(i, ['alive'], { interrupt_unknown: 0 });
@@ -344,10 +378,9 @@ function createHostCore({ dbPath, adapter, identityProbe, clock = Date.now, host
             decision.behavior === 'answer' ? !e.is_error && JSON.stringify(e.content) === JSON.stringify(decision.answer) : !e.is_error && !d.tainted;
           dc(d, ['sending', 'written', 'unknown'], { state: observed ? 'provider_observed' : 'unknown', reason: observed ? null : e.is_error ? 'tool_finished_error' : 'tool_finished' });
         } else if (e.type === 'interrupt_receipt') {
-          const d = one("SELECT * FROM deliveries WHERE incarnation_id=? AND kind='interrupt' ORDER BY rowid DESC LIMIT 1", i.id);
-          if (!d) return;
+          const d = one("SELECT * FROM deliveries WHERE incarnation_id=? AND kind='interrupt' AND id=?", i.id, e.interrupt_id || null);
+          if (!d || !['sending', 'written', 'unknown', 'provider_observed'].includes(d.state)) return;
           dc(d, ['sending', 'written', 'unknown'], { state: 'provider_observed' });
-          ic(i, ['alive'], { interrupt_unknown: 0 });
           if (e.still_queued?.length) {
             uncertain(i);
             for (const uuid of e.still_queued) {
@@ -356,15 +389,15 @@ function createHostCore({ dbPath, adapter, identityProbe, clock = Date.now, host
             }
           }
         } else if (e.type === 'system_init') {
+          if (incarnation(i.id).capabilities !== null) return;
           ic(i, ['alive'], { capabilities: JSON.stringify(e.capabilities || []), close_after_turn:
             ['msg_lifecycle_v1', 'interrupt_receipt_v1'].every(c => e.capabilities?.includes(c)) && (!e.apiKeySource || e.apiKeySource === 'none') ? 0 : 1 });
         } else if (e.type === 'child_exit') endDeliveries(incarnation(i.id));
       });
       if (e.type === 'child_exit') for (const c of all("SELECT * FROM control_requests WHERE incarnation_id=? AND state='accepted' AND kind IN ('stop','close','handoff')", i.id)) finishControl(c.request_key);
       const current = incarnation(i.id);
-      if (current?.close_after_turn && idle(current)) {
-        adapter.close(i.id);
-        write(() => { if (incarnation(i.id).state === 'exited') sc(session(i.session_id), { state: 'closed' }); });
+      if (current?.close_after_turn && (idle(current) || current.state === 'exited')) {
+        autoClose(current);
       } else drain(i.session_id);
     });
   }
@@ -407,7 +440,7 @@ function createHostCore({ dbPath, adapter, identityProbe, clock = Date.now, host
     for (const c of all("SELECT * FROM control_requests WHERE state='accepted'")) {
       if (c.kind === 'delete') continue;
       const i = c.incarnation_id && incarnation(c.incarnation_id);
-      if (['start', 'resume'].includes(c.kind)) write(() => cc(c, { state: 'failed', reason: i?.state === 'never_started' ? 'not_started' : 'control_lost' }));
+      if (['start', 'resume'].includes(c.kind)) write(() => cc(c, i?.state === 'never_started' ? { state: 'failed', reason: 'not_started' } : i?.state === 'exited' ? { state: 'failed', reason: 'exited_before_confirm' } : { state: 'blocked', reason: 'control_lost' }));
       else if (!i || ['exited', 'never_started'].includes(i.state)) finishControl(c.request_key);
       else write(() => cc(c, { state: 'blocked', reason: 'control_lost' }));
     }
@@ -421,7 +454,9 @@ function createHostCore({ dbPath, adapter, identityProbe, clock = Date.now, host
     return store.read(() => {
       const s = session(sid);
       if (s && ['deleting', 'deleted'].includes(s.state)) return { state: { session: s }, seq_high: one('SELECT COALESCE(MAX(seq),0) n FROM events').n };
-      return { state: { session: s || null, incarnations: all('SELECT * FROM incarnations WHERE session_id=?', sid), deliveries: all('SELECT * FROM deliveries WHERE session_id=?', sid), tool_requests: all('SELECT * FROM tool_requests WHERE incarnation_id IN (SELECT id FROM incarnations WHERE session_id=?)', sid), controls: all('SELECT * FROM control_requests WHERE session_id=?', sid) }, seq_high: one('SELECT COALESCE(MAX(seq),0) n FROM events').n };
+      const state = { session: s || null, incarnations: all('SELECT * FROM incarnations WHERE session_id=?', sid), deliveries: all('SELECT * FROM deliveries WHERE session_id=?', sid), tool_requests: all('SELECT * FROM tool_requests WHERE incarnation_id IN (SELECT id FROM incarnations WHERE session_id=?)', sid), controls: all('SELECT * FROM control_requests WHERE session_id=?', sid) };
+      store.readCheckpoint();
+      return { state, seq_high: one('SELECT COALESCE(MAX(seq),0) n FROM events').n };
     });
   }
   function eventsSince(seq) {
@@ -433,7 +468,7 @@ function createHostCore({ dbPath, adapter, identityProbe, clock = Date.now, host
     });
   }
   adapter.events.on('event', onEvent);
-  return { submit, recover, snapshot, eventsSince, onEvent, idle: sid => idle(latest(sid)),
+  return { submit, recover, snapshot, eventsSince, onEvent, tick, idle: sid => idle(latest(sid)),
     close() { adapter.events.off('event', onEvent); store.close(); } };
 }
-module.exports = { createHostCore };
+module.exports = { createHostCore, INTERRUPT_RECEIPT_TIMEOUT_MS };

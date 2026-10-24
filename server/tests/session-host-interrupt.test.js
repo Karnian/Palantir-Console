@@ -45,7 +45,8 @@ test('§5-5 absent receipt unknown clears only on target generation result; dupl
   const f = fixture(t, { manual: true, noReceipt: true }); f.start(); const old = f.prompt();
   f.adapter.emit(f.iid, 'lifecycle', { command_uuid: old.message_uuid, state: 'completed' });
   const p = f.prompt(); const int = f.core.submit(f.req('interrupt'));
-  assert.equal(int.state, 'unknown'); assert.equal(f.core.submit(f.req('interrupt')).id, int.id);
+  assert.equal(int.state, 'written'); f.advance(10000); f.core.tick();
+  assert.equal(f.d(int.id).state, 'unknown'); assert.equal(f.core.submit(f.req('interrupt')).id, int.id);
   assert.equal(f.adapter.log.interrupts.length, 1);
   f.adapter.emit(f.iid, 'result', { user_message_uuids: [old.message_uuid], is_error: false }); assert.equal(f.d(int.id).state, 'unknown');
   f.adapter.emit(f.iid, 'result', { user_message_uuids: [p.message_uuid], is_error: true, subtype: 'error_during_execution' }); assert.equal(f.d(int.id).state, 'completed');
