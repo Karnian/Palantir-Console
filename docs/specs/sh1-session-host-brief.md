@@ -1,6 +1,6 @@
 # SH1 — 사람용 세션 호스트 (Claude 1개·머신 1대) 구현 brief
 
-상태: **v5.4 (2026-10-24)** — v4.1(사용자 승인) + S1-0 스파이크 결과 반영(`docs/sh1-s1-0-spike-record.md`). codex R5·R6 NO-GO → R7 **GO** → 최종 R8·R9 NO-GO(제어 요청 저장·재검증·복구) 반영 → R10. **사용자 승인 대기** — 승인 뒤 S1-a 에 들어간다. v4.1 에서 "S1-0 에서 확정"으로 남긴 칸은 모두 실측값으로 채웠다. 사용자 판정 두 항목은 닫혔다: §10 R6 은 사용자가 받아들였고("과금은 상관 없어"), §1.4 는 사용자 위임에 따라 codex 합의안으로 정했다(구현 S1-pre).
+상태: **v5.5 (2026-10-24)** — v4.1(사용자 승인) + S1-0 스파이크 결과 반영(`docs/sh1-s1-0-spike-record.md`). codex R5·R6 NO-GO → R7 **GO** → 최종 R8·R9 NO-GO(제어 요청 저장·재검증·복구) 반영 → R10 NO-GO(종료된 실행의 close) 반영 → R11. **사용자 승인 대기** — 승인 뒤 S1-a 에 들어간다. v4.1 에서 "S1-0 에서 확정"으로 남긴 칸은 모두 실측값으로 채웠다. 사용자 판정 두 항목은 닫혔다: §10 R6 은 사용자가 받아들였고("과금은 상관 없어"), §1.4 는 사용자 위임에 따라 codex 합의안으로 정했다(구현 S1-pre).
 상위 계약: `docs/specs/instruction-centric-direction-brief.md` §0.2 (v6 LOCKED). 이 문서와 충돌하면 §0.2 가 우선한다.
 
 ## 0. 목적과 범위
@@ -242,12 +242,12 @@ kind 별 관측 증거 — **상관 ID 로 특정되는 증거만 인정**한다
   |---|---|---|---|
   | start | 행 + `owned_sessions` 행 + `incarnations` 예약(`spawning`, §3.3-1) | `resolveSettings` 검사 통과(§1.2-3) | `spawn_sent` → spawn |
   | resume | 행 + 새 incarnation 예약 | 세션 `active`, 이전 incarnation 이 `exited`·`never_started`(대화 실행 종료 확인) + §3.4 하위 프로세스 확인 통과, live incarnation 없음 | `spawn_sent` → spawn |
-  | close | 행(대상 incarnation) | 대상이 `alive`(제어 가능) 또는 `orphaned`. `liveness_unknown` 이면 `rejected`("프로세스 확인 필요") | 제어 가능: `close_sent` → SDK close. `orphaned`: `signal_sent` → §3.3 신원 재대조 뒤 신호(일치 안 하면 신호 0, `failed`) |
-  | handoff | 행(대상 incarnation) | close 와 같고 세션 `active` | close 와 같음. 이후 확인 통과 시 세션 `handed_off` |
+  | close | 행(대상 = 세션의 마지막 incarnation, 없으면 null) | 세션 `active`. 대상이 `alive`(제어 가능)·`orphaned`·`exited`·`never_started` 이거나 없음. `liveness_unknown`·`spawning` 이면 `rejected`(`liveness_unknown`/`busy`) | 제어 가능: `close_sent` → SDK close. `orphaned`: `signal_sent` → §3.3 신원 재대조 뒤 신호(일치 안 하면 신호 0, `failed`). **이미 종료(`exited`·`never_started`·없음)**: 효과 없이 바로 `exit_confirmed` |
+  | handoff | 행(대상 = 세션의 마지막 incarnation) | close 와 같고, 대상이 있어야 하며 `claude_session_id` 가 기록돼 있어야 함(없으면 `rejected`(`no_session_id`)) | close 와 같음 |
   | delete | 행 + 세션 `deleting`(§4.6 ①) | 세션 `closed`·`handed_off` | §4.6 ②~④ |
 
   - 같은 키 재시도는 그 행과 **예약된 session·incarnation id 를 그대로** 돌려준다. 예약을 두 번 만들지 않는다. spawn 은 예약 행에서만 나오고 예약 하나에 최대 한 번이다 — 재기동 때 `spawning` 예약은 §3.3 복구만 하고 다시 spawn 하지 않는다. `never_started` 면 그 요청은 `failed`(`not_started`)로 끝나고, 다시 시작하려면 사람이 새 키로 제출한다.
-  - close·handoff 는 stage(`requested → close_sent|signal_sent → exit_confirmed → subprocess_checked → done`)를 기록하며 진행한다. 재기동 때 미완료 요청은 효과를 다시 내지 않고 대상 incarnation 의 §3.3 판정으로 잇는다: `mismatch_confirmed`(사망)면 남은 확인 단계를 진행하고, `orphaned`·`liveness_unknown` 이면 요청을 `blocked`(`control_lost`)로 닫는다.
+  - close·handoff 는 stage(`requested → close_sent|signal_sent → exit_confirmed → subprocess_checked → done`)를 기록하며 진행한다. `done` 과 **같은 트랜잭션**에서 세션을 close 는 `closed`(`end_reason=user_stop`), handoff 는 `handed_off` 로 바꾼다. 하위 프로세스 확인(§3.4)을 통과하지 못하면 요청은 `blocked`(`subprocess_remaining`)로 닫히고 세션은 `active` 로 남는다 — 사람이 하위 프로세스를 정리한 뒤 새 키로 다시 낸다(대상이 이미 종료라 효과 없이 확인 단계만 다시 탄다). 재기동 때 미완료 요청은 효과를 다시 내지 않고 대상 incarnation 의 §3.3 판정으로 잇는다: `mismatch_confirmed`(사망)면 남은 확인 단계를 진행하고, `orphaned`·`liveness_unknown` 이면 요청을 `blocked`(`control_lost`)로 닫는다.
   - **배타권**: 한 세션에는 진행 중(`accepted`)인 제어 요청이 하나뿐이다. 다른 키의 제어 요청이 오면 `rejected`(`busy`). `done`·`failed`·`blocked`·`rejected` 는 **최종 상태이고 배타권을 놓는다** — `blocked` 뒤에 사람은 새 키로 close 를 낼 수 있고, 대상이 `orphaned` 면 그 close 가 §3.3 신원 재대조·신호 경로를 탄다. `liveness_unknown` 이면 "다시 확인"으로 판정을 바꾼 뒤에만 close 가 받아진다.
   - 세션을 삭제해도 `control_requests` 행은 30일 남긴다(본문이 없고 fingerprint 는 해시, reason 은 고정 코드) — 삭제 뒤 같은 키 재시도가 재실행되지 않는다. 오류 상세(경로가 든 spawn 오류 등)는 이 행에 쓰지 않고 `events` 에 남겨 §4.6 삭제 대상이 된다.
 
@@ -368,6 +368,7 @@ lock-in 은 사용자가 실제 작업에 써 본 뒤 정한다. brief 는 화�
 - 같은 세션에 다른 키 제어 요청 동시 2개 → 하나만 진행, 나머지 rejected.
 - close 중 호스트 크래시 + 자식 orphaned → 요청 `blocked`, 새 키 close 가 받아져 신원 재대조 뒤 신호 1회(불일치면 0). `liveness_unknown` 대상 close → rejected.
 - start·resume 은 `alive` 전제 없이 진행(전제는 kind 표대로), `spawn_sent` 전 크래시 → spawn 0.
+- 대상이 이미 `exited`·`never_started` 인 세션의 close → 신호·close 0, 확인 단계 뒤 세션 `closed` → 삭제 가능. handoff 도 같고 `handed_off`. 하위 프로세스가 남으면 `blocked`, 정리 뒤 새 키로 완료.
 - 경로가 든 spawn 오류 → `control_requests.reason` 은 고정 코드, 세션 삭제 뒤 행에 경로 0.
 - 대기열에 `queued` prompt 가 있고 직전 턴 종결 → idle 진입·배출 1회. `result` 는 왔지만 lifecycle 종결 전 → 배출 0.
 - `result.is_error = true` + lifecycle `completed` → 전달 completed, `outcome = errored`, unknown 0. lifecycle `completed` 인데 그 uuid `result` 없음 → `outcome_unknown`, idle 진입.
@@ -425,3 +426,4 @@ lock-in 은 사용자가 실제 작업에 써 본 뒤 정한다. brief 는 화�
 - codex **R7**(v5.2): **GO** (R6 4건 모두 닫힘). MINOR 1(자연 발생 오류 사례를 정상 경로 기준과 분리) 반영. 이 GO 는 설계 단계 판정이다.
 - codex **R8**(v5.2, 최종 게이트·문서 전체): **NO-GO** (SERIOUS 1 / MODERATE 2 / MINOR 1). 반영(v5.3): 시작·이어서 시작·종료·넘기기·삭제를 `control_requests` 로 저장하고 접수와 첫 효과(예약·deleting)를 한 트랜잭션으로 묶음, 같은 키 재시도는 같은 예약을 돌려받고 spawn 최대 1회, close·handoff 단계 재개 규칙(§4.2·§4.4). idle 정의를 "이 incarnation 에서 쓴 prompt 전부 턴 종결, 대기열 queued 제외"로 고정(§4.3·§5-2). prompt 의 결과 내용(result)과 턴 종결(lifecycle)을 분리하고 `errored` outcome 추가, 조합별 규칙(§4.3). §8.1 unknown 허용 문장에 자연 발생 오류 포함.
 - codex **R9**(v5.3): **NO-GO** (R8 4건 모두 닫힘, 새 SERIOUS 2 / MODERATE 1). 반영(v5.4): 제어 요청에 delivery 재검증을 적용하지 않고 kind 별 접수 트랜잭션·전제·효과 직전 stage 표를 둠, 명령 큐를 세션 단위로(§4.4·§4.5). `blocked` 등 최종 상태는 배타권을 놓고, orphaned 대상 close 는 §3.3 신원 재대조·신호 경로로 처리. `control_requests.reason` 은 고정 코드만, 오류 상세는 삭제 대상인 events 로.
+- codex **R10**(v5.4): **NO-GO** (R9 3건 중 닫힘 2 / 부분 1, 새 SERIOUS 1 — 이미 종료된 실행은 close·handoff 로 끝낼 수 없어 세션이 active 로 갇힘). 반영(v5.5): close·handoff 가 `exited`·`never_started`·대상 없음을 받아 효과 없이 `exit_confirmed` 부터 진행, `done` 과 같은 트랜잭션에서 세션 `closed`/`handed_off`, 하위 프로세스가 남으면 `blocked` 후 새 키로 재시도(§4.4).
