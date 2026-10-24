@@ -1,19 +1,20 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { fixture } = require('./helpers/session-host-fixture');
+const { fixture: baseFixture } = require('./helpers/session-host-fixture');
+const fixture = (t, options = {}) => baseFixture(t, { async: true, ...options });
 const pin = require('../sessionHost/pin');
 
 const account = () => ({ email: 'fake@example.test', organization: 'fake', subscriptionType: 'Claude Max', apiProvider: 'firstParty' });
 const settings = () => ({ effective: {}, sources: [], provenance: {} });
 async function start(f) {
   const accepted = f.start();
-  await f.core.flush();
+  await f.settle();
   return f.core.lookup(accepted.request_key);
 }
 async function prompt(f) {
   const accepted = f.prompt();
-  await f.core.flush();
+  await f.settle();
   return f.core.lookup(accepted.request_key);
 }
 const microtasks = async () => {
@@ -47,7 +48,7 @@ test('S1-b2a settings timeout uses tick and ignores late result', async t => {
   assert.equal(f.core.lookup(accepted.request_key).stage, 'settings_checking');
   f.advance(pin.resolveSettingsDeadlineMs);
   f.core.tick();
-  await f.core.flush();
+  await f.settle();
   assert.equal(f.core.lookup(accepted.request_key).reason, 'settings_check_failed');
   resolve(settings());
   await microtasks();
@@ -149,7 +150,7 @@ test('S1-b2a recheck releases queue and interrupt prevents send', async t => {
   f.core.submit(f.req('interrupt'));
   assert.equal(f.adapter.log.interrupts.length, 1);
   resolve(account());
-  await f.core.flush();
+  await f.settle();
   assert.equal(f.core.lookup(delivery.request_key).state, 'rejected');
   assert.equal(f.adapter.log.received.length, 0);
 });

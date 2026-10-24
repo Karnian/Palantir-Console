@@ -18,6 +18,11 @@ function fixture(t, options = {}) {
     get core() { return core; },
     get time() { return time; },
     advance(ms) { time += ms; },
+    async settle() {
+      for (let turn = 0; turn < 32; turn++) await Promise.resolve();
+      core.tick();
+      await core.flush();
+    },
     key(at = time) { return `rk_${at}_${(++n).toString(16).padStart(16, '0')}`; },
     req(kind, extra = {}) { return { request_key: f.key(), kind, session_id: f.sid, incarnation_id: f.iid, ...extra }; },
     start() { const c = core.submit({ request_key: f.key(), kind: 'start', cwd: '/private/work' }); f.sid = c.session_id; f.iid = c.incarnation_id; return c; },

@@ -66,10 +66,33 @@ function createHostCore({
     },
     clearTimeout(id) { settingsTimers.delete(id); }
   };
-  function continueAsync(promise, sessionId, operation) {
-    const task = Promise.resolve(promise).then(value => {
+  // Normalize adapter values in one place; only pending results leave the queue.
+  function continueResult(read, sessionId, operation, {
+    synchronous = value => value,
+    asynchronous = value => Promise.resolve(value).then(synchronous),
+    failed = () => ({ ok: false })
+  } = {}) {
+    const complete = value => {
       if (!disposed && !crashed) enqueue(sessionId, () => operation(value));
-    }).catch(error => { asyncErrors.push(error); }).finally(() => pending.delete(task));
+    };
+    let value;
+    let result;
+    let asynchronousResult;
+    try {
+      value = read();
+      asynchronousResult = value !== null && value !== undefined && typeof value.then === 'function';
+      result = asynchronousResult ? asynchronous(value) : synchronous(value);
+    } catch {
+      complete(failed());
+      return;
+    }
+    if (!asynchronousResult) {
+      complete(result);
+      return;
+    }
+    const task = Promise.resolve(result).then(complete, () => complete(failed()))
+      .catch(error => { asyncErrors.push(error); })
+      .finally(() => pending.delete(task));
     pending.add(task);
   }
   const getRow = (sql, ...parameters) => database.prepare(sql).get(...parameters);
@@ -255,7 +278,7 @@ function createHostCore({
       if (['sending', 'written'].includes(delivery.state)) {
         transitionDelivery(delivery, ['sending', 'written'], {
           state: 'unknown',
-          reason: 'host_lost'
+          reason: delivery.outcome === 'errored' ? delivery.reason : 'host_lost'
         });
       }
       if (delivery.state === 'queued') {
@@ -296,6 +319,7 @@ function createHostCore({
     let delivery = getDelivery(id);
     let incarnation = getIncarnation(delivery.incarnation_id);
     if (delivery.state !== 'queued') {
+      rechecks.delete(id);
       return;
     }
     if (delivery.kind === 'prompt' && incarnation?.state === 'alive' && !isIdle(incarnation) && !incarnation.attribution_uncertain &&
@@ -303,16 +327,14 @@ function createHostCore({
       return;
     }
     if (delivery.kind === 'prompt' && !checked && isIdle(incarnation)) {
-      if (rechecks.has(id)) return;
+      if (rechecks.has(id) || getRow("SELECT id FROM deliveries WHERE incarnation_id=? AND kind='prompt' AND state='queued' ORDER BY rowid LIMIT 1", incarnation.id)?.id !== id) return;
       const token = { passed: false, turn: incarnation.turn_gen };
       rechecks.set(id, token);
-      continueAsync(Promise.resolve().then(() => adapter.accountInfo(incarnation.id)).then(
-        account => authGate.evaluateAccountRecheck(accounts.get(incarnation.id), account),
-        () => ({ ok: false })
-      ), delivery.session_id, result => {
-        token.passed = result.ok;
+      continueResult(() => adapter.accountInfo(incarnation.id), delivery.session_id, result => {
+        token.passed = result.ok && !token.invalidated;
         dispatchDelivery(id, true);
-      });
+        drainPromptQueue(delivery.session_id);
+      }, { synchronous: account => authGate.evaluateAccountRecheck(accounts.get(incarnation.id), account) });
       return;
     }
     let decision;
@@ -330,6 +352,7 @@ function createHostCore({
         reason = 'tool_not_pending';
       }
       if (reason) {
+        rechecks.delete(id);
         transitionDelivery(delivery, ['queued'], {
           state: 'rejected',
           reason
@@ -424,23 +447,16 @@ function createHostCore({
       if (now() >= timer.at) { settingsTimers.delete(id); timer.callback(); }
     }
     for (const [key, at] of deadlines) {
-      if (now() >= at) {
-        deadlines.delete(key);
-        const control = getControl(key);
-        if (control?.state === 'accepted' && control.stage === 'gating') rejectGate(control, 'initialization_timeout');
-      }
-    }
-    for (const [key, flow] of cleanups) {
+      if (now() < at) continue;
       const control = getControl(key);
-      const incarnation = getIncarnation(control.incarnation_id);
-      if (incarnation.state === 'exited') { finishGateCleanup(control); continue; }
-      if (now() < flow.at) continue;
-      if (!flow.signalled) {
-        writeTransaction(() => transitionControl(control, { stage: 'gate_signal_sent' }));
-        try { identityProbe.verifyThenSignal(incarnation.pid, incarnation.pid_started_at, 'SIGTERM'); } catch {}
-        flow.signalled = true;
-        flow.at = now() + pin.sigtermWaitMs;
-      } else finishGateCleanup(control);
+      enqueue(control.session_id, () => {
+        const current = getControl(key);
+        if (current?.state === 'accepted' && current.stage === 'gating') rejectGate(current, 'initialization_timeout');
+      });
+    }
+    for (const [key] of cleanups) {
+      const control = getControl(key);
+      enqueue(control.session_id, () => advanceGateCleanup(key));
     }
     writeTransaction(() => {
       for (const delivery of getRows("SELECT * FROM deliveries WHERE kind='interrupt' AND state='written' AND updated_at<=?", now(
@@ -589,11 +605,8 @@ function createHostCore({
       if (controlRequest.stage === 'requested') {
         writeTransaction(() => transitionControl(controlRequest, { stage: 'settings_checking' }));
         injectFault('after_settings_checking');
-        continueAsync(authGate.resolveSettingsChecked(
-          typeof adapter.checkSettings === 'function' ? ({ cwd }) => adapter.checkSettings(cwd) : undefined,
-          getSession(controlRequest.session_id).cwd,
-          { deadlineMs: pin.resolveSettingsDeadlineMs, clock: now, timers }
-        ), controlRequest.session_id, result => {
+        const cwd = getSession(controlRequest.session_id).cwd;
+        continueResult(() => adapter.checkSettings(cwd), controlRequest.session_id, result => {
           const current = getControl(key);
           if (current.state !== 'accepted' || current.stage !== 'settings_checking') return;
           if (!result.ok) {
@@ -603,9 +616,18 @@ function createHostCore({
               transitionControl(current, { state: 'failed', reason: result.reason === 'settings_auth_override' ? 'settings_rejected' : 'settings_check_failed' });
             });
           } else {
-            writeTransaction(() => transitionControl(current, { stage: 'settings_checked' }));
+            writeTransaction(() => {
+              recordEvent(current.session_id, current.incarnation_id, 'settings_checked', result);
+              transitionControl(current, { stage: 'settings_checked' });
+            });
             executeControlRequest(key);
           }
+        }, {
+          synchronous: authGate.evaluateResolvedSettings,
+          asynchronous: value => authGate.resolveSettingsChecked(() => value, cwd, {
+            deadlineMs: pin.resolveSettingsDeadlineMs, clock: now, timers
+          }),
+          failed: () => ({ ok: false, reason: 'settings_check_failed' })
         });
         return;
       }
@@ -701,7 +723,26 @@ function createHostCore({
     finishControlRequest(key);
   }
 
+  function advanceGateCleanup(key) {
+    const flow = cleanups.get(key);
+    const control = getControl(key);
+    if (!flow || control?.state !== 'accepted') return;
+    const incarnation = getIncarnation(control.incarnation_id);
+    if (incarnation.state === 'exited') { finishGateCleanup(control); return; }
+    if (now() < flow.at) return;
+    if (flow.signalled) { finishGateCleanup(control); return; }
+    writeTransaction(() => transitionControl(control, { stage: 'gate_signal_sent' }));
+    flow.signalled = true;
+    flow.at = now() + pin.sigtermWaitMs;
+    try {
+      identityProbe.verifyThenSignal(incarnation.pid, incarnation.pid_started_at, 'SIGTERM');
+    } catch {
+      // Failed identity/signalling cannot establish death; still await and query.
+    }
+  }
+
   function finishGateCleanup(control) {
+    if (!cleanups.has(control.request_key) || getControl(control.request_key).state !== 'accepted') return;
     const incarnation = getIncarnation(control.incarnation_id);
     const dead = incarnation.state === 'exited' || checkIdentity(incarnation) === 'mismatch_confirmed';
     const clear = areDescendantsClear(incarnation);
@@ -715,11 +756,11 @@ function createHostCore({
     accounts.delete(incarnation.id);
   }
 
-  function rejectGate(control, reason = 'gate_rejected') {
+  function rejectGate(control, reason = 'gate_rejected', detail = reason) {
     if (control.state !== 'accepted' || cleanups.has(control.request_key)) return;
     deadlines.delete(control.request_key);
     writeTransaction(() => {
-      recordEvent(control.session_id, control.incarnation_id, 'gate_rejected', { reason });
+      recordEvent(control.session_id, control.incarnation_id, 'gate_rejected', { reason: detail });
       transitionControl(control, { stage: 'gate_close_sent' });
     });
     cleanups.set(control.request_key, { reason, at: now() + pin.closeWaitMs, signalled: false });
@@ -729,14 +770,14 @@ function createHostCore({
     if (getIncarnation(control.incarnation_id).state === 'exited') finishGateCleanup(control);
   }
 
-  function closeForMissingCapability(incarnation) {
+  function closeForInitFailure(incarnation) {
     const failureReason = incarnation.end_reason === 'auth_source_not_subscription' ? incarnation.end_reason : 'capability_missing';
     if (incarnation.state !== 'alive' || getSession(incarnation.session_id).state !== 'active' || getRow(
-      "SELECT request_key FROM control_requests WHERE incarnation_id=? AND reason='capability_missing'", incarnation.id) || getRow(
+      "SELECT request_key FROM control_requests WHERE incarnation_id=? AND reason IN ('capability_missing','auth_source_not_subscription')", incarnation.id) || getRow(
         "SELECT request_key FROM control_requests WHERE session_id=? AND state='accepted'", incarnation.session_id)) {
       return;
     }
-    const key = `rk_${now()}_${hash(['capability_missing', incarnation.id])}`;
+    const key = `rk_${now()}_${hash([failureReason, incarnation.id])}`;
     writeTransaction(() => {
       execute(
         "INSERT INTO control_requests(request_key,fingerprint,kind,session_id,incarnation_id,stage," +
@@ -847,7 +888,7 @@ function createHostCore({
       if (isControl) {
         if (!reason && request.kind === 'stop' && session?.state === 'active' && incarnation?.close_after_turn) {
           reason = 'capability_close_pending';
-          closeForMissingCapability(incarnation);
+          closeForInitFailure(incarnation);
         }
         if (!reason && getRow("SELECT request_key FROM control_requests WHERE session_id=? AND state='accepted'", sessionId)) {
           reason = 'busy';
@@ -937,9 +978,9 @@ function createHostCore({
         }
         if (!reason && request.kind === 'interrupt') {
           for (const [id, token] of rechecks) {
-            if (getDelivery(id)?.incarnation_id === incarnation.id) token.passed = false;
-          }
-          for (const queued of getRows("SELECT * FROM deliveries WHERE incarnation_id=? AND kind='prompt' AND state='queued'", incarnation.id)) {
+            const queued = getDelivery(id);
+            if (queued?.incarnation_id !== incarnation.id || queued.state !== 'queued') continue;
+            token.invalidated = true;
             writeTransaction(() => transitionDelivery(queued, ['queued'], { state: 'rejected', reason: 'auth_recheck_failed' }));
           }
           const pending = getRow("SELECT * FROM deliveries WHERE incarnation_id=? AND kind='interrupt' AND state IN " +
@@ -1013,10 +1054,12 @@ function createHostCore({
       enqueue(incarnation.session_id, () => {
         const control = getRow("SELECT * FROM control_requests WHERE incarnation_id=? AND state='accepted' AND stage='gating'", incarnation.id);
         if (!control) return;
+        if (getIncarnation(incarnation.id).state !== 'alive') { rejectGate(control, 'initialization_failed'); return; }
+        if (now() >= deadlines.get(control.request_key)) { rejectGate(control, 'initialization_timeout'); return; }
         const init = adapterEvent.initialization || adapterEvent;
         const result = adapterEvent.type === 'initialization_failed' ? { ok: false, reason: 'initialization_failed' } :
-          authGate.evaluateInitialization(init, { expectedPid: incarnation.pid, pin });
-        if (!result.ok) { rejectGate(control, result.reason === 'initialization_failed' ? result.reason : 'gate_rejected'); return; }
+          authGate.evaluateInitialization(init, { expectedPid: getIncarnation(incarnation.id).pid, pin });
+        if (!result.ok) { rejectGate(control, result.reason === 'initialization_failed' ? result.reason : 'gate_rejected', result.reason); return; }
         const account = structuredClone(init.account);
         accounts.set(incarnation.id, account);
         deadlines.delete(control.request_key);
@@ -1024,6 +1067,7 @@ function createHostCore({
           transitionIncarnation(incarnation, ['alive'], { account_snapshot: JSON.stringify({ subscriptionType: account.subscriptionType, apiProvider: account.apiProvider }) });
           transitionControl(control, { state: 'done', stage: 'done' });
         });
+        drainPromptQueue(incarnation.session_id);
       });
       return;
     }
@@ -1209,7 +1253,7 @@ function createHostCore({
       }
       const current = getIncarnation(incarnation.id);
       if (current?.state === 'alive' && current.close_after_turn && (capabilityTurnEnded || isIdle(current))) {
-        closeForMissingCapability(current);
+        closeForInitFailure(current);
       } else {
         drainPromptQueue(incarnation.session_id);
       }
@@ -1223,6 +1267,7 @@ function createHostCore({
           state: 'exited',
           ended_at: now()
         });
+        accounts.delete(incarnation.id);
         taintPendingDecisions(incarnation);
       } else {
         const toolRequest = getRow('SELECT * FROM tool_requests WHERE incarnation_id=? AND tool_use_id=?', incarnation.id, adapterEvent.tool_use_id);
@@ -1388,7 +1433,7 @@ function createHostCore({
     },
     submitUnavailable(request) {
       const result = submit(request);
-      if (['start', 'resume'].includes(request.kind) && result.state === 'failed' && result.reason === 'spawn_failed') {
+      if (['start', 'resume'].includes(request.kind) && result.state === 'failed' && ['spawn_failed', 'settings_check_failed'].includes(result.reason)) {
         writeTransaction(() => transitionRow('control_requests', request.request_key, ['failed'],
           { reason: 'adapter_unavailable' }, result.session_id, result.incarnation_id));
         return getControl(request.request_key);

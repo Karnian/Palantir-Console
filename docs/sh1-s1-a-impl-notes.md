@@ -8,7 +8,7 @@
 
 요청 키 형식은 `rk_<epoch ms>_<16+ hex>`다. fingerprint는 키 순서를 정규화한 JSON의 SHA-256이다. 제어 요청에는 본문이 없으며 cwd도 해시로만 fingerprint에 들어간다. 기존 행·tombstone 조회가 시각 검사보다 먼저다. 새 키의 허용 구간은 호스트 시각 기준 24시간 전부터 5분 후까지다. 반환값은 durable 행의 최신 상태이며 SDK 콜백이 동기적으로 처리됐으면 완료 상태일 수도 있다. fingerprint 충돌은 `status:409`다.
 
-`adapter.start({incarnation_id,session_id,cwd})`, `send(incarnationId,uuid,text)`, `decide(incarnationId,toolUseId,decision)`, `interrupt(incarnationId)`, `close(incarnationId)`를 사용한다. §2.4 경계를 여러 세션에 쓰기 위해 incarnation 인자를 명시했다. `facts(incarnationId,toolUseId)`는 선형화 구간의 최종 SDK 사실 조회다. `signal(incarnationId,signal)`은 가짜 신호 경로다. 실제 OS 호출은 없다. `authCheck()`·`settingsCheck()`는 이번 경계에서 **동기 boolean 판정 결과**를 반환한다. 실제 account·초기화 응답·resolveSettings 구조/기한 검사는 S1-b 어댑터가 수행한다. Promise·누락·예외·true 이외 값은 통과하지 않는다.
+`adapter.start({incarnation_id,session_id,cwd})`, `send(incarnationId,uuid,text)`, `decide(incarnationId,toolUseId,decision)`, `interrupt(incarnationId)`, `close(incarnationId)`를 사용한다. §2.4 경계를 여러 세션에 쓰기 위해 incarnation 인자를 명시했다. `facts(incarnationId,toolUseId)`는 선형화 구간의 최종 SDK 사실 조회다. `signal(incarnationId,signal)`은 가짜 신호 경로다. 실제 OS 호출은 없다. S1-b2a부터 `authCheck()`·`settingsCheck()` 대신 `checkSettings(cwd)`·`accountInfo(incarnationId)`와 `initialization`·`initialization_failed` 이벤트를 사용한다. 코어는 값과 thenable을 지원하고 실제 SDK 어댑터는 Promise를 반환한다. 상세 계약은 아래 S1-b2a 절에 있다.
 
 이벤트 형식은 `{type,incarnation_id,...payload}`다. lifecycle은 `command_uuid,state`, result는 `user_message_uuids,is_error,subtype`, tool_request는 `tool_use_id,name,input,signal`, tool_result는 `tool_use_id,is_error,content`, interrupt_receipt는 `still_queued`, system_init은 `capabilities,apiKeySource`다. exit와 abort는 각각 `child_exit`, `signal_abort`다.
 
@@ -542,45 +542,6 @@ R2 픽스처 6개 및 기존 순수·픽스처 181개가 통과했다.
 이 결과로 실제 macOS 결함이 해결됐다고 단정하지 않는다. 호스트에서 두 실제 ps 테스트를 포함해 재검증해야 한다.
 SDK 설치·실제 claude 실행·npm test·git 조작은 하지 않았다.
 
-## S1-b2a — 비동기 게이트 연결 (미완료)
-
-코어에 설정 확인 → spawn → 초기화 응답 게이트 경로를 연결했다.
-§4.4의 접수 트랜잭션이 행과 예약을 함께 만들므로 실제 순서는
-예약 → 설정 검사 → spawn이다. §5-1의 spawn 전 검사 계약은 유지한다.
-설정 확인은 resolveSettingsChecked를 사용하며 clock과 tick 기반 타이머를 주입한다.
-초기화 60초·close 대기 5초·SIGTERM 뒤 5초도 tick으로 진행한다.
-정리 신호는 verifyThenSignal 인터페이스로 신원을 다시 대조한다.
-
-account 원본은 재확인 판정에만 쓰는 메모리 Map에 복사한다.
-DB account_snapshot에는 subscriptionType·apiProvider만 저장하고,
-초기화 원문·email·organization은 events에 저장하지 않는다.
-prompt delivery마다 비동기 accountInfo 결과를 큐에 다시 넣고,
-동기 sending 트랜잭션에서 해당 delivery의 일회용 통과 토큰을 검사한다.
-system/init은 evaluateSystemInit으로 판정하며 인증 출처 장애를 턴에 남긴다.
-rate_limit의 여섯 필드는 events에 저장하고 최신 이벤트를 incarnation snapshot에 투영한다.
-
-### 가짜 어댑터 경계
-
-checkSettings(cwd)는 Promise로 resolveSettings 결과를 반환한다.
-accountInfo(incarnationId)는 Promise로 account를 반환한다.
-start는 incarnation_id와 cwd를 받고 동기 신원을 반환한다.
-start 뒤 initialization 이벤트의 initialization 필드에 초기화 응답 전문을 싣거나,
-initialization_failed 이벤트에 고정 코드를 싣는다.
-close(incarnationId)의 완료만으로 사망을 확정하지 않고 child_exit 또는 신원 판정을 사용한다.
-가짜 어댑터도 buildChildEnv/assertChildEnv를 통과해야 starts를 기록한다.
-injectEnv는 최종 env 검사 실패를 증명하는 테스트 전용 입력이다.
-실제 SDK·argvCheck·고정 실행 파일 검증 연결은 S1-b2b에 남는다.
-
-### 검증 한계와 남은 작업
-
-사용자 지정 실행 호출 상한 5회를 모두 사용했다.
-마지막 호출에서 node --check server/sessionHost/core.js는 종료 코드 0이었다.
-신규 session-host-async-gate.test.js는 작성했으나 실행하지 못했다.
-수정 전 신규 테스트 실패를 실행으로 확인하지 않았으므로 재현 성공을 주장하지 않는다.
-기존 동기 fixture 사용 테스트의 비동기 전환과 crash 단계 테스트 보강이 남았다.
-지정 전체 테스트 명령은 실행하지 않았고 통과·실패 개수는 알 수 없다.
-현재 변경은 Definition of Done을 충족하지 않은 작업 중 상태다.
-
 ## S1-b1 수정 라운드 3 — lstart 열 맞춤·신원 구간·조회 불일치
 
 호스트 실측으로 macOS lstart 출력의 끝에 열 맞춤 공백이 있음을 확인받았다.
@@ -649,4 +610,142 @@ R3 신규 9개를 포함한 순수·픽스처 테스트 196개가 통과했다.
 실패는 기존 X 14개(ps EPERM 13개·host_start_timeout 1개)와 실제 ps 테스트 2개다.
 실측 리터럴에 대한 수정은 검증했지만 이 샌드박스에서 실제 macOS ps 통합의 통과를 확인한 것은 아니다.
 호스트에서 전체 212개와 실제 조회 시간을 재검증해야 한다.
+SDK 설치·실제 claude 실행·npm test·git 조작은 하지 않았다.
+
+
+## S1-b2a — 비동기 인증·설정 게이트 코어 연결
+
+SDK 없이 S1-b1의 authGate·spawnEnv·pin을 코어와 가짜 어댑터에 연결했다.
+§4.4는 접수 행·세션·incarnation 예약을 같은 트랜잭션으로 묶으므로 순서는
+예약 → 설정 검사 → spawn이다. §5-1의 설정 검사 → 예약이라는 설명과 순서는 다르지만,
+spawn 전에 검사하고 검사 실패 시 spawn 0이라는 계약은 유지한다.
+
+### 어댑터 경계와 동기·비동기 호환
+
+| 경계 | 계약 |
+|---|---|
+| `checkSettings(cwd)` | resolveSettings 결과 값 또는 thenable. 실제 SDK는 Promise |
+| `accountInfo(incarnationId)` | account 값 또는 thenable. 실제 SDK는 Promise |
+| `start({incarnation_id,session_id,cwd,...resume})` | 예약 ID로 한 번만 실행하고 pid·startedAt·provider 대화 ID를 동기 반환 |
+| `initialization` | `initialization` 필드에 account·pid·claude_code_version·current_permission_mode·remote_control_auto_enable을 포함한 초기화 응답 전문 |
+| `initialization_failed` | 고정 코드. 외부 자유문 code를 저장하지 않고 내부 `initialization_failed`로 처리 |
+| `close(incarnationId)` | 정리 요청. 반환·Promise 완료 자체는 본체 사망 증거가 아님 |
+| `rate_limit` | `rate_limit_info`의 status·resetsAt·rateLimitType·overageStatus·overageDisabledReason·isUsingOverage |
+
+코어의 continueResult 한 곳에서 반환값의 thenable 여부를 가른다.
+즉시 값은 같은 틱의 세션 큐로 이어지고, 미완료 값은 큐를 점유하지 않으며 완료를 큐에 다시 넣는다.
+동기 설정 값에는 evaluateResolvedSettings를 직접 적용한다.
+thenable에는 resolveSettingsChecked를 적용하며 어댑터를 두 번 호출하지 않는다.
+설정 기한에는 주입 clock과 tick 타이머를 사용한다. 실제 setTimeout·sleep은 없다.
+
+가짜 어댑터는 기본적으로 설정·account 값과 start 내부 초기화 이벤트를 동기로 제공한다.
+`async: true`는 두 조회를 Promise로, 초기화 이벤트를 다음 microtask로 바꾼다.
+동기 start 안에서 온 초기화 이벤트는 신원 커밋 뒤 같은 세션 큐에서 판정한다.
+판정 때 pid·생존 상태를 다시 읽으므로 신원 커밋 전 스냅샷의 null pid를 쓰거나,
+초기화와 함께 이미 exit한 실행을 done으로 바꾸지 않는다.
+
+가짜도 buildChildEnv/assertChildEnv를 통과한 뒤에만 starts를 기록한다.
+테스트 전용 injectEnv로 PALANTIR_TOKEN 등을 섞으면 spawn 0·invalid_child_env다.
+실제 SDK·argvCheck·고정 실행 파일 검증 연결은 S1-b2b 범위다.
+공개 submit·receipt·lookup의 동기 반환 계약은 유지한다.
+미구현 제품 어댑터의 submitUnavailable도 adapter_unavailable 고정 응답을 유지한다.
+
+### 게이트·정리·복구
+
+시작·재개 제어 요청 stage는 requested → settings_checking → settings_checked → spawn_sent → gating → done이다.
+검사 거부는 settings_rejected 또는 settings_check_failed와 never_started를 함께 커밋한다.
+설정 값은 저장하지 않고 판정·경고·출처 경로만 events에 쓴다. 출처 경로는 control reason이나 snapshot에 넣지 않는다.
+
+초기화 게이트는 evaluateInitialization으로 account·pid·버전·권한 모드·원격 제어를 전부 검사한다.
+초기화 기한은 pin의 60초이며, tick 검사와 늦은 초기화 응답의 수신 시각 검사로 닫는다.
+실패하면 gate_rejected 이벤트와 gate_close_sent를 기록한 뒤 close한다.
+본체 exit를 최대 5초 기다리고, 미확인이면 gate_signal_sent 커밋 뒤
+identityProbe.verifyThenSignal(pid, startedAt, SIGTERM)을 한 번 호출한다.
+다시 최대 5초 뒤 본체 신원과 listMarkedDescendants를 확인한다.
+신원 불일치·조회 실패 때는 신호가 나가지 않는다.
+
+본체 사망과 빈 표지 하위 목록이 함께 확인돼야 exited와 gate_rejected_cleaned
+또는 initialization_failed·initialization_timeout으로 종결한다.
+하위 생존·조회 실패·본체 생존은 liveness_unknown과 gate_rejected_unverified다.
+close·신호·정리 판정은 모두 세션 큐 안에서 실행한다.
+게이트 전 hooks·MCP 실행 가능성은 gate_rejected 이벤트로 화면에 전달할 수 있다.
+
+settings_checking 중 크래시는 spawn이 없으므로 신원 조회 없이 never_started·failed(not_started)다.
+gating 중 크래시는 저장한 pid·시작시각으로 판정하며 match이면 orphaned·blocked(control_lost)다.
+어떤 복구도 spawn을 반복하거나 게이트 미통과 orphaned에 prompt를 보내지 않는다.
+
+### prompt 재확인과 사후 탐지
+
+초기 account 원본은 재확인 판정에 필요한 메모리 복사본으로만 보관한다.
+DB account_snapshot에는 subscriptionType·apiProvider만 저장한다.
+초기화 응답 원문·email·organization은 DB·events·snapshot에 저장하지 않는다.
+exit 또는 코어 close 때 메모리 기준 account도 제거한다.
+
+큐 맨 앞 prompt를 꺼낼 때 accountInfo와 evaluateAccountRecheck를 적용한다.
+각 delivery ID·turn_gen에 묶인 일회용 통과 토큰을 sending 트랜잭션에서 검사하고 소비한다.
+조회 예외·변경·미지 account는 rejected(auth_recheck_failed), send 0이다.
+다음 prompt는 자기 차례에 새 조회를 해야 하며 앞 prompt의 토큰을 재사용하지 않는다.
+재확인 중 인터럽트는 그 재확인만 무효화한다. 아직 재확인을 시작하지 않은 대기 prompt의 기존 상태는 보존한다.
+exit·세션 상태 변화도 dispatch의 재검증으로 차단한다.
+sending 커밋 → facts → 효과 호출의 동기 구간에는 await가 없다.
+
+첫 system/init은 evaluateSystemInit으로 판정한다.
+apiKeySource가 정확히 none이 아니면 턴을 errored(auth_source_not_subscription)로 기록하고
+기존 capability 누락과 같은 호스트 close 제어 경로로 닫는다.
+기존 실패 원인은 exit 정리의 host_lost로 덮어쓰지 않는다.
+capability 누락의 첫 턴 증거·턴 종료 뒤 자동 close·사람 제어 우선 계약은 유지한다.
+rate limit은 events에 기록하고 incarnation별 최신 값을 snapshot의 rate_limit_info로 투영한다.
+재기동 뒤에도 유지되며 새 incarnation에는 앞 실행의 한도 값을 복사하지 않는다.
+
+### 테스트와 수정 전 실패 증거
+
+기본 동기 모드 덕분에 기존 동기 테스트 대부분은 원래 단언 그대로 실행한다.
+삭제된 authCheck/settingsCheck 계약을 직접 검증하던 control 테스트 3건만
+새 필수 코드(settings_rejected·auth_recheck_failed·gate_rejected_cleaned)와
+5초+5초 tick 정리 계약에 맞췄다. 실패 상태·spawn/send/close/신호 횟수 단언은 유지하거나 보강했다.
+즉시 SIGTERM을 기대하던 단언은 실제 신원 재대조 인터페이스인 probe.signals를 확인한다.
+
+S1-b2a 테스트는 async-gate 26개·dual-gate 14개·gate-flow 54개, 총 94개다.
+정상 지시 20회·승인 10회, 전달 크래시 3곳, 인터럽트 영수증, stop/resume/close는
+동기와 async:true 모드 양쪽에서 같은 증거를 검증한다.
+설정 거부·throw·10초 정체·구조 오류·함수 없음, 여섯 account 모양,
+초기화의 pid·버전·권한·원격 제어, 정리 단계·신원 판정·하위 조회,
+두 새 크래시 stage, 재확인 예외·변경·대기 중 인터럽트/exit/상태 변화,
+사후 인증 탐지·최신 rate limit·금지 env도 비동기 모드에서 검증한다.
+settle helper는 microtask와 tick을 소진하며 실제 sleep을 사용하지 않는다.
+
+이번 수정 시작 전 WIP 제품 파일을 /tmp/sh1-b2a-baseline에 복사해 보존했다.
+git checkout·reset 없이 같은 최종 테스트 94개를 이 보관본에 실행했다.
+보관본은 이미 S1-b2a 일부 구현을 포함하므로 전체 94개가 수정 전 실패했다고 주장하지 않는다.
+결과 원문 요약은 tests 94, pass 83, fail 11, cancelled 0, skipped 0이다.
+
+수정 전 실패 11개는 다음과 같다.
+
+- non-subscription system init fails turn and closes
+- sync adapter returns values and initialization at the contracted time
+- sync crash before_accepted_reply never retransmits
+- delayed initialization passes before deadline and fails at deadline without tick
+- async queued prompts each consume a fresh recheck token only when dequeued
+- async system init source ANTHROPIC_API_KEY / 빈 문자열 / null / undefined의 네 사례
+- async unknown account null / undefined의 두 사례
+
+현재 동일 명령의 제품 경로 실행:
+`PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-{async-gate,dual-gate,gate-flow}.test.js`
+
+결과 원문 요약: tests 94, pass 94, fail 0, cancelled 0, skipped 0.
+
+### 지정 전체 검증과 환경 제한
+
+`PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-*.test.js`
+
+결과 원문 요약: tests 306, pass 290, fail 16, cancelled 0, skipped 0.
+새 S1-b2a 94개와 기존 순수·픽스처 196개는 전부 통과했다.
+실패는 X 14개(ps EPERM 13개·host_start_timeout 1개)와 실제 ps 통합 2개다.
+직접 /bin/ps spawnSync 재확인도 status:null·error:EPERM이었다.
+두 실제 ps 테스트는 통과 대조부터 query_failed이며 이 환경에서 실제 프로세스 귀속을 검증하지 못했다.
+실패를 skip이나 통과로 바꾸지 않았다. 호스트에서 전체 306개를 다시 실행해야 한다.
+
+이전 기록의 maxExecInvocations 5회를 셸 호출 상한으로 해석한 것은 잘못이었다.
+호스트 재호출 상한이라는 사용자 정정에 따라 필요한 명령·테스트를 실행했다.
+S1-b1 판정 모듈·pin·프로세스/프로토콜 공개 API 파일·설계 원문은 수정하지 않았다.
 SDK 설치·실제 claude 실행·npm test·git 조작은 하지 않았다.

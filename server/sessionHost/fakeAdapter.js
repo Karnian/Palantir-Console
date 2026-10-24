@@ -26,6 +26,18 @@ function createFakeAdapter(options = {}) {
     type,
     ...data
   });
+  function readSettings(cwd) {
+    if (options.checkSettings) return options.checkSettings(cwd);
+    const allowed = typeof options.settings === 'function' ? options.settings() : options.settings !== false;
+    return { effective: allowed ? {} : { apiKeyHelper: 'blocked' }, sources: [], provenance: {} };
+  }
+  function configuredAccount() {
+    const allowed = typeof options.auth === 'function' ? options.auth() : options.auth !== false;
+    return Object.hasOwn(options, 'account') ? options.account : (allowed ? subscription() : { ...subscription(), tokenSource: 'env' });
+  }
+  function readAccount(incarnationId) {
+    return options.accountInfo ? options.accountInfo(incarnationId) : configuredAccount();
+  }
   const adapter = {
     events,
     log,
@@ -33,15 +45,13 @@ function createFakeAdapter(options = {}) {
     pending: pendingMessages,
     toolSignals,
     options,
-    async checkSettings(cwd) {
-      if (options.checkSettings) return options.checkSettings(cwd);
-      const allowed = typeof options.settings === 'function' ? options.settings() : options.settings !== false;
-      return { effective: allowed ? {} : { apiKeyHelper: 'blocked' }, sources: [], provenance: {} };
+    checkSettings(cwd) {
+      if (options.async) return Promise.resolve().then(() => readSettings(cwd));
+      return readSettings(cwd);
     },
-    async accountInfo(incarnationId) {
-      if (options.accountInfo) return options.accountInfo(incarnationId);
-      const allowed = typeof options.auth === 'function' ? options.auth() : options.auth !== false;
-      return options.account || (allowed ? subscription() : { ...subscription(), tokenSource: 'env' });
+    accountInfo(incarnationId) {
+      if (options.async) return Promise.resolve().then(() => readAccount(incarnationId));
+      return readAccount(incarnationId);
     },
     start({
       incarnation_id,
@@ -77,11 +87,11 @@ function createFakeAdapter(options = {}) {
         session_id
       });
       options.identityProbe?.register(incarnation_id, identity);
-      if (!options.noInitialization) queueMicrotask(() => {
+      const initialize = () => {
         if (options.initializationFailed) { emit(incarnation_id, 'initialization_failed', { code: 'initialization_failed' }); return; }
         emit(incarnation_id, 'initialization', {
           initialization: {
-            account: options.account || (options.auth === false ? { ...subscription(), tokenSource: 'env' } : subscription()),
+            account: configuredAccount(),
             pid: identity.pid,
             claude_code_version: pin.cliVersion,
             current_permission_mode: 'default',
@@ -89,7 +99,11 @@ function createFakeAdapter(options = {}) {
             ...options.initialization
           }
         });
-      });
+      };
+      if (!options.noInitialization) {
+        if (options.async) queueMicrotask(initialize);
+        else initialize();
+      }
       return {
         ...identity,
         claude_session_id: resume ? claude_session_id : `fake-conversation-${session_id}`
@@ -129,7 +143,7 @@ function createFakeAdapter(options = {}) {
           child.initialized = true;
           emit(message.id, 'system_init', {
             capabilities: options.capabilities || ['msg_lifecycle_v1', 'interrupt_receipt_v1'],
-            apiKeySource: options.apiKeySource ?? 'none'
+            apiKeySource: Object.hasOwn(options, 'apiKeySource') ? options.apiKeySource : 'none'
           });
         }
         if (!options.omitLifecycle) {
