@@ -149,3 +149,101 @@ S1-a2: 호스트 잠금·동시 기동·FD 상속·소켓·handshake·유휴 종
 | 3 | R3-03 completed interrupt result cannot release an existing permanent barrier | 기존 통과 / 일시 장벽 해소가 survivor 영구 장벽까지 해제 |
 
 테스트는 가짜 자체의 결정·실행·close·interrupt 로그로 효과 횟수를 확인한다. npm test는 이번 라운드 지시에 따라 호스트에서 실행한다.
+
+## S1-a2 — 세션 호스트 프로세스 껍데기
+
+설계 v5.6 §3.1·§3.2·§4.1·§5-6·§8.1에 맞춰 CommonJS 프로세스 계층을 추가했다.
+서버 라우트 연결, 실제 SDK 설치·실행, 기존 인증 서비스와 package.json 변경은 하지 않는다.
+
+### 잠금과 부팅
+
+`lock.js`는 **flock 대신 SQLite 배타 잠금**을 사용한다.
+`host.lock`을 better-sqlite3로 열고 `busy_timeout=0`, `locking_mode=EXCLUSIVE`,
+`BEGIN EXCLUSIVE` 쓰기 트랜잭션을 커밋한 뒤 연결을 프로세스 수명 동안 유지한다.
+SQLite EXCLUSIVE 모드는 커밋 뒤에도 배타 잠금을 유지한다.
+의미는 비차단 배타, 평생 보유, 사망 시 커널 해제, 자식 비상속으로 동일하다.
+잠금 파일은 삭제하지 않는다. 파일을 지웠다 다시 만드는 방식의 서로 다른 inode 잠금 경쟁을 피한다.
+SQLite의 프로세스 소유 잠금과 exec 시 닫히는 파일 descriptor, Node의 stdio 외 descriptor 차단을 사용한다.
+장수 Node 자식이 살아 있어도 소유자 SIGKILL 뒤 새 호스트가 잠금을 잡는 X 테스트로 비상속을 검증한다.
+같은 테스트에서 기존 소유자가 살아 있을 때 새 호스트가 반드시 실패하는 음성 대조도 둔다.
+자식이 배타권을 유지하도록 바꾸면 소유자 사망 뒤 replacement readiness 단언이 실패한다.
+
+잠금 DB를 열 부모 디렉터리가 필요하므로 디렉터리 생성·0700 설정은 잠금 획득 직전에 한다.
+기존 소켓 제거, host.db 열기·recover, listen·0600, capability 교체는 잠금 보유자만 한다.
+capability는 32바이트 랜덤 hex이고 0600 임시 파일을 rename한다.
+argv·env에 capability를 넣지 않는다. SIGTERM/SIGINT는 active 소유 세션이 있으면 무시하고
+고정 로그 코드만 남긴다. SIGHUP도 무시한다. 정상 종료에서 process.exit를 호출하지 않는다.
+
+### 프로토콜과 유휴 종료
+
+`protocol.js`는 Duplex 스트림에 연결하는 줄 단위 JSON 처리기다.
+capability 비교는 SHA-256으로 길이를 고정한 뒤 timingSafeEqual을 사용한다.
+잘못된 capability, hello 이전 요청, JSON 오류, 1 MiB 초과 줄은 응답 없이 닫는다.
+submit 반환 뒤에만 accepted를 쓰고, 예외는 고정 `storage_unavailable` 또는 `invalid_request`만 보낸다.
+lookup·snapshot·events_since의 결과는 result 필드로 감싼 코어 원본이다.
+요청 본문·도구 입력·account·capability·예외 원문은 로그에 쓰지 않는다.
+
+유휴 시 새 연결을 막고 기존 연결을 접수 거부 상태로 전환한 뒤 미응답 요청에 not_accepted를 보낸다.
+응답 write가 끝난 뒤 스트림을 닫아 not_accepted를 즉시 destroy로 버리지 않는다.
+큐·소유 세션을 다시 확인하여 일이 생겼으면 다시 listen한다.
+활동이 있으면 유휴 시각을 초기화한다. 주입 clock으로 시간을 읽고 실제 unref 타이머는 유휴 검사에만 쓴다.
+`before_idle_drain` fault는 fixture에서만 파일 기반 대기를 반환한다.
+이 지점에서 새 요청을 보내 not_accepted와 새 호스트 재시도를 결정적으로 검증한다.
+제품 main은 fault·fake 환경 설정을 받지 않는다.
+
+### 코어 공개 메서드 추가 이유
+
+기존 submit·recover·상태 전이 구현은 변경하지 않고 반환 객체에 다음 공개 메서드만 추가했다.
+
+- `lookup(requestKey)`: 별칭·delivery·control·삭제 tombstone을 같은 read transaction에서 조회한다.
+  서버가 DB를 직접 열거나 조회를 위해 submit을 호출하지 않도록 한다.
+- `activity()`: active 소유 세션 수와 동기 큐 수를 제공한다. private DB·큐를 프로세스 계층에 노출하지 않는다.
+- `submitUnavailable(request)`: 기본 unavailableAdapter 전용 공개 진입이다.
+  기존 submit의 검증·멱등·durable 접수·spawn 실패 처리를 그대로 거친다.
+  start/resume의 spawn_failed만 adapter_unavailable로 저장하고 응답한다.
+  이는 기존 submit의 고정 spawn_failed 동작을 바꾸지 않으면서 제품 stub의 요구 reason을 제공하기 위한 것이다.
+  원래 core submit과 일반 어댑터 경로의 동작은 그대로다.
+
+### 서버 기동기와 재연결
+
+`ensureHost`는 capability 파일·hello를 먼저 시도하고 실패하면 detached·stdio ignore·unref로 호스트를 띄운다.
+부모 env에서 모든 PALANTIR_*와 CLAUDE_CODE_OAUTH_TOKEN을 무조건 제거하고,
+OAuth 형식 ANTHROPIC_API_KEY도 authResolver.isClaudeOAuthTokenValue로 판별해 제거한다.
+stripClaudeOAuthEnv의 레거시 우회 경로는 사용하지 않는다.
+레거시 스위치가 정확히 1이면 launcher와 제품 main 모두 legacy_credential_mode로 거부한다.
+동시 기동의 패자는 host_locked로 종료하고 launcher는 기한 내 이긴 호스트에 연결한다.
+
+`createClient`는 connect 이후 submit·lookup·snapshot·eventsSince를 id로 매칭한다.
+연결 상실·응답 기한 초과의 submit은 acceptance_unknown이며 원래 request_key를 보존한다.
+호스트 재기동 후 기존 client.reconcile()을 호출하면 재연결하고 보존한 키들을 lookup한다.
+결과는 request_key → 결과 Map이며 found:false인 항목만 호출자가 같은 키로 재제출한다.
+hostBootId와 hostBootChanged로 부팅 신원 변화를 관측한다. 자동 효과 재전송은 하지 않는다.
+
+### 검증과 남은 실행
+
+P 테스트는 실제 소켓 없이 Duplex로 잘못된 인증·hello 순서·durable 응답 순서·저장 오류·줄 제한·
+lookup/snapshot/replay·UTF-8 분할·유휴 not_accepted를 검증한다.
+정책 테스트는 환경 제거·레거시 거부·기본 어댑터 실패 reason·삭제 tombstone·별칭·SQLite 잠금을 검증한다.
+기존 상태 기계 102개와 P/정책 17개는 통과했다.
+전체 명령은 129개 중 119개 통과, X 10개 실패, skip 0이다.
+
+샌드박스에서 실행 불가한 테스트 목록(`session-host-process-lifecycle.test.js`):
+
+1. 동시 호스트·패자의 inode/capability 보존.
+2. 장수 자식 생존 중 잠금 비상속.
+3. launcher 부모 SIGKILL 뒤 호스트 신원·snapshot 유지.
+4. launcher 부모 SIGTERM 뒤 호스트 신원·snapshot 유지.
+5. launcher 부모 프로세스 그룹 SIGHUP 뒤 호스트 신원·snapshot 유지.
+6. before_accepted_reply SIGKILL 뒤 boot 변경·lookup·멱등 재제출·효과 1회.
+7. 유휴 drain 중 not_accepted 뒤 새 호스트 재시도·효과 1회.
+8. active 소유 세션의 idle/SIGTERM 생존과 소유 세션 0개 시 자동 종료.
+9. 디렉터리·파일 mode와 ps -E -ww로 capability/env/argv 미노출 확인.
+10. 소유 세션 0개에서 SIGTERM 정리·잠금 해제.
+
+9개는 신원 확인용 /bin/ps 실행 자체가 EPERM이다.
+9번은 소켓 bind가 EPERM이어서 launcher가 host_start_timeout으로 실패한다.
+별도 fixture 직접 기동으로 종료 코드 1·stderr EPERM도 확인했다.
+보안 검사를 skip하거나 실패를 성공으로 바꾸지 않았다. 호스트 macOS에서 이 10개를 다시 실행해야 한다.
+각 테스트는 9.5초 제한과 기한 있는 짧은 조건 polling을 사용한다.
+직접 생성한 ChildProcess handle 또는 ps 시작시각 신원을 확인한 PID만 정리하고 runtimeDir을 제거한다.
+npm test는 지시대로 실행하지 않았다. 호스트 전체 회귀 검증이 남아 있다.
