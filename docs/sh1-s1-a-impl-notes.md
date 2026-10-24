@@ -378,3 +378,50 @@ session_deleted=0 tombstone의 종결 처리 테스트 3개도 통과했다.
 기존·P·정책·클라이언트 테스트를 포함한다. git diff --check도 통과했다.
 X 14개는 이번 턴에 실행하지 않았다. 변경 후 전체 예상 167개는 호스트에서 재검증한다.
 npm test와 commit/push는 실행하지 않았다.
+
+## S1-b1 — SDK 없는 판정·구성 부품
+
+SDK 설치·실행 및 기존 코어 연결 없이 CommonJS 순수 게이트, env 구성, argv 검사, ps 신원 조회를 추가했다.
+고정 버전·해시·Team ID·구독 유형·capability·기한은 pin.js의 동결 객체와 동결 배열에 둔다.
+account는 실측된 email·organization·subscriptionType·apiProvider만 허용한다.
+인증 출처는 값이 undefined여도 키가 존재하면 거부한다. 미지 필드도 거부한다.
+email·organization은 선택 문자열이며 판정 결과와 로그에 넣지 않는다.
+재확인은 유효한 구독 account의 전체 값이 같아야 통과한다. 실패·미지 값·메타데이터 변경도 거부한다.
+S1-b2는 최초 account 스냅샷을 복사하여 보관하고 조회 예외를 실패 입력으로 전달해야 한다.
+
+resolveSettingsChecked는 함수 없음·예외·10초 정체·구조 이상을 settings_check_failed로 돌려준다.
+clock은 밀리초 반환 함수, timers는 setTimeout/clearTimeout 객체로 주입한다.
+성공 결과는 warnings, hookSources, mcpSources를 포함한다. 출처는 provenance의 path 필드만 투영한다.
+인증 설정 거부의 detail도 provenance.env 또는 provenance.apiKeyHelper의 파일 경로만 포함한다.
+설정 값과 전체 sources 객체는 화면 결과에 복사하지 않는다.
+시작 확인 화면은 PermissionRequest 경고와 이 경로 목록을 표시하고 실제 시작 여부를 정해야 한다.
+
+incarnation ID는 UUID와 실측 inc_spike_sub를 수용하는 영숫자 시작의 영숫자·밑줄·하이픈 1~128자로 제한한다.
+최종 env는 객체이며 중복 키를 표현할 수 없다. 표지 own key 하나·일치 값과 나머지 PALANTIR_* 부재를 검사한다.
+SDK 세 변수와 기본 열 변수만 복사하고 인증 변수는 어느 입력에서도 복사하지 않는다.
+argv는 고정 절대 경로의 realpath와 스트리밍 SHA-256을 검사한다.
+정확히 하나의 --permission-mode=default를 요구하며 다른 permission-mode 표현과 -- 구분자는 보수적으로 거부한다.
+Team ID는 이번 부품에서 고정값만 제공한다. 설치 시 codesign 확인과 경로 선택은 S1-b2에서 연결해야 한다.
+
+ps는 /bin/ps만 실행하고 LC_ALL=C로 시작시각 형식을 고정한다.
+표지는 공백 토큰 전체 일치로 비교한다. 별도 ppid 조회로 표지 프로세스 중 표지 부모가 없는 유일 루트를 본체로 정한다.
+루트가 여럿이거나 목록 형식 이상·중복 pid·시작시각/부모 조회 실패·부분 파싱 실패면 query_failed다.
+listMarkedDescendants는 같은 probe에서 findMarked로 확인한 본체 신원만 제외한다.
+재시작 직후 본체 신원을 아직 모르면 모든 표지 프로세스를 반환한다. 생존 하위를 본체로 오인해 숨기지 않는 보수적 선택이다.
+본체 종료 후 남은 표지 프로세스도 계속 반환한다. 새 probe의 findMarked는 생존 루트를 새 본체로 해석할 수 있으므로,
+S1-b2 복구는 저장한 본체 신원을 check로 먼저 판정하고 하위 확인에는 목록 메서드를 사용해야 한다.
+ps 조회와 신호 사이의 커널 수준 원자성은 제공하지 않는다. 신호 직전 시작시각 재대조만 수행한다.
+
+macOS의 PID 없음 후보 신호는 ps 종료 코드 1·빈 stdout·빈 stderr·signal/code 없음으로만 제한했다.
+성공 코드의 빈 출력, 권한 오류와 그 밖의 실패는 사망으로 바꾸지 않는다.
+이번 샌드박스에서 /bin/ps 직접 실행은 operation not permitted로 막혀 PID 없음 동작을 실제 확인하지 못했다.
+픽스처는 이 구분을 고정하며 실제 자식·손자 통합 테스트는 호스트에서 반드시 재실행해야 한다.
+macOS 실측에서 다른 신호가 나오면 위 부재 판정을 실측에 맞춰 고쳐야 한다. 지금은 확인 완료를 주장하지 않는다.
+npm test는 사용자 지시에 따라 호스트가 실행한다.
+
+최종 지정 명령 `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-*.test.js` 결과:
+tests 185, pass 170, fail 15, cancelled 0, skipped 0.
+신규 18개 중 순수/픽스처 17개 통과, 실제 ps 통합 1개는 샌드박스 조회 제한으로 실패했다.
+기존 프로세스 X 테스트 14개도 실패했다. 13개는 spawnSync /bin/ps EPERM,
+나머지 1개는 기존 기록과 같은 host_start_timeout이다. 나머지 기존 153개는 통과했다.
+실패를 skip이나 성공으로 바꾸지 않았다. 호스트에서 전체 명령과 npm test를 실행해야 한다.
