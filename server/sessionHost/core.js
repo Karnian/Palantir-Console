@@ -1,0 +1,1256 @@
+'use strict';
+
+const { randomUUID, createHash } = require('node:crypto');
+const { openStore } = require('./store');
+const { SimulatedCrash } = require('./faults');
+const {
+  getEndedPromptOutcome,
+  createToolDecision,
+  getCompletedPromptOutcome,
+  isToolDecisionObserved,
+  getToolResultReason,
+  getRecoveredIncarnationState,
+  getRecoveredStartResult
+} = require('./stateRules');
+const CONTROLS = new Set(['start', 'resume', 'stop', 'close', 'handoff', 'delete']);
+const KINDS = new Set([...CONTROLS, 'prompt', 'tool_decision', 'question_answer', 'interrupt']);
+const DAY = 86400000;
+const INTERRUPT_RECEIPT_TIMEOUT_MS = 10000;
+
+function canonical(value) {
+  if (Array.isArray(value)) {
+    return value.map(canonical);
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value).sort().map(propertyName => [propertyName, canonical(value[propertyName])]));
+  }
+  return value;
+}
+const hash = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
+
+function createHostCore({
+  dbPath,
+  adapter,
+  identityProbe,
+  clock = Date.now,
+  hostBootId = randomUUID(),
+  faults,
+  readHooks
+} = {}) {
+  const now = typeof clock === 'function' ? clock : () => clock.now();
+  const store = openStore(dbPath, {
+    now,
+    faults,
+    readHooks
+  });
+  const database = store.db;
+  const queues = new Map();
+  const signals = new Map();
+  let crashed = false;
+  const getRow = (sql, ...parameters) => database.prepare(sql).get(...parameters);
+  const getRows = (sql, ...parameters) => database.prepare(sql).all(...parameters);
+  const execute = (sql, ...parameters) => database.prepare(sql).run(...parameters);
+  const injectFault = point => {
+    try {
+      faults?.hit?.(point);
+    } catch (error) {
+      if (error instanceof SimulatedCrash) {
+        crashed = true;
+      }
+      throw error;
+    }
+  };
+  const writeTransaction = operation => store.write(operation);
+  const recordEvent = (sessionId, incarnationId, type, data) => store.event(sessionId, incarnationId, type, data);
+  const getIncarnation = id => getRow('SELECT * FROM incarnations WHERE id=?', id);
+  const getSession = id => getRow('SELECT * FROM owned_sessions WHERE id=?', id);
+  const getLatestIncarnation = id => getRow('SELECT * FROM incarnations WHERE session_id=? ORDER BY rowid DESC LIMIT 1', id);
+  const getDelivery = id => getRow('SELECT * FROM deliveries WHERE id=?', id);
+  const getControl = key => getRow('SELECT * FROM control_requests WHERE request_key=?', key);
+
+  // §4.1/§4.3: replay must never expose a transition without its durable state.
+  function transitionRow(table, key, from, values, sessionId, incarnationId, guard = '') {
+    const column = table === 'control_requests' ? 'request_key' : 'id';
+    const keys = Object.keys(values);
+    const result = execute(
+      `UPDATE ${table} SET ${keys.map(propertyName => `${propertyName}=?`).join(',')}` +
+        ` WHERE ${column}=? AND state IN (${from.map(() => '?').join(',')}) ${guard}`,
+      ...keys.map(propertyName => values[propertyName]),
+      key,
+      ...from
+    );
+    if (result.changes) {
+      const seq = recordEvent(sessionId, incarnationId, 'transition', {
+        table,
+        id: key,
+        ...values
+      });
+      if (table === 'deliveries' || table === 'control_requests') {
+        execute(`UPDATE ${table} SET seq=?,updated_at=? WHERE ${column}=?`, seq, now(), key);
+      }
+    }
+    return result.changes;
+  }
+  const transitionDelivery = (delivery, from, values) => transitionRow(
+    'deliveries',
+    delivery.id,
+    from,
+    values,
+    delivery.session_id,
+    delivery.incarnation_id,
+    Object.hasOwn(values, 'outcome') ? 'AND outcome IS NULL' : ''
+  );
+  const transitionIncarnation = (incarnation, from, values) => transitionRow(
+    'incarnations',
+    incarnation.id,
+    from,
+    values,
+    incarnation.session_id,
+    incarnation.id
+  );
+  const transitionControl = (controlRequest, values) => transitionRow(
+    'control_requests',
+    controlRequest.request_key,
+    ['accepted'],
+    values,
+    controlRequest.session_id,
+    controlRequest.incarnation_id
+  );
+
+  function transitionSession(session, values) {
+    return transitionRow(
+      'owned_sessions',
+      session.id,
+      [session.state],
+      values,
+      session.id,
+      null
+    );
+  }
+
+  function transitionToolRequest(toolRequest, from, values, incarnation) {
+    return transitionRow(
+      'tool_requests',
+      toolRequest.id,
+      from,
+      values,
+      incarnation.session_id,
+      incarnation.id
+    );
+  }
+
+  function enqueue(sessionId, operation) {
+    if (crashed) {
+      throw new SimulatedCrash('core_crashed');
+    }
+    if (queues.has(sessionId)) {
+      queues.get(sessionId).push(operation);
+      return;
+    }
+    const commandQueue = [operation];
+    queues.set(sessionId, commandQueue);
+    try {
+      while (commandQueue.length) {
+        commandQueue.shift()();
+      }
+    } finally {
+      queues.delete(sessionId);
+    }
+  }
+
+  // §4.3: queued prompts have no provider effect and must not block queue draining.
+  function isIdle(incarnation) {
+    return incarnation?.state === 'alive' && incarnation.host_boot_id === hostBootId && !incarnation.attribution_uncertain &&
+      !incarnation.interrupt_unknown && !getRow("SELECT id FROM deliveries WHERE incarnation_id=? AND kind='prompt' AND state IN " +
+        "('sending','written','provider_observed') AND outcome IS NULL LIMIT 1", incarnation.id);
+  }
+
+  function passesAdapterCheck(method, ...parameters) {
+    try {
+      const checkResult = adapter[method]?.(...parameters);
+      return checkResult === true;
+    } catch {
+      return false;
+    }
+  }
+
+  function areDescendantsClear(incarnation) {
+    if (!incarnation) {
+      return true;
+    }
+    try {
+      const probeResult = identityProbe.listMarkedDescendants(incarnation.id);
+      return probeResult.status === 'ok' && probeResult.pids.length === 0;
+    } catch {
+      return false;
+    }
+  }
+
+  function checkIdentity(incarnation) {
+    try {
+      return identityProbe.check(incarnation.pid, incarnation.pid_started_at);
+    } catch {
+      return 'query_failed';
+    }
+  }
+
+  function markAttributionUncertain(incarnation, permanent = true) {
+    // 1 is an irreversible mixed-turn barrier; 2 can be resolved by that UUID's evidence.
+    transitionIncarnation(incarnation, ['alive', 'orphaned'], {
+      attribution_uncertain: permanent || getIncarnation(incarnation.id).attribution_uncertain === 1 ? 1 : 2
+    });
+  }
+
+  function resolveAttributionCause(delivery) {
+    if (!delivery.attribution_pending) {
+      return;
+    }
+    transitionDelivery(delivery, ['sending', 'written', 'unknown', 'provider_observed', 'completed'], {
+      attribution_pending: 0
+    });
+    const incarnation = getIncarnation(delivery.incarnation_id);
+    if (incarnation.attribution_uncertain === 2 && !getRow('SELECT id FROM deliveries WHERE incarnation_id=? AND attribution_pending=1 LIMIT 1',
+      incarnation.id)) {
+      transitionIncarnation(incarnation, ['alive', 'orphaned'], {
+        attribution_uncertain: 0
+      });
+    }
+  }
+
+  function taintDelivery(delivery) {
+    // §4.3/§4.5: an ambiguous call can still execute later, unlike a finished tool.
+    if (delivery.state === 'unknown' && ['tool_finished', 'tool_finished_error'].includes(delivery.reason)) {
+      return;
+    }
+    transitionDelivery(delivery, ['sending', 'written', 'unknown'], {
+      tainted: 1
+    });
+  }
+
+  function taintPendingDecisions(incarnation) {
+    for (const delivery of getRows("SELECT * FROM deliveries WHERE incarnation_id=? AND kind IN ('tool_decision'," +
+      "'question_answer') AND state IN ('sending','written','unknown')", incarnation.id)) {
+      taintDelivery(delivery);
+    }
+  }
+
+  function finishIncarnationDeliveries(incarnation) {
+    for (const delivery of getRows('SELECT * FROM deliveries WHERE incarnation_id=?', incarnation.id)) {
+      if (['sending', 'written'].includes(delivery.state)) {
+        transitionDelivery(delivery, ['sending', 'written'], {
+          state: 'unknown',
+          reason: 'host_lost'
+        });
+      }
+      if (delivery.state === 'queued') {
+        transitionDelivery(delivery, ['queued'], {
+          state: 'expired',
+          reason: 'incarnation_ended'
+        });
+      }
+      if (delivery.kind === 'prompt' && delivery.outcome === null && ['sending', 'written', 'provider_observed', 'unknown'].includes(delivery.state)) {
+        const turnResult = delivery.result_json && JSON.parse(delivery.result_json);
+        transitionDelivery(delivery, ['sending', 'written', 'provider_observed', 'unknown'], {
+          outcome: getEndedPromptOutcome(turnResult),
+          ...(turnResult?.is_error ? {
+            reason: turnResult.subtype || null
+          } : {})
+        });
+      }
+    }
+    for (const toolRequest of getRows("SELECT * FROM tool_requests WHERE incarnation_id=? AND state='pending'", incarnation.id)) {
+      transitionToolRequest(toolRequest, ['pending'], {
+        state: 'expired'
+      }, incarnation);
+    }
+  }
+
+  function drainPromptQueue(sessionId) {
+    const incarnation = getLatestIncarnation(sessionId);
+    if (!isIdle(incarnation) || incarnation.close_after_turn) {
+      return;
+    }
+    const delivery = getRow("SELECT * FROM deliveries WHERE incarnation_id=? AND kind='prompt' AND state='queued' " + "ORDER BY rowid LIMIT 1", incarnation.id);
+    if (delivery) {
+      dispatchDelivery(delivery.id);
+    }
+  }
+
+  function dispatchDelivery(id) {
+    let delivery = getDelivery(id);
+    let incarnation = getIncarnation(delivery.incarnation_id);
+    if (delivery.state !== 'queued') {
+      return;
+    }
+    if (delivery.kind === 'prompt' && incarnation?.state === 'alive' && !isIdle(incarnation) && !incarnation.attribution_uncertain &&
+      !incarnation.interrupt_unknown && !incarnation.close_after_turn) {
+      return;
+    }
+    let decision;
+    writeTransaction(() => {
+      const toolRequest = delivery.target_tool_use_id && getRow('SELECT * FROM tool_requests WHERE incarnation_id=? AND tool_use_id=?',
+        incarnation?.id, delivery.target_tool_use_id);
+      let reason;
+      if (!incarnation || incarnation.state !== 'alive' || incarnation.host_boot_id !== hostBootId || getSession(delivery.session_id).state !== 'active') {
+        reason = 'not_controllable';
+      } else if (delivery.kind === 'prompt' && (!isIdle(incarnation) || incarnation.close_after_turn)) {
+        reason = 'not_idle';
+      } else if (delivery.kind === 'prompt' && !passesAdapterCheck('authCheck', incarnation.id)) {
+        reason = 'auth_failed';
+      } else if (['tool_decision', 'question_answer'].includes(delivery.kind) && toolRequest?.state !== 'pending') {
+        reason = 'tool_not_pending';
+      }
+      if (reason) {
+        transitionDelivery(delivery, ['queued'], {
+          state: 'rejected',
+          reason
+        });
+        return;
+      }
+      if (toolRequest) {
+        const body = JSON.parse(delivery.body || '{}') || {};
+        decision = createToolDecision(delivery, body);
+        transitionToolRequest(toolRequest, ['pending'], {
+          state: 'decided',
+          decision: JSON.stringify(decision),
+          answer_delivery_id: delivery.id
+        }, incarnation);
+      }
+      if (delivery.kind === 'prompt') {
+        transitionIncarnation(incarnation, ['alive'], {
+          turn_gen: incarnation.turn_gen + 1
+        });
+        delivery.turn_gen = incarnation.turn_gen + 1;
+      } else {
+        delivery.turn_gen = incarnation.turn_gen;
+      }
+      transitionDelivery(delivery, ['queued'], {
+        state: 'sending',
+        turn_gen: delivery.turn_gen
+      });
+      if (delivery.kind === 'interrupt') {
+        taintPendingDecisions(incarnation);
+        for (const toolRequest of getRows("SELECT * FROM tool_requests WHERE incarnation_id=? AND state='pending'", incarnation.id)) {
+          transitionToolRequest(toolRequest, ['pending'], {
+            state: 'cancelled'
+          }, incarnation);
+        }
+      }
+    });
+    delivery = getDelivery(id);
+    if (delivery.state !== 'sending') {
+      return;
+    }
+    if (decision) {
+      injectFault('after_decided_commit');
+    }
+    injectFault('after_sending_commit');
+    // §4.5: no await may separate durable intent, live SDK facts, and the effect.
+    const facts = adapter.facts(incarnation.id, delivery.target_tool_use_id);
+    const signal = signals.get(`${incarnation.id}:${delivery.target_tool_use_id}`);
+    if (getIncarnation(incarnation.id).state !== 'alive' || facts.exited || facts.aborted || signal?.aborted) {
+      writeTransaction(() => transitionDelivery(delivery, ['sending'], {
+        state: 'cancelled',
+        reason: 'effect_invalidated'
+      }));
+      return;
+    }
+    try {
+      if (delivery.kind === 'prompt') {
+        adapter.send(incarnation.id, delivery.message_uuid, JSON.parse(delivery.body));
+      } else if (delivery.kind === 'interrupt') {
+        adapter.interrupt(incarnation.id, delivery.id);
+      } else {
+        adapter.decide(incarnation.id, delivery.target_tool_use_id, decision);
+      }
+    } catch (error) {
+      if (error instanceof SimulatedCrash) {
+        throw error;
+      }
+      writeTransaction(() => {
+        if (transitionDelivery(delivery, ['sending', 'written'], {
+          state: 'unknown',
+          reason: 'effect_failed',
+          attribution_pending: 1
+        })) {
+          markAttributionUncertain(incarnation, false);
+        }
+      });
+      return;
+    }
+    injectFault('after_effect_before_written');
+    writeTransaction(() => {
+      transitionDelivery(delivery, ['sending'], {
+        state: 'written'
+      });
+    });
+  }
+
+  function tick() {
+    if (crashed) {
+      throw new SimulatedCrash('core_crashed');
+    }
+    writeTransaction(() => {
+      for (const delivery of getRows("SELECT * FROM deliveries WHERE kind='interrupt' AND state='written' AND updated_at<=?", now(
+        ) - INTERRUPT_RECEIPT_TIMEOUT_MS)) {
+        transitionDelivery(delivery, ['written'], {
+          state: 'unknown',
+          reason: 'interrupt_unconfirmed'
+        });
+        transitionIncarnation(getIncarnation(delivery.incarnation_id), ['alive'], {
+          interrupt_unknown: 1
+        });
+      }
+    });
+  }
+
+  function finishControlRequest(key) {
+    const controlRequest = getControl(key);
+    const incarnation = controlRequest.incarnation_id && getIncarnation(controlRequest.incarnation_id);
+    if (controlRequest.state !== 'accepted') {
+      return;
+    }
+    if (incarnation && !['exited', 'never_started'].includes(incarnation.state)) {
+      return;
+    }
+    writeTransaction(() => transitionControl(controlRequest, {
+      stage: 'exit_confirmed'
+    }));
+    if (!areDescendantsClear(incarnation)) {
+      writeTransaction(() => transitionControl(controlRequest, {
+        state: 'blocked',
+        reason: 'subprocess_remaining'
+      }));
+      return;
+    }
+    writeTransaction(() => {
+      transitionControl(controlRequest, {
+        stage: 'subprocess_checked'
+      });
+      if (incarnation) {
+        transitionIncarnation(incarnation, ['exited', 'never_started'], {
+          end_reason: controlRequest.kind === 'stop' ? 'user_restart' : 'user_stop'
+        });
+      }
+      if (controlRequest.kind !== 'stop') {
+        transitionSession(getSession(controlRequest.session_id), {
+          state: controlRequest.kind === 'handoff' ? 'handed_off' : 'closed'
+        });
+      }
+      transitionControl(controlRequest, {
+        state: 'done',
+        stage: 'done'
+      });
+    });
+  }
+
+  // §4.6: deleting stays durable until scrubbing and WAL maintenance both finish.
+  function deleteSessionData(sessionId) {
+    writeTransaction(() => {
+      for (const requestAlias of getRows("SELECT a.*,d.state FROM request_aliases a JOIN deliveries d ON d.id=a.target_delivery_id " +
+        "WHERE a.session_id=?", sessionId)) {
+        execute(
+          'INSERT OR REPLACE INTO request_tombstones VALUES(?,?,?,?,?)',
+          requestAlias.request_key,
+          requestAlias.fingerprint,
+          requestAlias.state,
+          1,
+          now() + 30 * DAY
+        );
+      }
+      execute('DELETE FROM request_aliases WHERE session_id=?', sessionId);
+      for (const delivery of getRows('SELECT * FROM deliveries WHERE session_id=?', sessionId)) {
+        execute(
+          'INSERT OR REPLACE INTO request_tombstones VALUES(?,?,?,?,?)',
+          delivery.request_key,
+          delivery.fingerprint,
+          delivery.state,
+          1,
+          now() + 30 * DAY
+        );
+      }
+      execute('DELETE FROM events WHERE session_id=?', sessionId);
+      execute('DELETE FROM tool_requests WHERE incarnation_id IN (SELECT id FROM incarnations WHERE session_id=?)', sessionId);
+      execute('DELETE FROM deliveries WHERE session_id=?', sessionId);
+      for (const incarnation of getRows('SELECT * FROM incarnations WHERE session_id=?', sessionId)) {
+        transitionIncarnation(incarnation, [incarnation.state], {
+          host_boot_id: '',
+          pid: null,
+          pid_started_at: null,
+          sdk_version: null,
+          cli_path: null,
+          cli_sha256: null,
+          account_snapshot: null,
+          capabilities: null,
+          started_at: null,
+          ended_at: null,
+          end_reason: null,
+          turn_gen: 0,
+          attribution_uncertain: 0,
+          interrupt_unknown: 0,
+          close_after_turn: 0
+        });
+      }
+      transitionSession(getSession(sessionId), {
+        cwd: null,
+        title: null,
+        claude_session_id: null
+      });
+    });
+    try {
+      database.pragma('wal_checkpoint(TRUNCATE)');
+      database.exec('VACUUM');
+      // VACUUM itself writes WAL frames; flush those before declaring deletion.
+      database.pragma('wal_checkpoint(TRUNCATE)');
+    } catch (error) {
+      // Route maintenance failures through the same fail-closed storage latch.
+      writeTransaction(() => {
+        throw error;
+      });
+    }
+    writeTransaction(() => {
+      transitionSession(getSession(sessionId), {
+        state: 'deleted'
+      });
+      for (const controlRequest of getRows("SELECT * FROM control_requests WHERE session_id=? AND kind='delete' AND state='accepted'", sessionId)) {
+        transitionControl(controlRequest, {
+          stage: 'done',
+          state: 'done'
+        });
+      }
+    });
+  }
+
+  // §4.4: each effect follows its durable stage so recovery never repeats it.
+  function executeControlRequest(key) {
+    let controlRequest = getControl(key);
+    let incarnation = controlRequest.incarnation_id && getIncarnation(controlRequest.incarnation_id);
+    if (controlRequest.state !== 'accepted') {
+      return;
+    }
+    if (controlRequest.kind === 'delete') {
+      injectFault('after_deleting_commit');
+      deleteSessionData(controlRequest.session_id);
+      return;
+    }
+    if (controlRequest.kind === 'start' || controlRequest.kind === 'resume') {
+      writeTransaction(() => transitionControl(controlRequest, {
+        stage: 'spawn_sent'
+      }));
+      injectFault('after_spawn_sent_before_spawn');
+      let spawnIdentity;
+      try {
+        spawnIdentity = adapter.start({
+          incarnation_id: incarnation.id,
+          session_id: controlRequest.session_id,
+          cwd: getSession(controlRequest.session_id).cwd,
+          ...(controlRequest.kind === 'resume' ? {
+            resume: true,
+            claude_session_id: getSession(controlRequest.session_id).claude_session_id
+          } : {})
+        });
+      } catch (error) {
+        if (error instanceof SimulatedCrash) {
+          throw error;
+        }
+        writeTransaction(() => {
+          transitionIncarnation(incarnation, ['spawning'], {
+            state: 'never_started'
+          });
+          transitionControl(controlRequest, {
+            state: 'failed',
+            reason: 'spawn_failed'
+          });
+        });
+        return;
+      }
+      injectFault('after_spawn_before_identity');
+      writeTransaction(() => {
+        transitionIncarnation(incarnation, ['spawning'], {
+          state: 'alive',
+          pid: spawnIdentity.pid,
+          pid_started_at: spawnIdentity.startedAt,
+          started_at: now()
+        });
+        // Owned session ids never stand in for provider conversation identities.
+        if (typeof spawnIdentity.claude_session_id === 'string' && spawnIdentity.claude_session_id.length) {
+          transitionSession(getSession(controlRequest.session_id), {
+            claude_session_id: spawnIdentity.claude_session_id
+          });
+        }
+      });
+      if (!passesAdapterCheck('authCheck', incarnation.id)) {
+        adapter.close(incarnation.id);
+        if (getIncarnation(incarnation.id).state !== 'exited') {
+          if (checkIdentity(getIncarnation(incarnation.id)) === 'match') {
+            adapter.signal?.(incarnation.id, 'SIGTERM');
+          }
+          if (getIncarnation(incarnation.id).state !== 'exited') {
+            writeTransaction(() => transitionIncarnation(getIncarnation(incarnation.id), ['alive'], {
+              state: 'liveness_unknown'
+            }));
+          }
+        }
+        writeTransaction(() => transitionControl(controlRequest, {
+          state: 'failed',
+          reason: 'auth_failed'
+        }));
+      } else {
+        writeTransaction(() => transitionControl(controlRequest, {
+          stage: 'done',
+          state: 'done'
+        }));
+      }
+      return;
+    }
+    if (!incarnation || ['exited', 'never_started'].includes(incarnation.state)) {
+      finishControlRequest(key);
+      return;
+    }
+    if (incarnation.state === 'orphaned') {
+      const verdict = checkIdentity(incarnation);
+      if (verdict !== 'match') {
+        writeTransaction(() => transitionControl(controlRequest, {
+          state: 'failed',
+          reason: verdict === 'query_failed' ? 'liveness_unknown' : 'identity_mismatch'
+        }));
+        return;
+      }
+      writeTransaction(() => transitionControl(controlRequest, {
+        stage: 'signal_sent'
+      }));
+      injectFault('after_close_sent');
+      adapter.signal(incarnation.id, 'SIGTERM');
+    } else {
+      writeTransaction(() => transitionControl(controlRequest, {
+        stage: 'close_sent'
+      }));
+      injectFault('after_close_sent');
+      if (controlRequest.kind === 'handoff') {
+        writeTransaction(() => {
+          taintPendingDecisions(incarnation);
+          for (const toolRequest of getRows("SELECT * FROM tool_requests WHERE incarnation_id=? AND state='pending'", incarnation.id)) {
+            transitionToolRequest(toolRequest, ['pending'], {
+              state: 'cancelled'
+            }, incarnation);
+          }
+        });
+        adapter.interrupt(incarnation.id, controlRequest.request_key);
+      }
+      if (getIncarnation(incarnation.id).state !== 'exited') {
+        adapter.close(incarnation.id);
+      }
+    }
+    finishControlRequest(key);
+  }
+
+  function closeForMissingCapability(incarnation) {
+    if (incarnation.state !== 'alive' || getSession(incarnation.session_id).state !== 'active' || getRow(
+      "SELECT request_key FROM control_requests WHERE incarnation_id=? AND reason='capability_missing'", incarnation.id) || getRow(
+        "SELECT request_key FROM control_requests WHERE session_id=? AND state='accepted'", incarnation.session_id)) {
+      return;
+    }
+    const key = `rk_${now()}_${hash(['capability_missing', incarnation.id])}`;
+    writeTransaction(() => {
+      execute(
+        "INSERT INTO control_requests(request_key,fingerprint,kind,session_id,incarnation_id,stage," +
+          "state,reason,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        key,
+        hash(['close', incarnation.id]),
+        'close',
+        incarnation.session_id,
+        incarnation.id,
+        'requested',
+        'accepted',
+        'capability_missing',
+        now(),
+        now()
+      );
+      recordEvent(incarnation.session_id, incarnation.id, 'control_accepted', {
+        request_key: key,
+        reason: 'capability_missing'
+      });
+    });
+    executeControlRequest(key);
+  }
+
+  function requestFingerprint(request) {
+    return hash([request.kind, request.session_id || null, request.incarnation_id || null, request.target_tool_use_id || null, hash(
+      request.body ?? null), hash(request.cwd ?? null)]);
+  }
+
+  function submit(request) {
+
+    function getLatestRequestResult(result) {
+      if (result?.id) {
+        return getDelivery(result.id);
+      }
+      if (result?.request_key) {
+        return getControl(result.request_key) || result;
+      }
+      return result;
+    }
+    if (crashed) {
+      throw new SimulatedCrash('core_crashed');
+    }
+    if (store.failed) {
+      throw new Error('storage_unavailable');
+    }
+    const fingerprint = requestFingerprint(request);
+    const alias = getRow('SELECT * FROM request_aliases WHERE request_key=?', request.request_key);
+    if (alias) {
+      return alias.fingerprint === fingerprint ? getDelivery(alias.target_delivery_id) : {
+        state: 'rejected',
+        reason: 'fingerprint_conflict',
+        status: 409
+      };
+    }
+    const existing = getRow('SELECT * FROM deliveries WHERE request_key=?', request.request_key) || getControl(request.request_key) || getRow(
+      'SELECT * FROM request_tombstones WHERE request_key=?', request.request_key);
+    if (existing) {
+      if (existing.fingerprint !== fingerprint) {
+        return {
+          state: 'rejected',
+          reason: 'fingerprint_conflict',
+          status: 409
+        };
+      }
+      return existing;
+    }
+    const keyMatch = /^rk_(\d{1,16})_([a-fA-F0-9]{16,})$/.exec(request.request_key || '');
+    if (!keyMatch || !KINDS.has(request.kind)) {
+      return {
+        state: 'rejected',
+        reason: 'invalid_request'
+      };
+    }
+    if (+keyMatch[1] < now() - DAY) {
+      return {
+        state: 'expired',
+        reason: 'key_expired'
+      };
+    }
+    if (+keyMatch[1] > now() + 300000) {
+      return {
+        state: 'rejected',
+        reason: 'key_future'
+      };
+    }
+    const isControl = CONTROLS.has(request.kind);
+    let result;
+    const sessionId = request.kind === 'start' ? randomUUID() : request.session_id;
+    enqueue(sessionId, () => {
+      let session = sessionId && getSession(sessionId);
+      let incarnation = session && getLatestIncarnation(sessionId);
+      let reason;
+      if (session && ['deleting', 'deleted'].includes(session.state)) {
+        writeTransaction(() => execute(
+          'INSERT INTO request_tombstones VALUES(?,?,?,?,?)',
+          request.request_key,
+          fingerprint,
+          'rejected',
+          1,
+          now() + 30 * DAY
+        ));
+        result = getRow('SELECT * FROM request_tombstones WHERE request_key=?', request.request_key);
+        return;
+      }
+      if (request.kind !== 'start' && (!session || ['deleting', 'deleted'].includes(session.state))) {
+        reason = 'session_unavailable';
+      }
+      if (isControl) {
+        if (!reason && request.kind === 'stop' && session?.state === 'active' && incarnation?.close_after_turn) {
+          reason = 'capability_close_pending';
+          closeForMissingCapability(incarnation);
+        }
+        if (!reason && getRow("SELECT request_key FROM control_requests WHERE session_id=? AND state='accepted'", sessionId)) {
+          reason = 'busy';
+        }
+        if (!reason && request.kind === 'start' && !passesAdapterCheck('settingsCheck', request.cwd)) {
+          reason = 'settings_failed';
+        }
+        if (!reason && request.kind === 'resume') {
+          if (session.state !== 'active') {
+            reason = 'session_inactive';
+          } else if (!incarnation || !['exited', 'never_started'].includes(incarnation.state)) {
+            reason = incarnation?.state === 'liveness_unknown' ? 'liveness_unknown' : 'busy';
+          } else if (!areDescendantsClear(incarnation)) {
+            reason = 'subprocess_remaining';
+          } else if (!passesAdapterCheck('settingsCheck', session.cwd)) {
+            reason = 'settings_failed';
+          }
+        }
+        if (!reason && ['stop', 'close', 'handoff'].includes(request.kind)) {
+          if (session.state !== 'active') {
+            reason = 'session_inactive';
+          } else if (incarnation && !['alive', 'orphaned', 'exited', 'never_started'].includes(incarnation.state)) {
+            reason = incarnation.state === 'liveness_unknown' ? 'liveness_unknown' : 'busy';
+          } else if (request.kind === 'handoff' && (!incarnation || !session.claude_session_id)) {
+            reason = 'no_session_id';
+          }
+        }
+        if (!reason && request.kind === 'delete' && !['closed', 'handed_off'].includes(session.state)) {
+          reason = 'session_active';
+        }
+        const incarnationId = ['start', 'resume'].includes(request.kind) && !reason ? randomUUID() : incarnation?.id || null;
+        writeTransaction(() => {
+          if (!reason && request.kind === 'start') {
+            execute(
+              'INSERT INTO owned_sessions VALUES(?,?,?,?,?,?)',
+              sessionId,
+              request.cwd || null,
+              null,
+              null,
+              'active',
+              now()
+            );
+            recordEvent(sessionId, null, 'session_reserved', {
+              id: sessionId
+            });
+          }
+          if (!reason && ['start', 'resume'].includes(request.kind)) {
+            execute(
+              'INSERT INTO incarnations(id,session_id,host_boot_id,state) VALUES(?,?,?,?)',
+              incarnationId,
+              sessionId,
+              hostBootId,
+              'spawning'
+            );
+            recordEvent(sessionId, incarnationId, 'incarnation_reserved', {
+              id: incarnationId
+            });
+          }
+          execute(
+            "INSERT INTO control_requests(request_key,fingerprint,kind,session_id,incarnation_id,stage," +
+              "state,reason,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            request.request_key,
+            fingerprint,
+            request.kind,
+            sessionId || null,
+            incarnationId,
+            'requested',
+            reason ? 'rejected' : 'accepted',
+            reason || null,
+            now(),
+            now()
+          );
+          recordEvent(sessionId, incarnationId, 'control_accepted', {
+            request_key: request.request_key,
+            state: reason ? 'rejected' : 'accepted'
+          });
+          if (!reason && request.kind === 'delete') {
+            transitionSession(session, {
+              state: 'deleting'
+            });
+          }
+        });
+        if (!reason) {
+          injectFault('after_control_accept_before_reply');
+          executeControlRequest(request.request_key);
+        }
+        result = getControl(request.request_key);
+      } else {
+        if (!reason && (session.state !== 'active' || !incarnation || request.incarnation_id !== incarnation.id)) {
+          reason = 'incarnation_mismatch';
+        }
+        if (!reason && request.kind === 'interrupt') {
+          const pending = getRow("SELECT * FROM deliveries WHERE incarnation_id=? AND kind='interrupt' AND state IN " +
+            "('queued','sending','written','provider_observed','unknown') ORDER BY rowid DESC LIMIT 1", incarnation.id);
+          if (pending) {
+            writeTransaction(() => {
+              execute(
+                'INSERT INTO request_aliases VALUES(?,?,?,?,?)',
+                request.request_key,
+                fingerprint,
+                pending.id,
+                sessionId,
+                now()
+              );
+              recordEvent(sessionId, incarnation.id, 'request_alias', {
+                request_key: request.request_key,
+                target_delivery_id: pending.id
+              });
+            });
+            result = pending;
+            return;
+          }
+        }
+        const id = randomUUID();
+        writeTransaction(() => {
+          execute(
+            "INSERT INTO deliveries(id,session_id,incarnation_id,kind,body,target_tool_use_id," +
+              "request_key,fingerprint,message_uuid,state,reason,created_at,updated_at) VALUES(?,?,?,?,?," + "?,?,?,?,?,?,?,?)",
+            id,
+            sessionId || '',
+            request.incarnation_id || null,
+            request.kind,
+            JSON.stringify(request.body ?? null),
+            request.target_tool_use_id || null,
+            request.request_key,
+            fingerprint,
+            randomUUID(),
+            reason ? 'rejected' : 'queued',
+            reason || null,
+            now(),
+            now()
+          );
+          recordEvent(sessionId, request.incarnation_id, 'delivery_accepted', {
+            id,
+            state: reason ? 'rejected' : 'queued'
+          });
+        });
+        if (!reason) {
+          dispatchDelivery(id);
+        }
+        result = getDelivery(id);
+      }
+    });
+    injectFault('before_accepted_reply');
+    // Synchronous callbacks may have advanced the row while the queue drained.
+    return getLatestRequestResult(result) || {
+      state: 'accepted',
+      request_key: request.request_key
+    };
+  }
+
+  function onEvent(adapterEvent) {
+    if (crashed || store.failed) {
+      return;
+    }
+    const incarnation = getIncarnation(adapterEvent.incarnation_id);
+    if (!incarnation || ['deleting', 'deleted'].includes(getSession(incarnation.session_id)?.state)) {
+      return;
+    }
+    // §4.5: exit and abort must invalidate effects even while a command owns the queue.
+    if (adapterEvent.type === 'child_exit' || adapterEvent.type === 'signal_abort') {
+      invalidatePendingEffects(adapterEvent, incarnation);
+    }
+    enqueue(incarnation.session_id, () => {
+      let capabilityTurnEnded = false;
+      writeTransaction(() => {
+        const {
+          signal,
+          ...raw
+        } = adapterEvent;
+        recordEvent(incarnation.session_id, incarnation.id, 'sdk', raw);
+        if (adapterEvent.type === 'tool_request') {
+          if (incarnation.state !== 'alive') {
+            return;
+          }
+          execute(
+            'INSERT OR IGNORE INTO tool_requests VALUES(?,?,?,?,?,?,?,?)',
+            randomUUID(),
+            incarnation.id,
+            adapterEvent.tool_use_id,
+            adapterEvent.name,
+            JSON.stringify(adapterEvent.input),
+            adapterEvent.signal?.aborted ? 'cancelled' : 'pending',
+            null,
+            null
+          );
+          recordEvent(incarnation.session_id, incarnation.id, 'tool_pending', {
+            tool_use_id: adapterEvent.tool_use_id
+          });
+          if (adapterEvent.signal) {
+            signals.set(`${incarnation.id}:${adapterEvent.tool_use_id}`, adapterEvent.signal);
+            adapterEvent.signal.addEventListener('abort', () => onEvent({
+              incarnation_id: incarnation.id,
+              type: 'signal_abort',
+              tool_use_id: adapterEvent.tool_use_id
+            }), {
+              once: true
+            });
+          }
+        } else if (adapterEvent.type === 'lifecycle') {
+          const delivery = getRow("SELECT * FROM deliveries WHERE incarnation_id=? AND kind='prompt' AND message_uuid=?", incarnation.id,
+            adapterEvent.command_uuid);
+          if (delivery && ['completed', 'cancelled'].includes(adapterEvent.state)) {
+            capabilityTurnEnded = true;
+          }
+          if (!delivery || delivery.outcome !== null || getIncarnation(incarnation.id).attribution_uncertain === 1) {
+            return;
+          }
+          if (['queued', 'started', 'completed', 'cancelled'].includes(adapterEvent.state)) {
+            resolveAttributionCause(delivery);
+          }
+          if (['queued', 'started'].includes(adapterEvent.state)) {
+            transitionDelivery(delivery, ['sending', 'written', 'unknown'], {
+              state: 'provider_observed'
+            });
+          }
+          if (adapterEvent.state === 'completed') {
+            const turnResult = delivery.result_json && JSON.parse(delivery.result_json);
+            transitionDelivery(delivery, ['sending', 'written', 'provider_observed', 'unknown'], {
+              state: 'completed',
+              outcome: getCompletedPromptOutcome(turnResult),
+              ...(turnResult?.is_error ? {
+                reason: turnResult.subtype || null
+              } : {})
+            });
+          }
+          if (adapterEvent.state === 'cancelled') {
+            transitionDelivery(delivery, ['sending', 'written', 'provider_observed', 'unknown'], {
+              state: 'provider_observed',
+              outcome: 'interrupted'
+            });
+          }
+        } else if (adapterEvent.type === 'result') {
+          const uuids = adapterEvent.user_message_uuids || [];
+          if (uuids.length !== 1) {
+            if (uuids.length > 1) {
+              markAttributionUncertain(incarnation);
+            }
+            return;
+          }
+          const delivery = getRow("SELECT * FROM deliveries WHERE incarnation_id=? AND kind='prompt' AND message_uuid=?", incarnation.id, uuids[0]);
+          if (delivery) {
+            capabilityTurnEnded = true;
+          }
+          if (!delivery || getIncarnation(incarnation.id).attribution_uncertain === 1) {
+            return;
+          }
+          transitionDelivery(delivery, ['sending', 'written', 'provider_observed', 'unknown', 'completed'], {
+            result_json: JSON.stringify(adapterEvent)
+          });
+          for (const interruptDelivery of getRows("SELECT * FROM deliveries WHERE incarnation_id=? AND kind='interrupt' AND turn_gen=? AND " +
+            "state IN ('sending','written','provider_observed','unknown')", incarnation.id, delivery.turn_gen)) {
+            transitionDelivery(interruptDelivery, ['sending', 'written', 'provider_observed', 'unknown'], {
+              state: 'completed'
+            });
+            resolveAttributionCause(interruptDelivery);
+            transitionIncarnation(incarnation, ['alive'], {
+              interrupt_unknown: 0
+            });
+          }
+        } else if (adapterEvent.type === 'tool_result') {
+          const toolRequest = getRow('SELECT * FROM tool_requests WHERE incarnation_id=? AND tool_use_id=?', incarnation.id, adapterEvent.tool_use_id);
+          if (!toolRequest?.answer_delivery_id) {
+            return;
+          }
+          const delivery = getDelivery(toolRequest.answer_delivery_id);
+          const decision = JSON.parse(toolRequest.decision);
+          const observed = isToolDecisionObserved(delivery, decision, adapterEvent);
+          transitionDelivery(delivery, ['sending', 'written', 'unknown'], {
+            state: observed ? 'provider_observed' : 'unknown',
+            reason: getToolResultReason(observed, adapterEvent)
+          });
+          // This exact tool has finished, so an ambiguous call cannot execute later.
+          resolveAttributionCause(delivery);
+        } else if (adapterEvent.type === 'interrupt_receipt') {
+          const delivery = getRow("SELECT * FROM deliveries WHERE incarnation_id=? AND kind='interrupt' AND id=?", incarnation.id,
+            adapterEvent.interrupt_id || null);
+          if (!delivery || !['sending', 'written', 'unknown', 'provider_observed', 'completed'].includes(delivery.state)) {
+            return;
+          }
+          if (delivery.state === 'written' && delivery.updated_at <= now() - INTERRUPT_RECEIPT_TIMEOUT_MS) {
+            transitionIncarnation(incarnation, ['alive'], {
+              interrupt_unknown: 1
+            });
+          }
+          transitionDelivery(delivery, ['sending', 'written', 'unknown'], {
+            state: 'provider_observed'
+          });
+          resolveAttributionCause(delivery);
+          if (adapterEvent.still_queued?.length) {
+            markAttributionUncertain(incarnation);
+            for (const uuid of adapterEvent.still_queued) {
+              const survivorDelivery = getRow('SELECT * FROM deliveries WHERE incarnation_id=? AND message_uuid=?', incarnation.id, uuid);
+              if (survivorDelivery) {
+                transitionDelivery(survivorDelivery, ['sending', 'written', 'unknown'], {
+                  state: 'provider_observed'
+                });
+              }
+            }
+          }
+        } else if (adapterEvent.type === 'system_init') {
+          if (getIncarnation(incarnation.id).capabilities !== null) {
+            return;
+          }
+          transitionIncarnation(incarnation, ['alive'], {
+            capabilities: JSON.stringify(adapterEvent.capabilities || []),
+            close_after_turn: ['msg_lifecycle_v1', 'interrupt_receipt_v1'].every(capability => adapterEvent.capabilities?.includes(
+              capability)) && (!adapterEvent.apiKeySource || adapterEvent.apiKeySource === 'none') ? 0 : 1
+          });
+        } else if (adapterEvent.type === 'child_exit') {
+          finishIncarnationDeliveries(getIncarnation(incarnation.id));
+        }
+      });
+      if (adapterEvent.type === 'child_exit') {
+        for (const controlRequest of getRows("SELECT * FROM control_requests WHERE incarnation_id=? AND state='accepted' AND kind IN " +
+          "('stop','close','handoff')", incarnation.id)) {
+          finishControlRequest(controlRequest.request_key);
+        }
+      }
+      const current = getIncarnation(incarnation.id);
+      if (current?.state === 'alive' && current.close_after_turn && (capabilityTurnEnded || isIdle(current))) {
+        closeForMissingCapability(current);
+      } else {
+        drainPromptQueue(incarnation.session_id);
+      }
+    });
+  }
+
+  function invalidatePendingEffects(adapterEvent, incarnation) {
+    writeTransaction(() => {
+      if (adapterEvent.type === 'child_exit') {
+        transitionIncarnation(incarnation, ['spawning', 'alive', 'orphaned', 'liveness_unknown'], {
+          state: 'exited',
+          ended_at: now()
+        });
+        taintPendingDecisions(incarnation);
+      } else {
+        const toolRequest = getRow('SELECT * FROM tool_requests WHERE incarnation_id=? AND tool_use_id=?', incarnation.id, adapterEvent.tool_use_id);
+        if (!toolRequest) {
+          return;
+        }
+        const delivery = toolRequest.answer_delivery_id && getDelivery(toolRequest.answer_delivery_id);
+        if (toolRequest.state === 'pending' || toolRequest.state === 'decided' && delivery?.state === 'queued') {
+          transitionToolRequest(toolRequest, ['pending', 'decided'], {
+            state: 'cancelled'
+          }, incarnation);
+          if (delivery) {
+            transitionDelivery(delivery, ['queued'], {
+              state: 'cancelled',
+              reason: 'signal_abort'
+            });
+          }
+        } else if (delivery) {
+          taintDelivery(delivery);
+          recordEvent(incarnation.session_id, incarnation.id, 'decision_tool_aborted', {
+            delivery_id: delivery.id
+          });
+        }
+      }
+    });
+  }
+
+  // §3.3: a failed identity query cannot serve as evidence of process death.
+  function recover() {
+    if (crashed) {
+      throw new SimulatedCrash('core_crashed');
+    }
+    for (let incarnation of getRows("SELECT * FROM incarnations WHERE state IN ('spawning','alive','orphaned','liveness_unknown')")) {
+      let verdict;
+      if (!incarnation.pid) {
+        let found;
+        try {
+          found = identityProbe.findMarked(incarnation.id);
+        } catch {
+          found = {
+            status: 'query_failed'
+          };
+        }
+        if (found.status !== 'ok' || found.pids.length > 1) {
+          verdict = 'query_failed';
+        } else if (!found.pids.length) {
+          verdict = 'never_started';
+        } else {
+          const markedProcess = found.pids[0];
+          writeTransaction(() => transitionIncarnation(incarnation, [incarnation.state], {
+            pid: markedProcess.pid,
+            pid_started_at: markedProcess.startedAt
+          }));
+          incarnation = getIncarnation(incarnation.id);
+          verdict = checkIdentity(incarnation);
+        }
+      } else {
+        verdict = checkIdentity(incarnation);
+      }
+      writeTransaction(() => {
+        transitionIncarnation(incarnation, [incarnation.state], {
+          state: getRecoveredIncarnationState(verdict),
+          end_reason: 'host_lost'
+        });
+        finishIncarnationDeliveries(incarnation);
+      });
+    }
+    for (const controlRequest of getRows("SELECT * FROM control_requests WHERE state='accepted'")) {
+      if (controlRequest.kind === 'delete') {
+        continue;
+      }
+      const incarnation = controlRequest.incarnation_id && getIncarnation(controlRequest.incarnation_id);
+      if (['start', 'resume'].includes(controlRequest.kind)) {
+        writeTransaction(() => transitionControl(controlRequest, getRecoveredStartResult(incarnation)));
+      } else if (!incarnation || ['exited', 'never_started'].includes(incarnation.state)) {
+        finishControlRequest(controlRequest.request_key);
+      } else {
+        writeTransaction(() => transitionControl(controlRequest, {
+          state: 'blocked',
+          reason: 'control_lost'
+        }));
+      }
+    }
+    for (const session of getRows("SELECT * FROM owned_sessions WHERE state='deleting'")) {
+      deleteSessionData(session.id);
+    }
+    writeTransaction(() => {
+      execute('DELETE FROM request_tombstones WHERE expires_at<?', now());
+      execute("DELETE FROM control_requests WHERE state!='accepted' AND created_at<?", now() - 30 * DAY);
+    });
+  }
+
+  // §4.1: a single read view prevents a state/sequence gap during subscription.
+  function snapshot(sessionId) {
+    return store.read(() => {
+      const session = getSession(sessionId);
+      if (session && ['deleting', 'deleted'].includes(session.state)) {
+        return {
+          state: {
+            session: session
+          },
+          seq_high: getRow('SELECT COALESCE(MAX(seq),0) n FROM events').n
+        };
+      }
+      const state = {
+        session: session || null,
+        incarnations: getRows('SELECT * FROM incarnations WHERE session_id=?', sessionId),
+        deliveries: getRows('SELECT * FROM deliveries WHERE session_id=?', sessionId),
+        tool_requests: getRows('SELECT * FROM tool_requests WHERE incarnation_id IN (SELECT id FROM incarnations WHERE session_id=?)', sessionId),
+        controls: getRows('SELECT * FROM control_requests WHERE session_id=?', sessionId)
+      };
+      store.readCheckpoint();
+      return {
+        state,
+        seq_high: getRow('SELECT COALESCE(MAX(seq),0) n FROM events').n
+      };
+    });
+  }
+
+  function eventsSince(seq) {
+    return store.read(() => {
+      const rows = getRows('SELECT * FROM events WHERE seq>? ORDER BY seq', seq);
+      const high = getRow("SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='events'),0) n").n;
+      if (seq < 0 || seq > high || seq < high && (!rows.length || rows[0].seq !== seq + 1) || rows.some((eventRow, eventIndex) => eventIndex &&
+        eventRow.seq !== rows[eventIndex - 1].seq + 1)) {
+        return {
+          snapshot_required: true
+        };
+      }
+      return {
+        events: rows.map(eventRow => ({
+          ...eventRow,
+          json: JSON.parse(eventRow.json)
+        })),
+        seq_high: high
+      };
+    });
+  }
+  adapter.events.on('event', onEvent);
+  return {
+    submit,
+    recover,
+    snapshot,
+    eventsSince,
+    onEvent,
+    tick,
+    idle: sessionId => isIdle(getLatestIncarnation(sessionId)),
+    close() {
+      adapter.events.off('event', onEvent);
+      store.close();
+    }
+  };
+}
+module.exports = {
+  createHostCore,
+  INTERRUPT_RECEIPT_TIMEOUT_MS
+};
