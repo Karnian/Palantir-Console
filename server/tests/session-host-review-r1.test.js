@@ -126,13 +126,14 @@ test('R1-10 finished tool error unknown has no attribution barrier; resultless d
   assert.equal(f.adapter.log.executions.length, 2);
 });
 
-test('R1-11 missing capability plus missing lifecycle: no idle close until exit, prompt unknown, no extra send', t => {
-  const f = fixture(t, { capabilities: [], omitLifecycle: true }); f.start(); const p = f.prompt();
+test('R1-11 updated by R2-04: missing capability and lifecycle closes on result, prompt unknown, no extra send', t => {
+  const f = fixture(t, { capabilities: [], omitLifecycle: true, manual: true }); f.start(); const p = f.prompt();
   assert.equal(p.state, 'written'); assert.equal(f.core.idle(f.sid), false); assert.equal(f.adapter.log.closes.length, 0);
-  assert.equal(f.prompt().state, 'rejected'); f.adapter.exit(f.iid);
+  assert.equal(f.prompt().state, 'rejected');
+  f.adapter.emit(f.iid, 'result', { user_message_uuids: [p.message_uuid], is_error: false });
   assert.equal(f.d(p.id).state, 'unknown'); assert.equal(f.state().session.state, 'closed');
-  f.start(); f.adapter.options.omitLifecycle = false; f.prompt();
-  assert.equal(f.adapter.log.closes.length, 1); assert.equal(f.adapter.log.received.length, 2);
+  f.start(); f.adapter.options.omitLifecycle = false; f.adapter.options.manual = false; f.prompt();
+  assert.equal(f.adapter.log.closes.length, 2); assert.equal(f.adapter.log.received.length, 2);
 });
 
 test('R1-12 abort at after_sending_commit cancels delivery with zero decide for that card', t => {

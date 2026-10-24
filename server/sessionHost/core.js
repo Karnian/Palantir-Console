@@ -72,6 +72,14 @@ function createHostCore({ dbPath, adapter, identityProbe, clock = Date.now, host
     // 1 is an irreversible mixed-turn barrier; 2 can be resolved by that UUID's evidence.
     ic(i, ['alive', 'orphaned'], { attribution_uncertain: permanent || incarnation(i.id).attribution_uncertain === 1 ? 1 : 2 });
   }
+  function resolveCause(d) {
+    if (!d.attribution_pending) return;
+    dc(d, ['sending', 'written', 'unknown', 'provider_observed', 'completed'], { attribution_pending: 0 });
+    const i = incarnation(d.incarnation_id);
+    if (i.attribution_uncertain === 2 && !one('SELECT id FROM deliveries WHERE incarnation_id=? AND attribution_pending=1 LIMIT 1', i.id)) {
+      ic(i, ['alive', 'orphaned'], { attribution_uncertain: 0 });
+    }
+  }
   function taint(i) {
     for (const d of all("SELECT * FROM deliveries WHERE incarnation_id=? AND kind IN ('tool_decision','question_answer') AND state IN ('sending','written')", i.id)) {
       dc(d, ['sending', 'written'], { tainted: 1 });
@@ -81,7 +89,7 @@ function createHostCore({ dbPath, adapter, identityProbe, clock = Date.now, host
     for (const d of all('SELECT * FROM deliveries WHERE incarnation_id=?', i.id)) {
       if (['sending', 'written'].includes(d.state)) dc(d, ['sending', 'written'], { state: 'unknown', reason: 'host_lost' });
       if (d.state === 'queued') dc(d, ['queued'], { state: 'expired', reason: 'incarnation_ended' });
-      if (d.kind === 'prompt' && d.outcome === null && ['sending', 'written', 'provider_observed'].includes(d.state)) {
+      if (d.kind === 'prompt' && d.outcome === null && ['sending', 'written', 'provider_observed', 'unknown'].includes(d.state)) {
         const r = d.result_json && JSON.parse(d.result_json);
         dc(d, ['sending', 'written', 'provider_observed', 'unknown'], { outcome: r ? r.subtype === 'error_during_execution' ? 'interrupted' : r.is_error ? 'errored' : 'completed' : 'outcome_unknown', ...(r?.is_error ? { reason: r.subtype || null } : {}) });
       }
@@ -137,7 +145,9 @@ function createHostCore({ dbPath, adapter, identityProbe, clock = Date.now, host
       else adapter.decide(i.id, d.target_tool_use_id, decision);
     } catch (e) {
       if (e instanceof SimulatedCrash) throw e;
-      write(() => { dc(d, ['sending', 'written'], { state: 'unknown', reason: 'effect_failed' }); uncertain(i, false); });
+      write(() => {
+        if (dc(d, ['sending', 'written'], { state: 'unknown', reason: 'effect_failed', attribution_pending: 1 })) uncertain(i, false);
+      });
       return;
     }
     hit('after_effect_before_written');
@@ -212,7 +222,8 @@ function createHostCore({ dbPath, adapter, identityProbe, clock = Date.now, host
       hit('after_spawn_before_identity');
       write(() => {
         ic(i, ['spawning'], { state: 'alive', pid: p.pid, pid_started_at: p.startedAt, started_at: now() });
-        sc(session(c.session_id), { claude_session_id: p.claude_session_id || c.session_id });
+        // Owned session ids never stand in for provider conversation identities.
+        if (typeof p.claude_session_id === 'string' && p.claude_session_id.length) sc(session(c.session_id), { claude_session_id: p.claude_session_id });
       });
       if (!safeCheck('authCheck', i.id)) {
         adapter.close(i.id);
@@ -279,6 +290,10 @@ function createHostCore({ dbPath, adapter, identityProbe, clock = Date.now, host
       }
       if (req.kind !== 'start' && (!s || ['deleting', 'deleted'].includes(s.state))) reason = 'session_unavailable';
       if (isControl) {
+        if (!reason && req.kind === 'stop' && s?.state === 'active' && i?.close_after_turn) {
+          reason = 'capability_close_pending';
+          autoClose(i);
+        }
         if (!reason && one("SELECT request_key FROM control_requests WHERE session_id=? AND state='accepted'", sid)) reason = 'busy';
         if (!reason && req.kind === 'start' && !safeCheck('settingsCheck', req.cwd)) reason = 'settings_failed';
         if (!reason && req.kind === 'resume') {
@@ -340,6 +355,7 @@ function createHostCore({ dbPath, adapter, identityProbe, clock = Date.now, host
     // Exit and abort must invalidate effects even while a command owns the queue.
     if (e.type === 'child_exit' || e.type === 'signal_abort') immediate(e, i);
     enqueue(i.session_id, () => {
+      let capabilityTurnEnded = false;
       write(() => {
         const { signal, ...raw } = e;
         event(i.session_id, i.id, 'sdk', raw);
@@ -353,8 +369,9 @@ function createHostCore({ dbPath, adapter, identityProbe, clock = Date.now, host
           }
         } else if (e.type === 'lifecycle') {
           const d = one("SELECT * FROM deliveries WHERE incarnation_id=? AND kind='prompt' AND message_uuid=?", i.id, e.command_uuid);
+          if (d && ['completed', 'cancelled'].includes(e.state)) capabilityTurnEnded = true;
           if (!d || d.outcome !== null || incarnation(i.id).attribution_uncertain === 1) return;
-          if (incarnation(i.id).attribution_uncertain === 2 && d.state === 'unknown') ic(i, ['alive'], { attribution_uncertain: 0 });
+          if (['queued', 'started', 'completed', 'cancelled'].includes(e.state)) resolveCause(d);
           if (['queued', 'started'].includes(e.state)) dc(d, ['sending', 'written', 'unknown'], { state: 'provider_observed' });
           if (e.state === 'completed') {
             const r = d.result_json && JSON.parse(d.result_json);
@@ -365,6 +382,7 @@ function createHostCore({ dbPath, adapter, identityProbe, clock = Date.now, host
           const uuids = e.user_message_uuids || [];
           if (uuids.length !== 1) { if (uuids.length > 1) uncertain(i); return; }
           const d = one("SELECT * FROM deliveries WHERE incarnation_id=? AND kind='prompt' AND message_uuid=?", i.id, uuids[0]);
+          if (d) capabilityTurnEnded = true;
           if (!d || incarnation(i.id).attribution_uncertain === 1) return;
           dc(d, ['sending', 'written', 'provider_observed', 'unknown', 'completed'], { result_json: JSON.stringify(e) });
           for (const int of all("SELECT * FROM deliveries WHERE incarnation_id=? AND kind='interrupt' AND turn_gen=? AND state IN ('sending','written','provider_observed','unknown')", i.id, d.turn_gen)) {
@@ -377,10 +395,14 @@ function createHostCore({ dbPath, adapter, identityProbe, clock = Date.now, host
           const observed = decision.behavior === 'deny' ? e.is_error === true && e.content === decision.message :
             decision.behavior === 'answer' ? !e.is_error && JSON.stringify(e.content) === JSON.stringify(decision.answer) : !e.is_error && !d.tainted;
           dc(d, ['sending', 'written', 'unknown'], { state: observed ? 'provider_observed' : 'unknown', reason: observed ? null : e.is_error ? 'tool_finished_error' : 'tool_finished' });
+          // This exact tool has finished, so an ambiguous call cannot execute later.
+          resolveCause(d);
         } else if (e.type === 'interrupt_receipt') {
           const d = one("SELECT * FROM deliveries WHERE incarnation_id=? AND kind='interrupt' AND id=?", i.id, e.interrupt_id || null);
-          if (!d || !['sending', 'written', 'unknown', 'provider_observed'].includes(d.state)) return;
+          if (!d || !['sending', 'written', 'unknown', 'provider_observed', 'completed'].includes(d.state)) return;
+          if (d.state === 'written' && d.updated_at <= now() - INTERRUPT_RECEIPT_TIMEOUT_MS) ic(i, ['alive'], { interrupt_unknown: 1 });
           dc(d, ['sending', 'written', 'unknown'], { state: 'provider_observed' });
+          resolveCause(d);
           if (e.still_queued?.length) {
             uncertain(i);
             for (const uuid of e.still_queued) {
@@ -396,7 +418,7 @@ function createHostCore({ dbPath, adapter, identityProbe, clock = Date.now, host
       });
       if (e.type === 'child_exit') for (const c of all("SELECT * FROM control_requests WHERE incarnation_id=? AND state='accepted' AND kind IN ('stop','close','handoff')", i.id)) finishControl(c.request_key);
       const current = incarnation(i.id);
-      if (current?.close_after_turn && (idle(current) || current.state === 'exited')) {
+      if (current?.close_after_turn && (capabilityTurnEnded || idle(current) || current.state === 'exited')) {
         autoClose(current);
       } else drain(i.session_id);
     });

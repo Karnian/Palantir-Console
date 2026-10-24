@@ -18,7 +18,7 @@ function createFakeAdapter(options = {}) {
       const identity = { pid: ++pid, startedAt: `fake-${pid}` };
       children.set(incarnation_id, { ...identity, exited: false, session_id });
       options.identityProbe?.register(incarnation_id, identity);
-      return identity;
+      return { ...identity, claude_session_id: resume ? claude_session_id : `fake-conversation-${session_id}` };
     },
     facts(id, toolUseId) { return { exited: children.get(id)?.exited !== false, aborted: toolSignals.get(`${id}:${toolUseId}`)?.aborted === true }; },
     send(id, uuid, text) {

@@ -16,7 +16,7 @@
 
 ## 저장과 복구
 
-호스트 전용 스키마 버전 2와 WAL을 사용한다. 버전 1에서 2로의 마이그레이션은 본문 없는 `request_aliases`를 추가한다. 상태 변경 helper는 허용 이전 상태를 명시한 UPDATE와 replay 이벤트를 같은 트랜잭션에 쓴다. 원문 SDK 이벤트와 상태 전이는 events의 AUTOINCREMENT seq를 공유한다. snapshot은 read transaction 하나로 상태와 seq를 읽으며 replay의 삭제 구멍은 `snapshot_required:true`다. 마이그레이션 실패는 생성자를 실패시키고 쓰기 실패는 해당 인스턴스를 fail-closed로 고정한다. `faults.hit('db_write')`에서 일반 오류를 던지면 저장 실패를 재현한다.
+호스트 전용 스키마 버전 3과 WAL을 사용한다. 버전 1에서 2로의 마이그레이션은 본문 없는 `request_aliases`를 추가한다. 버전 3은 delivery별 `attribution_pending`을 추가하고 기존 effect_failed 일시 장벽의 원인도 복원한다. 상태 변경 helper는 허용 이전 상태를 명시한 UPDATE와 replay 이벤트를 같은 트랜잭션에 쓴다. 원문 SDK 이벤트와 상태 전이는 events의 AUTOINCREMENT seq를 공유한다. snapshot은 read transaction 하나로 상태와 seq를 읽으며 replay의 삭제 구멍은 `snapshot_required:true`다. 마이그레이션 실패는 생성자를 실패시키고 쓰기 실패는 해당 인스턴스를 fail-closed로 고정한다. `faults.hit('db_write')`에서 일반 오류를 던지면 저장 실패를 재현한다.
 
 세션 큐는 동기 명령만 소유하며 provider의 비동기 완료를 기다리지 않는다. sending 커밋·facts·효과 호출 사이에는 await가 없다. SDK exit/abort의 무효화는 큐 밖에서 즉시 기록한다. 재기동 시 새 코어를 만들고 `recover()`를 호출한다. spawn 예약을 재사용해 spawn하지 않으며 3값 신원 판정만으로 orphaned/exited/never_started/liveness_unknown을 정한다. pending 카드는 expired, decided는 유지한다. 미관측 sending/written은 unknown이며 재전송하지 않는다.
 
@@ -102,5 +102,31 @@ system_init은 가짜의 첫 prompt에서 incarnation당 한 번만 발생한다
 | 17 | R1-09-17 error subtype is retained | 실패 |
 
 각 테스트는 해당 결함의 재발을 막는다. 특히 #12는 abort 검사 제거 시 decide가 발생하고, #13은 늦은 written의 이전 상태 조건 제거 시 observed가 written으로 역행하며, #16은 read transaction 제거 시 상태에는 없는 이벤트가 seq_high 뒤 replay에서도 누락된다.
+
+## 수정 라운드 2 — 대화 신원·종료 우선순위·장벽 원인
+
+start에서 어댑터가 대화 id를 주지 않으면 null을 유지한다. resume 응답에 id가 없으면 저장된 값을 유지하고, 명시적으로 반환한 비어 있지 않은 대화 id만 반영한다. 소유 세션 id는 대화 id의 대체값이 아니다. 가짜는 start/resume 응답에 실제 가짜 대화 id를 제공한다.
+
+capability 누락은 **세션 종료 의도가 우선**이다. 해당 incarnation의 사용자 stop은 `rejected(capability_close_pending)`이며, 자동 close가 아직 없으면 그 요청 처리 중 먼저 durable 자동 close를 시작한다. 이미 진행 중인 자동 close와 배타권을 공유한다. 첫 prompt의 정확한 UUID result 또는 lifecycle 종결 중 먼저 온 신호로 자동 close를 시작한다. 이것은 정리를 시작하는 근거일 뿐 전달 완료 근거가 아니다. lifecycle이 없으면 written이며, exit 후 unknown과 결과에 따른 outcome을 기록한다. 이 결정은 라운드 1의 “lifecycle 없으면 외부 exit까지 close 대기” 테스트를 대체한다.
+
+completed interrupt의 늦은 영수증도 survivor UUID를 처리한다. completed는 역행하지 않으며, still_queued가 비어 있지 않으면 영구 장벽을 건다. written 영수증 처리 시에도 durable updated_at(해당 written 커밋 시각)과 10초 기한을 검사하므로 tick 선후에 따라 판정이 달라지지 않는다. 늦은 영수증은 provider_observed라는 관측을 남기면서 interrupt_unknown을 세운다. 대상 세대 result가 이미 interrupt를 완료한 경우는 중단 불명을 다시 만들지 않는다.
+
+효과 예외의 일시 장벽은 각 delivery의 attribution_pending으로 원인을 보존한다. 그 delivery의 정상 lifecycle·상관된 tool_result·interrupt 영수증만 그 원인을 해소한다. 도구의 오류 결과도 해당 도구가 끝났다는 사실이므로 라운드 1 #10의 정책대로 원인을 해소한다. 원인이 하나라도 남으면 값 2를 유지하며, 값 1(합쳐진 턴·survivor)의 영구 장벽은 원인이 전부 해소돼도 유지한다. incarnation 종료 시 unknown prompt도 outcome IS NULL 조건으로 확정한다.
+
+수정 전 신규 테스트 14개 중 실패 12개·통과 2개를 확인했다. 각 지적 번호에서 최소 한 사례는 수정 전 실패했다.
+
+| 지적 | 추가 테스트명 | 수정 전 실패 여부 / 막는 실수 |
+|---|---|---|
+| 1 | R2-01 two resumes preserve saved conversation id when adapter omits response id | 실패 / 두 번째 resume에 소유 id 전달 |
+| 1 | R2-01 fake start returns conversation id; missing start id stays null and blocks handoff | 실패 / 대화 id 날조 및 no_session_id 누락 |
+| 2 | R2-02 completed interrupt still processes late survivor receipt without state regression | 실패 / 완료 후 survivor 영수증 무시 |
+| 3 | R2-03 capability close wins user stop, alreadyClosing=false/true | 둘 다 실패 / stop이 종료 의도를 취소하거나 busy로 오분류 |
+| 4 | R2-04 missing lifecycle closes on exact result without external exit or completed delivery | 실패 / lifecycle 생략 시 정리 영구 대기 |
+| 4 | R2-04 wrong result cannot initiate capability close, exact result can | 실패 / 상관없는 결과로 종료 또는 정확한 결과 무시 |
+| 5 | R2-05 late receipt durable deadline is order independent, tickFirst=false/true | false 실패·true 기존 통과 / tick 순서 의존 |
+| 6 | R2-06 unknown prompt receives terminal outcome on exit, withResult=false/true | 둘 다 실패 / unknown prompt 결과 영구 미확정 |
+| 7 | R2-07 multiple tool effect barriers clear only their own cause and release after last positive result | 실패 / 원인 하나 해소로 전체 장벽 해제 또는 영구 대기 |
+| 7 | R2-07 unrelated unknown prompt cannot clear another delivery barrier | 실패 / prompt 증거가 다른 도구 원인까지 해제 |
+| 7 | R2-07 resolving temporary cause never clears permanent survivor barrier | 기존 통과 / 일시 원인 해소가 영구 장벽까지 해제 |
 
 S1-a2: 호스트 잠금·동시 기동·FD 상속·소켓·handshake·유휴 종료·서버 생존 분리. S1-b: 실제 SDK/가짜 CLI 프로토콜, account 여섯 모양/버전/pid/권한모드/원격 제어 검사, resolveSettings 구조·10초 기한, 초기화 60초 및 종료 유예 5초, env allowlist와 capability 값 유출 검사, 실제 ps·신호 transport. S1-c: cookie·origin·bearer 거부와 소켓 장애 화면. S1-e: 넘기기 shell argv·환경·실제 CLI와 hook 실측. 이 검증은 이번 라이브러리 테스트로 대체하지 않는다.
