@@ -331,3 +331,50 @@ rejected는 해당 고정 code로 확정 거부하며 새 재확인 대상으로
 X의 ps EPERM·소켓 제한을 성공이나 skip으로 처리하지 않았다.
 이번 신규 X 4개와 변경 후 기존 X 10개는 실제 macOS에서 호스트 확인이 필요하다.
 npm test·commit·push는 실행하지 않았다.
+
+## S1-a2 마무리 — R2 MODERATE 재확인 추적 수명
+
+호스트 확인으로 이전 변경의 전체 154/154(X 포함) 통과와 적대리뷰 R2 GO를 받았다.
+이번에는 launcher의 재확인 목록 수명과 보관 데이터만 수정했다.
+
+일반 lookup, submit 응답, eventsSince의 delivery/control transition을 받을 때 즉시 추적 상태를 갱신한다.
+종결이면 즉시 제거하고, 미종결이면 마지막 상태만 갱신한다.
+분할된 transition은 기존 state/outcome과 합치고 다른 delivery의 이벤트는 적용하지 않는다.
+별칭은 같은 delivery id를 기준으로 함께 갱신할 수 있다.
+reconcile은 일반 lookup 경로를 사용하므로 별도 정리 루프가 필요하지 않다.
+
+session_deleted 또는 expires_at 필드가 있는 tombstone은 원래 state가 unknown이어도 종결이다.
+session_deleted가 0인 tombstone도 재등록하지 않는다. found:false도 추적을 끝낸다.
+
+추적 목록은 request_key·kind·lastState만 보관한다.
+lastState는 이벤트 상관관계에 필요한 id와 state/outcome만 투영한다.
+요청 본문, 전체 요청 객체, 응답의 delivery 본문·도구 입력 등을 복사하지 않는다.
+error·timeout·disconnect 경로도 같은 최소 메타데이터를 사용한다.
+진행 중 요청의 응답 매칭용 pending에도 submit의 key·kind만 남긴다.
+재확인은 lookup만 호출하며 자동 재제출하지 않는다.
+
+### 실패 선확인
+
+제품 수정 전 클라이언트 테스트 23개를 실행하여 기존 13개 통과·신규 10개 실패를 확인했다.
+신규 실패 테스트 이름은 다음과 같다.
+
+- R2-M lookup terminal result immediately removes recheck entry
+- R2-M submit/lookup/reconcile session_deleted tombstone immediately ends tracking (3개)
+- R2-M terminal transition event immediately removes control/delivery tracking (2개)
+- R2-M accepted/error/timeout/disconnect tracking is independent of original request and body (4개)
+
+마지막 네 테스트는 제출이 끝난 원래 요청의 kind/key/body 접근자를 실패하도록 바꾼 뒤
+두 번의 재연결·lookup을 수행한다. 원래 요청 객체를 재확인 데이터로 사용하는 회귀를 검출한다.
+수정 후 위 23개가 모두 통과했다.
+추가로 종결 submit 응답의 기존 항목 제거, 부분·무관 이벤트의 미종결 보존,
+session_deleted=0 tombstone의 종결 처리 테스트 3개도 통과했다.
+이 보강 3개는 수정 전 실패를 주장하지 않는다.
+
+### 최종 검증
+
+`PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test $(rg --files server/tests -g 'session-host-*.test.js' | rg -v 'session-host-process-lifecycle.test.js')`
+
+결과: tests 153, pass 153, fail 0, cancelled 0, skipped 0.
+기존·P·정책·클라이언트 테스트를 포함한다. git diff --check도 통과했다.
+X 14개는 이번 턴에 실행하지 않았다. 변경 후 전체 예상 167개는 호스트에서 재검증한다.
+npm test와 commit/push는 실행하지 않았다.

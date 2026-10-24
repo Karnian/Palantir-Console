@@ -18,25 +18,56 @@ function createClient({ runtimeDir, timeoutMs = 2000 }) {
   let connecting;
   const pending = new Map();
   const uncertain = new Map();
-  function remember(request, result) {
-    const kind = result.kind || request.kind;
+  function remember(metadata, result) {
+    const key = metadata.request_key;
+    if (result.found === false || Object.hasOwn(result, 'session_deleted') || Object.hasOwn(result, 'expires_at')) {
+      uncertain.delete(key);
+      return;
+    }
+    const kind = result.kind || metadata.kind;
+    const previous = metadata.lastState || {};
+    // Keep only correlation and state facts, never a request or a returned row containing a body.
+    const lastState = {
+      id: result.id ?? previous.id,
+      state: result.state ?? previous.state,
+      outcome: Object.hasOwn(result, 'outcome') ? result.outcome : previous.outcome
+    };
     const control = ['start', 'resume', 'close', 'stop', 'handoff', 'delete'].includes(kind);
-    const unfinished = control ? result.state === 'accepted' : kind === 'prompt' ?
-      result.outcome == null && !['rejected', 'cancelled', 'expired'].includes(result.state) :
-      ['queued', 'sending', 'written', 'provider_observed'].includes(result.state);
-    if (unfinished && result.found !== false) uncertain.set(request.request_key, request);
-    else uncertain.delete(request.request_key);
+    const unfinished = control ? lastState.state === 'accepted' : kind === 'prompt' ?
+      lastState.outcome == null && !['rejected', 'cancelled', 'expired'].includes(lastState.state) :
+      ['queued', 'sending', 'written', 'provider_observed'].includes(lastState.state);
+    if (unfinished) uncertain.set(key, { request_key: key, kind, lastState });
+    else uncertain.delete(key);
+  }
+  function rememberUnknown(metadata) {
+    if (!uncertain.has(metadata.request_key)) {
+      uncertain.set(metadata.request_key, { request_key: metadata.request_key, kind: metadata.kind,
+        lastState: { state: 'acceptance_unknown' } });
+    }
+  }
+  function observeEvents(events) {
+    for (const event of events || []) {
+      if (event.type !== 'transition') continue;
+      const change = event.json;
+      if (!['deliveries', 'control_requests'].includes(change?.table)) continue;
+      for (const metadata of [...uncertain.values()]) {
+        const id = change.table === 'control_requests' ? metadata.request_key : metadata.lastState.id;
+        if (id !== undefined && id === change.id) remember(metadata, change);
+      }
+    }
   }
   function request(type, fields) {
     if (!connected) return Promise.reject(new Error('host_disconnected'));
     const id = ++nextId;
+    const trackedFields = type === 'submit' ?
+      { request: { request_key: fields.request.request_key, kind: fields.request.kind } } : fields;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         pending.delete(id);
-        if (type === 'submit') uncertain.set(fields.request.request_key, fields.request);
+        if (type === 'submit') rememberUnknown(trackedFields.request);
         reject(new Error(type === 'submit' ? 'acceptance_unknown' : 'request_timeout'));
       }, timeoutMs);
-      pending.set(id, { resolve, reject, timer, type, fields });
+      pending.set(id, { resolve, reject, timer, type, fields: trackedFields });
       socket.write(JSON.stringify({ type, id, ...fields }) + '\n');
     });
   }
@@ -76,11 +107,15 @@ function createClient({ runtimeDir, timeoutMs = 2000 }) {
               clearTimeout(entry.timer);
               if (['error', 'not_accepted', 'rejected'].includes(message.type)) {
                 const unknown = message.type === 'error' && entry.type === 'submit';
-                if (unknown) uncertain.set(entry.fields.request.request_key, entry.fields.request);
+                if (unknown) rememberUnknown(entry.fields.request);
                 entry.reject(Object.assign(new Error(unknown ? 'acceptance_unknown' : message.code || message.type),
                   { code: message.code || message.type }));
               } else {
                 if (entry.type === 'submit') remember(entry.fields.request, message.result);
+                if (entry.type === 'lookup' && uncertain.has(entry.fields.request_key)) {
+                  remember(uncertain.get(entry.fields.request_key), message.result);
+                }
+                if (entry.type === 'events_since') observeEvents(message.result.events);
                 entry.resolve(message.result);
               }
             }
@@ -93,7 +128,7 @@ function createClient({ runtimeDir, timeoutMs = 2000 }) {
           if (!greeted) reject(new Error('handshake_closed'));
           for (const entry of pending.values()) {
             clearTimeout(entry.timer);
-            if (entry.type === 'submit') uncertain.set(entry.fields.request.request_key, entry.fields.request);
+            if (entry.type === 'submit') rememberUnknown(entry.fields.request);
             entry.reject(new Error(entry.type === 'submit' ? 'acceptance_unknown' : 'host_disconnected'));
           }
           pending.clear();
@@ -114,10 +149,8 @@ function createClient({ runtimeDir, timeoutMs = 2000 }) {
     async reconcile() {
       await connect();
       const results = new Map();
-      for (const [key, request] of [...uncertain]) {
-        const result = await api.lookup(key);
-        results.set(key, result);
-        remember(request, result);
+      for (const key of [...uncertain.keys()]) {
+        results.set(key, await api.lookup(key));
       }
       return results;
     },
