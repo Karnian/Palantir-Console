@@ -15,7 +15,9 @@ function fixture() {
   const state = { output: `10 ${pinnedPath} PALANTIR_OWNED_INCARNATION=${id}\n`, start: `${startedAt}\n` };
   const probe = createPsIdentityProbe({ pinnedPath, execFileSync(command, args) {
     assert.equal(command, '/bin/ps');
-    if (args.includes('-A')) return state.output;
+    if (args.includes('pid=,command=')) return state.output;
+    if (args.includes('pid=')) return state.pids ?? '10\n';
+    if (args.includes('command=')) return state.output.replace(/^\S+ +/, '');
     if (state.error) throw state.error;
     return args.includes('ppid=') ? '1\n' : state.start;
   } });
@@ -40,7 +42,7 @@ test('R1-01 main executable must match pinned path including spaces', () => {
     assert.equal(probe.findMarked(id).status, 'query_failed');
   }
 });
-test('R1-02 truncated marker prefixes and malformed PID fail closed', () => {
+test('R1-02 truncated marker prefixes and malformed PID list fail closed', () => {
   for (const suffix of [id.slice(0, 1), id.slice(0, -1), '']) {
     const { state, probe } = fixture();
     assert.equal(probe.findMarked(id).status, 'ok');
@@ -50,7 +52,7 @@ test('R1-02 truncated marker prefixes and malformed PID fail closed', () => {
   }
   const { state, probe } = fixture();
   assert.equal(probe.findMarked(id).status, 'ok');
-  state.output = `1.5 ${pinnedPath} PALANTIR_OWNED_INCARNATION=${id}\n`;
+  state.pids = '1.5\n';
   assert.equal(probe.findMarked(id).status, 'query_failed');
 });
 test('R1-03 child env has null prototype and inherited pollution is rejected', () => {

@@ -483,3 +483,61 @@ R1 신규 11개는 모두 통과했다. 기존 순수·픽스처 170개도 통�
 실패는 기존 X 14개(ps EPERM 13개·host_start_timeout 1개)와 실제 ps 통합 1개다.
 호스트가 전달한 이전 185/185 통과와 구분하며 수정 후 196개는 호스트에서 다시 확인해야 한다.
 npm test·SDK 설치·실제 claude 실행·git 조작은 하지 않았다.
+
+## S1-b1 수정 라운드 2 — 여러 줄 argv의 ps 귀속 결함
+
+호스트 검증은 이전 라운드 196개 중 195개 통과였다.
+실제 ps 통합 1개는 샌드박스에만 기인한 실패가 아니라 구현 결함이었다.
+이전 보고의 샌드박스 추정을 정정한다. Node -e 소스나 Bash -c 명령의 줄바꿈은 전역 ps 출력에도 나타난다.
+따라서 전역 출력의 한 줄을 한 프로세스로 해석하거나 해석 불가 줄을 모두 오류로 보는 규칙은 폐기한다.
+
+전역 `ps -E -ww -A -o pid=,command=` 출력은 전체 문자열에서 표지 토큰과 줄 끝 진접두의 존재만 확인한다.
+정상 종료·비어 있지 않은 출력에서 둘 다 없으면 빈 목록이다. 진접두가 있으면 보수적으로 query_failed다.
+정확한 토큰이 있으면 별도 `ps -A -o pid=`로 PID 목록을 구한다.
+이 목록만 정수·중복·상한을 검증하며 전역 command 출력의 PID 같은 문자열은 신뢰하지 않는다.
+각 PID에 `ps -E -ww -o command= -p <pid>`를 실행한다.
+이 출력은 여러 줄이어도 해당 PID 하나에 귀속되므로 전체 문자열에서 표지를 검사한다.
+표지 PID만 시작시각과 부모 PID를 조회한다. 유일 루트·고정 실행 경로·하위 목록 규칙은 유지한다.
+개별 command·시작시각·부모 조회 중 PID가 종료 1·stdout/stderr 길이 0으로 사라지면 건너뛴다.
+다른 실패·빈 성공 출력·잘린 표지·잘못된 PID 목록은 query_failed로 남긴다.
+
+기본 상한은 스캔당 PID 4096개, 전체 기한 10000ms다.
+maxPids와 deadlineMs는 테스트에서 낮춰 주입할 수 있으며 기본 상한보다 큰 값은 거부한다.
+clock은 기본 단조 시계 performance.now이며 주입할 수 있다.
+모든 ps 호출 전에 남은 시간을 검사하고 명령 timeout은 min(5000ms, 남은 시간의 올림)이다.
+호출 후와 결과 반환 시에도 기한을 검사하여 늦은 정상 반환을 성공으로 처리하지 않는다.
+findMarked/listMarkedDescendants는 성공·실패 모두 diagnostics: {elapsedMs, queryCount}를 반환한다.
+queryCount는 전역·PID 목록·개별 command·시작시각·부모 조회를 포함한 실제 ps 호출 횟수다.
+check/verifyThenSignal의 기존 문자열 인터페이스는 유지한다.
+
+### 실패 선확인
+
+수정 전 `node --test server/tests/session-host-ps-identity-r2.test.js`:
+tests 7, pass 0, fail 7.
+아래 픽스처 6개는 수정 전 실패를 확인했고, 실제 ps 1개는 대조군부터 샌드박스 제한으로 실패했다.
+실제 테스트 실패를 이 환경에서 결함 재현 성공으로 주장하지 않는다.
+
+- R2-01 unrelated multiline argv and marked multiline argv use per-PID attribution
+- R2-01 global no-token multiline output succeeds empty without per-PID queries
+- R2-02 marker-looking global PID never determines attribution
+- R2-02 disappearing PID is skipped; other errors and malformed PID lists fail closed
+- R2-02 prefix-only global and per-PID output fail closed with full-token controls
+- R2-03 PID count and total deadline are bounded and diagnostic counts reflect executed queries
+- R2 real ps ignores unrelated multiline argv while identifying a marked child
+
+실제 테스트는 한 줄 argv 표지 자식으로 통과 대조를 먼저 확인하고,
+표지가 없는 여러 줄 argv 자식을 추가해도 본체·빈 하위 목록이 유지되는지 검증한다.
+기존 자식·손자 테스트의 여러 줄 소스도 그대로 유지했다.
+그 테스트 기한은 스캔 전체 기한과 복수 조회를 수용하도록 30초로 늘렸다.
+기존 픽스처는 전역·PID 목록·PID별 command를 분리했고 진단 필드는 별도로 확인한다.
+이전 R1의 잘못된 PID 검증은 이제 전역 command가 아닌 PID 목록에 적용한다.
+
+### 수정 후 검증
+
+지정 명령 `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-*.test.js`:
+tests 203, pass 187, fail 16, cancelled 0, skipped 0.
+R2 픽스처 6개 및 기존 순수·픽스처 181개가 통과했다.
+실패는 기존 프로세스 X 14개(ps EPERM 13개·host_start_timeout 1개)와 실제 ps 통합 2개다.
+실제 ps 회귀 테스트는 통과 대조부터 이 샌드박스에서 query_failed다.
+이 결과로 실제 macOS 결함이 해결됐다고 단정하지 않는다. 호스트에서 두 실제 ps 테스트를 포함해 재검증해야 한다.
+SDK 설치·실제 claude 실행·npm test·git 조작은 하지 않았다.
