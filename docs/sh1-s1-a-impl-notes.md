@@ -635,7 +635,8 @@ spawn 전에 검사하고 검사 실패 시 spawn 0이라는 계약은 유지한
 코어의 continueResult 한 곳에서 반환값의 thenable 여부를 가른다.
 즉시 값은 같은 틱의 세션 큐로 이어지고, 미완료 값은 큐를 점유하지 않으며 완료를 큐에 다시 넣는다.
 동기 설정 값에는 evaluateResolvedSettings를 직접 적용한다.
-thenable에는 resolveSettingsChecked를 적용하며 어댑터를 두 번 호출하지 않는다.
+R1부터 어댑터 호출 전에 잡은 절대 기한은 동기 값에도 적용한다.
+thenable에는 남은 시간으로 resolveSettingsChecked를 적용하며 어댑터를 두 번 호출하지 않는다.
 설정 기한에는 주입 clock과 tick 타이머를 사용한다. 실제 setTimeout·sleep은 없다.
 
 가짜 어댑터는 기본적으로 설정·account 값과 start 내부 초기화 이벤트를 동기로 제공한다.
@@ -748,4 +749,96 @@ git checkout·reset 없이 같은 최종 테스트 94개를 이 보관본에 실
 이전 기록의 maxExecInvocations 5회를 셸 호출 상한으로 해석한 것은 잘못이었다.
 호스트 재호출 상한이라는 사용자 정정에 따라 필요한 명령·테스트를 실행했다.
 S1-b1 판정 모듈·pin·프로세스/프로토콜 공개 API 파일·설계 원문은 수정하지 않았다.
+SDK 설치·실제 claude 실행·npm test·git 조작은 하지 않았다.
+
+
+## S1-b2a 수정 라운드 1 — 게이트 전 응답·설정 절대 기한·rate limit 정제
+
+호스트가 이전 구현을 실제 macOS에서 306/306 통과했다고 확인한 뒤 받은 적대리뷰 R1을 반영했다.
+새 테스트 파일은 `server/tests/session-host-gate-flow-r1.test.js`이며 제품 코드를 고치기 전에 실행했다.
+S1-b1의 authGate·spawnEnv·argvCheck·psIdentity·pin은 수정하지 않았다.
+
+### 1. 게이트 전 승인·질문 응답 차단
+
+sending과 같은 트랜잭션의 재검증에서 해당 incarnation의 start/resume이 done·stage done인지,
+메모리에 게이트 통과 account가 있는지, 해당 게이트 정리가 진행 중이지 않은지 검사한다.
+미통과·정리 중 tool_decision·question_answer는 rejected(gate_pending)이며 decide 효과는 0이다.
+거부한 delivery만 종결하고 카드는 pending으로 두므로, 통과 뒤 사람이 새 키로 다시 답할 수 있다.
+이미 거부한 같은 키는 게이트 통과 뒤에도 그대로 거부 상태를 반환한다.
+
+start 내부에서 신원 커밋보다 먼저 온 tool_request도 버리지 않는다.
+큐에서 처리할 때 incarnation 생존 상태를 다시 읽어 카드로 기록한다.
+게이트 실패 정리 종료 시에는 본체 종료가 확인됐는지와 무관하게 남은 pending 카드를 expired로 만든다.
+이 변경은 정리 미확인의 liveness_unknown에도 적용한다.
+
+`B2a-R1-01` 테스트 10개:
+동기·비동기 × 승인·질문의 게이트 전 거부/통과 후 새 답변 4개,
+정리 두 단계에서의 거부와 카드 만료 4개,
+start 내부 조기 카드 기록과 게이트 거부 뒤 만료 2개다.
+수정 전 10개 모두 실패했고 수정 후 전부 통과했다.
+
+### 2. 어댑터 호출 전부터 공유하는 설정 절대 기한
+
+settings_checking에서 checkSettings 호출 직전에 `now() + pin.resolveSettingsDeadlineMs`를 잡는다.
+동기 값은 이미 절대 기한에 도달했으면 구조 검사를 진행하지 않고 settings_check_failed로 거부한다.
+thenable은 호출이 소비한 시간을 뺀 remaining만 resolveSettingsChecked에 넘긴다.
+주입 타이머의 만료 시각도 원래 절대 기한으로 고정한다.
+기한이 이미 끝났으면 반환된 Promise의 rejection을 관측해 미처리 거절을 방지하면서 즉시 실패한다.
+동기 값·비동기 완료·예외 결과는 큐 복귀 시 같은 절대 기한으로 다시 검사한다.
+판정 중 또는 큐 복귀 전에 기한을 넘겨도 spawn하지 않는다. 실제 타이머나 sleep은 추가하지 않았다.
+
+`B2a-R1-02` 테스트 9개:
+동기 값·Promise·thenable 각각 10000ms/10001ms 지연 반환 6개,
+기한 뒤 throw/reject 2개, 호출 중 6000ms 소비 후 남은 4000ms만 기다리는 사례 1개다.
+지연 반환의 통과 대조는 9999ms다.
+수정 전 7개 실패·2개 통과였고 수정 후 9개 모두 통과했다.
+throw/reject 2개는 기존에도 거부됐으므로 새 결함 재현 성공으로 주장하지 않는다.
+
+### 3. rate limit만 저장 전에 정제
+
+rate_limit은 onEvent 진입에서 type·incarnation_id·정제한 rate_limit_info로 새 객체를 만든다.
+허용 키는 status·resetsAt·rateLimitType·overageStatus·overageDisabledReason·isUsingOverage뿐이다.
+값은 문자열·유한 숫자·불리언·null만 복사한다.
+객체·배열·undefined·함수·symbol·bigint·NaN·Infinity는 버린다.
+이 객체만 sdk 이벤트와 rate_limit 이벤트에 들어가므로 일반 sdk 원문 저장이 우회 경로가 되지 않는다.
+email·organization·account는 최상위와 rate_limit_info 양쪽에서 버린다.
+다른 SDK 이벤트의 원문 정책은 바꾸지 않았으며 S1-b2b에서 정한다.
+
+`B2a-R1-03` 테스트 10개:
+동기·비동기 메타데이터 2개와 허용하지 않는 값 타입 8개다.
+DB events 행·snapshot·eventsSince·재기동 snapshot을 확인하며,
+깨끗한 통과 이벤트와 동일 필드에 금지 값을 넣은 거부 대조를 함께 실행한다.
+수정 전 7개 실패·3개 통과였고 수정 후 모두 통과했다.
+undefined·함수·symbol 3개는 기존 JSON 직렬화도 버리므로 수정 전 실패를 주장하지 않는다.
+
+### 4. 정리 미확인 뒤 늦은 exit는 결함이 아님
+
+호스트 판정대로 incarnation의 exited는 본체 종료라는 사실이다.
+본체 종료 후에도 표지 하위 프로세스가 남을 수 있으므로 이 상태만으로 재개·넘기기를 허용하지 않는다.
+resume과 handoff는 제출 때 §3.4의 listMarkedDescendants를 다시 확인한다.
+따라서 늦은 child_exit가 liveness_unknown을 exited로 바꾸는 기존 전이는 유지했다.
+이미 종결된 start/resume control의 failed(gate_rejected_unverified) 사유도 바꾸지 않는다.
+
+`B2a-R1-04` 동기·비동기 테스트 2개는 수정 전부터 모두 통과했다.
+정리 미확인 → 늦은 본체 exit → 표지 하위 생존 상태에서
+resume rejected(subprocess_remaining)·handoff blocked(subprocess_remaining)·추가 spawn 0을 확인한다.
+같은 하위 표지만 제거하면 새 resume은 done이고 spawn이 정확히 한 번 늘어난다.
+이후에도 원래 control의 gate_rejected_unverified 사유가 보존된다.
+
+### 실패 선확인과 최종 검증
+
+수정 전:
+`PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-gate-flow-r1.test.js`
+
+원문 요약: tests 31, pass 7, fail 24, cancelled 0, skipped 0.
+번호별 실패는 1번 10/10, 2번 7/9, 3번 7/10, 4번 0/2다.
+수정 후 같은 명령: tests 31, pass 31, fail 0, cancelled 0, skipped 0.
+
+지정 전체 명령:
+`PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-*.test.js`
+
+원문 요약: tests 337, pass 321, fail 16, cancelled 0, skipped 0.
+기존 기능·픽스처 290개와 신규 31개는 모두 통과했다.
+실패는 기존 X 14개(ps EPERM 13개·host_start_timeout 1개)와 실제 ps 통합 2개(query_failed)다.
+실패를 skip하지 않았다. 이번 라운드의 전체 337개는 실제 macOS 호스트에서 다시 확인해야 한다.
 SDK 설치·실제 claude 실행·npm test·git 조작은 하지 않았다.

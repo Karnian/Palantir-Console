@@ -18,6 +18,22 @@ const CONTROLS = new Set(['start', 'resume', 'stop', 'close', 'handoff', 'delete
 const KINDS = new Set([...CONTROLS, 'prompt', 'tool_decision', 'question_answer', 'interrupt']);
 const DAY = 86400000;
 const INTERRUPT_RECEIPT_TIMEOUT_MS = 10000;
+const RATE_LIMIT_FIELDS = Object.freeze([
+  'status', 'resetsAt', 'rateLimitType', 'overageStatus', 'overageDisabledReason', 'isUsingOverage'
+]);
+
+function sanitizeRateLimit(info) {
+  if (!info || typeof info !== 'object' || Array.isArray(info)) return {};
+  const result = {};
+  for (const key of RATE_LIMIT_FIELDS) {
+    if (!Object.hasOwn(info, key)) continue;
+    const value = info[key];
+    if (value === null || typeof value === 'string' || typeof value === 'boolean' ||
+        typeof value === 'number' && Number.isFinite(value)) result[key] = value;
+  }
+  return result;
+}
+
 
 function canonical(value) {
   if (Array.isArray(value)) {
@@ -58,14 +74,17 @@ function createHostCore({
   const asyncErrors = [];
   const settingsTimers = new Map();
   let timerSequence = 0;
-  const timers = {
-    setTimeout(callback, delay) {
-      const id = ++timerSequence;
-      settingsTimers.set(id, { callback, at: now() + delay });
-      return id;
-    },
-    clearTimeout(id) { settingsTimers.delete(id); }
-  };
+  function deadlineTimers(deadline) {
+    return {
+      setTimeout(callback) {
+        const id = ++timerSequence;
+        // The adapter call and promise assimilation share this original deadline.
+        settingsTimers.set(id, { callback, at: deadline });
+        return id;
+      },
+      clearTimeout(id) { settingsTimers.delete(id); }
+    };
+  }
   // Normalize adapter values in one place; only pending results leave the queue.
   function continueResult(read, sessionId, operation, {
     synchronous = value => value,
@@ -213,6 +232,11 @@ function createHostCore({
         "('sending','written','provider_observed') AND outcome IS NULL LIMIT 1", incarnation.id);
   }
 
+  function hasPassedGate(incarnation) {
+    const gate = getRow("SELECT * FROM control_requests WHERE incarnation_id=? AND kind IN ('start','resume') AND state='done' AND stage='done'", incarnation.id);
+    return accounts.has(incarnation.id) && gate && !cleanups.has(gate.request_key);
+  }
+
   function areDescendantsClear(incarnation) {
     if (!incarnation) {
       return true;
@@ -348,6 +372,8 @@ function createHostCore({
         reason = 'not_idle';
       } else if (delivery.kind === 'prompt' && (!rechecks.get(id)?.passed || rechecks.get(id).turn !== incarnation.turn_gen)) {
         reason = 'auth_recheck_failed';
+      } else if (['tool_decision', 'question_answer'].includes(delivery.kind) && !hasPassedGate(incarnation)) {
+        reason = 'gate_pending';
       } else if (['tool_decision', 'question_answer'].includes(delivery.kind) && toolRequest?.state !== 'pending') {
         reason = 'tool_not_pending';
       }
@@ -606,9 +632,12 @@ function createHostCore({
         writeTransaction(() => transitionControl(controlRequest, { stage: 'settings_checking' }));
         injectFault('after_settings_checking');
         const cwd = getSession(controlRequest.session_id).cwd;
+        const deadline = now() + pin.resolveSettingsDeadlineMs;
+        const failedSettings = () => ({ ok: false, reason: 'settings_check_failed' });
         continueResult(() => adapter.checkSettings(cwd), controlRequest.session_id, result => {
           const current = getControl(key);
           if (current.state !== 'accepted' || current.stage !== 'settings_checking') return;
+          if (now() >= deadline) result = failedSettings();
           if (!result.ok) {
             writeTransaction(() => {
               recordEvent(current.session_id, current.incarnation_id, 'settings_rejected', result);
@@ -623,11 +652,19 @@ function createHostCore({
             executeControlRequest(key);
           }
         }, {
-          synchronous: authGate.evaluateResolvedSettings,
-          asynchronous: value => authGate.resolveSettingsChecked(() => value, cwd, {
-            deadlineMs: pin.resolveSettingsDeadlineMs, clock: now, timers
-          }),
-          failed: () => ({ ok: false, reason: 'settings_check_failed' })
+          synchronous: value => now() >= deadline ? failedSettings() : authGate.evaluateResolvedSettings(value),
+          asynchronous: value => {
+            const remaining = deadline - now();
+            if (remaining <= 0) {
+              // Observe even an already rejected promise without giving it extra time.
+              Promise.resolve(value).catch(() => {});
+              return Promise.resolve(failedSettings());
+            }
+            return authGate.resolveSettingsChecked(() => value, cwd, {
+              deadlineMs: remaining, clock: now, timers: deadlineTimers(deadline)
+            });
+          },
+          failed: failedSettings
         });
         return;
       }
@@ -749,6 +786,7 @@ function createHostCore({
     const verified = dead && clear;
     const flow = cleanups.get(control.request_key);
     writeTransaction(() => {
+      finishIncarnationDeliveries(incarnation);
       transitionIncarnation(incarnation, [incarnation.state], { state: verified ? 'exited' : 'liveness_unknown', end_reason: 'gate_rejected' });
       transitionControl(control, { state: 'failed', reason: verified ? (flow?.reason === 'gate_rejected' ? 'gate_rejected_cleaned' : flow?.reason || 'gate_rejected_cleaned') : 'gate_rejected_unverified' });
     });
@@ -1046,6 +1084,13 @@ function createHostCore({
     if (crashed || store.failed) {
       return;
     }
+    if (adapterEvent.type === 'rate_limit') {
+      adapterEvent = {
+        type: 'rate_limit',
+        incarnation_id: adapterEvent.incarnation_id,
+        rate_limit_info: sanitizeRateLimit(adapterEvent.rate_limit_info)
+      };
+    }
     const incarnation = getIncarnation(adapterEvent.incarnation_id);
     if (!incarnation || ['deleting', 'deleted'].includes(getSession(incarnation.session_id)?.state)) {
       return;
@@ -1084,13 +1129,10 @@ function createHostCore({
         } = adapterEvent;
         recordEvent(incarnation.session_id, incarnation.id, 'sdk', raw);
         if (adapterEvent.type === 'rate_limit') {
-          const info = adapterEvent.rate_limit_info || {};
-          const value = Object.fromEntries(['status', 'resetsAt', 'rateLimitType', 'overageStatus', 'overageDisabledReason', 'isUsingOverage']
-            .filter(key => Object.hasOwn(info, key)).map(key => [key, info[key]]));
-          recordEvent(incarnation.session_id, incarnation.id, 'rate_limit', value);
+          recordEvent(incarnation.session_id, incarnation.id, 'rate_limit', adapterEvent.rate_limit_info);
         }
         if (adapterEvent.type === 'tool_request') {
-          if (incarnation.state !== 'alive') {
+          if (getIncarnation(incarnation.id).state !== 'alive') {
             return;
           }
           execute(
