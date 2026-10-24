@@ -7,12 +7,14 @@ const reject = reason => ({ ok: false, reason });
 
 function validAccount(account, pin = defaultPin) {
   if (!object(account)) return false;
+  const prototype = Object.getPrototypeOf(account);
+  if (prototype !== Object.prototype && prototype !== null) return false;
   const known = ['email', 'organization', 'subscriptionType', 'apiProvider'];
   return Object.keys(account).every(key => known.includes(key)) &&
     own(account, 'apiProvider') && account.apiProvider === 'firstParty' &&
     own(account, 'subscriptionType') && pin.allowedSubscriptionTypes.includes(account.subscriptionType) &&
-    !('tokenSource' in account) && !('apiKeySource' in account) &&
-    ['email', 'organization'].every(key => !own(account, key) || typeof account[key] === 'string');
+    !own(account, 'tokenSource') && !own(account, 'apiKeySource') &&
+    ['email', 'organization'].every(key => own(account, key) && typeof account[key] === 'string' && account[key].trim().length > 0);
 }
 
 function evaluateInitialization(init, { expectedPid, pin = defaultPin } = {}) {

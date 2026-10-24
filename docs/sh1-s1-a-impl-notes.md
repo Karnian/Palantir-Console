@@ -385,7 +385,7 @@ SDK 설치·실행 및 기존 코어 연결 없이 CommonJS 순수 게이트, en
 고정 버전·해시·Team ID·구독 유형·capability·기한은 pin.js의 동결 객체와 동결 배열에 둔다.
 account는 실측된 email·organization·subscriptionType·apiProvider만 허용한다.
 인증 출처는 값이 undefined여도 키가 존재하면 거부한다. 미지 필드도 거부한다.
-email·organization은 선택 문자열이며 판정 결과와 로그에 넣지 않는다.
+email·organization은 own property인 비어 있지 않은 문자열이어야 하며 판정 결과와 로그에 넣지 않는다.
 재확인은 유효한 구독 account의 전체 값이 같아야 통과한다. 실패·미지 값·메타데이터 변경도 거부한다.
 S1-b2는 최초 account 스냅샷을 복사하여 보관하고 조회 예외를 실패 입력으로 전달해야 한다.
 
@@ -396,15 +396,16 @@ clock은 밀리초 반환 함수, timers는 setTimeout/clearTimeout 객체로 �
 설정 값과 전체 sources 객체는 화면 결과에 복사하지 않는다.
 시작 확인 화면은 PermissionRequest 경고와 이 경로 목록을 표시하고 실제 시작 여부를 정해야 한다.
 
-incarnation ID는 UUID와 실측 inc_spike_sub를 수용하는 영숫자 시작의 영숫자·밑줄·하이픈 1~128자로 제한한다.
-최종 env는 객체이며 중복 키를 표현할 수 없다. 표지 own key 하나·일치 값과 나머지 PALANTIR_* 부재를 검사한다.
+incarnation ID는 코어 randomUUID()가 만드는 UUID v4 형식으로 제한한다. 다른 버전·variant·실측용 단순 ID는 거부한다.
+최종 env는 null prototype 객체다. 표지 own key 하나·일치 값과 나머지 PALANTIR_* 부재를 검사한다.
 SDK 세 변수와 기본 열 변수만 복사하고 인증 변수는 어느 입력에서도 복사하지 않는다.
 argv는 고정 절대 경로의 realpath와 스트리밍 SHA-256을 검사한다.
 정확히 하나의 --permission-mode=default를 요구하며 다른 permission-mode 표현과 -- 구분자는 보수적으로 거부한다.
 Team ID는 이번 부품에서 고정값만 제공한다. 설치 시 codesign 확인과 경로 선택은 S1-b2에서 연결해야 한다.
 
 ps는 /bin/ps만 실행하고 LC_ALL=C로 시작시각 형식을 고정한다.
-표지는 공백 토큰 전체 일치로 비교한다. 별도 ppid 조회로 표지 프로세스 중 표지 부모가 없는 유일 루트를 본체로 정한다.
+표지는 UUID v4 공백 토큰 전체 일치로 비교한다. 별도 ppid 조회로 표지 부모가 없는 유일 루트를 구한다.
+그 루트의 command는 주입된 고정 CLI 절대 경로 + 공백으로 시작해야 본체로 인정한다.
 루트가 여럿이거나 목록 형식 이상·중복 pid·시작시각/부모 조회 실패·부분 파싱 실패면 query_failed다.
 listMarkedDescendants는 같은 probe에서 findMarked로 확인한 본체 신원만 제외한다.
 재시작 직후 본체 신원을 아직 모르면 모든 표지 프로세스를 반환한다. 생존 하위를 본체로 오인해 숨기지 않는 보수적 선택이다.
@@ -412,11 +413,11 @@ listMarkedDescendants는 같은 probe에서 findMarked로 확인한 본체 신�
 S1-b2 복구는 저장한 본체 신원을 check로 먼저 판정하고 하위 확인에는 목록 메서드를 사용해야 한다.
 ps 조회와 신호 사이의 커널 수준 원자성은 제공하지 않는다. 신호 직전 시작시각 재대조만 수행한다.
 
-macOS의 PID 없음 후보 신호는 ps 종료 코드 1·빈 stdout·빈 stderr·signal/code 없음으로만 제한했다.
+macOS의 PID 없음 신호는 ps 종료 코드 1·길이 0인 stdout·길이 0인 stderr·signal/code 없음으로만 제한한다.
 성공 코드의 빈 출력, 권한 오류와 그 밖의 실패는 사망으로 바꾸지 않는다.
-이번 샌드박스에서 /bin/ps 직접 실행은 operation not permitted로 막혀 PID 없음 동작을 실제 확인하지 못했다.
-픽스처는 이 구분을 고정하며 실제 자식·손자 통합 테스트는 호스트에서 반드시 재실행해야 한다.
-macOS 실측에서 다른 신호가 나오면 위 부재 판정을 실측에 맞춰 고쳐야 한다. 지금은 확인 완료를 주장하지 않는다.
+첫 구현의 호스트 검증에서 실제 macOS 185/185 통과를 확인받았다(실제 ps 포함).
+호스트 실측: 종료된 pid는 종료 1·stdout/stderr 길이 0, 범위 밖 pid는 종료 1·stderr 있음이다.
+이번 수정의 실제 자식·손자 통합 테스트는 샌드박스 제한 때문에 호스트에서 다시 실행해야 한다.
 npm test는 사용자 지시에 따라 호스트가 실행한다.
 
 최종 지정 명령 `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-*.test.js` 결과:
@@ -425,3 +426,60 @@ tests 185, pass 170, fail 15, cancelled 0, skipped 0.
 기존 프로세스 X 테스트 14개도 실패했다. 13개는 spawnSync /bin/ps EPERM,
 나머지 1개는 기존 기록과 같은 host_start_timeout이다. 나머지 기존 153개는 통과했다.
 실패를 skip이나 성공으로 바꾸지 않았다. 호스트에서 전체 명령과 npm test를 실행해야 한다.
+
+
+## S1-b1 수정 라운드 1 — 표지·출력·상속 입력 검증
+
+사용자가 전달한 적대리뷰 R1의 7개 항목을 보강했다. SDK 설치·실행과 기존 코어 변경은 없다.
+ps -E는 argv와 env를 구분하지 못한다. 코어가 randomUUID()로 생성한 추측 불가능한 UUID v4만 사용하고,
+probe 생성 시 S1-b2가 검증한 고정 CLI 절대 경로를 pinnedPath로 주입해야 한다.
+findMarked는 유일 표지 루트의 command가 정확한 경로 + 공백으로 시작하는지도 확인한다.
+공백 든 실행 경로를 토큰 분할하지 않으며 경로 접두만 같은 다른 실행 파일도 거부한다.
+하위 프로세스 목록에는 실행 파일 제한을 걸지 않는다. 같은 UID는 격리 경계가 아니다(brief §3.2).
+UUID 형식 검증만으로 난수 생성 자체를 증명할 수 없으므로 S1-b2는 외부 ID를 예약 ID 대신 넣으면 안 된다.
+
+줄 끝의 표지 값이 찾는 UUID의 진접두(빈 값 포함)면 조회 전체를 query_failed로 돌려준다.
+파싱 불가 줄을 버리지 않으며, 이미 유효한 행이 있어도 뒤의 부분 결과를 성공으로 처리하지 않는다.
+자식 env는 Object.create(null)에 허용 own key만 복사한다.
+최종 검사는 null prototype을 요구하고 for...in으로 열거 키를 검사한다.
+부재 판정은 공백을 trim하지 않는다. 누락된 stream도 빈 stream으로 취급하지 않는다.
+lstart는 ps가 붙인 마지막 LF 하나만 제거한 한 줄을 검증한다.
+요일·월 이름, 일 1~31, 시 0~23, 분·초 0~59를 확인하고 공백을 하나로 정규화하여 저장·비교한다.
+저장된 startedAt에는 줄바꿈을 허용하지 않는다.
+account는 Object.prototype 또는 null prototype만 허용하고 own property만 판정한다.
+email·organization의 누락·빈 문자열·공백 문자열도 거부한다. 메타데이터를 결과나 로그에 노출하지 않는다.
+
+### 실패 선확인
+
+제품 수정 전 `node --test server/tests/session-host-gate-review-r1.test.js` 실행:
+tests 11, pass 2, fail 9, cancelled 0, skipped 0.
+모든 테스트는 통과 대조를 포함하며, 아래 기존 통과 2개는 수정 전 실패를 주장하지 않는다.
+
+| 번호 | 테스트 이름 | 수정 전 |
+|---|---|---|
+| 1 | R1-01 UUID v4 required by env and both marker queries | 실패 |
+| 1 | R1-01 main executable must match pinned path including spaces | 실패 |
+| 2 | R1-02 truncated marker prefixes and malformed PID fail closed | 실패 |
+| 3 | R1-03 child env has null prototype and inherited pollution is rejected | 실패 |
+| 4 | R1-04 only zero-length absent streams prove death | 실패 |
+| 5 | R1-05 lstart rejects extra lines and invalid calendar/time ranges | 실패 |
+| 5 | R1-05 lstart compares normalized spaces | 실패 |
+| 6 | R1-06 account requires own nonempty email and organization | 실패 |
+| 6 | R1-06 account rejects custom prototypes regardless of inherited fields | 실패 |
+| 7 | R1-07 streaming hash uses an independent known SHA-256 literal | 기존 통과 |
+| 7 | R1-07 hash throw and rejection refuse spawn with passing controls | 기존 통과 |
+
+7번은 임시 파일의 고정 내용 abc와 알려진 SHA-256 리터럴을 비교한다.
+테스트 안에서 crypto.createHash로 기대값을 계산하지 않는다.
+같은 파일 내용만 abcd로 바꾸는 거부 대조와 hashFile throw/reject의 통과 대조를 추가했다.
+기존 env/ps 테스트는 UUID v4·null prototype·고정 경로 계약에 맞춰 갱신했다.
+실제 ps 테스트는 임의 UUID v4와 process.execPath를 고정 경로로 사용한다.
+
+### 수정 후 검증
+
+지정 전체 명령 `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-*.test.js`:
+tests 196, pass 181, fail 15, cancelled 0, skipped 0.
+R1 신규 11개는 모두 통과했다. 기존 순수·픽스처 170개도 통과했다.
+실패는 기존 X 14개(ps EPERM 13개·host_start_timeout 1개)와 실제 ps 통합 1개다.
+호스트가 전달한 이전 185/185 통과와 구분하며 수정 후 196개는 호스트에서 다시 확인해야 한다.
+npm test·SDK 설치·실제 claude 실행·git 조작은 하지 않았다.
