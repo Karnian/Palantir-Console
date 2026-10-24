@@ -1,6 +1,6 @@
 # SH1 — 사람용 세션 호스트 (Claude 1개·머신 1대) 구현 brief
 
-상태: **v5.6 (2026-10-24)** — v4.1(사용자 승인) + S1-0 스파이크 결과 반영(`docs/sh1-s1-0-spike-record.md`). codex R5·R6 NO-GO → R7 **GO** → 최종 R8·R9 NO-GO(제어 요청 저장·재검증·복구) 반영 → R10 NO-GO(종료된 실행의 close) 반영 → R11 NO-GO(실행만 끝내기) 반영 → R12. **사용자 승인 대기** — 승인 뒤 S1-a 에 들어간다. v4.1 에서 "S1-0 에서 확정"으로 남긴 칸은 모두 실측값으로 채웠다. 사용자 판정 두 항목은 닫혔다: §10 R6 은 사용자가 받아들였고("과금은 상관 없어"), §1.4 는 사용자 위임에 따라 codex 합의안으로 정했다(구현 S1-pre).
+상태: **v5.6 (2026-10-24)** — v4.1(사용자 승인) + S1-0 스파이크 결과 반영(`docs/sh1-s1-0-spike-record.md`). codex R5·R6 NO-GO → R7 **GO** → 최종 R8·R9 NO-GO(제어 요청 저장·재검증·복구) 반영 → R10 NO-GO(종료된 실행의 close) 반영 → R11 NO-GO(실행만 끝내기) 반영 → R12 **GO**. **승인됨**(2026-10-24 — 사용자: "최종 적대리뷰에서 문제 없으면 승인") — S1-a 진행. v4.1 에서 "S1-0 에서 확정"으로 남긴 칸은 모두 실측값으로 채웠다. 사용자 판정 두 항목은 닫혔다: §10 R6 은 사용자가 받아들였고("과금은 상관 없어"), §1.4 는 사용자 위임에 따라 codex 합의안으로 정했다(구현 S1-pre).
 상위 계약: `docs/specs/instruction-centric-direction-brief.md` §0.2 (v6 LOCKED). 이 문서와 충돌하면 §0.2 가 우선한다.
 
 ## 0. 목적과 범위
@@ -429,3 +429,4 @@ lock-in 은 사용자가 실제 작업에 써 본 뒤 정한다. brief 는 화�
 - codex **R9**(v5.3): **NO-GO** (R8 4건 모두 닫힘, 새 SERIOUS 2 / MODERATE 1). 반영(v5.4): 제어 요청에 delivery 재검증을 적용하지 않고 kind 별 접수 트랜잭션·전제·효과 직전 stage 표를 둠, 명령 큐를 세션 단위로(§4.4·§4.5). `blocked` 등 최종 상태는 배타권을 놓고, orphaned 대상 close 는 §3.3 신원 재대조·신호 경로로 처리. `control_requests.reason` 은 고정 코드만, 오류 상세는 삭제 대상인 events 로.
 - codex **R10**(v5.4): **NO-GO** (R9 3건 중 닫힘 2 / 부분 1, 새 SERIOUS 1 — 이미 종료된 실행은 close·handoff 로 끝낼 수 없어 세션이 active 로 갇힘). 반영(v5.5): close·handoff 가 `exited`·`never_started`·대상 없음을 받아 효과 없이 `exit_confirmed` 부터 진행, `done` 과 같은 트랜잭션에서 세션 `closed`/`handed_off`, 하위 프로세스가 남으면 `blocked` 후 새 키로 재시도(§4.4).
 - codex **R11**(v5.5): **NO-GO** (R10 닫힘, 새 SERIOUS 1 — close 가 세션을 `closed` 로 확정해 "끝내고 이어서 시작"의 resume 이 막힘). 반영(v5.6): 실행만 끝내는 제어 요청 `stop`(세션 active 유지, `end_reason=user_restart`)을 추가하고 "실행 끝내고 이어서 시작" = stop → resume 으로 정리. close 는 세션 종료 전용.
+- codex **R12**(v5.6): **GO** (R11 닫힘, 새 결함 없음). 사용자 위임에 따라 이 GO 로 승인.
