@@ -136,5 +136,5 @@ test('R2-07 resolving temporary cause never clears permanent survivor barrier', 
   f.adapter.emit(f.iid, 'tool_result', { tool_use_id: 'a', is_error: false, content: 'ok' });
   assert.equal(f.state().incarnations[0].attribution_uncertain, 1);
   assert.equal(f.prompt().state, 'rejected'); assert.equal(f.adapter.log.executions.length, 1);
-  assert.ok(['unknown', 'provider_observed'].includes(f.d(a.id).state));
+  assert.equal(f.d(a.id).state, 'unknown'); assert.equal(f.d(a.id).reason, 'tool_finished');
 });

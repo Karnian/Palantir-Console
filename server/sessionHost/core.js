@@ -80,10 +80,13 @@ function createHostCore({ dbPath, adapter, identityProbe, clock = Date.now, host
       ic(i, ['alive', 'orphaned'], { attribution_uncertain: 0 });
     }
   }
+  function taintDelivery(d) {
+    // A finished tool has no deferred effect left; an ambiguous call without a result does.
+    if (d.state === 'unknown' && ['tool_finished', 'tool_finished_error'].includes(d.reason)) return;
+    dc(d, ['sending', 'written', 'unknown'], { tainted: 1 });
+  }
   function taint(i) {
-    for (const d of all("SELECT * FROM deliveries WHERE incarnation_id=? AND kind IN ('tool_decision','question_answer') AND state IN ('sending','written')", i.id)) {
-      dc(d, ['sending', 'written'], { tainted: 1 });
-    }
+    for (const d of all("SELECT * FROM deliveries WHERE incarnation_id=? AND kind IN ('tool_decision','question_answer') AND state IN ('sending','written','unknown')", i.id)) taintDelivery(d);
   }
   function endDeliveries(i) {
     for (const d of all('SELECT * FROM deliveries WHERE incarnation_id=?', i.id)) {
@@ -255,7 +258,7 @@ function createHostCore({ dbPath, adapter, identityProbe, clock = Date.now, host
     finishControl(key);
   }
   function autoClose(i) {
-    if (session(i.session_id).state !== 'active' || one("SELECT request_key FROM control_requests WHERE incarnation_id=? AND reason='capability_missing'", i.id) || one("SELECT request_key FROM control_requests WHERE session_id=? AND state='accepted'", i.session_id)) return;
+    if (i.state !== 'alive' || session(i.session_id).state !== 'active' || one("SELECT request_key FROM control_requests WHERE incarnation_id=? AND reason='capability_missing'", i.id) || one("SELECT request_key FROM control_requests WHERE session_id=? AND state='accepted'", i.session_id)) return;
     const key = `rk_${now()}_${hash(['capability_missing', i.id])}`;
     write(() => {
       run('INSERT INTO control_requests(request_key,fingerprint,kind,session_id,incarnation_id,stage,state,reason,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)', key, hash(['close', i.id]), 'close', i.session_id, i.id, 'requested', 'accepted', 'capability_missing', now(), now());
@@ -386,14 +389,16 @@ function createHostCore({ dbPath, adapter, identityProbe, clock = Date.now, host
           if (!d || incarnation(i.id).attribution_uncertain === 1) return;
           dc(d, ['sending', 'written', 'provider_observed', 'unknown', 'completed'], { result_json: JSON.stringify(e) });
           for (const int of all("SELECT * FROM deliveries WHERE incarnation_id=? AND kind='interrupt' AND turn_gen=? AND state IN ('sending','written','provider_observed','unknown')", i.id, d.turn_gen)) {
-            dc(int, ['sending', 'written', 'provider_observed', 'unknown'], { state: 'completed' }); ic(i, ['alive'], { interrupt_unknown: 0 });
+            dc(int, ['sending', 'written', 'provider_observed', 'unknown'], { state: 'completed' });
+            resolveCause(int);
+            ic(i, ['alive'], { interrupt_unknown: 0 });
           }
         } else if (e.type === 'tool_result') {
           const t = one('SELECT * FROM tool_requests WHERE incarnation_id=? AND tool_use_id=?', i.id, e.tool_use_id);
           if (!t?.answer_delivery_id) return;
           const d = delivery(t.answer_delivery_id), decision = JSON.parse(t.decision);
           const observed = decision.behavior === 'deny' ? e.is_error === true && e.content === decision.message :
-            decision.behavior === 'answer' ? !e.is_error && JSON.stringify(e.content) === JSON.stringify(decision.answer) : !e.is_error && !d.tainted;
+            decision.behavior === 'answer' ? !e.is_error && !d.tainted && JSON.stringify(e.content) === JSON.stringify(decision.answer) : !e.is_error && !d.tainted;
           dc(d, ['sending', 'written', 'unknown'], { state: observed ? 'provider_observed' : 'unknown', reason: observed ? null : e.is_error ? 'tool_finished_error' : 'tool_finished' });
           // This exact tool has finished, so an ambiguous call cannot execute later.
           resolveCause(d);
@@ -418,7 +423,7 @@ function createHostCore({ dbPath, adapter, identityProbe, clock = Date.now, host
       });
       if (e.type === 'child_exit') for (const c of all("SELECT * FROM control_requests WHERE incarnation_id=? AND state='accepted' AND kind IN ('stop','close','handoff')", i.id)) finishControl(c.request_key);
       const current = incarnation(i.id);
-      if (current?.close_after_turn && (capabilityTurnEnded || idle(current) || current.state === 'exited')) {
+      if (current?.state === 'alive' && current.close_after_turn && (capabilityTurnEnded || idle(current))) {
         autoClose(current);
       } else drain(i.session_id);
     });
@@ -435,7 +440,7 @@ function createHostCore({ dbPath, adapter, identityProbe, clock = Date.now, host
           tc(t, ['pending', 'decided'], { state: 'cancelled' }, i);
           if (d) dc(d, ['queued'], { state: 'cancelled', reason: 'signal_abort' });
         } else if (d) {
-          dc(d, ['sending', 'written'], { tainted: 1 });
+          taintDelivery(d);
           event(i.session_id, i.id, 'decision_tool_aborted', { delivery_id: d.id });
         }
       }

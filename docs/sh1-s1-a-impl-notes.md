@@ -130,3 +130,22 @@ completed interrupt의 늦은 영수증도 survivor UUID를 처리한다. comple
 | 7 | R2-07 resolving temporary cause never clears permanent survivor barrier | 기존 통과 / 일시 원인 해소가 영구 장벽까지 해제 |
 
 S1-a2: 호스트 잠금·동시 기동·FD 상속·소켓·handshake·유휴 종료·서버 생존 분리. S1-b: 실제 SDK/가짜 CLI 프로토콜, account 여섯 모양/버전/pid/권한모드/원격 제어 검사, resolveSettings 구조·10초 기한, 초기화 60초 및 종료 유예 5초, env allowlist와 capability 값 유출 검사, 실제 ps·신호 transport. S1-c: cookie·origin·bearer 거부와 소켓 장애 화면. S1-e: 넘기기 shell argv·환경·실제 CLI와 hook 실측. 이 검증은 이번 라이브러리 테스트로 대체하지 않는다.
+
+## 수정 라운드 3 — 미관측 결정 오염과 종료 경로 보존
+
+호스트 결정에 따라 capability 자동 close는 **아직 alive인 incarnation에서만 시작**한다. 이미 사용자 stop/close/handoff가 접수되어 종료 경로에 들어갔다면 그 진행 중 제어 요청의 배타권을 유지한다. exit 뒤에는 자동 close를 새로 만들지 않는다. 특히 init 지연 중 먼저 접수된 stop은 뒤늦은 capability 누락 때문에 세션 close로 바뀌지 않으며, stop done 뒤 세션 active와 resume 가능 상태를 유지한다. 누락 사실은 해당 incarnation에만 남고 새 incarnation은 첫 init으로 다시 판정한다. 반대로 누락 판정 뒤 새로 제출한 stop은 기존 라운드 2 정책대로 `rejected(capability_close_pending)`다. 이 정책은 라운드 2의 종료 의도 우선 규칙을 위 조건으로 한정한다.
+
+인터럽트·signal abort·exit는 sending/written뿐 아니라 결과를 아직 받지 못한 unknown tool_decision/question_answer도 taint한다. 이미 `tool_finished`/`tool_finished_error`로 끝난 unknown은 제외한다. 오염된 허용·질문 응답은 정상 tool_result가 뒤늦게 와도 observed로 승격하지 않고 unknown·`tool_finished`로 남긴다. 해당 도구가 끝난 사실로 일시 장벽 원인은 해소하되, 영구 장벽은 유지한다. R2-07의 survivor 테스트도 이 정책에 맞게 unknown을 엄격히 단언한다.
+
+대상 turn_gen의 result로 interrupt가 completed가 되면 같은 트랜잭션에서 그 interrupt의 attribution_pending을 해소한다. 다른 delivery의 원인은 남기며 원인이 모두 해소된 경우에만 값 2의 일시 장벽을 해제한다. 값 1의 영구 장벽은 해제하지 않는다.
+
+수정 전 신규 테스트 10개 중 9개 실패·1개 통과를 확인했고 수정 후 전체 전용 테스트 102개가 통과했다.
+
+| 지적 | 추가 테스트 이름 | 수정 전 결과 / 막는 구현 실수 |
+|---|---|---|
+| 1 | R3-01 unknown tool_decision/question_answer tainted by interrupt/abort/exit cannot become observed on normal tool result | 6개 모두 실패 / 효과 예외를 거친 미관측 결정이 오염 구간을 무시하고 observed로 승격 |
+| 2 | R3-02 stop accepted before delayed missing init remains active after exit and can resume | 실패 / stop 완료 뒤 자동 close를 추가해 세션을 닫음 |
+| 3 | R3-03 target result clears interrupt effect barrier only, otherCause=false/true | 2개 모두 실패 / interrupt 완료 뒤 원인이 남거나 다른 원인까지 해제 |
+| 3 | R3-03 completed interrupt result cannot release an existing permanent barrier | 기존 통과 / 일시 장벽 해소가 survivor 영구 장벽까지 해제 |
+
+테스트는 가짜 자체의 결정·실행·close·interrupt 로그로 효과 횟수를 확인한다. npm test는 이번 라운드 지시에 따라 호스트에서 실행한다.
