@@ -1241,6 +1241,16 @@ function createHostCore({
     recover,
     snapshot,
     eventsSince,
+    submitWithReceipt(request) {
+      const result = this.submit(request);
+      return store.read(() => {
+        const persisted = getRow('SELECT * FROM request_aliases WHERE request_key=?', request.request_key) ||
+          getRow('SELECT * FROM deliveries WHERE request_key=?', request.request_key) || getControl(request.request_key) ||
+          getRow('SELECT * FROM request_tombstones WHERE request_key=?', request.request_key);
+        const durable = Boolean(persisted && persisted.fingerprint === requestFingerprint(request));
+        return { durable, result, ...(!durable ? { code: result.reason || 'not_recorded' } : {}) };
+      });
+    },
     submitUnavailable(request) {
       const result = submit(request);
       if (['start', 'resume'].includes(request.kind) && result.state === 'failed' && result.reason === 'spawn_failed') {

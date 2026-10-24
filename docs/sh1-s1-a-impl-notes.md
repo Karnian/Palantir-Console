@@ -247,3 +247,87 @@ lookup/snapshot/replay·UTF-8 분할·유휴 not_accepted를 검증한다.
 각 테스트는 9.5초 제한과 기한 있는 짧은 조건 polling을 사용한다.
 직접 생성한 ChildProcess handle 또는 ps 시작시각 신원을 확인한 PID만 정리하고 runtimeDir을 제거한다.
 npm test는 지시대로 실행하지 않았다. 호스트 전체 회귀 검증이 남아 있다.
+
+## S1-a2 수정 라운드 1 — fatal 보존·접수 증거·재확인 범위
+
+호스트 사전 확인: 이전 HEAD에서 실제 macOS 전용 테스트 129/129 통과, 잔존 프로세스 0.
+EXCLUSIVE 제거·active 보호 제거·accepted 선응답 mutation 3종 모두 검출됐다는 결과를 받았다.
+
+### R1-01 치명 오류 정책
+
+uncaughtException·unhandledRejection 처리기를 호스트 수명에 맞춰 등록·제거한다.
+첫 치명 오류에서 fatal을 래치하고 고정 진단 host_fatal 한 줄만 기록한다.
+예외 값·본문·스택은 읽거나 로그로 넘기지 않는다. 이후 정상 인증된 모든 새 요청은 host_fatal 오류다.
+인증 실패 연결은 기존처럼 무응답으로 닫고, 올바른 hello는 진단 연결을 위해 계속 허용한다.
+active 소유 세션이 있거나 그 수를 확인할 수 없으면 종료하지 않고 유휴 검사도 중지한다.
+세션이 없으면 연결·코어·잠금을 정리한 뒤 exitCode=1로 자연 종료한다.
+process.exit 호출은 추가하지 않았다. active 상태의 SIGTERM 보호도 유지한다.
+
+fixture의 SH_ASYNC_FATAL(throw/rejection)과 SH_ASYNC_FATAL_POINT로 비동기 오류 지점을 고른다.
+trigger_file 지점은 파일 신호로 오류를 발생시켜 세션 생성 전후를 결정적으로 나눈다.
+제품 main은 이 설정을 받지 않는다. X 테스트는 같은 PID·부팅 신원 유지, 재연결 후 host_fatal,
+추가 효과 0, 반복 오류의 진단 중복 없음, 유휴 기한·SIGTERM 생존을 확인한다.
+세션 0개 대조군은 exit 1·소켓 제거·새 호스트 잠금 획득을 확인한다.
+
+### R1-02 명시적 durable 접수 증거
+
+기존 submit 및 상태 전이 구현은 바꾸지 않고 공개 submitWithReceipt(request)를 추가했다.
+기존 submit 결과와 별도로 저장된 alias/delivery/control/tombstone 행 및 fingerprint 일치를
+read transaction에서 확인하여 {durable,result,code?}를 반환한다.
+존재하는 다른 fingerprint의 행은 해당 제출의 durable 증거로 인정하지 않는다.
+submitUnavailable을 사용하는 facade에서도 같은 메서드가 해당 submit 경로를 사용한다.
+
+프로토콜은 명시적인 durable 값으로만 accepted/rejected를 나눈다.
+미기록 형식 오류·만료·미래 키·fingerprint 충돌은 rejected(id,request_key,code)다.
+반대로 저장된 rejected 행, 별칭, 삭제 tombstone과 같은 키의 멱등 결과는 accepted다.
+따라서 상태 문자열이나 reason으로 기록 여부를 추측하지 않는다.
+
+### R1-03·04 클라이언트 재확인
+
+accepted 결과라도 control accepted, delivery queued/sending/written/provider_observed,
+prompt의 미종결 outcome은 request_key를 보존한다.
+reconcile()은 재연결 후 이 키들을 모두 lookup하여 갱신 결과 Map을 반환한다.
+조회 결과도 미종결이면 다음 재연결을 위해 계속 남기고 종결·found:false면 제거한다.
+prompt의 interrupted 같은 종결 outcome은 provider_observed 상태여도 재확인 대상에서 뺀다.
+자동 재제출이나 효과 재전송은 하지 않는다.
+
+submit의 error 응답은 원래 오류 code를 유지하면서 acceptance_unknown으로 reject하고 키를 보존한다.
+rejected는 해당 고정 code로 확정 거부하며 새 재확인 대상으로 추가하지 않는다.
+응답 유실·시간 초과의 보존 동작도 유지한다. 같은 부팅으로 재연결해도 reconcile로 판정할 수 있다.
+
+### 실패 선확인과 최종 검증
+
+제품 수정 전 신규 P 테스트를 먼저 실행했다: 28개 중 통과 13·실패 15.
+다음은 지적별 테스트 이름과 실제 수정 전 결과다.
+
+| 번호 | 테스트 이름 | 수정 전 |
+|---|---|---|
+| 1 | R1-01 fatal latch rejects every authenticated request without core access or secret leakage | 실패 |
+| 1 | X R1-01 asynchronous throw, active ownership=false/true | 호스트 확인 필요 |
+| 1 | X R1-01 asynchronous rejection, active ownership=false/true | 호스트 확인 필요 |
+| 2 | R1-02 real core non-durable invalid_request/key_expired/key_future/fingerprint_conflict returns rejected instead of accepted | 4개 모두 실패 |
+| 2 | R1-02 real core durable rejection and idempotent result still return accepted | 기존 통과, 양성 대조 |
+| 3 | R1-03 accepted unfinished prompt/queued·sending·written·provider_observed·completed is looked up after boot change | 5개 모두 실패 |
+| 3 | R1-03 accepted unfinished close/accepted is looked up after boot change | 실패 |
+| 3 | R1-03 accepted unfinished tool_decision/written is looked up after boot change | 실패 |
+| 3 | R1-03 terminal prompt outcome is not retained for lookup | 기존 통과, 종결 대조 |
+| 4 | R1-04 submit error storage_unavailable/host_fatal remains acceptance_unknown until lookup | 2개 모두 실패 |
+| 4 | R1-04 rejected submit is definitive and never retained for lookup | 실패 |
+
+수정 후 추가한 보강 테스트 4개도 통과한다. 이 4개는 수정 전 실패를 주장하지 않는다.
+
+- R1-03 unfinished lookup remains tracked across another boot, terminal lookup removes it
+- R1-04 submit error is reconciled after reconnect to the same boot
+- R1-02 receipt recognizes interrupt aliases and deleted delivery tombstones as durable
+- R1-02 unavailable adapter receipt preserves fixed adapter_unavailable result
+
+최종 실행은 X 파일을 제외한 명시적 파일 목록으로 했다.
+`PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test $(rg --files server/tests -g 'session-host-*.test.js' | rg -v 'session-host-process-lifecycle.test.js')`
+결과: tests 140, pass 140, fail 0, cancelled 0, skipped 0.
+기존 102개와 이전 P·정책 17개, 이번 신규 P·클라이언트 21개가 포함된다.
+
+그 전 이름 필터로 X를 제외하려던 실행에서는 필터가 적용되지 않아 X 14개도 실행됐다.
+그 실행은 P 136개 통과·X 14개 샌드박스 실패였다(보강 4개 추가 전).
+X의 ps EPERM·소켓 제한을 성공이나 skip으로 처리하지 않았다.
+이번 신규 X 4개와 변경 후 기존 X 10개는 실제 macOS에서 호스트 확인이 필요하다.
+npm test·commit·push는 실행하지 않았다.

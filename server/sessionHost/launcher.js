@@ -18,6 +18,15 @@ function createClient({ runtimeDir, timeoutMs = 2000 }) {
   let connecting;
   const pending = new Map();
   const uncertain = new Map();
+  function remember(request, result) {
+    const kind = result.kind || request.kind;
+    const control = ['start', 'resume', 'close', 'stop', 'handoff', 'delete'].includes(kind);
+    const unfinished = control ? result.state === 'accepted' : kind === 'prompt' ?
+      result.outcome == null && !['rejected', 'cancelled', 'expired'].includes(result.state) :
+      ['queued', 'sending', 'written', 'provider_observed'].includes(result.state);
+    if (unfinished && result.found !== false) uncertain.set(request.request_key, request);
+    else uncertain.delete(request.request_key);
+  }
   function request(type, fields) {
     if (!connected) return Promise.reject(new Error('host_disconnected'));
     const id = ++nextId;
@@ -65,8 +74,15 @@ function createClient({ runtimeDir, timeoutMs = 2000 }) {
               if (!entry) continue;
               pending.delete(message.id);
               clearTimeout(entry.timer);
-              if (message.type === 'error' || message.type === 'not_accepted') entry.reject(new Error(message.code || message.type));
-              else entry.resolve(message.result);
+              if (['error', 'not_accepted', 'rejected'].includes(message.type)) {
+                const unknown = message.type === 'error' && entry.type === 'submit';
+                if (unknown) uncertain.set(entry.fields.request.request_key, entry.fields.request);
+                entry.reject(Object.assign(new Error(unknown ? 'acceptance_unknown' : message.code || message.type),
+                  { code: message.code || message.type }));
+              } else {
+                if (entry.type === 'submit') remember(entry.fields.request, message.result);
+                entry.resolve(message.result);
+              }
             }
           }
         });
@@ -98,9 +114,10 @@ function createClient({ runtimeDir, timeoutMs = 2000 }) {
     async reconcile() {
       await connect();
       const results = new Map();
-      for (const key of uncertain.keys()) {
-        results.set(key, await api.lookup(key));
-        uncertain.delete(key);
+      for (const [key, request] of [...uncertain]) {
+        const result = await api.lookup(key);
+        results.set(key, result);
+        remember(request, result);
       }
       return results;
     },

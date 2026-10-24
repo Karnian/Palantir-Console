@@ -16,7 +16,17 @@ for (const name of ['start', 'send', 'decide', 'interrupt', 'close']) {
     return original(...args);
   };
 }
+function scheduleFatal() {
+  const countFile = path.join(runtimeDir, 'fatal-count');
+  const count = fs.existsSync(countFile) ? Number(fs.readFileSync(countFile, 'utf8')) : 0;
+  fs.writeFileSync(countFile, String(count + 1));
+  setImmediate(() => {
+    if (process.env.SH_ASYNC_FATAL === 'throw') throw new Error('private-user-body');
+    void Promise.reject(new Error('private-user-body'));
+  });
+}
 const faults = { hit(point) {
+  if (point === process.env.SH_ASYNC_FATAL_POINT && ['throw', 'rejection'].includes(process.env.SH_ASYNC_FATAL)) scheduleFatal();
   if (point === 'before_idle_drain' && process.env.SH_IDLE_GATE === '1' &&
       !fs.existsSync(path.join(runtimeDir, 'idle-release'))) {
     fs.writeFileSync(path.join(runtimeDir, 'idle-draining'), 'ready');
@@ -36,8 +46,18 @@ const faults = { hit(point) {
   fs.writeFileSync(marker, point);
   process.kill(process.pid, 'SIGKILL');
 } };
-startHost({ runtimeDir, adapter, identityProbe: probe, faults, idleMs: Number(process.env.SH_IDLE_MS || 60000) })
+startHost({ runtimeDir, adapter, identityProbe: probe, faults, idleMs: Number(process.env.SH_IDLE_MS || 60000),
+  log: code => fs.appendFileSync(path.join(runtimeDir, 'fatal-log'), code + '\n') })
   .then(host => {
+    if (process.env.SH_ASYNC_FATAL_POINT === 'trigger_file' && ['throw', 'rejection'].includes(process.env.SH_ASYNC_FATAL)) {
+      const timer = setInterval(() => {
+        const trigger = path.join(runtimeDir, 'fatal-trigger');
+        if (!fs.existsSync(trigger)) return;
+        fs.unlinkSync(trigger);
+        scheduleFatal();
+      }, 5);
+      timer.unref();
+    }
     fs.writeFileSync(path.join(runtimeDir, 'host-info'), JSON.stringify({ pid: process.pid, boot: host.hostBootId,
       tokenPresent: Object.hasOwn(process.env, 'PALANTIR_TOKEN'),
       oauthPresent: Object.hasOwn(process.env, 'CLAUDE_CODE_OAUTH_TOKEN') ||

@@ -2,7 +2,8 @@
 const { createHash, timingSafeEqual } = require('node:crypto');
 const digest = value => createHash('sha256').update(typeof value === 'string' ? value : '').digest();
 
-function createProtocol({ stream, core, capability, hostBootId, sdkVersion = null, maxLineBytes = 1048576, onActivity = () => {} }) {
+function createProtocol({ stream, core, capability, hostBootId, sdkVersion = null, maxLineBytes = 1048576, onActivity = () => {},
+  isFatal = () => false }) {
   let buffer = Buffer.alloc(0);
   let authenticated = false;
   let draining = false;
@@ -20,6 +21,10 @@ function createProtocol({ stream, core, capability, hostBootId, sdkVersion = nul
       send({ type: 'hello', host_boot_id: hostBootId, schema_version: 3, sdk_version: sdkVersion });
       return;
     }
+    if (isFatal()) {
+      send({ type: 'error', id: message.id, code: 'host_fatal' });
+      return;
+    }
     if (draining) {
       send({ type: 'not_accepted', id: message.id });
       return close();
@@ -31,13 +36,17 @@ function createProtocol({ stream, core, capability, hostBootId, sdkVersion = nul
     onActivity();
     try {
       let result;
+      let receipt;
       if (message.type === 'submit') {
         if (!message.request || typeof message.request !== 'object') throw new Error('invalid_request');
-        result = await core.submit(message.request);
+        receipt = await core.submitWithReceipt(message.request);
+        result = receipt.result;
       } else if (message.type === 'lookup') result = await core.lookup(message.request_key);
       else if (message.type === 'snapshot') result = await core.snapshot(message.session_id);
       else result = await core.eventsSince(message.seq);
-      if (pending.has(token)) {
+      if (pending.has(token) && receipt && !receipt.durable) {
+        send({ type: 'rejected', id: message.id, request_key: message.request.request_key, code: receipt.code });
+      } else if (pending.has(token)) {
         send({ type: message.type === 'submit' ? 'accepted' : message.type, id: message.id,
           ...(message.type === 'submit' ? { request_key: message.request.request_key } : {}), result });
       }

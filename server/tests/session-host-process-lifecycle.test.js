@@ -183,3 +183,53 @@ test('X SIGTERM with zero ownership exits cleanly and releases exclusion', optio
   const replacement = h.launch();
   await h.ready(replacement);
 });
+
+for (const fatalKind of ['throw', 'rejection']) {
+  for (const owned of [false, true]) {
+    test(`X R1-01 asynchronous ${fatalKind}, active ownership=${owned}`, options, async t => {
+      const h = setup(t);
+      const child = h.launch({ SH_ASYNC_FATAL: fatalKind, SH_ASYNC_FATAL_POINT: 'trigger_file', SH_IDLE_MS: '150' });
+      const client = await h.ready(child);
+      if (owned) {
+        const accepted = await client.submit({ kind: 'start', cwd: '/tmp', request_key: key() });
+        assert.equal(accepted.state, 'done');
+        assert.equal((await client.snapshot(accepted.session_id)).state.session.state, 'active');
+      }
+      assert.ok(alive(child.pid, h.tracked.get(child.pid)));
+      fs.writeFileSync(path.join(h.runtimeDir, 'fatal-trigger'), 'go');
+      await poll(() => {
+        try { return fs.readFileSync(path.join(h.runtimeDir, 'fatal-log'), 'utf8').includes('host_fatal'); } catch { return false; }
+      });
+      if (owned) {
+        await assert.rejects(client.snapshot('missing'), { code: 'host_fatal' });
+        const fresh = await h.ready(child);
+        assert.equal(fresh.hostBootId, client.hostBootId);
+        await assert.rejects(fresh.submit({ kind: 'start', cwd: '/tmp', request_key: key() }),
+          { message: 'acceptance_unknown', code: 'host_fatal' });
+        fs.writeFileSync(path.join(h.runtimeDir, 'fatal-trigger'), 'again');
+        await poll(() => {
+          try { return fs.readFileSync(path.join(h.runtimeDir, 'fatal-count'), 'utf8') === '2'; } catch { return false; }
+        });
+        process.kill(child.pid, 'SIGTERM');
+        const deadline = Date.now() + 350;
+        await poll(() => {
+          assert.ok(alive(child.pid, h.tracked.get(child.pid)));
+          return Date.now() >= deadline;
+        });
+        await assert.rejects(fresh.snapshot('missing'), { code: 'host_fatal' });
+        assert.equal(child.exitCode, null);
+        assert.deepEqual(fs.readFileSync(path.join(h.runtimeDir, 'effects'), 'utf8').trim().split('\n'), ['start']);
+      } else {
+        await waitExit(child);
+        assert.equal(child.exitCode, 1);
+        assert.equal(fs.existsSync(path.join(h.runtimeDir, 'host.sock')), false);
+        const replacement = h.launch();
+        await h.ready(replacement);
+      }
+      const diagnostic = fs.readFileSync(path.join(h.runtimeDir, 'fatal-log'), 'utf8');
+      assert.equal(diagnostic.split('\n').filter(line => line === 'host_fatal').length, 1);
+      assert.equal(diagnostic.includes('private-user-body'), false);
+      assert.equal(child.errors.includes('private-user-body'), false);
+    });
+  }
+}
