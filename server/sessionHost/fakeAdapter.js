@@ -1,6 +1,9 @@
 'use strict';
 
 const { EventEmitter } = require('node:events');
+const pin = require('./pin');
+const { buildChildEnv, assertChildEnv } = require('./spawnEnv');
+const subscription = () => ({ email: 'fake@example.test', organization: 'fake', subscriptionType: 'Claude Max', apiProvider: 'firstParty' });
 
 function createFakeAdapter(options = {}) {
   const events = new EventEmitter();
@@ -30,11 +33,15 @@ function createFakeAdapter(options = {}) {
     pending: pendingMessages,
     toolSignals,
     options,
-    settingsCheck() {
-      return typeof options.settings === 'function' ? options.settings() : options.settings !== false;
+    async checkSettings(cwd) {
+      if (options.checkSettings) return options.checkSettings(cwd);
+      const allowed = typeof options.settings === 'function' ? options.settings() : options.settings !== false;
+      return { effective: allowed ? {} : { apiKeyHelper: 'blocked' }, sources: [], provenance: {} };
     },
-    authCheck() {
-      return typeof options.auth === 'function' ? options.auth() : options.auth !== false;
+    async accountInfo(incarnationId) {
+      if (options.accountInfo) return options.accountInfo(incarnationId);
+      const allowed = typeof options.auth === 'function' ? options.auth() : options.auth !== false;
+      return options.account || (allowed ? subscription() : { ...subscription(), tokenSource: 'env' });
     },
     start({
       incarnation_id,
@@ -45,6 +52,9 @@ function createFakeAdapter(options = {}) {
       if (resume === true ? typeof claude_session_id !== 'string' || !claude_session_id : resume !== undefined || claude_session_id !== undefined) {
         throw new Error('invalid_resume_contract');
       }
+      const env = buildChildEnv({ baseEnv: options.baseEnv || {}, incarnationId: incarnation_id });
+      Object.assign(env, options.injectEnv || {});
+      assertChildEnv(env, incarnation_id);
       log.starts.push(incarnation_id);
       log.startRequests.push({
         incarnation_id,
@@ -67,6 +77,19 @@ function createFakeAdapter(options = {}) {
         session_id
       });
       options.identityProbe?.register(incarnation_id, identity);
+      if (!options.noInitialization) queueMicrotask(() => {
+        if (options.initializationFailed) { emit(incarnation_id, 'initialization_failed', { code: 'initialization_failed' }); return; }
+        emit(incarnation_id, 'initialization', {
+          initialization: {
+            account: options.account || (options.auth === false ? { ...subscription(), tokenSource: 'env' } : subscription()),
+            pid: identity.pid,
+            claude_code_version: pin.cliVersion,
+            current_permission_mode: 'default',
+            remote_control_auto_enable: false,
+            ...options.initialization
+          }
+        });
+      });
       return {
         ...identity,
         claude_session_id: resume ? claude_session_id : `fake-conversation-${session_id}`
@@ -106,7 +129,7 @@ function createFakeAdapter(options = {}) {
           child.initialized = true;
           emit(message.id, 'system_init', {
             capabilities: options.capabilities || ['msg_lifecycle_v1', 'interrupt_receipt_v1'],
-            apiKeySource: 'none'
+            apiKeySource: options.apiKeySource ?? 'none'
           });
         }
         if (!options.omitLifecycle) {

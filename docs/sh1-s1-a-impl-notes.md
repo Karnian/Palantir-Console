@@ -542,6 +542,45 @@ R2 픽스처 6개 및 기존 순수·픽스처 181개가 통과했다.
 이 결과로 실제 macOS 결함이 해결됐다고 단정하지 않는다. 호스트에서 두 실제 ps 테스트를 포함해 재검증해야 한다.
 SDK 설치·실제 claude 실행·npm test·git 조작은 하지 않았다.
 
+## S1-b2a — 비동기 게이트 연결 (미완료)
+
+코어에 설정 확인 → spawn → 초기화 응답 게이트 경로를 연결했다.
+§4.4의 접수 트랜잭션이 행과 예약을 함께 만들므로 실제 순서는
+예약 → 설정 검사 → spawn이다. §5-1의 spawn 전 검사 계약은 유지한다.
+설정 확인은 resolveSettingsChecked를 사용하며 clock과 tick 기반 타이머를 주입한다.
+초기화 60초·close 대기 5초·SIGTERM 뒤 5초도 tick으로 진행한다.
+정리 신호는 verifyThenSignal 인터페이스로 신원을 다시 대조한다.
+
+account 원본은 재확인 판정에만 쓰는 메모리 Map에 복사한다.
+DB account_snapshot에는 subscriptionType·apiProvider만 저장하고,
+초기화 원문·email·organization은 events에 저장하지 않는다.
+prompt delivery마다 비동기 accountInfo 결과를 큐에 다시 넣고,
+동기 sending 트랜잭션에서 해당 delivery의 일회용 통과 토큰을 검사한다.
+system/init은 evaluateSystemInit으로 판정하며 인증 출처 장애를 턴에 남긴다.
+rate_limit의 여섯 필드는 events에 저장하고 최신 이벤트를 incarnation snapshot에 투영한다.
+
+### 가짜 어댑터 경계
+
+checkSettings(cwd)는 Promise로 resolveSettings 결과를 반환한다.
+accountInfo(incarnationId)는 Promise로 account를 반환한다.
+start는 incarnation_id와 cwd를 받고 동기 신원을 반환한다.
+start 뒤 initialization 이벤트의 initialization 필드에 초기화 응답 전문을 싣거나,
+initialization_failed 이벤트에 고정 코드를 싣는다.
+close(incarnationId)의 완료만으로 사망을 확정하지 않고 child_exit 또는 신원 판정을 사용한다.
+가짜 어댑터도 buildChildEnv/assertChildEnv를 통과해야 starts를 기록한다.
+injectEnv는 최종 env 검사 실패를 증명하는 테스트 전용 입력이다.
+실제 SDK·argvCheck·고정 실행 파일 검증 연결은 S1-b2b에 남는다.
+
+### 검증 한계와 남은 작업
+
+사용자 지정 실행 호출 상한 5회를 모두 사용했다.
+마지막 호출에서 node --check server/sessionHost/core.js는 종료 코드 0이었다.
+신규 session-host-async-gate.test.js는 작성했으나 실행하지 못했다.
+수정 전 신규 테스트 실패를 실행으로 확인하지 않았으므로 재현 성공을 주장하지 않는다.
+기존 동기 fixture 사용 테스트의 비동기 전환과 crash 단계 테스트 보강이 남았다.
+지정 전체 테스트 명령은 실행하지 않았고 통과·실패 개수는 알 수 없다.
+현재 변경은 Definition of Done을 충족하지 않은 작업 중 상태다.
+
 ## S1-b1 수정 라운드 3 — lstart 열 맞춤·신원 구간·조회 불일치
 
 호스트 실측으로 macOS lstart 출력의 끝에 열 맞춤 공백이 있음을 확인받았다.
