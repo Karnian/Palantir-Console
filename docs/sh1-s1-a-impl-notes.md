@@ -378,3 +378,236 @@ session_deleted=0 tombstone의 종결 처리 테스트 3개도 통과했다.
 기존·P·정책·클라이언트 테스트를 포함한다. git diff --check도 통과했다.
 X 14개는 이번 턴에 실행하지 않았다. 변경 후 전체 예상 167개는 호스트에서 재검증한다.
 npm test와 commit/push는 실행하지 않았다.
+
+## S1-b1 — SDK 없는 판정·구성 부품
+
+SDK 설치·실행 및 기존 코어 연결 없이 CommonJS 순수 게이트, env 구성, argv 검사, ps 신원 조회를 추가했다.
+고정 버전·해시·Team ID·구독 유형·capability·기한은 pin.js의 동결 객체와 동결 배열에 둔다.
+account는 실측된 email·organization·subscriptionType·apiProvider만 허용한다.
+인증 출처는 값이 undefined여도 키가 존재하면 거부한다. 미지 필드도 거부한다.
+email·organization은 own property인 비어 있지 않은 문자열이어야 하며 판정 결과와 로그에 넣지 않는다.
+재확인은 유효한 구독 account의 전체 값이 같아야 통과한다. 실패·미지 값·메타데이터 변경도 거부한다.
+S1-b2는 최초 account 스냅샷을 복사하여 보관하고 조회 예외를 실패 입력으로 전달해야 한다.
+
+resolveSettingsChecked는 함수 없음·예외·10초 정체·구조 이상을 settings_check_failed로 돌려준다.
+clock은 밀리초 반환 함수, timers는 setTimeout/clearTimeout 객체로 주입한다.
+성공 결과는 warnings, hookSources, mcpSources를 포함한다. 출처는 provenance의 path 필드만 투영한다.
+인증 설정 거부의 detail도 provenance.env 또는 provenance.apiKeyHelper의 파일 경로만 포함한다.
+설정 값과 전체 sources 객체는 화면 결과에 복사하지 않는다.
+시작 확인 화면은 PermissionRequest 경고와 이 경로 목록을 표시하고 실제 시작 여부를 정해야 한다.
+
+incarnation ID는 코어 randomUUID()가 만드는 UUID v4 형식으로 제한한다. 다른 버전·variant·실측용 단순 ID는 거부한다.
+최종 env는 null prototype 객체다. 표지 own key 하나·일치 값과 나머지 PALANTIR_* 부재를 검사한다.
+SDK 세 변수와 기본 열 변수만 복사하고 인증 변수는 어느 입력에서도 복사하지 않는다.
+argv는 고정 절대 경로의 realpath와 스트리밍 SHA-256을 검사한다.
+정확히 하나의 --permission-mode=default를 요구하며 다른 permission-mode 표현과 -- 구분자는 보수적으로 거부한다.
+Team ID는 이번 부품에서 고정값만 제공한다. 설치 시 codesign 확인과 경로 선택은 S1-b2에서 연결해야 한다.
+
+ps는 /bin/ps만 실행하고 LC_ALL=C로 시작시각 형식을 고정한다.
+표지는 UUID v4 공백 토큰 전체 일치로 비교한다. 별도 ppid 조회로 표지 부모가 없는 유일 루트를 구한다.
+그 루트의 command는 주입된 고정 CLI 절대 경로 + 공백으로 시작해야 본체로 인정한다.
+루트가 여럿이거나 목록 형식 이상·중복 pid·시작시각/부모 조회 실패·부분 파싱 실패면 query_failed다.
+listMarkedDescendants는 같은 probe에서 findMarked로 확인한 본체 신원만 제외한다.
+재시작 직후 본체 신원을 아직 모르면 모든 표지 프로세스를 반환한다. 생존 하위를 본체로 오인해 숨기지 않는 보수적 선택이다.
+본체 종료 후 남은 표지 프로세스도 계속 반환한다. 새 probe의 findMarked는 생존 루트를 새 본체로 해석할 수 있으므로,
+S1-b2 복구는 저장한 본체 신원을 check로 먼저 판정하고 하위 확인에는 목록 메서드를 사용해야 한다.
+ps 조회와 신호 사이의 커널 수준 원자성은 제공하지 않는다. 신호 직전 시작시각 재대조만 수행한다.
+
+macOS의 PID 없음 신호는 ps 종료 코드 1·길이 0인 stdout·길이 0인 stderr·signal/code 없음으로만 제한한다.
+성공 코드의 빈 출력, 권한 오류와 그 밖의 실패는 사망으로 바꾸지 않는다.
+첫 구현의 호스트 검증에서 실제 macOS 185/185 통과를 확인받았다(실제 ps 포함).
+호스트 실측: 종료된 pid는 종료 1·stdout/stderr 길이 0, 범위 밖 pid는 종료 1·stderr 있음이다.
+이번 수정의 실제 자식·손자 통합 테스트는 샌드박스 제한 때문에 호스트에서 다시 실행해야 한다.
+npm test는 사용자 지시에 따라 호스트가 실행한다.
+
+최종 지정 명령 `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-*.test.js` 결과:
+tests 185, pass 170, fail 15, cancelled 0, skipped 0.
+신규 18개 중 순수/픽스처 17개 통과, 실제 ps 통합 1개는 샌드박스 조회 제한으로 실패했다.
+기존 프로세스 X 테스트 14개도 실패했다. 13개는 spawnSync /bin/ps EPERM,
+나머지 1개는 기존 기록과 같은 host_start_timeout이다. 나머지 기존 153개는 통과했다.
+실패를 skip이나 성공으로 바꾸지 않았다. 호스트에서 전체 명령과 npm test를 실행해야 한다.
+
+
+## S1-b1 수정 라운드 1 — 표지·출력·상속 입력 검증
+
+사용자가 전달한 적대리뷰 R1의 7개 항목을 보강했다. SDK 설치·실행과 기존 코어 변경은 없다.
+ps -E는 argv와 env를 구분하지 못한다. 코어가 randomUUID()로 생성한 추측 불가능한 UUID v4만 사용하고,
+probe 생성 시 S1-b2가 검증한 고정 CLI 절대 경로를 pinnedPath로 주입해야 한다.
+findMarked는 유일 표지 루트의 command가 정확한 경로 + 공백으로 시작하는지도 확인한다.
+공백 든 실행 경로를 토큰 분할하지 않으며 경로 접두만 같은 다른 실행 파일도 거부한다.
+하위 프로세스 목록에는 실행 파일 제한을 걸지 않는다. 같은 UID는 격리 경계가 아니다(brief §3.2).
+UUID 형식 검증만으로 난수 생성 자체를 증명할 수 없으므로 S1-b2는 외부 ID를 예약 ID 대신 넣으면 안 된다.
+
+줄 끝의 표지 값이 찾는 UUID의 진접두(빈 값 포함)면 조회 전체를 query_failed로 돌려준다.
+파싱 불가 줄을 버리지 않으며, 이미 유효한 행이 있어도 뒤의 부분 결과를 성공으로 처리하지 않는다.
+자식 env는 Object.create(null)에 허용 own key만 복사한다.
+최종 검사는 null prototype을 요구하고 for...in으로 열거 키를 검사한다.
+부재 판정은 공백을 trim하지 않는다. 누락된 stream도 빈 stream으로 취급하지 않는다.
+lstart는 ps가 붙인 마지막 LF 하나만 제거한 한 줄을 검증한다.
+요일·월 이름, 일 1~31, 시 0~23, 분·초 0~59를 확인하고 공백을 하나로 정규화하여 저장·비교한다.
+저장된 startedAt에는 줄바꿈을 허용하지 않는다.
+account는 Object.prototype 또는 null prototype만 허용하고 own property만 판정한다.
+email·organization의 누락·빈 문자열·공백 문자열도 거부한다. 메타데이터를 결과나 로그에 노출하지 않는다.
+
+### 실패 선확인
+
+제품 수정 전 `node --test server/tests/session-host-gate-review-r1.test.js` 실행:
+tests 11, pass 2, fail 9, cancelled 0, skipped 0.
+모든 테스트는 통과 대조를 포함하며, 아래 기존 통과 2개는 수정 전 실패를 주장하지 않는다.
+
+| 번호 | 테스트 이름 | 수정 전 |
+|---|---|---|
+| 1 | R1-01 UUID v4 required by env and both marker queries | 실패 |
+| 1 | R1-01 main executable must match pinned path including spaces | 실패 |
+| 2 | R1-02 truncated marker prefixes and malformed PID fail closed | 실패 |
+| 3 | R1-03 child env has null prototype and inherited pollution is rejected | 실패 |
+| 4 | R1-04 only zero-length absent streams prove death | 실패 |
+| 5 | R1-05 lstart rejects extra lines and invalid calendar/time ranges | 실패 |
+| 5 | R1-05 lstart compares normalized spaces | 실패 |
+| 6 | R1-06 account requires own nonempty email and organization | 실패 |
+| 6 | R1-06 account rejects custom prototypes regardless of inherited fields | 실패 |
+| 7 | R1-07 streaming hash uses an independent known SHA-256 literal | 기존 통과 |
+| 7 | R1-07 hash throw and rejection refuse spawn with passing controls | 기존 통과 |
+
+7번은 임시 파일의 고정 내용 abc와 알려진 SHA-256 리터럴을 비교한다.
+테스트 안에서 crypto.createHash로 기대값을 계산하지 않는다.
+같은 파일 내용만 abcd로 바꾸는 거부 대조와 hashFile throw/reject의 통과 대조를 추가했다.
+기존 env/ps 테스트는 UUID v4·null prototype·고정 경로 계약에 맞춰 갱신했다.
+실제 ps 테스트는 임의 UUID v4와 process.execPath를 고정 경로로 사용한다.
+
+### 수정 후 검증
+
+지정 전체 명령 `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-*.test.js`:
+tests 196, pass 181, fail 15, cancelled 0, skipped 0.
+R1 신규 11개는 모두 통과했다. 기존 순수·픽스처 170개도 통과했다.
+실패는 기존 X 14개(ps EPERM 13개·host_start_timeout 1개)와 실제 ps 통합 1개다.
+호스트가 전달한 이전 185/185 통과와 구분하며 수정 후 196개는 호스트에서 다시 확인해야 한다.
+npm test·SDK 설치·실제 claude 실행·git 조작은 하지 않았다.
+
+## S1-b1 수정 라운드 2 — 여러 줄 argv의 ps 귀속 결함
+
+호스트 검증은 이전 라운드 196개 중 195개 통과였다.
+실제 ps 통합 1개는 샌드박스에만 기인한 실패가 아니라 구현 결함이었다.
+이전 보고의 샌드박스 추정을 정정한다. Node -e 소스나 Bash -c 명령의 줄바꿈은 전역 ps 출력에도 나타난다.
+따라서 전역 출력의 한 줄을 한 프로세스로 해석하거나 해석 불가 줄을 모두 오류로 보는 규칙은 폐기한다.
+
+전역 `ps -E -ww -A -o pid=,command=` 출력은 전체 문자열에서 표지 토큰과 줄 끝 진접두의 존재만 확인한다.
+정상 종료·비어 있지 않은 출력에서 둘 다 없으면 빈 목록이다. 진접두가 있으면 보수적으로 query_failed다.
+정확한 토큰이 있으면 별도 `ps -A -o pid=`로 PID 목록을 구한다.
+이 목록만 정수·중복·상한을 검증하며 전역 command 출력의 PID 같은 문자열은 신뢰하지 않는다.
+각 PID에 `ps -E -ww -o command= -p <pid>`를 실행한다.
+이 출력은 여러 줄이어도 해당 PID 하나에 귀속되므로 전체 문자열에서 표지를 검사한다.
+표지 PID만 시작시각과 부모 PID를 조회한다. 유일 루트·고정 실행 경로·하위 목록 규칙은 유지한다.
+개별 command·시작시각·부모 조회 중 PID가 종료 1·stdout/stderr 길이 0으로 사라지면 건너뛴다.
+다른 실패·빈 성공 출력·잘린 표지·잘못된 PID 목록은 query_failed로 남긴다.
+
+기본 상한은 스캔당 PID 4096개, 전체 기한 10000ms다.
+maxPids와 deadlineMs는 테스트에서 낮춰 주입할 수 있으며 기본 상한보다 큰 값은 거부한다.
+clock은 기본 단조 시계 performance.now이며 주입할 수 있다.
+모든 ps 호출 전에 남은 시간을 검사하고 명령 timeout은 min(5000ms, 남은 시간의 올림)이다.
+호출 후와 결과 반환 시에도 기한을 검사하여 늦은 정상 반환을 성공으로 처리하지 않는다.
+findMarked/listMarkedDescendants는 성공·실패 모두 diagnostics: {elapsedMs, queryCount}를 반환한다.
+queryCount는 전역·PID 목록·개별 command·시작시각·부모 조회를 포함한 실제 ps 호출 횟수다.
+check/verifyThenSignal의 기존 문자열 인터페이스는 유지한다.
+
+### 실패 선확인
+
+수정 전 `node --test server/tests/session-host-ps-identity-r2.test.js`:
+tests 7, pass 0, fail 7.
+아래 픽스처 6개는 수정 전 실패를 확인했고, 실제 ps 1개는 대조군부터 샌드박스 제한으로 실패했다.
+실제 테스트 실패를 이 환경에서 결함 재현 성공으로 주장하지 않는다.
+
+- R2-01 unrelated multiline argv and marked multiline argv use per-PID attribution
+- R2-01 global no-token multiline output succeeds empty without per-PID queries
+- R2-02 marker-looking global PID never determines attribution
+- R2-02 disappearing PID is skipped; other errors and malformed PID lists fail closed
+- R2-02 prefix-only global and per-PID output fail closed with full-token controls
+- R2-03 PID count and total deadline are bounded and diagnostic counts reflect executed queries
+- R2 real ps ignores unrelated multiline argv while identifying a marked child
+
+실제 테스트는 한 줄 argv 표지 자식으로 통과 대조를 먼저 확인하고,
+표지가 없는 여러 줄 argv 자식을 추가해도 본체·빈 하위 목록이 유지되는지 검증한다.
+기존 자식·손자 테스트의 여러 줄 소스도 그대로 유지했다.
+그 테스트 기한은 스캔 전체 기한과 복수 조회를 수용하도록 30초로 늘렸다.
+기존 픽스처는 전역·PID 목록·PID별 command를 분리했고 진단 필드는 별도로 확인한다.
+이전 R1의 잘못된 PID 검증은 이제 전역 command가 아닌 PID 목록에 적용한다.
+
+### 수정 후 검증
+
+지정 명령 `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-*.test.js`:
+tests 203, pass 187, fail 16, cancelled 0, skipped 0.
+R2 픽스처 6개 및 기존 순수·픽스처 181개가 통과했다.
+실패는 기존 프로세스 X 14개(ps EPERM 13개·host_start_timeout 1개)와 실제 ps 통합 2개다.
+실제 ps 회귀 테스트는 통과 대조부터 이 샌드박스에서 query_failed다.
+이 결과로 실제 macOS 결함이 해결됐다고 단정하지 않는다. 호스트에서 두 실제 ps 테스트를 포함해 재검증해야 한다.
+SDK 설치·실제 claude 실행·npm test·git 조작은 하지 않았다.
+
+## S1-b1 수정 라운드 3 — lstart 열 맞춤·신원 구간·조회 불일치
+
+호스트 실측으로 macOS lstart 출력의 끝에 열 맞춤 공백이 있음을 확인받았다.
+실제 값 `"Sat Oct 24 17:40:20 2026    \n"`을 기존 엄격 검사가 거부한 것은 구현 결함이다.
+normalizeStart는 마지막 LF 하나를 제거한 뒤 끝의 ASCII 공백(0x20)만 제거한다.
+탭·NBSP·CR·추가 줄바꿈은 제거하지 않으며 기존 형식·범위 검사로 거부한다.
+공백 정규화와 check의 문자열 3값 인터페이스는 유지한다.
+호스트는 process.execPath와 ps command가 모두 Node의 realpath임도 확인했다. 테스트의 고정 경로 주입을 유지한다.
+
+PID 재사용을 막기 위해 모든 개별 command 조회 전에 lstart를 먼저 읽는다.
+표지 후보에는 `lstart 전 → command → ppid → lstart 후` 순서를 요구한다.
+두 정규화 시작시각이 같을 때만 command·부모·시작시각을 같은 신원으로 확정한다.
+다르면 query_failed다. 표지 여부를 아직 모르는 PID도 command 전 시작시각 조회가 필요하다.
+후보 확인 도중 PID가 사라지면 그 PID는 버리고, 조회 오류는 기존대로 query_failed다.
+단, 모든 후보가 사라졌다고 곧바로 빈 목록으로 확정하지 않는다.
+
+전역 표지가 양성인데 개별 조회로 표지 신원을 하나도 확정하지 못하면 내부적으로 inconsistent다.
+이 경우에만 전역 조회부터 전체 스캔을 한 번 다시 한다.
+다시 불일치하면 query_failed다. 재조회 전역이 정상 음성이면 그 시점의 빈 목록을 인정한다.
+형식 오류·권한 오류·시작시각 불일치는 불일치 재시도로 감추지 않고 즉시 실패한다.
+재시도는 최초의 10000ms 기한과 누적 4096 PID 예산을 공유한다.
+diagnostics의 조회 횟수와 시간도 두 시도를 합쳐 반환한다.
+호스트가 측정한 이전 구현의 545 PID 약 3.3초는 새 이중 신원 검사 성능의 실측값이 아니다.
+추가 lstart 조회 비용을 포함한 실제 macOS 실행 시간은 호스트에서 재확인해야 한다.
+
+account의 일반 필드는 own property로 확인하지만 인증 출처는 예외다.
+tokenSource·apiKeySource는 `in`으로 검사하여 own·상속·undefined 값 모두 존재하면 거부한다.
+Object.prototype 또는 null prototype만 허용하는 규칙은 유지한다.
+Object.prototype에 두 필드를 각각 임시로 심는 테스트는 try/finally로 원래 descriptor를 복원하거나 삭제한다.
+
+### 남은 한계와 ps 계약 가정
+
+R1-01: ps 출력만으로 argv와 env를 구분할 수 없다.
+코어 randomUUID()로 만든 추측 불가능한 UUID v4와 본체 command의 고정 실행 파일 경로 두 조건을 함께 요구한다.
+이것은 같은 UID 프로세스에 대한 격리가 아니다. 같은 UID는 격리 경계가 아니다(brief §3.2).
+하위 도구는 어떤 실행 파일이든 가능하므로 표지와 신원 구간 검사로 판정한다.
+lstart는 초 단위이므로 같은 초 안의 PID 재사용이나 신호와 조회 사이의 커널 수준 원자성을 보장하지 않는다.
+
+R1-02: `-ww`는 폭 제한 없는 출력을 요청한다. 표지 앞에서의 잘림은 ps 계약상 일어나지 않는다고 가정한다.
+따라서 검출 가능한 줄 끝 표지 진접두만 검사한다. 앞 잘림까지 검출한다는 보장은 하지 않는다.
+버퍼 상한·명령 기한 초과·명령 실패는 성공한 잘린 출력으로 취급하지 않고 query_failed다.
+
+### 실패 선확인
+
+제품 수정 전 `node --test server/tests/session-host-gate-review-r3.test.js`:
+tests 9, pass 0, fail 9. 아래 9개 모두 수정 전 실패를 확인했다.
+
+- R3-01 actual macOS lstart literal accepts ASCII padding and rejects other trailing whitespace
+- R3-02 candidate command and parent are bracketed by equal lstart reads
+- R3-02 reused PID between command and parent cannot establish main or descendant identity
+- R3-03 persistent global-positive individual-negative mismatch retries once and rejects
+- R3-03 retry resolves transient mismatch by rerunning global and individual queries
+- R3-03 retry may confirm globally absent marker but never returns empty on persistent disappearance
+- R3-03 retries share the original deadline and PID budget
+- R3-04 inherited Object.prototype.tokenSource rejects initialization and recheck with cleanup
+- R3-04 inherited Object.prototype.apiKeySource rejects initialization and recheck with cleanup
+
+각 거부 사례는 같은 조건의 통과 대조를 포함한다.
+수정 후 위 9개가 모두 통과했다. 기존 R2 진단 횟수 기대값은 추가 lstart 조회를 반영해 갱신했다.
+
+### 전체 검증
+
+`PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-*.test.js`:
+tests 212, pass 196, fail 16, cancelled 0, skipped 0.
+R3 신규 9개를 포함한 순수·픽스처 테스트 196개가 통과했다.
+실패는 기존 X 14개(ps EPERM 13개·host_start_timeout 1개)와 실제 ps 테스트 2개다.
+실측 리터럴에 대한 수정은 검증했지만 이 샌드박스에서 실제 macOS ps 통합의 통과를 확인한 것은 아니다.
+호스트에서 전체 212개와 실제 조회 시간을 재검증해야 한다.
+SDK 설치·실제 claude 실행·npm test·git 조작은 하지 않았다.
