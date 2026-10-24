@@ -1,6 +1,6 @@
 # SH1 — 사람용 세션 호스트 (Claude 1개·머신 1대) 구현 brief
 
-상태: **v5.5 (2026-10-24)** — v4.1(사용자 승인) + S1-0 스파이크 결과 반영(`docs/sh1-s1-0-spike-record.md`). codex R5·R6 NO-GO → R7 **GO** → 최종 R8·R9 NO-GO(제어 요청 저장·재검증·복구) 반영 → R10 NO-GO(종료된 실행의 close) 반영 → R11. **사용자 승인 대기** — 승인 뒤 S1-a 에 들어간다. v4.1 에서 "S1-0 에서 확정"으로 남긴 칸은 모두 실측값으로 채웠다. 사용자 판정 두 항목은 닫혔다: §10 R6 은 사용자가 받아들였고("과금은 상관 없어"), §1.4 는 사용자 위임에 따라 codex 합의안으로 정했다(구현 S1-pre).
+상태: **v5.6 (2026-10-24)** — v4.1(사용자 승인) + S1-0 스파이크 결과 반영(`docs/sh1-s1-0-spike-record.md`). codex R5·R6 NO-GO → R7 **GO** → 최종 R8·R9 NO-GO(제어 요청 저장·재검증·복구) 반영 → R10 NO-GO(종료된 실행의 close) 반영 → R11 NO-GO(실행만 끝내기) 반영 → R12. **사용자 승인 대기** — 승인 뒤 S1-a 에 들어간다. v4.1 에서 "S1-0 에서 확정"으로 남긴 칸은 모두 실측값으로 채웠다. 사용자 판정 두 항목은 닫혔다: §10 R6 은 사용자가 받아들였고("과금은 상관 없어"), §1.4 는 사용자 위임에 따라 codex 합의안으로 정했다(구현 S1-pre).
 상위 계약: `docs/specs/instruction-centric-direction-brief.md` §0.2 (v6 LOCKED). 이 문서와 충돌하면 §0.2 가 우선한다.
 
 ## 0. 목적과 범위
@@ -195,7 +195,7 @@ pid 와 pgid 는 그것만으로 신원이 아니다(owner-exit 트랙 교훈 �
 | `deliveries` | id, session_id, incarnation_id, kind(prompt/tool_decision/question_answer/interrupt), body, target_tool_use_id, turn_gen, request_key, fingerprint, message_uuid, state, outcome(prompt 만: null/completed/errored/interrupted/outcome_unknown, §4.3), 상태별 시각·seq, reason |
 | `tool_requests` | id, incarnation_id, tool_use_id, tool_name, input(원문), state(pending/decided/cancelled/expired), decision(allow/deny/answer + 내용), answer_delivery_id — **사람의 결정 확정(state=decided)과 provider 전달(delivery state)은 별도 필드** |
 | `events` | incarnation_id, seq, 원문 JSON(SDK 메시지 전문 — 화면 절단과 분리, §0.2.12) |
-| `control_requests` | request_key, fingerprint(kind, session_id 또는 새 세션이면 null, cwd 해시, 대상 incarnation_id), kind(start/resume/close/handoff/delete), session_id, incarnation_id(start·resume 이 예약한 것 / close·handoff 의 대상), stage, state(accepted/done/failed/blocked/rejected), reason(**고정 코드만** — 자유문·경로·오류 원문 금지), 시각·seq — 본문 없음 |
+| `control_requests` | request_key, fingerprint(kind, session_id 또는 새 세션이면 null, cwd 해시, 대상 incarnation_id), kind(start/resume/stop/close/handoff/delete), session_id, incarnation_id(start·resume 이 예약한 것 / close·handoff 의 대상), stage, state(accepted/done/failed/blocked/rejected), reason(**고정 코드만** — 자유문·경로·오류 원문 금지), 시각·seq — 본문 없음 |
 | `request_tombstones` | request_key, fingerprint 해시, 원래 전달 최종 state(unknown 포함), session_deleted 여부, 만료 시각 — 삭제 뒤 멱등 유지(§4.6) |
 
 ### 4.3 전달 상태 기계 (§0.2.6)
@@ -208,7 +208,7 @@ pid 와 pgid 는 그것만으로 신원이 아니다(owner-exit 트랙 교훈 �
 - **단조성**: 상태는 앞으로만 간다. 모든 전이는 `UPDATE … WHERE state IN (<허용 이전 상태>)` 조건부다. 예: 관측 이벤트가 `written` 커밋보다 먼저 처리되면 `sending → provider_observed` 로 바로 가고, 늦은 `written` 커밋은 조건에서 떨어진다.
 - 복구: `queued` 는 그대로 남아도 된다(효과 없음 보장). **`sending`·`written` 인데 관측이 없는 것은 전부 `unknown`** 이다. **prompt 의 결과는 전달 상태와 별도 필드 `outcome`** 에 둔다: `null`(진행 중) / `completed` / `errored` / `interrupted` / `outcome_unknown`. 조합 규칙은 아래 "prompt 의 턴 종결과 outcome" 을 따른다. 전달이 `provider_observed`(CLI 수신 확인)인데 그 incarnation 이 끝날 때까지 결과를 못 봤으면 전달 상태는 그대로 두고 `outcome = outcome_unknown` — 화면 "받음 · 결과 불명(호스트 상실 중 계속 실행됐을 수 있음)". queued 는 실행 보장이 아니고, 호스트가 죽으면 고아 자식이 그 턴을 끝까지 수행할 수 있다(S1-0 ⑤). 이 항목에는 "다시 보내기"가 없다(이미 받았다). tool_decision·question_answer 는 observed 가 곧 종결이라 `outcome` 이 없고, interrupt 의 종결은 아래 표대로다. **idle 의 정의**: 그 incarnation 이 alive·제어 가능하고, `attribution_uncertain`·"중단 여부 불명"이 아니며, 그 incarnation 에서 쓴 prompt(상태 `sending`·`written`·`provider_observed`) 가 전부 턴 종결(`outcome ≠ null`)됐다. **Palantir 대기열의 `queued` prompt 는 idle 을 막지 않는다** — 아직 외부 효과가 없고, idle 일 때 큐가 꺼내 보낼 대상이다. **idle 판정은 incarnation 안에서만 한다** — 이전 incarnation 의 `outcome_unknown` 은 새 incarnation 의 idle 을 막지 않고, 새 incarnation 시작 화면에 "이전 실행에서 결과를 못 본 지시 N건 — 대화 기록에서 확인"으로 보인다(§5-7). `sending` 을 `queued` 로 되돌리지 않는다. 승인 카드는 `decided` 를 유지하고 "결정 기록됨 · 전달 불명"으로 보인다. 같은 요청에 다시 답할 수 없다.
 - **unknown 은 자동 재전송하지 않고, 같은 incarnation 에서는 다시 보내기도 막는다.** 원본이 provider 안에 남아 늦게 실행될 수 있기 때문이다.
-  - incarnation 이 살아 있으면 세션은 `attribution_uncertain` 상태가 되어 새 prompt 를 막는다. 사람의 선택지: "기다리기"(관측이 오면 해제) 또는 "세션 끝내고 이어서 시작"(종료 확인 → resume).
+  - incarnation 이 살아 있으면 세션은 `attribution_uncertain` 상태가 되어 새 prompt 를 막는다. 사람의 선택지: "기다리기"(관측이 오면 해제) 또는 "실행 끝내고 이어서 시작"(stop → resume, §4.4).
   - incarnation 이 끝난 뒤(대화 실행 종료 확인, §3.4)에만 "다시 보내기"가 열린다. 새 incarnation 에서 새 request_key 로 보내며, 화면에 "원본이 실행됐을 수 있음 — 대화 기록을 먼저 확인"을 보인다.
 
 kind 별 관측 증거 — **상관 ID 로 특정되는 증거만 인정**한다:
@@ -243,11 +243,12 @@ kind 별 관측 증거 — **상관 ID 로 특정되는 증거만 인정**한다
   | start | 행 + `owned_sessions` 행 + `incarnations` 예약(`spawning`, §3.3-1) | `resolveSettings` 검사 통과(§1.2-3) | `spawn_sent` → spawn |
   | resume | 행 + 새 incarnation 예약 | 세션 `active`, 이전 incarnation 이 `exited`·`never_started`(대화 실행 종료 확인) + §3.4 하위 프로세스 확인 통과, live incarnation 없음 | `spawn_sent` → spawn |
   | close | 행(대상 = 세션의 마지막 incarnation, 없으면 null) | 세션 `active`. 대상이 `alive`(제어 가능)·`orphaned`·`exited`·`never_started` 이거나 없음. `liveness_unknown`·`spawning` 이면 `rejected`(`liveness_unknown`/`busy`) | 제어 가능: `close_sent` → SDK close. `orphaned`: `signal_sent` → §3.3 신원 재대조 뒤 신호(일치 안 하면 신호 0, `failed`). **이미 종료(`exited`·`never_started`·없음)**: 효과 없이 바로 `exit_confirmed` |
+  | stop | close 와 같음 | close 와 같음 | close 와 같음. **세션은 `active` 로 남는다** — 실행만 끝내고 같은 대화를 resume 하기 위한 것 |
   | handoff | 행(대상 = 세션의 마지막 incarnation) | close 와 같고, 대상이 있어야 하며 `claude_session_id` 가 기록돼 있어야 함(없으면 `rejected`(`no_session_id`)) | close 와 같음 |
   | delete | 행 + 세션 `deleting`(§4.6 ①) | 세션 `closed`·`handed_off` | §4.6 ②~④ |
 
   - 같은 키 재시도는 그 행과 **예약된 session·incarnation id 를 그대로** 돌려준다. 예약을 두 번 만들지 않는다. spawn 은 예약 행에서만 나오고 예약 하나에 최대 한 번이다 — 재기동 때 `spawning` 예약은 §3.3 복구만 하고 다시 spawn 하지 않는다. `never_started` 면 그 요청은 `failed`(`not_started`)로 끝나고, 다시 시작하려면 사람이 새 키로 제출한다.
-  - close·handoff 는 stage(`requested → close_sent|signal_sent → exit_confirmed → subprocess_checked → done`)를 기록하며 진행한다. `done` 과 **같은 트랜잭션**에서 세션을 close 는 `closed`(`end_reason=user_stop`), handoff 는 `handed_off` 로 바꾼다. 하위 프로세스 확인(§3.4)을 통과하지 못하면 요청은 `blocked`(`subprocess_remaining`)로 닫히고 세션은 `active` 로 남는다 — 사람이 하위 프로세스를 정리한 뒤 새 키로 다시 낸다(대상이 이미 종료라 효과 없이 확인 단계만 다시 탄다). 재기동 때 미완료 요청은 효과를 다시 내지 않고 대상 incarnation 의 §3.3 판정으로 잇는다: `mismatch_confirmed`(사망)면 남은 확인 단계를 진행하고, `orphaned`·`liveness_unknown` 이면 요청을 `blocked`(`control_lost`)로 닫는다.
+  - close·handoff 는 stage(`requested → close_sent|signal_sent → exit_confirmed → subprocess_checked → done`)를 기록하며 진행한다. stop 도 같은 stage 를 쓴다. `done` 과 **같은 트랜잭션**에서 세션을 close 는 `closed`(`end_reason=user_stop`), handoff 는 `handed_off` 로 바꾸고, stop 은 세션을 `active` 로 둔 채 incarnation 의 `end_reason=user_restart` 만 기록한다. 화면의 **"실행 끝내고 이어서 시작"은 stop → resume** 두 제어 요청을 차례로 낸다(stop 이 `done` 이어야 resume 이 받아진다). 하위 프로세스 확인(§3.4)을 통과하지 못하면 요청은 `blocked`(`subprocess_remaining`)로 닫히고 세션은 `active` 로 남는다 — 사람이 하위 프로세스를 정리한 뒤 새 키로 다시 낸다(대상이 이미 종료라 효과 없이 확인 단계만 다시 탄다). 재기동 때 미완료 요청은 효과를 다시 내지 않고 대상 incarnation 의 §3.3 판정으로 잇는다: `mismatch_confirmed`(사망)면 남은 확인 단계를 진행하고, `orphaned`·`liveness_unknown` 이면 요청을 `blocked`(`control_lost`)로 닫는다.
   - **배타권**: 한 세션에는 진행 중(`accepted`)인 제어 요청이 하나뿐이다. 다른 키의 제어 요청이 오면 `rejected`(`busy`). `done`·`failed`·`blocked`·`rejected` 는 **최종 상태이고 배타권을 놓는다** — `blocked` 뒤에 사람은 새 키로 close 를 낼 수 있고, 대상이 `orphaned` 면 그 close 가 §3.3 신원 재대조·신호 경로를 탄다. `liveness_unknown` 이면 "다시 확인"으로 판정을 바꾼 뒤에만 close 가 받아진다.
   - 세션을 삭제해도 `control_requests` 행은 30일 남긴다(본문이 없고 fingerprint 는 해시, reason 은 고정 코드) — 삭제 뒤 같은 키 재시도가 재실행되지 않는다. 오류 상세(경로가 든 spawn 오류 등)는 이 행에 쓰지 않고 `events` 에 남겨 §4.6 삭제 대상이 된다.
 
@@ -286,8 +287,8 @@ kind 별 관측 증거 — **상관 ID 로 특정되는 증거만 인정**한다
 4. **질문**: `AskUserQuestion` → 선택지 카드 + 직접 입력 → delivery(question_answer), 재검증·관측 규칙은 3과 같다.
 5. **인터럽트**: SH1 은 `interrupt_receipt_v1` 을 광고하는 CLI 만 지원한다(§2.3 버전쌍). 버튼 → delivery(interrupt) → `interrupt()` → 영수증. S1-0 ⑦: 진행 중 Bash 는 정지(`task_notification stopped`)되고 중단된 prompt 의 lifecycle 은 `cancelled`. SDK `interrupt()` 는 `cancel_queued` 를 보내지 않으므로 `still_queued` 의 메시지는 인터럽트 뒤 실행된다(실측: 다음 턴으로 실행) — 아래 규칙이 그래서 필요하다.
    - pending 승인 카드는 `cancelled`.
-   - 1:1 규칙상 `still_queued` 는 비어야 한다. 비어 있지 않으면(규칙이 깨진 비정상) 그 uuid 들의 delivery 를 `provider_observed`("중단 뒤 실행 예정")로 올리고, 세션을 `attribution_uncertain` 으로 바꾼다: 새 prompt·Palantir 대기열 배출을 막고, 그 뒤 나오는 턴 결과는 특정 메시지에 귀속하지 않고 "귀속 불명 결과"로 표시한다. **이 incarnation 안에서는 해제하지 않는다** — survivor 가 언제 소비·종결됐는지 증명할 신호가 없고, 사람 확인은 증거를 대신하지 못한다. 사람의 선택지는 "세션 끝내고 이어서 시작"(대화 실행 종료 확인 → 새 incarnation 으로 resume)뿐이다. 1:1 규칙을 지키면 이 상태는 생기지 않아야 하므로, 생기면 결함으로 기록한다.
-   - 영수증 미수신·타임아웃 → interrupt `unknown`, 세션 "중단 여부 불명". 대상 `turn_gen` 의 result 를 관측하면 해제한다. 관측이 없으면 사람의 선택지는 "기다리기"와 "세션 끝내고 이어서 시작"(대화 실행 종료 확인 → resume)뿐이다.
+   - 1:1 규칙상 `still_queued` 는 비어야 한다. 비어 있지 않으면(규칙이 깨진 비정상) 그 uuid 들의 delivery 를 `provider_observed`("중단 뒤 실행 예정")로 올리고, 세션을 `attribution_uncertain` 으로 바꾼다: 새 prompt·Palantir 대기열 배출을 막고, 그 뒤 나오는 턴 결과는 특정 메시지에 귀속하지 않고 "귀속 불명 결과"로 표시한다. **이 incarnation 안에서는 해제하지 않는다** — survivor 가 언제 소비·종결됐는지 증명할 신호가 없고, 사람 확인은 증거를 대신하지 못한다. 사람의 선택지는 "실행 끝내고 이어서 시작"(stop → 새 incarnation 으로 resume, §4.4)뿐이다. 1:1 규칙을 지키면 이 상태는 생기지 않아야 하므로, 생기면 결함으로 기록한다.
+   - 영수증 미수신·타임아웃 → interrupt `unknown`, 세션 "중단 여부 불명". 대상 `turn_gen` 의 result 를 관측하면 해제한다. 관측이 없으면 사람의 선택지는 "기다리기"와 "실행 끝내고 이어서 시작"(stop → resume, §4.4)뿐이다.
    - interrupt 는 쓸 당시의 `turn_gen` 에 묶인다. completed 는 그 세대의 result 관측뿐이다(이전 턴 result 로 완료되지 않는다).
    - 진행 중인 interrupt 가 있으면 추가 버튼은 같은 요청을 돌려준다.
    - "중단하고 보내기" = interrupt completed **그리고** 세션 idle·`attribution_uncertain` 아님일 때만 prompt 를 보낸다.
@@ -356,7 +357,7 @@ lock-in 은 사용자가 실제 작업에 써 본 뒤 정한다. brief 는 화�
 - 허용 결정 뒤 `is_error: true` 결과 → 전달 unknown + "도구 끝남(오류)", observed 0. 정상 결과 → observed.
 - prompt 가 `provider_observed` 인 직후 호스트 크래시 → 재기동 뒤 그 delivery 는 observed 유지 + `outcome = outcome_unknown`, 다시 보내기 0, 새 incarnation 의 idle 은 막히지 않음. 이미 observed 인 tool_decision 은 크래시 뒤에도 observed 그대로(`outcome` 없음).
 - abort 가 효과 뒤에 옴(`written` 뒤 인터럽트) → 전달 상태 유지, "결정 뒤 도구 취소됨" 기록, `cancelled` 로 덮어쓰기 0.
-- `attribution_uncertain` → 사람 확인으로 해제 0, 새 prompt 0, 종료 확인 → resume 경로만 성공.
+- `attribution_uncertain` → 사람 확인으로 해제 0, 새 prompt 0, stop(`done`, 세션 active 유지) → resume 경로만 성공. close 뒤(세션 `closed`) resume → rejected.
 - 표지 남은 하위 프로세스 / 하위 조회 `query_failed` → 사람 확인 유무와 무관하게 resume·넘기기 0.
 - 최종 env 검사: 표지 1개·다른 `PALANTIR_*` 0 → spawn 성공. `PALANTIR_TOKEN` 섞임 → spawn 0.
 - 넘기기 명령: 생성한 문자열을 셸로 파싱한 **argv 순서**를 검증(`-u` 전부가 `name=value` 앞), 인증 변수 `-u` 전부, `CLAUDE_CONFIG_DIR` 있음/없음 각각 재현, 공백·따옴표 든 cwd 의 shell-quote. 가짜 실행 파일로 실제 실행해 받은 env 를 확인.
@@ -427,3 +428,4 @@ lock-in 은 사용자가 실제 작업에 써 본 뒤 정한다. brief 는 화�
 - codex **R8**(v5.2, 최종 게이트·문서 전체): **NO-GO** (SERIOUS 1 / MODERATE 2 / MINOR 1). 반영(v5.3): 시작·이어서 시작·종료·넘기기·삭제를 `control_requests` 로 저장하고 접수와 첫 효과(예약·deleting)를 한 트랜잭션으로 묶음, 같은 키 재시도는 같은 예약을 돌려받고 spawn 최대 1회, close·handoff 단계 재개 규칙(§4.2·§4.4). idle 정의를 "이 incarnation 에서 쓴 prompt 전부 턴 종결, 대기열 queued 제외"로 고정(§4.3·§5-2). prompt 의 결과 내용(result)과 턴 종결(lifecycle)을 분리하고 `errored` outcome 추가, 조합별 규칙(§4.3). §8.1 unknown 허용 문장에 자연 발생 오류 포함.
 - codex **R9**(v5.3): **NO-GO** (R8 4건 모두 닫힘, 새 SERIOUS 2 / MODERATE 1). 반영(v5.4): 제어 요청에 delivery 재검증을 적용하지 않고 kind 별 접수 트랜잭션·전제·효과 직전 stage 표를 둠, 명령 큐를 세션 단위로(§4.4·§4.5). `blocked` 등 최종 상태는 배타권을 놓고, orphaned 대상 close 는 §3.3 신원 재대조·신호 경로로 처리. `control_requests.reason` 은 고정 코드만, 오류 상세는 삭제 대상인 events 로.
 - codex **R10**(v5.4): **NO-GO** (R9 3건 중 닫힘 2 / 부분 1, 새 SERIOUS 1 — 이미 종료된 실행은 close·handoff 로 끝낼 수 없어 세션이 active 로 갇힘). 반영(v5.5): close·handoff 가 `exited`·`never_started`·대상 없음을 받아 효과 없이 `exit_confirmed` 부터 진행, `done` 과 같은 트랜잭션에서 세션 `closed`/`handed_off`, 하위 프로세스가 남으면 `blocked` 후 새 키로 재시도(§4.4).
+- codex **R11**(v5.5): **NO-GO** (R10 닫힘, 새 SERIOUS 1 — close 가 세션을 `closed` 로 확정해 "끝내고 이어서 시작"의 resume 이 막힘). 반영(v5.6): 실행만 끝내는 제어 요청 `stop`(세션 active 유지, `end_reason=user_restart`)을 추가하고 "실행 끝내고 이어서 시작" = stop → resume 으로 정리. close 는 세션 종료 전용.
