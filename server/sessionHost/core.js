@@ -1241,6 +1241,39 @@ function createHostCore({
     recover,
     snapshot,
     eventsSince,
+    submitWithReceipt(request) {
+      const result = this.submit(request);
+      return store.read(() => {
+        const persisted = getRow('SELECT * FROM request_aliases WHERE request_key=?', request.request_key) ||
+          getRow('SELECT * FROM deliveries WHERE request_key=?', request.request_key) || getControl(request.request_key) ||
+          getRow('SELECT * FROM request_tombstones WHERE request_key=?', request.request_key);
+        const durable = Boolean(persisted && persisted.fingerprint === requestFingerprint(request));
+        return { durable, result, ...(!durable ? { code: result.reason || 'not_recorded' } : {}) };
+      });
+    },
+    submitUnavailable(request) {
+      const result = submit(request);
+      if (['start', 'resume'].includes(request.kind) && result.state === 'failed' && result.reason === 'spawn_failed') {
+        writeTransaction(() => transitionRow('control_requests', request.request_key, ['failed'],
+          { reason: 'adapter_unavailable' }, result.session_id, result.incarnation_id));
+        return getControl(request.request_key);
+      }
+      return result;
+    },
+    lookup(requestKey) {
+      return store.read(() => {
+        const alias = getRow('SELECT * FROM request_aliases WHERE request_key=?', requestKey);
+        return (alias && getDelivery(alias.target_delivery_id)) ||
+          getRow('SELECT * FROM deliveries WHERE request_key=?', requestKey) || getControl(requestKey) ||
+          getRow('SELECT * FROM request_tombstones WHERE request_key=?', requestKey) || { found: false };
+      });
+    },
+    activity() {
+      return {
+        activeSessions: getRow("SELECT COUNT(*) n FROM owned_sessions WHERE state='active'").n,
+        pendingCommands: queues.size
+      };
+    },
     onEvent,
     tick,
     idle: sessionId => isIdle(getLatestIncarnation(sessionId)),

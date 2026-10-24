@@ -390,7 +390,7 @@ lock-in 은 사용자가 실제 작업에 써 본 뒤 정한다. brief 는 화�
 | **S1-pre** | §1.4 판정 1~9 구현(레거시 스위치 기본 꺼짐, A~F 차단, argv 노출 수정, 정제기 backend 판정, 문서) | ✅ 2026-10-24 PR #613 — codex 적대리뷰 R1~R3 NO-GO → R4 GO, npm test 5132/5132 |
 | **S1-0 스파이크** | 실제 SDK+동봉 CLI 로 확인(소량 LLM 호출, 2026-10-24 사용자 승인): ① prompt 수신 신호(uuid echo 여부, 1:1 규칙 성립) ② 동봉 실행 파일의 키체인 로그인 사용 ③ `account`·`tokenSource`·`apiKeySource` 실제 값(구독·API 키·bearer 각각) ④ custom spawn 에서 pid·시작시각 확보, macOS 표지 조회 ⑤ 호스트 종료 시 자식 동작(stdin 닫힘·SIGTERM·진행 중 Bash·백그라운드 작업) ⑥ `canUseTool` 장시간 대기 ⑦ 인터럽트 영수증 ⑧ resume 뒤 사용자 설치 `claude --resume` 호환. | ✅ 2026-10-24 `docs/sh1-s1-0-spike-record.md` + **brief v5** → codex 재검토 → 사용자 승인 |
 | **S1-a1** | 저장소 + 상태 기계 + 제어 요청 + 복구·결함 주입, 가짜 어댑터·가짜 신원 조회 (in-process 라이브러리 `server/sessionHost/`) | ✅ 2026-10-24 — 테스트 102개(§8.1-(a) 중 in-process 사례), codex 적대리뷰 R1~R3 NO-GO → R4 GO, 리팩터링 동작 보존 GO, npm test 5234/5234. 기록 `docs/sh1-s1-a-impl-notes.md` |
-| **S1-a2** | 호스트 프로세스: 단일 인스턴스 잠금·소켓·capability·handshake·접수 응답·유휴 종료·기동(setsid) | §8.1-(a) 중 프로세스 사례 |
+| **S1-a2** | 호스트 프로세스: 단일 인스턴스 잠금·소켓·capability·handshake·접수 응답·유휴 종료·기동(setsid)·치명 오류 정책 | ✅ 2026-10-24 — 테스트 167개(프로세스 층 실제 macOS 실행 포함), mutation 3종 검출, codex 적대리뷰 R1 NO-GO → R2 GO → R3 GO, npm test 5299/5299. 잠금은 `flock` 대신 SQLite 배타 잠금(의미 동일 — 기록 `docs/sh1-s1-a-impl-notes.md`) |
 | **S1-b** | SDK 어댑터(custom spawn·신원·버전쌍 확인·env 허용 목록·인증 게이트·능력 판정) | §8.1-(b) |
 | **S1-c** | 서버 브리지(handshake·seq 재생·읽기 전용 장애 경로·cookie-only·origin) + 최소 화면(상태·전달 배지·승인 카드) | 서버 재시작·장애 사례 |
 | **S1-e** | 터미널 넘기기 + §8.2 최소 안전 실측 | 실측 기록. 미달이면 S1-d 진입 안 함 |
