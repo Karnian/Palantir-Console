@@ -1,15 +1,22 @@
 'use strict';
+
 const Database = require('better-sqlite3');
 
-function openStore(dbPath, { faults, now = Date.now, readHooks } = {}) {
-  if (!dbPath) throw new Error('host_db_path_required');
-  const db = new Database(dbPath);
+function openStore(dbPath, {
+  faults,
+  now = Date.now,
+  readHooks
+} = {}) {
+  if (!dbPath) {
+    throw new Error('host_db_path_required');
+  }
+  const database = new Database(dbPath);
   let failed = false;
-  db.pragma('journal_mode = WAL');
-  db.pragma('foreign_keys = ON');
-  db.pragma('secure_delete = ON');
-  db.transaction(() => {
-    db.exec(`CREATE TABLE IF NOT EXISTS host_schema_versions(version INTEGER PRIMARY KEY);
+  database.pragma('journal_mode = WAL');
+  database.pragma('foreign_keys = ON');
+  database.pragma('secure_delete = ON');
+  database.transaction(() => {
+    database.exec(`CREATE TABLE IF NOT EXISTS host_schema_versions(version INTEGER PRIMARY KEY);
       INSERT OR IGNORE INTO host_schema_versions VALUES(1);
       CREATE TABLE IF NOT EXISTS owned_sessions(
         id TEXT PRIMARY KEY, cwd TEXT, claude_session_id TEXT, title TEXT,
@@ -44,36 +51,64 @@ function openStore(dbPath, { faults, now = Date.now, readHooks } = {}) {
         session_deleted INTEGER NOT NULL, expires_at INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS event_session ON events(session_id,seq);
       CREATE INDEX IF NOT EXISTS delivery_incarnation ON deliveries(incarnation_id,state);`);
-    const version = db.prepare('SELECT MAX(version) v FROM host_schema_versions').get().v;
-    if (![1, 2, 3].includes(version)) throw new Error('host_schema_unsupported');
+    const version = database.prepare('SELECT MAX(version) v FROM host_schema_versions').get().v;
+    if (![1, 2, 3].includes(version)) {
+      throw new Error('host_schema_unsupported');
+    }
     if (version === 1) {
-      db.exec(`CREATE TABLE request_aliases(request_key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL,
+      database.exec(`CREATE TABLE request_aliases(request_key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL,
         target_delivery_id TEXT NOT NULL, session_id TEXT NOT NULL, created_at INTEGER NOT NULL);
         INSERT INTO host_schema_versions VALUES(2);`);
     }
     if (version < 3) {
-      db.exec(`ALTER TABLE deliveries ADD COLUMN attribution_pending INTEGER NOT NULL DEFAULT 0;
+      database.exec(`ALTER TABLE deliveries ADD COLUMN attribution_pending INTEGER NOT NULL DEFAULT 0;
         UPDATE deliveries SET attribution_pending=1 WHERE state='unknown' AND reason='effect_failed'
           AND incarnation_id IN (SELECT id FROM incarnations WHERE attribution_uncertain=2);
         INSERT INTO host_schema_versions VALUES(3);`);
     }
   })();
   const store = {
-    db,
-    get failed() { return failed; },
-    read(fn) { return db.transaction(fn).deferred(); },
-    readCheckpoint() { readHooks?.afterState?.(); },
-    write(fn) {
-      if (failed) throw new Error('storage_unavailable');
-      try { return db.transaction(() => { faults?.hit?.('db_write'); return fn(); }).immediate(); }
-      catch (e) { if (e.name !== 'SimulatedCrash') failed = true; throw e; }
+    db: database,
+    get failed() {
+      return failed;
+    },
+    read(operation) {
+      return database.transaction(operation).deferred();
+    },
+    readCheckpoint() {
+      readHooks?.afterState?.();
+    },
+    write(operation) {
+      if (failed) {
+        throw new Error('storage_unavailable');
+      }
+      try {
+        return database.transaction(() => {
+          faults?.hit?.('db_write');
+          return operation();
+        }).immediate();
+      } catch (error) {
+        if (error.name !== 'SimulatedCrash') {
+          failed = true;
+        }
+        throw error;
+      }
     },
     event(sessionId, incarnationId, type, data) {
-      return Number(db.prepare('INSERT INTO events(session_id,incarnation_id,type,json,created_at) VALUES(?,?,?,?,?)')
-        .run(sessionId || null, incarnationId || null, type, JSON.stringify(data), now()).lastInsertRowid);
+      return Number(database.prepare('INSERT INTO events(session_id,incarnation_id,type,json,created_at) VALUES(?,?,?,?,?)').run(
+        sessionId || null,
+        incarnationId || null,
+        type,
+        JSON.stringify(data),
+        now()
+      ).lastInsertRowid);
     },
-    close() { db.close(); }
+    close() {
+      database.close();
+    }
   };
   return store;
 }
-module.exports = { openStore };
+module.exports = {
+  openStore
+};
