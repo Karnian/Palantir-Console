@@ -40,6 +40,8 @@ test('handoff confirmation, completion-only command and clipboard failure fallba
   [...e.document.querySelectorAll('button')].find(x => x.textContent === '터미널로 넘기기').click();
   await flushEffects(20);
   assert.match(e.document.body.textContent, /인증 게이트도 없다/);
+  assert.equal(e.context.C.handoffFolderTrust, "처음 쓰는 폴더면 터미널에서 '이 폴더를 신뢰하나요?' 확인이 먼저 나옵니다. 신뢰를 고르면 Claude Code 가 사용자 설정에 기록합니다.");
+  assert.ok(e.document.querySelector('.modal-body').textContent.includes(e.context.C.handoffFolderTrust));
   assert.match(e.document.body.textContent, /어느 셸에 붙여 넣어도 \/bin\/sh 로 실행됨/);
   [...e.document.querySelectorAll('button')].find(x => x.textContent === '확인하고 넘기기').click();
   assert.equal(calls, 1);
@@ -48,6 +50,7 @@ test('handoff confirmation, completion-only command and clipboard failure fallba
   assert.match(e.document.body.textContent, /읽기 전용/);
   const command = e.document.querySelector('.owned-handoff-command');
   assert.equal(command.value, s.handoff_command);
+  assert.ok(e.document.body.textContent.includes(e.context.C.handoffFolderTrust));
   assert.match(e.document.body.textContent, /어느 셸에 붙여 넣어도 \/bin\/sh 로 실행됨/);
   [...e.document.querySelectorAll('button')].find(x => x.textContent === '명령 복사').click();
   await flushEffects(20);

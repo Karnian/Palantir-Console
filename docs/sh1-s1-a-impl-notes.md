@@ -2502,3 +2502,14 @@ copy.js에 두 거부 코드를 추가했다. 신원 누락은 '실행 끝내고
 - 실제 Claude·LLM·외부 네트워크 호출 0. git 조작·spec·package.json·전역 SSE·스키마 변경 없음. 이번 DoD는 지정 Node 전체 테스트이며 a11y 실행은 요청 범위에 포함되지 않는다.
 
 최종 지정 전체 명령 `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session*.test.js server/tests/session-host-*.test.js`: tests 688, pass 664, fail 23, cancelled 0, skipped 1(`/tmp/sh1-e1-r3-all.log`). 실패 23개는 기존 소켓 listen EPERM·실제 ps EPERM/query_failed·host_start_timeout이며, 신규 R3와 갱신한 R2·gate-flow 회귀는 모두 통과했다. fish 미설치 1 skip은 유지한다. 호스트에서 지정 전체 명령의 최종 통과를 재확인해야 한다.
+
+
+### S1-e2 — 실측 후 읽기 복구·넘기기 안내
+
+[실측 기록](sh1-s1-e2-measurement-record.md)의 발견과 조치 1·2를 반영했다. 호스트 크래시 뒤 읽기가 not_running에 머물러 다음 변경 요청까지 복구되지 않았으므로, S1-c1의 “읽기는 연결만” 판정을 브리프 §3.1의 handshake 실패 시 기동 계약으로 넓혔다. 런타임의 host.db 존재만 확인하며 서버가 호스트 DB 내용을 읽지는 않는다. 기록이 없는 최초 사용은 기동하지 않고, 잠금 보유자가 무응답이면 기존 unreachable 판정을 유지한다.
+
+list·snapshot·lookup·transcript·chunks와 SSE 폴링은 변경 요청과 같은 single-flight startup을 사용한다. SSE 복구는 기존 폴링 스케줄에서만 시도하며 기동 실패는 not_running과 host_start_failed 진단으로 반환한다. 넘기기 확인창과 완료 명령 옆에는 처음 쓰는 폴더의 신뢰 확인 및 Claude Code의 사용자 설정 기록 안내를 copy.js 공용 문구로 표시한다.
+
+수정 전 회귀: /tmp/sh1-e2-red.log, 56개 중 8개 실패(읽기 5종·single-flight/진단·SSE·UI). 수정 후 집중 검증은 56/56 통과(/tmp/sh1-e2-focus.log). 프로세스 회귀는 가짜 어댑터 helper main에서 시작·SIGKILL 뒤 실제 GET snapshot으로 exited/host_lost 복구를 검사하도록 작성했으며, 기록 없는 GET 대조도 포함한다. 이 환경에서는 두 검사 모두 TCP·Unix 소켓 listen EPERM으로 차단되어 실제 복구 통과는 확인하지 못했다(/tmp/sh1-e2-process.log).
+
+지정 전체 명령 `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session*.test.js server/tests/session-host-*.test.js`: tests 697, pass 671, fail 25, skipped 1(/tmp/sh1-e2-all.log). 실패 목록은 기존 HTTP/프로세스 브리지 6건, 신규 GET 프로세스 2건, process-lifecycle 14건, 실제 ps 신원 조회 3건이다. 소켓 listen EPERM·/bin/ps EPERM/query_failed·host_start_timeout 제약으로 호스트 재실행이 필요하다. 최종 전체 실행에는 확인창과 완료 명령 옆 신뢰 안내 단언도 포함된다. 실제 Claude·LLM 호출 0, git 조작·실측 기록·spec 변경 없음.

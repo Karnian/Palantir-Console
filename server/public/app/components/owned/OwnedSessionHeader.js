@@ -74,7 +74,7 @@ export function OwnedSessionHeader({ state, incarnation, host, asOf, onHandoff, 
         onClose=${() => setConfirmHandoff(false)}>
         <div class="modal-header"><h2 id="owned-handoff-title">${handoffCopy.title}</h2></div>
         <div class="modal-body">
-          <p>${handoffCopy.guarantee}</p><p>${handoffCopy.limit}</p><p>${handoffCopy.shell}</p>
+          <p>${handoffCopy.guarantee}</p><p>${handoffCopy.limit}</p><p>${handoffCopy.shell}</p><p>${OWNED_COPY.handoffFolderTrust}</p>
         </div>
         <div class="modal-footer">
           <button class="btn" onClick=${() => setConfirmHandoff(false)}>취소</button>
@@ -84,7 +84,7 @@ export function OwnedSessionHeader({ state, incarnation, host, asOf, onHandoff, 
           }}>확인하고 넘기기</button>
         </div>
       </${Modal}>`}
-      ${handedOff && state.handoff_command && html`<p>${handoffCopy.shell}</p><label>터미널에서 실행할 명령
+      ${handedOff && state.handoff_command && html`<p>${handoffCopy.shell}</p><p>${OWNED_COPY.handoffFolderTrust}</p><label>터미널에서 실행할 명령
         <textarea ref=${commandRef} class="owned-handoff-command" readonly=${true} rows="6"
           style="width:100%;box-sizing:border-box" value=${state.handoff_command} />
         </label><button class="btn btn-sm" onClick=${copyCommand}>명령 복사</button>

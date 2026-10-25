@@ -14,6 +14,7 @@
 
 // Task lifecycle (server/db `tasks.status`).
 export const OWNED_COPY = {
+  handoffFolderTrust: "처음 쓰는 폴더면 터미널에서 '이 폴더를 신뢰하나요?' 확인이 먼저 나옵니다. 신뢰를 고르면 Claude Code 가 사용자 설정에 기록합니다.",
   handoff_identity_unavailable: '최신 실행의 신원·게이트 통과 기록을 확인할 수 없어 넘기지 않았습니다. ' +
     '실행 끝내고 이어서 시작(resume)으로 정상 실행을 만든 뒤 다시 넘기세요.',
   unsupported_path_character: '경로에 백슬래시(\\)가 있어 넘길 수 없습니다. 백슬래시 없는 경로에서 작업하세요.',

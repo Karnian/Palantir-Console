@@ -84,6 +84,7 @@ function createOwnedSessionService({ runtimeDir = path.resolve(process.cwd(), 'r
   let connecting;
   let bootId;
   let startup;
+  let startupFailed = false;
   function emit(subscriber, event, data) {
     if (!subscribers.has(subscriber)) return;
     try { subscriber.send(event, data); } catch { subscribers.delete(subscriber); }
@@ -112,7 +113,8 @@ function createOwnedSessionService({ runtimeDir = path.resolve(process.cwd(), 'r
   function unavailable(key) {
     const diagnosis = diagnose();
     const previous = cache.get(key);
-    if (!diagnosis.held) return { host: 'not_running' };
+    if (!diagnosis.held) return { host: 'not_running',
+      ...(startupFailed ? { diagnostics: { code: 'host_start_failed' } } : {}) };
     return { host: 'unreachable', current_state_known: false, as_of: previous?.as_of ?? null,
       last_known: previous?.value ?? null, diagnostics: { pid: diagnosis.pid ?? null,
         identity: diagnosis.identity || { status: 'query_failed' } } };
@@ -139,7 +141,7 @@ function createOwnedSessionService({ runtimeDir = path.resolve(process.cwd(), 'r
   }
   async function read(key, operation) {
     try {
-      await connect();
+      await readable();
       const result = await operation(client);
       observe(result);
       const sessionId = result.state?.session?.id || result.result?.session_id;
@@ -150,12 +152,20 @@ function createOwnedSessionService({ runtimeDir = path.resolve(process.cwd(), 'r
       return unavailable(key);
     }
   }
-  async function writable() {
+  async function readable() {
+    return writable(true);
+  }
+  async function writable(readOnly = false) {
     try { return await connect(); } catch {
-      if (closed || diagnose().held) throw failure('host_unreachable', 503);
+      if (closed || diagnose().held || (readOnly && !fs.existsSync(path.join(runtimeDir, 'host.db')))) {
+        throw failure('host_unreachable', 503);
+      }
       if (!startup) startup = (async () => {
-        const ready = await ensureHost({ runtimeDir });
-        ready.close();
+        startupFailed = false;
+        try {
+          const ready = await ensureHost({ runtimeDir });
+          ready.close();
+        } catch (error) { startupFailed = true; throw error; }
       })().finally(() => { startup = null; });
       try { await startup; return await connect(); } catch { throw failure('host_unreachable', 503); }
     }
@@ -187,7 +197,7 @@ function createOwnedSessionService({ runtimeDir = path.resolve(process.cwd(), 'r
   async function poll() {
     if (closed || !subscribers.size) return;
     try {
-      await connect();
+      await readable();
       for (const subscriber of [...subscribers]) {
         if (subscriber.paused) continue;
         const result = await client.eventsSince(subscriber.seq, { maxBytes: 4 * 1024 * 1024 });
@@ -228,7 +238,7 @@ function createOwnedSessionService({ runtimeDir = path.resolve(process.cwd(), 'r
     transcript: (id, before, limit) => read(`transcript:${id}`, host => host.transcript(id, before, limit)),
     async chunk(sessionId, source, ref, offset) {
       try {
-        await connect();
+        await readable();
         const result = await client.chunk(sessionId, source, ref, offset);
         return { host: 'running', host_boot_id: bootId, ...result };
       } catch (error) {
