@@ -72,7 +72,7 @@ function createPsIdentityProbe({ pinnedPath, execFileSync = childProcess.execFil
     if (found.status !== 'ok') return 'query_failed';
     return found.startedAt === normalized ? 'match' : 'mismatch_confirmed';
   }
-  function scanCandidates(output, pids, id, budget) {
+  function candidateMapping(output, id) {
     const candidates = [];
     let nearestPid;
     for (const line of output.split('\n')) {
@@ -80,17 +80,20 @@ function createPsIdentityProbe({ pinnedPath, execFileSync = childProcess.execFil
       if (row) nearestPid = Number(row[1]);
       if (markerState(line, id).exact) candidates.push(nearestPid);
     }
+    return candidates;
+  }
+  function scanCandidates(output, pids, id, budget) {
+    const candidates = candidateMapping(output, id);
     const knownPids = new Set(pids);
     if (candidates.some(pid => !knownPids.has(pid))) return null;
     if (new Set(candidates).size !== candidates.length) return null;
     const marked = [];
-    let absent = 0;
     for (const pid of candidates) {
       const before = start(pid, budget);
-      if (before.status === 'absent') { absent++; continue; }
+      if (before.status === 'absent') return null;
       if (before.status !== 'ok') return failed();
       const command = readProcess(['-E', '-ww', '-o', 'command=', '-p', String(pid)], budget);
-      if (command.status === 'absent') { absent++; continue; }
+      if (command.status === 'absent') return null;
       if (command.status !== 'ok') return failed();
       const marker = markerState(command.output, id);
       if (marker.partial) return failed();
@@ -98,20 +101,24 @@ function createPsIdentityProbe({ pinnedPath, execFileSync = childProcess.execFil
       const markers = command.output.split(/\s+/).filter(token => token.startsWith('PALANTIR_OWNED_INCARNATION='));
       if (markers.length !== 1) return failed();
       const parent = readProcess(['-o', 'ppid=', '-p', String(pid)], budget);
-      if (parent.status === 'absent') { absent++; continue; }
+      if (parent.status === 'absent') return null;
       if (parent.status !== 'ok') return failed();
       const parentLine = parent.output.endsWith('\n') ? parent.output.slice(0, -1) : parent.output;
       const ppid = /^ *\d+ *$/.test(parentLine) ? Number(parentLine) : NaN;
       if (!Number.isSafeInteger(ppid)) return failed();
       const after = start(pid, budget);
-      if (after.status === 'absent') { absent++; continue; }
+      if (after.status === 'absent') return null;
       if (after.status !== 'ok' || before.startedAt !== after.startedAt) return failed();
       marked.push({ pid, startedAt: before.startedAt, ppid, command: command.output });
     }
-    // Each environment ends its process record once. An injective mapping of marker lines
-    // to equally many verified processes is bijective; newline-forged PID rows must pass
-    // both uniqueness and per-PID marker checks, otherwise the original full scan runs.
-    if (marked.length + absent !== candidates.length) return null;
+    // Adopt only an injective mapping whose every candidate has a per-PID marker,
+    // no candidate was absent, and a fresh global mapping still agrees. Only then
+    // does equal cardinality justify the bijection; ambiguity uses the full scan.
+    const fresh = run(['-E', '-ww', '-A', '-o', 'pid=,command='], budget);
+    if (typeof fresh !== 'string' || !fresh.trim() || markerState(fresh, id).partial) return failed();
+    const mapping = candidateMapping(fresh, id);
+    if (mapping.some(pid => !knownPids.has(pid))) return failed();
+    if (mapping.length !== candidates.length || mapping.some((pid, index) => pid !== candidates[index])) return null;
     return { status: marked.length ? 'ok' : 'inconsistent', marked };
   }
   function scanOnce(id, budget) {

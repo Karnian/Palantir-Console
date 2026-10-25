@@ -44,8 +44,9 @@ test('R3-01 actual macOS lstart literal accepts ASCII padding and rejects other 
 test('R3-02 candidate command and parent are bracketed by equal lstart reads', () => {
   const { state, probe } = fixture();
   assert.equal(probe.findMarked(id).status, 'ok');
-  assert.deepEqual(state.calls.slice(2).map(call => call.args[1] === '-ww' ? 'command=' : call.args[1]),
+  assert.deepEqual(state.calls.slice(2, 6).map(call => call.args[1] === '-ww' ? 'command=' : call.args[1]),
     ['lstart=', 'command=', 'ppid=', 'lstart=']);
+  assert.ok(state.calls[6].args.includes('pid=,command='));
 });
 test('R3-02 reused PID between command and parent cannot establish main or descendant identity', () => {
   for (const method of ['findMarked', 'listMarkedDescendants']) {
@@ -75,8 +76,9 @@ test('R3-03 retry resolves transient mismatch by rerunning global and individual
   const result = probe.findMarked(id);
   assert.equal(result.status, 'ok');
   assert.deepEqual(result.pids, [{ pid: 10, startedAt }]);
-  assert.equal(state.pass, 2);
-  assert.equal(result.diagnostics.queryCount, 12);
+  assert.equal(state.pass, 3);
+  assert.equal(state.calls.filter(call => call.args.includes('pid=')).length, 2);
+  assert.equal(result.diagnostics.queryCount, 13);
 });
 test('R3-03 retry may confirm globally absent marker but never returns empty on persistent disappearance', () => {
   const { state, probe } = fixture();

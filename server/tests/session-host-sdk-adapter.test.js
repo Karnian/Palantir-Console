@@ -37,6 +37,13 @@ check('SDK core normal 20 prompts and 10 approvals have provider effect once and
     assert.equal(f.core.submit({ ...f.req('prompt', { body: index < 10 ? 'tool' : 'hello' }), request_key: delivery.request_key }).id, delivery.id);
   }
   const rows = f.log();
+  assert.equal(rows.filter(row => row.type === 'initialize').length, 21);
+  assert.equal(rows.filter(row => row.type === 'tool_response').length, 10);
+  for (const row of rows.filter(row => row.type === 'tool_response')) {
+    assert.equal(row.inputMatch, true);
+    assert.deepEqual(row.updatedInput, { command: 'fake success' });
+  }
+  assert.equal(rows.filter(row => row.type === 'input_mismatch').length, 0);
   assert.equal(rows.filter(row => row.type === 'user').length, 20);
   assert.equal(new Set(rows.filter(row => row.type === 'user').map(row => row.uuid)).size, 20);
   assert.equal(rows.filter(row => row.type === 'tool').length, 10);
@@ -68,13 +75,15 @@ for (const behavior of ['deny', 'answer', 'toolError']) check(`SDK core ${behavi
 for (const [label, config] of [
   ['empty', { stillQueued: [] }], ['survivors', { stillQueued: ['unexpected'] }], ['older', { olderReceipt: true }]
 ]) check(`SDK interrupt ${label} receipt via real control protocol`, async (t, sdk) => {
-  const f = await fixture(t, sdk, { ...config, delayMs: 1000, noInterruptResult: label === 'older' });
+  let interruptSettled = false;
+  const f = await fixture(t, sdk, { ...config, delayMs: 1000, noInterruptResult: label === 'older' },
+    { testHooks: { onInterruptSettled() { interruptSettled = true; } } });
   await f.start();
   const prompt = f.prompt();
   await until(() => f.events.some(event => event.type === 'lifecycle'), 'started');
   const interrupt = f.core.submit(f.req('interrupt'));
   if (label === 'older') {
-    await delay(80);
+    await until(() => f.log().some(row => row.type === 'interrupt_response') && interruptSettled, 'old receipt processed');
     assert.equal(f.events.filter(event => event.type === 'interrupt_receipt').length, 0);
     f.advance(60000);
     assert.equal(f.d(interrupt).state, 'unknown');
@@ -111,14 +120,34 @@ for (const mode of ['drop', 'merge', 'delayMs', 'omitLifecycle', 'singularResult
       assert.equal(retry.id, prompt.id);
       await f.completed(prompt);
     } else {
-      if (mode === 'merge') f.adapter.send(f.iid, randomUUID(), 'fault injected second message');
+      let queued, injected;
+      if (mode === 'merge') {
+        queued = f.prompt('queued before merge');
+        assert.equal(queued.state, 'queued');
+        injected = randomUUID();
+        f.adapter.send(f.iid, injected, 'fault injected second message');
+      }
       await until(() => f.events.some(event => event.type === 'result'), 'result');
       if (mode === 'merge') {
+        await until(() => [prompt.message_uuid, injected].every(uuid => f.events.some(event =>
+          event.type === 'lifecycle' && event.command_uuid === uuid && event.state === 'completed')), 'merged lifecycle ends');
         assert.equal(f.state().incarnations[0].attribution_uncertain, 1);
+        assert.equal(f.d(prompt).state, 'provider_observed');
         assert.equal(f.d(prompt).outcome, null);
+        assert.equal(f.d(queued).state, 'queued');
+        assert.equal(f.d(queued).outcome, null);
+        assert.equal(f.prompt('new after merge').state, 'rejected');
       } else if (mode === 'omitLifecycle') {
         assert.equal(f.d(prompt).outcome, null);
         assert.equal(f.core.idle(f.sid), false);
+        const queued = f.prompt('queued without lifecycle');
+        assert.equal(queued.state, 'queued');
+        await f.exit();
+        assert.equal(f.d(prompt).state, 'unknown');
+        // The unchanged core preserves the known exact result on exit, despite missing lifecycle.
+        assert.equal(f.d(prompt).outcome, 'completed');
+        assert.equal(f.d(queued).state, 'expired');
+        assert.equal(f.d(queued).outcome, null);
       } else {
         assert.deepEqual(f.events.find(event => event.type === 'result').user_message_uuids, []);
         assert.equal(f.d(prompt).outcome, 'outcome_unknown');
@@ -185,7 +214,7 @@ check('SDK initialization timeout tick closes child and child_exit comes once', 
   assert.equal(f.core.lookup(accepted.request_key).reason, 'initialization_timeout');
   assert.equal(f.events.filter(event => event.type === 'child_exit').length, 1);
   f.adapter.close(f.iid);
-  await delay(20);
+  await new Promise(setImmediate);
   assert.equal(f.events.filter(event => event.type === 'child_exit').length, 1);
   assert.throws(() => f.adapter.send(f.iid, randomUUID(), 'late'), /incarnation_closed/);
   assert.equal(f.adapter.signal(f.iid, 'SIGTERM'), 0);
@@ -206,7 +235,7 @@ check('SDK receives scrubbed child env with single ownership marker', async (t, 
 for (const [label, options, code] of [
   ['hash', { executableSha256: '0'.repeat(64) }, 'executable_hash_mismatch'],
   ['argv', { extraArgs: { bare: null } }, 'unsafe_argv'],
-  ['env', { baseEnv: { HOME: 'sk-ant-private' } }, 'invalid_child_env']
+  ['env', { baseEnv: { HOME: home, LANG: 'sk-ant-private' } }, 'invalid_child_env']
 ]) check(`SDK synchronous ${label} refusal happens before spawn with control`, async (t, sdk) => {
   const good = await fixture(t, sdk);
   assert.equal((await good.start()).state, 'done');
@@ -319,7 +348,7 @@ check('SDK close and SIGTERM ignored: stream closure is not child death and clea
   f.probe.listMarkedDescendants = () => { descendants++; return { status: 'query_failed' }; };
   f.advance(pin.closeWaitMs);
   assert.deepEqual(signals, ['SIGTERM']);
-  await delay(30);
+  await until(() => f.log().some(row => row.type === 'sigterm_ignored'), 'child handled SIGTERM');
   assert.equal(f.adapter.facts(f.iid).exited, false);
   f.advance(pin.sigtermWaitMs);
   assert.equal(descendants, 1);
@@ -393,6 +422,8 @@ check('SDK delay consumes original input once after host recovery marks it unkno
   await f.start();
   const prompt = f.prompt();
   await until(() => f.log().some(row => row.type === 'user'), 'provider input');
+  const queued = [f.prompt('queued A'), f.prompt('queued B')];
+  assert.ok(queued.every(row => row.state === 'queued'));
   // Closing the core detaches its event listener, without closing the owned SDK query.
   f.core.close();
   const { createHostCore } = require('../sessionHost/core');
@@ -400,9 +431,20 @@ check('SDK delay consumes original input once after host recovery marks it unkno
     hostBootId: 'recovered-sdk-boot', clock: () => 1800000000000 });
   t.after(() => core.close());
   core.recover();
+  assert.equal(core.lookup(prompt.request_key).state, 'unknown');
+  const blocked = core.submit(f.req('prompt', { body: 'different key while original unknown' }));
+  assert.equal(blocked.state, 'rejected');
+  assert.equal(blocked.outcome, null);
+  assert.equal(f.log().filter(row => row.type === 'user').length, 1);
   await until(() => f.events.some(event => event.type === 'result'), 'late original result');
   assert.equal(core.lookup(prompt.request_key).state, 'unknown');
   assert.equal(core.lookup(prompt.request_key).outcome, 'outcome_unknown');
+  for (const delivery of queued) {
+    assert.equal(core.lookup(delivery.request_key).state, 'expired');
+    assert.equal(core.lookup(delivery.request_key).outcome, null);
+  }
+  assert.equal(core.lookup(blocked.request_key).state, 'rejected');
+  assert.equal(core.lookup(blocked.request_key).outcome, null);
   assert.equal(core.submit({ ...f.req('prompt', { body: 'hello' }), request_key: prompt.request_key }).id, prompt.id);
   assert.equal(f.log().filter(row => row.type === 'user').length, 1);
 });
@@ -447,7 +489,8 @@ check('SDK settings use isolated process HOME user settings, not parent account 
   }
 });
 
-check('SDK structured question answer exposes existing core string-equality boundary', async (t, sdk) => {
+// Structured answers are a known limit and excluded from normal-path success counts until S1-e.
+check('SDK structured question answer known limit (S1-e): core string-equality boundary', async (t, sdk) => {
   const f = await fixture(t, sdk);
   await f.start();
   const prompt = f.prompt('question');
@@ -480,4 +523,177 @@ check('SDK missing initialization account stays absent and fails closed', async 
   assert.equal((await f.start()).reason, 'gate_rejected_cleaned');
   assert.equal(Object.hasOwn(f.events.find(event => event.type === 'initialization').initialization, 'account'), false);
   assert.equal(f.log().filter(row => row.type === 'user').length, 0);
+});
+
+check('R2 config root mismatch rejects settings and start before spawn', async (t, sdk) => {
+  const good = await fixture(t, sdk);
+  assert.equal((await good.start()).state, 'done');
+  const f = await fixture(t, sdk, {}, { baseEnv: { HOME: home + '-different', PATH: process.env.PATH } });
+  await assert.rejects(f.adapter.checkSettings(f.dir), { code: 'config_root_mismatch' });
+  assert.throws(() => f.adapter.start({ incarnation_id: randomUUID(), cwd: f.dir }), { code: 'config_root_mismatch' });
+  assert.equal(f.spawns.length, 0);
+});
+
+check('R2 prompt recheck gets fresh account instead of initialization cache', async (t, sdk) => {
+  const good = await fixture(t, sdk);
+  await good.start();
+  await good.completed(good.prompt());
+  await good.completed(good.prompt());
+  assert.equal(good.log().filter(row => row.type === 'initialize').length, 3);
+  const f = await fixture(t, sdk);
+  await f.start();
+  await f.completed(f.prompt());
+  fs.writeFileSync(path.join(f.dir, 'fake-claude.json'), JSON.stringify({ initialization: { account: { ...account,
+    apiKeySource: 'ANTHROPIC_API_KEY' } } }));
+  const second = f.prompt('must not reach provider');
+  await until(() => ['rejected', 'completed'].includes(f.d(second).state), 'second prompt settled');
+  assert.equal(f.d(second).state, 'rejected');
+  assert.equal(f.d(second).reason, 'auth_recheck_failed');
+  assert.equal(f.log().filter(row => row.type === 'user').length, 1);
+  assert.equal(f.log().filter(row => row.type === 'initialize').length, 3);
+});
+
+for (const aborted of [false, true]) check(`R2 duplicate tool callback shares pending promise aborted=${aborted}`, async (t, sdk) => {
+  let callback;
+  const f = await fixture(t, sdk, {}, { testHooks: { onQuery({ canUseTool }) { callback = canUseTool; } } });
+  await f.start();
+  const prompt = f.prompt('tool');
+  const tool = await f.pendingTool();
+  const event = f.events.find(event => event.type === 'tool_request');
+  const first = callback(event.name, event.input, { signal: new AbortController().signal, toolUseID: tool.tool_use_id });
+  const controller = new AbortController();
+  if (aborted) controller.abort();
+  const second = callback(event.name, event.input, { signal: controller.signal, toolUseID: tool.tool_use_id });
+  assert.strictEqual(first, second);
+  assert.equal(f.adapter.facts(f.iid, tool.tool_use_id).aborted, false);
+  const answer = f.core.submit(f.req('tool_decision', { target_tool_use_id: tool.tool_use_id, body: { behavior: 'allow' } }));
+  assert.deepEqual(await first, { behavior: 'allow', updatedInput: event.input });
+  await f.completed(prompt);
+  assert.equal(f.d(answer).state, 'provider_observed');
+  assert.equal(f.log().filter(row => row.type === 'tool').length, 1);
+  assert.equal(f.events.filter(event => event.type === 'tool_request').length, 1);
+  assert.deepEqual(await callback(event.name, event.input, { signal: controller.signal, toolUseID: tool.tool_use_id }),
+    { behavior: 'deny', message: 'duplicate_tool_request' });
+  assert.equal(f.events.filter(event => event.type === 'tool_request').length, 1);
+});
+
+for (const mode of ['error', 'missing']) check(`R2 prompt fresh initialization ${mode} rejects without provider input`, async (t, sdk) => {
+  const f = await fixture(t, sdk);
+  await f.start();
+  await f.completed(f.prompt());
+  fs.writeFileSync(path.join(f.dir, 'fake-claude.json'), JSON.stringify(mode === 'error' ? { initializationError: true } : { omitAccount: true }));
+  const second = f.prompt('blocked');
+  await until(() => f.d(second).state === 'rejected', 'auth recheck rejection');
+  assert.equal(f.d(second).reason, 'auth_recheck_failed');
+  assert.equal(f.log().filter(row => row.type === 'initialize').length, 3);
+  assert.equal(f.log().filter(row => row.type === 'user').length, 1);
+});
+
+for (const answer of [{}, { 'Which?': 'A' }, { 'Which?': 'A', 'Why?': 'B', Extra: 'C' },
+  { 'Which?': '', 'Why?': 'B' }, { 'Which?': '  ', 'Why?': 'B' }]) {
+  check(`R2 question rejects incomplete answers ${JSON.stringify(answer)}`, async (t, sdk) => {
+    const f = await fixture(t, sdk, { questionCount: 2 });
+    await f.start();
+    const prompt = f.prompt('question');
+    const tool = await f.pendingTool();
+    assert.throws(() => f.adapter.decide(f.iid, tool.tool_use_id, { behavior: 'answer', answer }), { code: 'invalid_decision' });
+    assert.equal(f.log().filter(row => row.type === 'tool').length, 0);
+    f.adapter.decide(f.iid, tool.tool_use_id, { behavior: 'answer', answer: { 'Which?': 'A', 'Why?': 'B' } });
+    await f.completed(prompt);
+    assert.equal(f.log().filter(row => row.type === 'tool').length, 1);
+  });
+}
+
+check('R2 fake refuses changed allow input instead of recording execution', async (t, sdk) => {
+  const f = await fixture(t, sdk);
+  await f.start();
+  const prompt = f.prompt('tool');
+  const tool = await f.pendingTool();
+  f.events.find(event => event.type === 'tool_request').input.command = 'tampered';
+  const answer = f.core.submit(f.req('tool_decision', { target_tool_use_id: tool.tool_use_id, body: { behavior: 'allow' } }));
+  await f.completed(prompt);
+  assert.equal(f.d(answer).state, 'unknown');
+  assert.equal(f.d(answer).reason, 'tool_finished_error');
+  assert.equal(f.log().filter(row => row.type === 'tool').length, 0);
+  assert.equal(f.log().filter(row => row.type === 'input_mismatch').length, 1);
+});
+
+check('R2 missing lifecycle and uncorrelated result finish unknown on child exit', async (t, sdk) => {
+  const f = await fixture(t, sdk, { omitLifecycle: true, singularResult: true });
+  await f.start();
+  const prompt = f.prompt();
+  await until(() => f.events.some(event => event.type === 'result'), 'uncorrelated result');
+  assert.equal(f.d(prompt).outcome, null);
+  await f.exit();
+  assert.equal(f.d(prompt).state, 'unknown');
+  assert.equal(f.d(prompt).outcome, 'outcome_unknown');
+  assert.equal(f.core.submit({ ...f.req('prompt', { body: 'hello' }), request_key: prompt.request_key }).id, prompt.id);
+  assert.equal(f.log().filter(row => row.type === 'user').length, 1);
+});
+
+check('R2 config root validates creation and every settings/start call with single-field controls', async (t, sdk) => {
+  const good = await fixture(t, sdk);
+  assert.equal((await good.start()).state, 'done');
+  const blocked = async f => {
+    await assert.rejects(f.adapter.checkSettings(f.dir), { code: 'config_root_mismatch' });
+    assert.throws(() => f.adapter.start({ incarnation_id: randomUUID(), cwd: f.dir }), { code: 'config_root_mismatch' });
+    assert.equal(f.spawns.length, 0);
+  };
+  for (const key of ['CLAUDE_CONFIG_DIR', 'CLAUDE_SECURESTORAGE_CONFIG_DIR']) {
+    const current = await fixture(t, sdk);
+    process.env[key] = home;
+    try { await blocked(current); } finally { delete process.env[key]; }
+    process.env[key] = home;
+    let created;
+    try { created = await fixture(t, sdk); } finally { delete process.env[key]; }
+    await blocked(created);
+    await blocked(await fixture(t, sdk, {}, { baseEnv: { HOME: home, PATH: process.env.PATH, [key]: '' } }));
+    const control = await fixture(t, sdk);
+    assert.equal((await control.start()).state, 'done');
+  }
+  for (const value of [undefined, '']) {
+    await blocked(await fixture(t, sdk, {}, { baseEnv: { HOME: value, PATH: process.env.PATH } }));
+  }
+  const current = await fixture(t, sdk);
+  const savedHome = process.env.HOME;
+  try {
+    process.env.HOME = '';
+    await blocked(current);
+  } finally { process.env.HOME = savedHome; }
+});
+
+check('R2 subagent tool result preserves approval observation and parent correlation', async (t, sdk) => {
+  const f = await fixture(t, sdk, { parentToolUseId: 'parent-tool' });
+  await f.start();
+  const prompt = f.prompt('tool');
+  const tool = await f.pendingTool();
+  const answer = f.core.submit(f.req('tool_decision', { target_tool_use_id: tool.tool_use_id, body: { behavior: 'allow' } }));
+  await f.completed(prompt);
+  assert.equal(f.d(answer).state, 'provider_observed');
+  assert.equal(f.events.find(event => event.type === 'tool_result').parent_tool_use_id, 'parent-tool');
+});
+
+check('R2 late original stays unknown while alive and never drains unrelated queued inputs', async (t, sdk) => {
+  const f = await fixture(t, sdk, { delayMs: 150, omitLifecycle: true });
+  await f.start();
+  const send = f.adapter.send.bind(f.adapter);
+  f.adapter.send = (...args) => { send(...args); throw Error('injected_after_input_yield'); };
+  const original = f.prompt('original');
+  const queued = [f.prompt('queued one'), f.prompt('queued two')];
+  await until(() => f.d(original).state === 'unknown', 'original unknown before delayed execution');
+  assert.equal(f.adapter.facts(f.iid).exited, false);
+  assert.equal(f.d(original).outcome, null);
+  assert.ok(queued.every(delivery => f.d(delivery).state === 'queued'));
+  const blocked = f.prompt('new key while unknown');
+  assert.equal(blocked.state, 'rejected');
+  await until(() => f.events.some(event => event.type === 'result'), 'late original result');
+  assert.equal(f.d(original).state, 'unknown');
+  assert.equal(f.d(original).outcome, null);
+  for (const delivery of queued) {
+    assert.equal(f.d(delivery).state, 'queued');
+    assert.equal(f.d(delivery).outcome, null);
+  }
+  assert.equal(f.d(blocked).state, 'rejected');
+  assert.equal(f.d(blocked).outcome, null);
+  assert.deepEqual(f.log().filter(row => row.type === 'user').map(row => row.uuid), [original.message_uuid]);
 });

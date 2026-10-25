@@ -24,7 +24,7 @@ function fixture(count = 3) {
   const probe = createPsIdentityProbe({ pinnedPath: '/pinned/claude', execFileSync(command, args) {
     assert.equal(command, '/bin/ps');
     state.calls.push(args);
-    if (args.includes('pid=,command=')) return state.global;
+    if (args.includes('pid=,command=')) return typeof state.global === 'function' ? state.global() : state.global;
     if (args.includes('pid=')) return pids.join('\n') + '\n';
     const pid = Number(args.at(-1));
     if (state.absent.has(pid)) throw Object.assign(Error(), { status: 1, stdout: '', stderr: '' });
@@ -40,14 +40,14 @@ function markedPids(probe) {
   return result.pids.map(row => row.pid);
 }
 
-test('fast ps scan uses 10 queries for two marked processes among 3000', { timeout: 5000 }, () => {
+test('fast ps scan uses 11 queries for two marked processes among 3000', { timeout: 5000 }, () => {
   const { state, probe } = fixture(3000);
   assert.deepEqual(markedPids(probe), [10, 11]);
-  assert.equal(state.calls.length, 2 + 2 * 4);
+  assert.equal(state.calls.length, 3 + 2 * 4);
   assert.equal(state.calls.filter(args => args.includes('command=')).length, 2);
   state.calls.length = 0;
   assert.deepEqual(probe.findMarked(id).pids, [{ pid: 10, startedAt }]);
-  assert.equal(state.calls.length, 10);
+  assert.equal(state.calls.length, 11);
 });
 
 test('fast ps duplicate mapping from newline forged real PID falls back to full scan', { timeout: 5000 }, () => {
@@ -72,11 +72,11 @@ test('fast ps candidate without per-PID marker falls back to full scan', { timeo
   assert.equal(state.calls.filter(args => args.includes('command=') && args.at(-1) === '12').length, 2);
 });
 
-test('fast ps counts absent candidates without discarding surviving marked processes', { timeout: 5000 }, () => {
+test('fast ps absent candidate forces full scan without discarding surviving processes', { timeout: 5000 }, () => {
   const { state, probe } = fixture();
   state.absent.add(11);
   assert.deepEqual(markedPids(probe), [10]);
-  assert.equal(state.calls.length, 7);
+  assert.equal(state.calls.length, 14);
 });
 
 test('buffered synchronous SHA-256 matches async and reference across buffer boundaries', { timeout: 5000 }, async t => {
@@ -108,4 +108,43 @@ test('buffered synchronous SHA-256 closes its descriptor after a read error', { 
     fs.readSync = originalRead;
     fs.closeSync = originalClose;
   }
+});
+
+test('R2 ps absent forged candidate cannot hide live marked child', { timeout: 5000 }, () => {
+  const { state, probe } = fixture();
+  assert.equal(probe.findMarked(id).pids[0].pid, 10);
+  state.commands[11] = `/tool newline\n12 forged argv ${marker}`;
+  state.global = `10 /pinned/claude ${marker}\n11 /tool newline\n12 forged argv ${marker}\n12 /temporary\n`;
+  state.absent.add(12);
+  assert.deepEqual(markedPids(probe), [11]);
+});
+
+test('R2 ps new marked process between G and P cannot be omitted', { timeout: 5000 }, () => {
+  const { state, probe } = fixture(4);
+  const before = state.global;
+  state.commands[12] = `/new/tool ${marker}`;
+  state.parents[12] = 10;
+  const after = `10 /pinned/claude ${marker}\n11 /tool ${marker}\n12 /new/tool ${marker}\n13 unrelated\n`;
+  let globals = 0;
+  state.global = () => ++globals === 1 ? before : after;
+  assert.deepEqual(markedPids(probe), [10, 11, 12]);
+  assert.ok(globals >= 2);
+  assert.ok(state.calls.some(args => args.includes('command=') && args.at(-1) === '13'), 'mapping change must use full scan');
+});
+
+test('R2 ps changed final G mapping forces full scan', { timeout: 5000 }, () => {
+  const { state, probe } = fixture(4);
+  const before = state.global;
+  let globals = 0;
+  state.global = () => ++globals === 1 ? before : `11 /tool ${marker}\n10 /pinned/claude ${marker}\n12 unrelated\n13 unrelated\n`;
+  assert.deepEqual(markedPids(probe), [10, 11]);
+  assert.ok(state.calls.some(args => args.includes('command=') && args.at(-1) === '13'), 'changed mapping must use full scan');
+});
+
+test('R2 ps new marked PID outside original P fails closed', { timeout: 5000 }, () => {
+  const { state, probe } = fixture();
+  const before = state.global;
+  let globals = 0;
+  state.global = () => ++globals === 1 ? before : before + `13 /new/tool ${marker}\n`;
+  assert.equal(probe.listMarkedDescendants(id).status, 'query_failed');
 });

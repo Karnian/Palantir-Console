@@ -48,7 +48,16 @@ function capabilityVerdict({ systemInitCapabilities, sdkVersion, cliVersion, per
 }
 function createSdkAdapter({ sdk, executablePath = bundledExecutable(), executableSha256 = pin.cliSha256,
   cliVersion = pin.cliVersion, baseEnv = process.env, identityProbe = createPsIdentityProbe({ pinnedPath: executablePath }),
-  hashFileSync, spawn = childProcess.spawn, extraArgs } = {}) {
+  hashFileSync, spawn = childProcess.spawn, extraArgs, testHooks = {} } = {}) {
+  function rootsMatch() {
+    const forbidden = ['CLAUDE_CONFIG_DIR', 'CLAUDE_SECURESTORAGE_CONFIG_DIR'];
+    return !forbidden.some(key => Object.hasOwn(process.env, key) || Object.hasOwn(baseEnv, key)) &&
+      typeof baseEnv.HOME === 'string' && baseEnv.HOME.length > 0 && baseEnv.HOME === process.env.HOME;
+  }
+  const initialRootsMatch = rootsMatch();
+  function assertConfigRoot() {
+    if (!initialRootsMatch || !rootsMatch()) throw failure('config_root_mismatch');
+  }
   const events = new EventEmitter(), children = new Map();
   const emit = (id, type, data = {}) => events.emit('event', { incarnation_id: id, type, ...data });
   function requireChild(id) {
@@ -73,22 +82,27 @@ function createSdkAdapter({ sdk, executablePath = bundledExecutable(), executabl
         if (block.type !== 'tool_result') continue;
         const content = typeof block.content === 'string' ? block.content : Array.isArray(block.content) ?
           block.content.filter(item => item.type === 'text' && typeof item.text === 'string').map(item => item.text).join('') : '';
-        emit(id, 'tool_result', { tool_use_id: block.tool_use_id, is_error: block.is_error === true, content });
+        emit(id, 'tool_result', { tool_use_id: block.tool_use_id, is_error: block.is_error === true, content,
+          parent_tool_use_id: message.parent_tool_use_id ?? null });
       }
     }
   }
   const adapter = {
     events,
-    checkSettings(cwd) { return sdk.resolveSettings({ cwd }); },
+    checkSettings(cwd) { return Promise.resolve().then(() => { assertConfigRoot(); return sdk.resolveSettings({ cwd }); }); },
     accountInfo(id) {
-      return Promise.resolve().then(() => requireChild(id).query.accountInfo());
+      return Promise.resolve().then(() => requireChild(id).query.reinitialize()).then(initialization => {
+        if (!initialization?.account || typeof initialization.account !== 'object') throw failure('account_unavailable');
+        return initialization.account;
+      });
     },
     start({ incarnation_id: id, cwd, resume, claude_session_id }) {
+      assertConfigRoot();
       if (children.has(id)) throw failure('incarnation_exists');
       if (resume === true ? typeof claude_session_id !== 'string' || !claude_session_id :
         resume !== undefined || claude_session_id !== undefined) throw failure('invalid_resume_contract');
       const sessionId = resume ? claude_session_id : randomUUID();
-      const row = { input: inputQueue(), pending: new Map(), signals: new Map(), exited: false, closed: false };
+      const row = { input: inputQueue(), pending: new Map(), signals: new Map(), decided: new Set(), exited: false, closed: false };
       let spawnError;
       function customSpawn(opts) {
         try {
@@ -129,20 +143,26 @@ function createSdkAdapter({ sdk, executablePath = bundledExecutable(), executabl
         }
       }
       function canUseTool(name, input, { signal, toolUseID }) {
-        return new Promise(resolve => {
-          const settle = result => {
-            row.pending.delete(toolUseID);
-            signal.removeEventListener('abort', abort);
-            resolve(result);
-          };
-          const abort = () => settle({ behavior: 'deny', message: 'request_aborted' });
-          row.signals.set(toolUseID, signal);
-          if (signal.aborted || row.exited || row.closed) { abort(); return; }
-          if (row.pending.has(toolUseID)) { resolve({ behavior: 'deny', message: 'duplicate_tool_request' }); return; }
-          row.pending.set(toolUseID, { input, settle });
-          signal.addEventListener('abort', abort, { once: true });
-          emit(id, 'tool_request', { tool_use_id: toolUseID, name, input, signal });
-        });
+        const existing = row.pending.get(toolUseID);
+        if (existing) return existing.promise;
+        if (row.decided.has(toolUseID)) return Promise.resolve({ behavior: 'deny', message: 'duplicate_tool_request' });
+        let resolve;
+        const promise = new Promise(done => { resolve = done; });
+        const pending = { input, promise, settle };
+        function settle(result) {
+          if (row.pending.get(toolUseID) !== pending) return;
+          row.pending.delete(toolUseID);
+          row.decided.add(toolUseID);
+          signal.removeEventListener('abort', abort);
+          resolve(result);
+        }
+        function abort() { settle({ behavior: 'deny', message: 'request_aborted' }); }
+        row.pending.set(toolUseID, pending);
+        row.signals.set(toolUseID, signal);
+        if (signal.aborted || row.exited || row.closed) { abort(); return promise; }
+        signal.addEventListener('abort', abort, { once: true });
+        emit(id, 'tool_request', { tool_use_id: toolUseID, name, input, signal });
+        return promise;
       }
       try {
         row.query = sdk.query({ prompt: row.input, options: {
@@ -160,6 +180,7 @@ function createSdkAdapter({ sdk, executablePath = bundledExecutable(), executabl
         throw spawnError || failure('spawn_blocked');
       }
       children.set(id, row);
+      testHooks.onQuery?.({ id, query: row.query, canUseTool });
       row.query.initializationResult().then(
         initialization => emit(id, 'initialization', { initialization }),
         () => emit(id, 'initialization_failed', { code: 'initialization_failed' })
@@ -188,7 +209,11 @@ function createSdkAdapter({ sdk, executablePath = bundledExecutable(), executabl
         }
         const answers = typeof answer === 'string' ? { [questions[0].question]: answer } : answer;
         if (!answers || typeof answers !== 'object' || Array.isArray(answers) ||
-            !Object.values(answers).every(value => typeof value === 'string')) throw failure('invalid_decision');
+            !Object.values(answers).every(value => typeof value === 'string' && value.trim().length > 0)) {
+          throw failure('invalid_decision');
+        }
+        const keys = Object.keys(answers), expected = new Set(questions.map(question => question.question));
+        if (keys.length !== expected.size || keys.some(key => !expected.has(key))) throw failure('invalid_decision');
         result = { behavior: 'allow', updatedInput: { ...pending.input, answers } };
       } else throw failure('invalid_decision');
       pending.settle(result);
@@ -200,7 +225,7 @@ function createSdkAdapter({ sdk, executablePath = bundledExecutable(), executabl
         if (Array.isArray(receipt?.still_queued)) {
           emit(id, 'interrupt_receipt', { interrupt_id: interruptId, still_queued: receipt?.still_queued });
         }
-      }, () => {});
+      }, () => {}).finally(() => testHooks.onInterruptSettled?.({ id, interruptId }));
     },
     close(id) {
       const row = requireChild(id);

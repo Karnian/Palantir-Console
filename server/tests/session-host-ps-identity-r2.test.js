@@ -13,7 +13,7 @@ function absent() {
   return Object.assign(Error(), { status: 1, stdout: '', stderr: '' });
 }
 function fixture(options = {}) {
-  const state = { global: `global hint ${pinnedPath} ${marker}\n20 unrelated\n`, pids: '10\n20\n',
+  const state = { global: `${options.fast ? '10' : 'global hint'} ${pinnedPath} ${marker}\n20 unrelated\n`, pids: '10\n20\n',
     commands: { 10: `${pinnedPath} ${marker}\n`, 20: '/tool unrelated\n' },
     parents: { 10: '1\n', 20: '1\n' }, calls: [], elapsed: 0 };
   const probe = createPsIdentityProbe({ pinnedPath, clock: () => state.elapsed, ...options, execFileSync(command, args, execution) {
@@ -41,7 +41,7 @@ test('R2-01 unrelated multiline argv and marked multiline argv use per-PID attri
   assert.deepEqual(result.pids, [{ pid: 10, startedAt }]);
   assert.ok(state.calls.some(call => call.args.join(' ') === '-A -o pid='));
   assert.ok(state.calls.some(call => call.args.join(' ') === '-E -ww -o command= -p 20'));
-  assert.deepEqual(result.diagnostics, { elapsedMs: 0, queryCount: 6 });
+  assert.deepEqual(result.diagnostics, { elapsedMs: 0, queryCount: 7 });
 });
 test('R2-01 global no-token multiline output succeeds empty without per-PID queries', () => {
   const { state, probe } = fixture();
@@ -124,4 +124,26 @@ test('R2 real ps ignores unrelated multiline argv while identifying a marked chi
   assert.equal(found.status, 'ok');
   assert.equal(found.pids[0].pid, child.pid);
   assert.deepEqual(probe.listMarkedDescendants(incarnationId).pids, []);
+});
+
+for (const fast of [true, false]) test(`R2 shared error matrix fast=${fast}`, { timeout: 5000 }, () => {
+  const { state, probe } = fixture({ fast });
+  assert.equal(probe.findMarked(id).status, 'ok');
+  for (const error of [Object.assign(Error(), { code: 'EPERM' }), Object.assign(Error(), { status: 1, stdout: '', stderr: 'permission' })]) {
+    state.commands[10] = error;
+    assert.equal(probe.findMarked(id).status, 'query_failed');
+    state.commands[10] = `${pinnedPath} ${marker}\n`;
+    assert.equal(probe.findMarked(id).status, 'ok');
+  }
+  state.commands[10] = `${pinnedPath} ${marker.slice(0, -1)}\n`;
+  assert.equal(probe.findMarked(id).status, 'query_failed');
+  state.commands[10] = `${pinnedPath} ${marker}\n`;
+  assert.equal(probe.findMarked(id).status, 'ok');
+  state.global = `${fast ? '10' : 'hint'} ${pinnedPath} first\ncontinuation ${marker}\n20 unrelated\n`;
+  state.commands[10] = `${pinnedPath} first\ncontinuation ${marker}\n`;
+  assert.deepEqual(probe.findMarked(id).pids, [{ pid: 10, startedAt }]);
+  const limited = fixture({ fast, maxPids: 1 });
+  assert.equal(limited.probe.findMarked(id).status, 'query_failed');
+  limited.state.pids = '10\n';
+  assert.equal(limited.probe.findMarked(id).status, 'ok');
 });

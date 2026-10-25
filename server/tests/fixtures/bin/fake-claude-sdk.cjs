@@ -38,7 +38,7 @@ if (config.spawnGrandchild) {
     if (!child.kill('SIGKILL')) process.exit(0);
   });
 }
-if (config.ignoreSigterm) process.on('SIGTERM', () => {});
+if (config.ignoreSigterm) process.on('SIGTERM', () => log({ type: 'sigterm_ignored' }));
 const pendingTools = new Map(), active = new Map();
 let initialized = false, mergeBatch = [], mergeTimer;
 const response = (id, value) => send({ type: 'control_response', response: { subtype: 'success', request_id: id, response: value } });
@@ -67,7 +67,10 @@ function finish(batch) {
     const id = randomUUID(), toolUseId = `tool_${message.uuid}`;
     const input = tool === 'AskUserQuestion' ? { questions: [{ question: 'Which?', header: 'Choice', multiSelect: false,
       options: [{ label: 'A', description: 'First' }, { label: 'B', description: 'Second' }] }] } : { command: 'fake success' };
-    pendingTools.set(id, { message, toolUseId, tool });
+    if (tool === 'AskUserQuestion' && config.questionCount === 2) {
+      input.questions.push({ ...input.questions[0], question: 'Why?' });
+    }
+    pendingTools.set(id, { message, toolUseId, tool, input });
     send({ type: 'control_request', request_id: id,
       request: { subtype: 'can_use_tool', tool_name: tool, input, tool_use_id: toolUseId } });
   }
@@ -98,6 +101,8 @@ lines.on('line', line => {
   if (message.type === 'control_request') {
     const request = message.request;
     if (request.subtype === 'initialize') {
+      config = JSON.parse(fs.readFileSync('fake-claude.json', 'utf8'));
+      log({ type: 'initialize' });
       if (config.initializationError) {
         send({ type: 'control_response', response: { subtype: 'error', request_id: message.request_id, error: 'fake_initialization_error' } });
         return;
@@ -111,6 +116,7 @@ lines.on('line', line => {
       if (!config.hangInitialize) response(message.request_id, initialization);
     } else if (request.subtype === 'interrupt') {
       response(message.request_id, config.olderReceipt ? {} : { still_queued: config.stillQueued || [] });
+      log({ type: 'interrupt_response', request_id: message.request_id });
       if (!config.noInterruptResult) {
         for (const [id] of pendingTools) send({ type: 'control_cancel_request', request_id: id });
         pendingTools.clear();
@@ -123,12 +129,18 @@ lines.on('line', line => {
     if (!entry) return;
     pendingTools.delete(message.response.request_id);
     const decision = message.response.response;
-    const allowed = decision?.behavior === 'allow';
+    const allowDecision = decision?.behavior === 'allow';
+    const expectedInput = entry.tool === 'AskUserQuestion' ?
+      { ...entry.input, answers: decision?.updatedInput?.answers } : entry.input;
+    const inputMatch = JSON.stringify(decision?.updatedInput) === JSON.stringify(expectedInput);
+    log({ type: 'tool_response', tool_use_id: entry.toolUseId, updatedInput: decision?.updatedInput, inputMatch });
+    if (allowDecision && !inputMatch) log({ type: 'input_mismatch', tool_use_id: entry.toolUseId });
+    const allowed = allowDecision && inputMatch;
     if (allowed) log({ type: 'tool', tool_use_id: entry.toolUseId,
       ...(entry.tool === 'AskUserQuestion' ? { answers: decision.updatedInput.answers } : {}) });
-    const content = !allowed ? decision?.message || 'denied' : entry.tool === 'AskUserQuestion' ?
+    const content = !allowed ? decision?.message || (allowDecision ? 'input_mismatch' : 'denied') : entry.tool === 'AskUserQuestion' ?
       Object.values(decision.updatedInput.answers).join(', ') : 'ok';
-    send({ type: 'user', session_id: sessionId, uuid: randomUUID(), parent_tool_use_id: null,
+    send({ type: 'user', session_id: sessionId, uuid: randomUUID(), parent_tool_use_id: config.parentToolUseId ?? null,
       message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: entry.toolUseId,
         is_error: !allowed || !!config.toolError, content: config.contentArray ? [{ type: 'text', text: content }] : content }] } });
     result([entry.message.uuid]);

@@ -1078,3 +1078,152 @@ readSync 예외를 주입해 closeSync가 한 번 호출되는 것도 확인했�
 - `R2 real ps ignores unrelated multiline argv while identifying a marked child` — query_failed !== ok (ps 오류를 보수적으로 반환)
 - `real ps identifies marked child and grandchild then confirms exit` — query_failed !== ok (ps 오류를 보수적으로 반환)
 - `SDK real ps identity reads actual child and inherited grandchild marker then mismatch` — 'spawnSync /bin/ps EPERM'
+
+## S1-b2b 수정 라운드 2 — 적대리뷰 R1
+
+이번 절은 앞선 accountInfo 캐시 위험과 라운드 1의 absent 허용 논증을 대체한다.
+설치·네트워크·실제 Claude 실행·LLM 호출은 0이다. 변경 금지 코어·stateRules는 유지했다.
+
+### 수정 전 실패 증거
+
+먼저 재현 테스트를 추가하고 제품 동작을 바꾸기 전에 실행했다.
+테스트 관측을 위해 onQuery 훅만 추가해 실제 SDK에 넘긴 canUseTool 함수를 캡처했고,
+가짜 실행 파일에는 initialize 요청의 기록·설정 재읽기를 먼저 추가했다.
+SDK 모듈·query·Query 객체를 가짜로 대체하지 않았다.
+
+명령:
+`PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test --test-name-pattern='R2 ps |R2 config root|R2 prompt recheck|R2 duplicate tool' server/tests/session-host-ps-identity-fast.test.js server/tests/session-host-sdk-adapter.test.js`
+
+수정 전 tests 7, pass 0, fail 7. 수정 후 같은 명령 tests 7, pass 7, fail 0.
+다음 줄 번호는 수정 전 실행 당시의 테스트 파일 기준이며 이후 추가로 이동했다.
+
+| 항목 | 테스트와 실패 줄 |
+|---|---|
+| 1 absent 누락 | `R2 ps absent forged candidate cannot hide live marked child`, ps-identity-fast:119, `assert.deepEqual(markedPids(probe), [11])`: 실제 [] |
+| 1 새 표지 | `R2 ps new marked process between G and P cannot be omitted`, 같은 파일:130, 기대 [10,11,12], 실제 [10,11] |
+| 1 재조회 | `R2 ps changed final G mapping forces full scan`, 같은 파일:141, `changed mapping must use full scan` 실패 |
+| 2 루트 | `R2 config root mismatch rejects settings and start before spawn`, sdk-adapter:489, `assert.rejects(...config_root_mismatch)`: Missing expected rejection |
+| 3 새 조회 | `R2 prompt recheck gets fresh account instead of initialization cache`, sdk-adapter:499, initialize 횟수 기대 3, 실제 1 |
+| 4 중복 | `R2 duplicate tool callback shares pending promise aborted=false/true`, `assert.strictEqual(first, second)` 실패: 서로 다른 Promise |
+
+### 1. ps 빠른 경로의 채택 조건
+
+어느 단계에서든 후보가 absent면 즉시 기존 전체 스캔으로 돌아간다.
+absent 개수를 더해 cardinality를 맞추던 도달 불가 검사는 제거했다.
+후보 검증 뒤 G를 한 번 더 읽고 같은 순서의 표지 줄→PID 매핑인지 비교한다.
+달라졌으면 전체 스캔이다. 재조회에서 원래 P에 없던 새 PID가 나오면
+기존 P를 순회해도 빠뜨릴 수 있으므로 query_failed로 닫는다.
+잘못된 재조회 출력·부분 표지도 query_failed다.
+
+채택 조건은 단사 매핑 + 모든 후보의 per-PID 표지·앞뒤 신원 확인 + absent 0 + 재조회 매핑 일치다.
+이 강제 조건이 있을 때만 같은 크기 집합으로의 단사를 전단사로 해석한다.
+스캔 자체를 OS 원자 snapshot으로 주장하지 않으며 마지막 조회 이후의 생성은 관측 범위 밖이다.
+표지 프로세스 2개·전체 3,000개의 정상 경로는 전역 재조회 1회가 추가돼 11회다.
+
+G와 P 사이 새 프로세스, P 뒤 새 PID, 숫자 줄 위조+absent, 재조회 매핑 변화 테스트를 추가했다.
+R2 공통 fixture는 정상 숫자 PID와 강제 fallback 형식 모두 지원한다.
+같은 권한 오류·부분 표지·PID 예산·여러 줄 argv 행렬을 fast=true/false 양쪽에서 실행한다.
+R3의 lstart bracket 단언은 그대로 유지하고 그 뒤 G 재조회도 단언한다.
+transient 재시도는 전역 조회 수 3(시도 2 + 마지막 재조회 1), queryCount 13으로 갱신했다.
+
+### 2. 설정 루트
+
+생성 시 루트 일치 여부를 보관하고 checkSettings·start마다 다시 검증한다.
+process.env 또는 baseEnv에 CLAUDE_CONFIG_DIR·CLAUDE_SECURESTORAGE_CONFIG_DIR이 있거나,
+HOME이 비었거나 두 HOME이 다르면 checkSettings는 config_root_mismatch reject,
+start는 같은 코드로 동기 throw하며 spawn 0이다.
+생성 때 불일치했던 어댑터는 나중에 env를 고쳐도 사용할 수 없다.
+각 필드 변경에 대한 통과 대조와 생성 후 변경·빈 HOME·누락 HOME을 검증했다.
+
+### 3. accountInfo는 매번 reinitialize
+
+sdk.d.ts:3030–3054는 reinitialize가 캐시와 달리 새 initialize 요청을 보내며,
+대기 중 can_use_tool/request_user_dialog를 재전달하고 hooks를 다시 등록할 수 있다고 명시한다.
+이 어댑터는 SDK hooks 옵션을 사용하지 않으므로 취소될 SDK hook callback이 없다.
+prompt는 코어의 idle 조건에서만 보내므로 정상 경로에 대기 중 can_use_tool도 없다.
+재전달이 와도 아래 도구 ID 멱등 처리가 동일 Promise를 돌려준다.
+CLI 파일 settings의 hooks 자체가 없다는 보장은 아니다.
+
+accountInfo(id)는 q.reinitialize() 응답의 account를 반환하고 reject·account 누락은 실패로 전파한다.
+가짜는 initialize마다 fake-claude.json을 다시 읽는다.
+첫 prompt 뒤 account를 API 키 모양으로 바꾸면 두 번째는 auth_recheck_failed로 거부되고
+provider 수신은 한 줄뿐이다. 바꾸지 않은 대조는 두 번 전송된다.
+재초기화 오류·account 누락도 거부한다. 로그의 initialize 횟수는 초기 1 + prompt 수다.
+정상 20회 지시 테스트는 initialize 21회를 확인한다.
+**실제 CLI의 새 initialize가 인증 변경을 반영하는지는 S1-e 실측 항목이다.**
+
+### 4–6. 도구 재전달·답변·서브에이전트
+
+pending 항목이 Promise를 소유한다. 같은 tool_use_id가 오면 signal을 읽거나 바꾸기 전에
+동일 Promise를 반환한다. 이미 aborted인 재전달 signal도 기존 항목을 지우지 않는다.
+settle은 자신이 아직 등록된 항목일 때만 삭제하고 결정 완료 ID를 보관한다.
+완료 ID 재사용은 새 이벤트 없이 duplicate_tool_request deny다.
+실제 SDK가 만든 첫 요청에 같은 콜백의 재전달을 주입하고,
+사람 결정 1회·동일 결과·tool_request 1회·provider 실행 1회를 확인했다.
+
+answer 사전은 질문 텍스트 키 집합과 정확히 같아야 하며 값은 공백뿐이지 않은 문자열이어야 한다.
+질문 두 개에서 빈 사전·한 질문 누락·여분 키·빈 값·공백 값 각각 invalid_decision이고,
+그 뒤 완전한 사전으로 결정하면 실행 1회다.
+구조화 답변의 기존 코어 관측 테스트는 `known limit (S1-e)`로 표시하고 정상 기준에서 제외했다.
+
+서브에이전트 tool_result 폐기는 기각했다.
+tool_use_id는 모델 API의 고유 상관 ID이며 서브에이전트 승인도 같은 canUseTool로 들어온다.
+이를 버리면 해당 승인 결과를 관측할 수 없다.
+대신 tool_result에 parent_tool_use_id를 추가했다. 코어는 무시하고 S1-c가 구분에 사용할 수 있다.
+서브에이전트 결과로도 승인이 observed가 되는 대조 테스트를 추가했다.
+
+### 7–11. 증거 강화와 코어 계약 차이
+
+늦은 실행 테스트는 입력 yield 뒤 오류를 주입해 alive incarnation의 원본을 unknown으로 만든다.
+서로 다른 키의 queued 두 개와 추가 prompt를 넣고 원본 결과 도착 뒤까지 상태·outcome을 확인한다.
+provider 로그는 원본 UUID 한 개뿐이고 다른 delivery에는 결과가 귀속되지 않는다.
+기존 복구 테스트에도 queued 두 개와 unknown 중 다른 키 제출을 추가했다.
+
+merge는 두 UUID의 lifecycle completed까지 기다린 뒤에도 attribution_uncertain=1,
+원본 outcome=null, 대기열 queued·outcome=null, 새 prompt rejected, 수신 2개만임을 검증한다.
+가짜는 allow의 updatedInput을 기록하고 원래 요청 입력과 같은 경우에만 실행한다.
+AskUserQuestion은 원래 질문 입력에 answers가 합쳐진 형태를 비교한다.
+정상 승인 10회에서 inputMatch=true·원래 Bash 입력 일치·input_mismatch 0을 단언한다.
+입력 변조 대조는 실행 0·input_mismatch 1·오류 결과다.
+
+구형 interrupt는 고정 80ms 대신 provider interrupt_response 로그와
+SDK interrupt Promise 완료를 관측하는 테스트 훅을 모두 기다린 후 clock을 진행한다.
+중복 exit 검증은 이벤트 루프 drain으로, SIGTERM 무시 검증은 자식의 처리 로그로 바꿨다.
+손자 1.6초 생존 시험의 시간 대기는 검증 대상 자체여서 유지했다.
+
+**9번의 코어 계약 차이**: core.js finishIncarnationDeliveries는 정확히 귀속된 result가 있으면
+lifecycle 없이 exit해도 state=unknown, outcome=completed로 보존한다.
+따라서 기존 omitLifecycle + 정상 result 사례는 그 최종 값을 단언한다.
+result 배열도 없는 별도 사례는 state=unknown, outcome=outcome_unknown을 단언한다.
+둘 다 원본 provider 수신은 한 번이다. 정상 result를 버려 요구된 outcome_unknown을 만들거나
+변경 금지 core/stateRules를 수정하지 않았다. 이 차이는 호스트 판단 항목이다.
+
+
+### 최종 검증
+
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-*.test.js`
+  → tests 412, pass 395, fail 17, cancelled 0, skipped 0.
+  신규 22개는 전부 통과했다. 아래 17개는 기존 샌드박스 ps·소켓 제한 사례다.
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/spawn-guard.test.js`
+  → tests 9, pass 9, fail 0.
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test --test-name-pattern='R2' server/tests/session-host-ps-identity-fast.test.js server/tests/session-host-sdk-adapter.test.js`
+  → 당시 tests 20, pass 20, fail 0. 이후 추가한 P 뒤 생성·alive unknown 사례도 최종 전체 실행에서 통과했다.
+
+샌드박스 실패 목록:
+- `X simultaneous hosts preserve winner socket inode and capability` — 'spawnSync /bin/ps EPERM'
+- `X lock does not survive in a live inherited-environment child` — 'spawnSync /bin/ps EPERM'
+- `X detached host survives launcher parent SIGKILL` — 'spawnSync /bin/ps EPERM'
+- `X detached host survives launcher parent SIGTERM` — 'spawnSync /bin/ps EPERM'
+- `X detached host survives launcher parent SIGHUP` — 'spawnSync /bin/ps EPERM'
+- `X before accepted crash is reconciled by lookup after boot change, effect occurs once` — 'spawnSync /bin/ps EPERM'
+- `X idle drain refuses arrival with not_accepted, new host retries exactly once` — 'spawnSync /bin/ps EPERM'
+- `X active ownership prevents idle and SIGTERM exit; zero ownership releases socket and lock` — 'spawnSync /bin/ps EPERM'
+- `X private file modes, capability absent from argv and env, launcher sanitizes env` — 'host_start_timeout'
+- `X SIGTERM with zero ownership exits cleanly and releases exclusion` — 'spawnSync /bin/ps EPERM'
+- `X R1-01 asynchronous throw, active ownership=false` — 'spawnSync /bin/ps EPERM'
+- `X R1-01 asynchronous throw, active ownership=true` — 'spawnSync /bin/ps EPERM'
+- `X R1-01 asynchronous rejection, active ownership=false` — 'spawnSync /bin/ps EPERM'
+- `X R1-01 asynchronous rejection, active ownership=true` — 'spawnSync /bin/ps EPERM'
+- `R2 real ps ignores unrelated multiline argv while identifying a marked child` — query_failed !== ok (실제 ps 조회 차단)
+- `real ps identifies marked child and grandchild then confirms exit` — query_failed !== ok (실제 ps 조회 차단)
+- `SDK real ps identity reads actual child and inherited grandchild marker then mismatch` — 'spawnSync /bin/ps EPERM'
