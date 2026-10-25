@@ -179,3 +179,26 @@ test('R8 metadata overflow is an explicit 413, not a stale snapshot or host rest
   await assert.rejects(h.service.snapshot('session'), { code: 'snapshot_too_large', status: 413 });
   assert.equal((await h.service.list()).host, 'running'); assert.equal(h.launches, 0);
 });
+
+test('R2 offline approval cache preserves the exact status field set including request time', async t => {
+  const host = bridge(t);
+  host.f.start();
+  host.f.adapter.toolRequest(host.f.iid, 'approval', 'Bash', { command: 'private input' });
+  const known = await host.service.snapshot(host.f.sid);
+  const card = known.state.tool_requests[0];
+  assert.equal(card.created_at, host.f.time);
+  host.online = false;
+  host.held = true;
+  const offline = await host.service.snapshot(host.f.sid);
+  assert.deepEqual(offline.last_known.state.tool_requests, [{
+    id: card.id,
+    incarnation_id: card.incarnation_id,
+    tool_use_id: card.tool_use_id,
+    tool_name: card.tool_name,
+    state: card.state,
+    created_at: card.created_at
+  }]);
+  assert.deepEqual(Object.keys(offline.last_known.state.tool_requests[0]).sort(), [
+    'created_at', 'id', 'incarnation_id', 'state', 'tool_name', 'tool_use_id'
+  ]);
+});

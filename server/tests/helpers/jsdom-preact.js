@@ -45,7 +45,7 @@ const clientMessageKeySrc = fs.readFileSync(path.join(APP_LIB_DIR, 'clientMessag
  * Local relative imports are stripped entirely (the caller must pre-load
  * any dependencies into the context manually).
  *
- * @param {string} componentName  e.g. 'Dropdown', 'MentionInput'
+ * @param {string} componentName  e.g. 'Dropdown', 'owned/OwnedQuestion'
  * @param {object} context        vm context to evaluate in
  */
 /**
@@ -98,8 +98,9 @@ function transformComponentSource(raw) {
 function loadComponent(componentName, context) {
   const filePath = path.join(COMPONENTS_DIR, `${componentName}.js`);
   const raw = fs.readFileSync(filePath, 'utf8');
+  const exportName = path.basename(componentName);
   const transformed = transformComponentSource(raw)
-    + `\nif (typeof ${componentName} !== 'undefined') this.${componentName} = ${componentName};`;
+    + `\nif (typeof ${exportName} !== 'undefined') this.${exportName} = ${exportName};`;
   vm.runInContext(transformed, context);
 }
 

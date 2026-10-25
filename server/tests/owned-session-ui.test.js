@@ -14,6 +14,13 @@ function setup(t) {
   e.context.DirectoryPicker = ({ onSelect }) => e.h('button', { onClick: () => onSelect('/safe') }, 'pick');
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../public/app/lib/markdown.js'), 'utf8').replace(/^export /gm, ''), e.context);
   e.context.EventSource = class { addEventListener() {} close() {} };
+  for (const moduleName of [
+    'format', 'state', 'client', 'OwnedDeliveryBadge', 'OwnedPrompt', 'OwnedMessage',
+    'OwnedQuestion', 'OwnedApproval', 'OwnedComposer', 'OwnedStart', 'OwnedSessionList',
+    'OwnedSessionHeader', 'OwnedConversation', 'useOwnedSessions', 'OwnedSession'
+  ]) {
+    e.loadComponent(`owned/${moduleName}`);
+  }
   e.loadComponent('OwnedSessionsView');
   e.mount = (name, props) => e.render(e.h(e.context[name], props), e.document.getElementById('root'));
   return e;
@@ -89,4 +96,43 @@ test('acceptance_unknown retries same key after lookup', async t => {
 test('assistant text is sent through safe markdown renderer', t => {
   const e = setup(t); e.mount('OwnedMessage', { event: { seq: 1, json: { message: { type: 'assistant', message: { content: [{ type: 'text', text: '<img onerror="throw 1">' }] } } } } });
   assert.equal(e.document.querySelector('img'), null); assert.match(e.document.body.textContent, /<img/);
+});
+
+test('pure selectors require server control evidence and confirmed stop before resume', t => {
+  const e = setup(t);
+  const { canControlOwnedSession, canResumeOwnedSession, ownedInteraction } = e.context;
+  const current = state();
+  assert.equal(canControlOwnedSession('running', current), true);
+  assert.equal(canControlOwnedSession('unreachable', current), false);
+  current.incarnations[0].control_available = false;
+  assert.equal(canControlOwnedSession('running', current), false);
+  current.incarnations[0].control_available = true;
+  current.controls.push({ state: 'accepted' });
+  assert.equal(canControlOwnedSession('running', current), false);
+  current.controls = [];
+  assert.equal(canResumeOwnedSession(current), false);
+  current.incarnations[0].state = 'exited';
+  assert.equal(canResumeOwnedSession(current), false);
+  current.controls.push({ incarnation_id: 'inc', kind: 'stop', state: 'blocked' });
+  assert.equal(canResumeOwnedSession(current), false);
+  current.controls[0].state = 'done';
+  assert.equal(canResumeOwnedSession(current), true);
+  current.session.state = 'closed';
+  assert.equal(canResumeOwnedSession(current), false);
+  assert.equal(ownedInteraction(state({ attribution_uncertain: 1 })), 'unknown');
+  assert.equal(ownedInteraction(state({ interrupt_unknown: 1 })), 'unknown');
+  const permission = state();
+  permission.tool_requests.push({ incarnation_id: 'inc', state: 'pending', tool_name: 'Bash' });
+  assert.equal(ownedInteraction(permission), 'awaiting_permission');
+  permission.tool_requests[0].tool_name = 'AskUserQuestion';
+  assert.equal(ownedInteraction(permission), 'awaiting_user');
+});
+
+test('capability evaluator is pure and sdkAdapter re-exports the same function', () => {
+  const fs = require('node:fs');
+  const corePath = path.join(__dirname, '../sessionHost/core.js');
+  const capability = require('../sessionHost/capability');
+  const adapter = require('../sessionHost/sdkAdapter');
+  assert.equal(adapter.capabilityVerdict, capability.capabilityVerdict);
+  assert.doesNotMatch(fs.readFileSync(corePath, 'utf8'), /require\(['"]\.\/sdkAdapter['"]\)/);
 });

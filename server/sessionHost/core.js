@@ -4,6 +4,7 @@ const { randomUUID, createHash } = require('node:crypto');
 const authGate = require('./authGate');
 const { validateDecision } = require('./decisionValidation');
 const pin = require('./pin');
+const { capabilityVerdict: evaluateCapabilities } = require('./capability');
 const { openStore } = require('./store');
 const { SimulatedCrash } = require('./faults');
 const {
@@ -1475,7 +1476,7 @@ function createHostCore({
           // Only a live, locally verified gate provides version and control evidence.
           const verified = incarnation.host_boot_id === hostBootId && hasPassedGate(incarnation);
           const caps = incarnation.capabilities === null ? undefined : JSON.parse(incarnation.capabilities);
-          const capabilityVerdict = verified ? require('./sdkAdapter').capabilityVerdict({
+          const capabilityVerdict = verified ? evaluateCapabilities({
             sdkVersion: pin.sdkVersion, cliVersion: pin.cliVersion, permissionMode: 'default', systemInitCapabilities: caps
           }) : null;
           return { ...incarnation, rate_limit_info: event ? JSON.parse(event.json) : null,

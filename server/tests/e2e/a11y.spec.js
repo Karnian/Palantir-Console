@@ -82,6 +82,152 @@ for (const theme of ['dark', 'light']) {
     });
   }
 }
+
+// Owned-session state coverage uses HTTP fixtures and a route-local SSE test double.
+// Other application EventSource channels retain their native implementation.
+async function installOwnedStateFixture(page, theme, scenario) {
+  await page.setViewportSize({ width: 360, height: 800 });
+  await page.addInitScript(value => {
+    localStorage.setItem('palantir.theme', value);
+    const NativeEventSource = window.EventSource;
+    window.EventSource = function (url, options) {
+      if (!String(url).startsWith('/api/owned-sessions/stream')) {
+        return new NativeEventSource(url, options);
+      }
+      const stream = new EventTarget();
+      stream.close = () => {};
+      window.ownedA11yStream = stream;
+      queueMicrotask(() => stream.dispatchEvent(new Event('open')));
+      return stream;
+    };
+  }, theme);
+  const session = {
+    id: 'owned-a11y', cwd: '/safe/project', state: 'active', pending_approvals: 2,
+    last_activity_seq: 15, incarnation: { id: 'inc', state: 'alive' }
+  };
+  const incarnation = {
+    id: 'inc', state: 'alive', control_available: true, cli_version: '2.1.308',
+    account_snapshot: JSON.stringify({ subscriptionType: 'team' }),
+    attribution_uncertain: scenario === 'conversation' ? 1 : 0
+  };
+  const longInput = JSON.stringify({ command: `echo ${'긴도구입력'.repeat(1800)}`, marker: '전문 마지막 표지' });
+  const questionInput = {
+    questions: [{ question: '어떤 검증을 진행할까요?', multiSelect: true,
+      options: [{ label: '단위 검사', description: '빠른 검증' }, { label: '회귀 검사', description: '전체 검증' }] }]
+  };
+  const toolRequests = ['permissions', 'unreachable'].includes(scenario) ? [
+    { id: 'tool-card', incarnation_id: 'inc', tool_use_id: 'tool-use', tool_name: 'Bash',
+      state: 'pending', input: longInput.slice(0, 128), input_truncated: true, created_at: 1800000000000 },
+    { id: 'question-card', incarnation_id: 'inc', tool_use_id: 'question-use', tool_name: 'AskUserQuestion',
+      state: 'pending', input: JSON.stringify(questionInput), created_at: 1800000000001 }
+  ] : [];
+  const deliveries = scenario === 'conversation' ? [
+    { id: 'unknown-prompt', incarnation_id: 'inc', kind: 'prompt', body: JSON.stringify('실행됐을 수 있는 지시'),
+      state: 'unknown', created_at: 1800000000000, seq: 1 },
+    { id: 'unknown-outcome', incarnation_id: 'inc', kind: 'prompt', body: JSON.stringify('결과를 확인하지 못한 지시'),
+      state: 'provider_observed', outcome: 'outcome_unknown', created_at: 1800000000001, seq: 2 }
+  ] : [];
+  const transcript = scenario === 'conversation' ? [
+    { seq: 3, session_id: session.id, incarnation_id: 'inc', type: 'sdk_message', created_at: 1800000000002,
+      json: { message: { type: 'assistant', message: { content: [{ type: 'text', text: '검사 **응답**입니다.' }] } } } },
+    { seq: 4, session_id: session.id, incarnation_id: 'inc', type: 'sdk_message', created_at: 1800000000003,
+      json: { message: { type: 'result', result: '귀속을 확인할 수 없는 결과', total_cost_usd: 0 } } }
+  ] : [];
+  let previewCount = 0;
+  await page.route('**/api/fs?**', route => route.fulfill({
+    contentType: 'application/json',
+    body: JSON.stringify({ path: session.cwd, root: session.cwd, roots: [session.cwd], directories: [] })
+  }));
+  await page.route('**/api/owned-sessions**', async route => {
+    const url = new URL(route.request().url());
+    let body;
+    if (url.pathname.endsWith('/settings-preview')) {
+      previewCount++;
+      body = {
+        ok: previewCount === 1,
+        hooks: [{ event: 'PermissionRequest', paths: ['/safe/project/.claude/settings.json'] }],
+        mcp_servers: [{ name: 'local-mcp', paths: ['/safe/project/.mcp.json'] }],
+        source_paths: ['/safe/project/.claude/settings.json', '/safe/project/.mcp.json'],
+        warnings: ['permission_request_hook'],
+        ...(previewCount > 1 ? { reason: 'settings_auth_override', detail: '/safe/project/.claude/settings.json' } : {})
+      };
+    } else if (url.pathname.endsWith('/chunks')) {
+      body = { host: 'running', found: true, offset: 0, data: longInput,
+        total_bytes: Buffer.byteLength(longInput), done: true };
+    } else if (url.pathname.endsWith('/transcript')) {
+      body = { host: 'running', events: transcript, next_before_seq: null };
+    } else if (url.pathname.endsWith('/owned-a11y')) {
+      body = { host: 'running', seq_high: 15, state: { session, current_incarnation_id: 'inc',
+        incarnations: [incarnation], deliveries, controls: [], tool_requests: toolRequests } };
+    } else {
+      body = { host: 'running', seq_high: 15, sessions: [session] };
+    }
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) });
+  });
+}
+
+async function checkOwnedStateAccessibility(page) {
+  const result = await new AxeBuilder({ page }).include('.owned-view')
+    .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa']).analyze();
+  expect(result.violations.filter(violation => ['critical', 'serious', 'moderate'].includes(violation.impact))).toEqual([]);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+}
+
+for (const theme of ['dark', 'light']) {
+  for (const scenario of ['permissions', 'conversation', 'unreachable', 'start']) {
+    test(`@a11y owned ${theme} ${scenario} state at 360px`, async ({ page }) => {
+      await installOwnedStateFixture(page, theme, scenario);
+      const route = scenario === 'start' ? 'owned' : 'owned/owned-a11y';
+      await page.goto(`/#${route}`);
+      await expect(page.getByRole('heading', { name: '내 세션', exact: true })).toBeVisible();
+      if (scenario === 'permissions' || scenario === 'unreachable') {
+        const approval = page.locator('.owned-card').filter({ has: page.getByRole('heading', { name: 'Bash', exact: true }) });
+        await expect(approval.locator('pre')).toContainText('전문 마지막 표지');
+        await expect(page.getByRole('button', { name: '허용', exact: true })).toBeEnabled();
+        await expect(page.getByText('어떤 검증을 진행할까요?', { exact: true })).toBeVisible();
+        if (scenario === 'permissions') {
+          await page.getByRole('checkbox', { name: /단위 검사/ }).check();
+          await expect(page.getByRole('button', { name: '답변 보내기', exact: true })).toBeEnabled();
+        } else {
+          await page.evaluate(() => window.ownedA11yStream.dispatchEvent(new MessageEvent('host_unreachable', {
+            data: JSON.stringify({ seq: 15, current_state_known: false })
+          })));
+          await expect(page.getByText(/호스트 응답 없음.*기준, 현재 상태 불명/)).toBeVisible();
+          const buttons = page.locator('.owned-view button');
+          expect(await buttons.count()).toBeGreaterThan(0);
+          for (const button of await buttons.all()) await expect(button).toBeDisabled();
+          await expect(approval.locator('pre')).toContainText('전문 마지막 표지');
+        }
+      } else if (scenario === 'conversation') {
+        await expect(page.getByText('받음·결과 불명', { exact: false })).toBeVisible();
+        await expect(page.locator('.owned-unknown').filter({ hasText: '전달 불명' }).first()).toBeVisible();
+        await expect(page.getByText('귀속 불명 결과', { exact: true })).toBeVisible();
+        await expect(page.locator('.owned-view textarea')).toBeDisabled();
+      } else {
+        await page.getByRole('button', { name: '새 세션', exact: true }).click();
+        const startDialog = page.getByRole('dialog', { name: '새 세션', exact: true });
+        await startDialog.getByRole('button', { name: '찾아보기', exact: true }).click();
+        const picker = page.getByRole('dialog', { name: '디렉터리 선택', exact: true });
+        await expect(picker.locator('.directory-path')).toHaveText('/safe/project');
+        await picker.getByRole('button', { name: '선택', exact: true }).click();
+        const previewButton = startDialog.getByRole('button', { name: '설정 미리보기', exact: true });
+        await previewButton.click();
+        await expect(startDialog.getByText(/승인 카드보다 먼저/)).toBeVisible();
+        await expect(startDialog.getByText('local-mcp', { exact: false })).toBeVisible();
+        await expect(startDialog.getByRole('button', { name: '세션 시작', exact: true })).toBeDisabled();
+        await startDialog.getByRole('checkbox').check();
+        await expect(startDialog.getByRole('button', { name: '세션 시작', exact: true })).toBeEnabled();
+        await checkOwnedStateAccessibility(page);
+        await previewButton.click();
+        await expect(startDialog.getByText(/설정에 구독 인증을 덮어쓰는/)).toBeVisible();
+        await expect(startDialog.getByRole('checkbox')).toBeDisabled();
+        await expect(startDialog.getByRole('button', { name: '세션 시작', exact: true })).toBeDisabled();
+      }
+      await checkOwnedStateAccessibility(page);
+    });
+  }
+}
+
 const VIEWPORTS = [
   { name: 'desktop', width: 1280, height: 800 },
   { name: 'mobile', width: 375, height: 667 },

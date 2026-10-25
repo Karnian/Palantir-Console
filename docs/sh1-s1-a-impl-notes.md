@@ -2218,3 +2218,25 @@ request_key는 브라우저에서 rk_<시각>_<16바이트 난수 hex>로 만든
 
 실제 Claude·LLM 호출, 외부 네트워크 호출, git 조작은 수행하지 않았다. 라이트·다크·360px의 실제 브라우저 검증과 화면 배치 lock-in은 호스트 및 S1-d에서 수행한다. 과거 실행에 버전·능력 판정 증거가 없으면 판정 전으로 남기며, 마지막 활동은 서버가 기존에 제공하던 순번으로 표시한다.
 
+
+## S1-c2 라운드 2 — 호스트 검증 반영과 화면 모듈 분리
+
+호스트 라운드 1의 관련 테스트 594개 중 593개 통과, a11y 74/74 통과 결과를 받아 남은 결정적 실패를 수정했다. `owned-session-http-process.test.js`의 장애 캐시 기대값은 id·incarnation_id·tool_use_id·tool_name·state·created_at 여섯 필드를 정확히 비교한다. 원문 input 비보존 단언도 유지했다. 별도 in-process 서비스 테스트에서도 동일한 여섯 필드만 남고 요청 시각이 보존됨을 확인했다. 캐시 허용 필드는 변경하지 않았다.
+
+화면은 `OwnedSessionsView.js` 라우트 셸과 `components/owned/` 하위 모듈로 분리했다. 목록, 세션 구성, 세션 머리, 대화, prompt, SDK 메시지, 전달 배지, 승인 카드, 질문 카드, 입력창, 시작 모달을 각각 읽고 고칠 수 있다. API·조각 조회는 client, JSON·시각·라벨 표시는 format, 전용 SSE·멱등 제출·후속 조작·async fence는 useOwnedSessions가 맡는다. 상호작용·제어 가능·resume 가능·재시작 가능·재전송 가능·대화 정렬은 state의 순수 함수다. 동작과 서버 계약을 유지하는 리팩터링이며, 화면 파일 16개는 상대 import 대상 존재와 줄당 160자 이내를 검사했다.
+
+jsdom helper는 하위 경로를 읽되 export 이름은 basename으로 처리한다. 기존 UI 테스트는 실제 owned 모듈을 의존 순서대로 불러오도록 경로 로딩만 바꿨고 기존 단언은 유지했다. 순수 상태 함수의 제어 증거·호스트 상실·진행 중 제어 요청·stop 미확인/blocked/done·닫힌 세션·승인/질문 대기 경계도 추가 검증했다.
+
+`capabilityVerdict`는 pin만 참조하는 `sessionHost/capability.js`로 옮겼다. sdkAdapter는 같은 함수 객체를 re-export하고 코어는 순수 모듈만 import한다. 코어의 SDK 어댑터 require는 제거했다. 기존 능력 판정 테스트와 re-export 동일성 검사가 통과했다.
+
+a11y에는 dark/light 각각 360px로 상태별 여덟 시나리오를 추가했다. 긴 승인 입력은 잘린 미리보기와 전문 chunk 응답을 나눠 전문 마지막 표지까지 복원됨을 확인한다. 질문 카드의 선택·답변 활성화, 전달 unknown·outcome_unknown·귀속 불명 결과, 호스트 상실 뒤 본문 유지·모든 버튼 비활성, 실제 DirectoryPicker를 거친 시작 모달의 설정 출처·PermissionRequest 경고·확인 체크·설정 거부 사유를 검사한다. 시작 모달은 정상 미리보기와 거부 미리보기 양쪽에서 axe를 실행한다. 기존 owned 네 시나리오와 합쳐 12개가 수집되며, 모두 가로 스크롤 검사를 유지한다. SSE 테스트 더블은 owned URL에만 적용하고 전역 SSE 채널은 바꾸지 않았다.
+
+검증:
+
+- UI·서비스·jsdom 변환·기존 capability·nav·SSE 집중 테스트: tests 72, pass 72, fail 0 (`/tmp/sh1-c2-r2-final-focus.log`).
+- SDK 어댑터를 포함한 모듈 집중 테스트: tests 130, pass 129, fail 1. 실패는 기존 실제 /bin/ps EPERM 사례다 (`/tmp/sh1-c2-r2-modules.log`).
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session*.test.js server/tests/session-host-*.test.js`: tests 551, pass 528, fail 23, cancelled 0, skipped 0. 실패는 기존 소켓·ps 권한 제한과 이에 따른 host_start_timeout이다 (`/tmp/sh1-c2-r2-final-host.log`).
+- 지정 DoD 전체 명령은 boot HTTP listen EPERM으로 boot 사례 pass 1/fail 37을 출력한 뒤 열린 핸들로 끝나지 않아 45초 후 해당 검증 프로세스 그룹만 중단했다 (`/tmp/sh1-c2-r2-dod.log`). owned/session-host와 SSE 결과는 위 별도 실행에서 확인했다.
+- `npm run test:a11y -- --project=chromium --grep owned`: 127.0.0.1:4177 listen EPERM으로 실행 전 종료 (`/tmp/sh1-c2-r2-a11y.log`). `--list`에서는 owned 시나리오 12개가 정상 수집됐다. 호스트에서 전체 a11y 재실행이 필요하다.
+
+실제 Claude·LLM·외부 네트워크 호출과 git 조작은 수행하지 않았다. visual baseline·전역 SSE 채널·C1 화면·스펙·패키지 설정은 변경하지 않았다.
