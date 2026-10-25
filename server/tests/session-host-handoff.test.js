@@ -2,8 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { fixture } = require('./helpers/session-host-fixture');
-const { buildHandoffCommand, unsetEnv } = require('../sessionHost/handoffCommand');
-const pin = require('../sessionHost/pin');
+const { buildHandoffCommand } = require('../sessionHost/handoffCommand');
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -65,15 +64,14 @@ test('handoff command appears only after exit and clear descendants', t => {
     home: f.adapter.home, executablePath: f.adapter.executablePath, claudeSessionId: f.sid }));
 });
 
-test('handoff shell parses quotes and orders every unset before HOME', () => {
+test('handoff shell parses quoted paths and starts with a clean environment', () => {
   const cwd = "/tmp/space ' $HOME `id`";
   const command = buildHandoffCommand({ ...input, cwd });
-  const parsed = spawnSync('/bin/sh', ['-c', command.replace(/^cd /, 'printf "%s\\0" ').replace(' && env ', ' env ')], { encoding: 'utf8' });
+  const parsed = spawnSync('/bin/sh', ['-c', 'unset SHELL TERM LOGNAME; ' + command.replace(/^cd /, 'printf "%s\\0" ').replace(' && env ', ' env ')],
+    { encoding: 'utf8', env: { PATH: '/bin', USER: '' } });
   assert.equal(parsed.status, 0, parsed.stderr);
-  const argv = parsed.stdout.split('\0').slice(0, -1);
-  assert.equal(argv.shift(), cwd); assert.equal(argv.shift(), 'env');
-  assert.deepEqual(unsetEnv, [...new Set([...pin.forbiddenAuthEnv, 'CLAUDE_CONFIG_DIR', 'CLAUDE_SECURESTORAGE_CONFIG_DIR'])]);
-  assert.deepEqual(argv, [...unsetEnv.flatMap(name => ['-u', name]), 'HOME=/tmp/home', '/fake/claude', '--resume', id]);
+  assert.deepEqual(parsed.stdout.split('\0').slice(0, -1),
+    [cwd, 'env', '-i', 'PATH=/bin', 'USER=', 'HOME=/tmp/home', '/fake/claude', '--resume', id]);
 });
 
 test('handoff rejects invalid paths and UUID, each with one-field passing control', () => {
@@ -87,19 +85,16 @@ test('handoff rejects invalid paths and UUID, each with one-field passing contro
   assert.ok(buildHandoffCommand(input));
 });
 
-test('handoff executes fixture with clean auth env, fixed HOME, exact cwd and resume argv', t => {
+test('handoff executes fixture with fixed HOME, exact cwd and resume argv', t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "handoff ' $ ` space-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  const output = path.join(dir, 'received.json');
-  const executablePath = path.resolve(__dirname, 'fixtures/bin/handoff-env.cjs');
+  const executablePath = path.resolve(__dirname, 'fixtures/bin/handoff-env-stdout.cjs');
   fs.chmodSync(executablePath, 0o755);
   const command = buildHandoffCommand({ ...input, cwd: dir, executablePath });
-  const result = spawnSync('/bin/sh', ['-c', command], { encoding: 'utf8', env: { ...process.env,
-    ...Object.fromEntries(unsetEnv.map(name => [name, 'parent-value'])), HANDOFF_OUTPUT: output } });
+  const result = spawnSync('/bin/sh', ['-c', command], { encoding: 'utf8', env: { PATH: process.env.PATH } });
   assert.equal(result.status, 0, result.stderr);
-  const received = JSON.parse(fs.readFileSync(output));
+  const received = JSON.parse(result.stdout);
   assert.equal(received.cwd, fs.realpathSync(dir));
   assert.equal(received.env.HOME, input.home);
   assert.deepEqual(received.argv, ['--resume', id]);
-  for (const name of unsetEnv) assert.equal(received.env[name], undefined);
 });

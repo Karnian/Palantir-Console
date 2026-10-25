@@ -41,6 +41,10 @@ function createFakeAdapter(options = {}) {
   const adapter = {
     executablePath: options.executablePath || '/fake/bundled/claude',
     home: options.home || '/fake/home',
+    executableSha256: options.executableSha256 || pin.cliSha256,
+    executionIdentity() {
+      return { home: adapter.home, executablePath: adapter.executablePath, executableSha256: adapter.executableSha256 };
+    },
     verifyExecutable() { return options.executableValid !== false; },
     events,
     log,

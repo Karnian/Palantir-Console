@@ -17,6 +17,7 @@ const {
   getRecoveredStartResult
 } = require('./stateRules');
 const { buildHandoffCommand } = require('./handoffCommand');
+const { ownedHandoffRejection } = require('../public/app/components/owned/handoffPolicy');
 const CONTROLS = new Set(['start', 'resume', 'stop', 'close', 'handoff', 'delete']);
 const KINDS = new Set([...CONTROLS, 'prompt', 'tool_decision', 'question_answer', 'interrupt']);
 const DAY = 86400000;
@@ -562,6 +563,26 @@ function createHostCore({
     });
   }
 
+  function prepareHandoff(controlRequest, incarnation) {
+    try {
+      if (adapter.verifyExecutable?.() !== true) return { reason: 'executable_hash_mismatch' };
+    } catch { return { reason: 'executable_hash_mismatch' }; }
+    let current;
+    try { current = adapter.executionIdentity?.(); } catch { /* Refuse missing identity evidence. */ }
+    if (!incarnation?.cli_home || !incarnation.cli_path || !incarnation.cli_sha256 || !current) {
+      return { reason: 'handoff_environment_mismatch' };
+    }
+    if (incarnation.cli_sha256 !== current.executableSha256) return { reason: 'executable_hash_mismatch' };
+    if (incarnation.cli_home !== current.home || incarnation.cli_path !== current.executablePath) {
+      return { reason: 'handoff_environment_mismatch' };
+    }
+    try {
+      const session = getSession(controlRequest.session_id);
+      return { command: buildHandoffCommand({ cwd: session.cwd, home: incarnation.cli_home,
+        executablePath: incarnation.cli_path, claudeSessionId: session.claude_session_id }) };
+    } catch (error) { return { reason: error.code || 'handoff_environment_mismatch' }; }
+  }
+
   function finishControlRequest(key) {
     const controlRequest = getControl(key);
     const incarnation = controlRequest.incarnation_id && getIncarnation(controlRequest.incarnation_id);
@@ -581,6 +602,12 @@ function createHostCore({
       }));
       return;
     }
+    // Every completion path, including recovery, must revalidate immediately before publishing.
+    const handoff = controlRequest.kind === 'handoff' ? prepareHandoff(controlRequest, incarnation) : null;
+    if (handoff?.reason) {
+      writeTransaction(() => transitionControl(controlRequest, { state: 'failed', reason: handoff.reason }));
+      return;
+    }
     writeTransaction(() => {
       transitionControl(controlRequest, {
         stage: 'subprocess_checked'
@@ -594,8 +621,7 @@ function createHostCore({
         if (controlRequest.kind === 'handoff') {
           const session = getSession(controlRequest.session_id);
           recordEvent(session.id, incarnation?.id || null, 'handoff_ready', {
-            command: buildHandoffCommand({ cwd: session.cwd, home: adapter.home,
-              executablePath: adapter.executablePath, claudeSessionId: session.claude_session_id })
+            command: handoff.command
           });
         }
         transitionSession(getSession(controlRequest.session_id), {
@@ -645,6 +671,7 @@ function createHostCore({
           sdk_version: null,
           cli_path: null,
           cli_sha256: null,
+          cli_home: null,
           account_snapshot: null,
           capabilities: null,
           started_at: null,
@@ -740,9 +767,15 @@ function createHostCore({
         return;
       }
       if (controlRequest.stage !== 'settings_checked') return;
-      writeTransaction(() => transitionControl(controlRequest, {
-        stage: 'spawn_sent'
-      }));
+      const execution = adapter.executionIdentity?.();
+      writeTransaction(() => {
+        transitionIncarnation(incarnation, ['spawning'], {
+          cli_path: execution?.executablePath || null,
+          cli_sha256: execution?.executableSha256 || null,
+          cli_home: execution?.home || null
+        });
+        transitionControl(controlRequest, { stage: 'spawn_sent' });
+      });
       injectFault('after_spawn_sent_before_spawn');
       let spawnIdentity;
       try {
@@ -791,15 +824,7 @@ function createHostCore({
       return;
     }
     if (controlRequest.kind === 'handoff') {
-      let reason;
-      try {
-        if (adapter.verifyExecutable?.() !== true) reason = 'executable_hash_mismatch';
-        else {
-          const session = getSession(controlRequest.session_id);
-          buildHandoffCommand({ cwd: session.cwd, home: adapter.home,
-            executablePath: adapter.executablePath, claudeSessionId: session.claude_session_id });
-        }
-      } catch (error) { reason = error.code || 'executable_hash_mismatch'; }
+      const { reason } = prepareHandoff(controlRequest, incarnation);
       if (reason) {
         writeTransaction(() => transitionControl(controlRequest, { state: 'failed', reason }));
         return;
@@ -1053,15 +1078,15 @@ function createHostCore({
 
           }
         }
-        if (!reason && ['stop', 'close', 'handoff'].includes(request.kind)) {
+        if (!reason && ['stop', 'close'].includes(request.kind)) {
           if (session.state !== 'active') {
             reason = 'session_inactive';
           } else if (incarnation && !['alive', 'orphaned', 'exited', 'never_started'].includes(incarnation.state)) {
             reason = incarnation.state === 'liveness_unknown' ? 'liveness_unknown' : 'busy';
-          } else if (request.kind === 'handoff' && (!incarnation || !session.claude_session_id)) {
-            reason = 'no_session_id';
+
           }
         }
+        if (!reason && request.kind === 'handoff') reason = ownedHandoffRejection(session, incarnation);
         if (!reason && request.kind === 'handoff' && request.incarnation_id !== undefined && request.incarnation_id !== incarnation?.id) {
           reason = 'incarnation_mismatch';
         }

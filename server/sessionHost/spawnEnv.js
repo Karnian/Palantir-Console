@@ -32,4 +32,4 @@ function buildChildEnv({ baseEnv = {}, sdkEnv = {}, incarnationId }) {
   assertChildEnv(env, incarnationId);
   return env;
 }
-module.exports = { buildChildEnv, assertChildEnv, validId };
+module.exports = { buildChildEnv, assertChildEnv, validId, baseKeys };

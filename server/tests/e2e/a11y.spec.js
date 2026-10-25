@@ -103,6 +103,7 @@ async function installOwnedStateFixture(page, theme, scenario) {
   }, theme);
   const session = {
     id: 'owned-a11y', cwd: '/safe/project', state: 'active', pending_approvals: 2,
+    claude_session_id: '12345678-1234-4234-8234-123456789abc',
     last_activity_seq: 15, incarnation: { id: 'inc', state: 'alive' }
   };
   const incarnation = {
@@ -163,7 +164,7 @@ async function installOwnedStateFixture(page, theme, scenario) {
       body = { host: 'running', events: transcript, next_before_seq: null };
     } else if (url.pathname.endsWith('/owned-a11y')) {
       body = { host: 'running', seq_high: 15, state: { session, current_incarnation_id: 'inc',
-        ...(scenario === 'handoff-complete' ? { handoff_command: "cd '/safe/project' && env -u CLAUDE_CONFIG_DIR HOME='/home/test' '/bundled/claude' --resume '12345678-1234-1234-1234-123456789abc'" } : {}),
+        ...(scenario === 'handoff-complete' ? { handoff_command: "cd '/safe/project' && env -i HOME='/home/test' '/bundled/claude' --resume '12345678-1234-1234-1234-123456789abc'" } : {}),
         incarnations: [incarnation], deliveries, controls: [], tool_requests: toolRequests } };
     } else {
       body = { host: 'running', seq_high: 15, sessions: [session] };

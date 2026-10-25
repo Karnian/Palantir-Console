@@ -1,8 +1,7 @@
 'use strict';
 const path = require('node:path');
-const pin = require('./pin');
-const unsetEnv = Object.freeze([...new Set([...pin.forbiddenAuthEnv,
-  'CLAUDE_CONFIG_DIR', 'CLAUDE_SECURESTORAGE_CONFIG_DIR'])]);
+const { baseKeys } = require('./spawnEnv');
+const inheritedKeys = Object.freeze(baseKeys.filter(key => key !== 'HOME'));
 const failure = code => Object.assign(new Error(code), { code });
 const quote = value => "'" + value.replace(/'/g, "'\\''") + "'";
 function buildHandoffCommand({ cwd, home, executablePath, claudeSessionId }) {
@@ -14,7 +13,7 @@ function buildHandoffCommand({ cwd, home, executablePath, claudeSessionId }) {
   if (typeof claudeSessionId !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(claudeSessionId)) {
     throw failure('invalid_claude_session_id');
   }
-  return `cd ${quote(cwd)} && env ${unsetEnv.map(name => `-u ${quote(name)}`).join(' ')} ` +
+  return `cd ${quote(cwd)} && env -i ${inheritedKeys.map(name => '${' + name + '+"' + name + '=$' + name + '"}').join(' ')} ` +
     `HOME=${quote(home)} ${quote(executablePath)} --resume ${quote(claudeSessionId)}`;
 }
-module.exports = { buildHandoffCommand, unsetEnv };
+module.exports = { buildHandoffCommand, inheritedKeys };

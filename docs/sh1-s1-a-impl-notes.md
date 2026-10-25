@@ -2436,3 +2436,24 @@ handoff 효과 전에 어댑터의 동기 `verifyExecutable()`을 호출한다. 
 - `PATH=/opt/homebrew/opt/node@22/bin:$PATH npx --no-install playwright test --grep '@a11y.*owned'`: exit 1을 관측했으나 상세 원인은 수집하지 못했다(`/tmp/sh1-e1-a11y.log`). 호스트에서 원인 확인과 재실행이 필요하다. DoD의 전체 테스트·a11y 통과는 아직 확정하지 않았다.
 - 실제 Claude·LLM 호출 0. 외부 네트워크·git 조작·spec·package.json·전역 SSE 변경 없음. 대화형 TUI 실측은 S1-e2에 남긴다.
 
+
+
+### S1-e1 라운드 2 — 적대리뷰 R1
+
+R1의 다섯 항목을 반영했다. 넘기기 효과 전과 완료 직전의 검증을 `prepareHandoff`로 모았다. `finishControlRequest`에서 종료·하위 프로세스 확인 뒤 다시 동기 실행 파일 검증을 수행하므로 정상 종료, close 이후 exit 콜백, 호스트 복구, blocked 뒤 새 키 재시도 모두 같은 완료 검증을 거친다. 검증 실패는 `executable_hash_mismatch`이고 active를 유지하며 명령 이벤트·handed_off를 만들지 않는다. 검증 예외도 같은 고정 코드로 처리한다.
+
+spawn_sent를 저장하는 트랜잭션에 incarnation의 canonical `cli_path`, 고정 `cli_sha256`, `cli_home`을 함께 기록한다. SDK는 설정한 실행 파일의 canonical 경로와 pin 해시 및 고정 HOME 스냅샷을 제공하며 실제 spawn도 그 canonical 경로와 해시를 검사한다. 넘기기 때 기록과 현재 어댑터의 세 값이 모두 같아야 한다. 해시 차이는 `executable_hash_mismatch`, HOME·경로 차이 또는 기록 누락은 `handoff_environment_mismatch`다. 완료 명령은 기록값으로만 만든다. 삭제 때 cli_home도 null로 지운다.
+
+스키마 v4는 incarnation에 nullable TEXT cli_home을 추가한다. v1~v3은 기존 순차 마이그레이션 뒤 v4로 이동하고 v4 재시작은 변경하지 않는다. 과거 실행의 HOME은 현재 호스트 값으로 채우지 않는다. 기록이 없는 과거 세션은 넘기기를 거부하며 새 세션에서 작업해야 한다. 프로토콜 hello도 store의 SCHEMA_VERSION(4)을 사용한다.
+
+사용자 지시에 따라 브리프 §5-8의 -u 나열을 `env -i`와 명시적 환경 허용 목록으로 대체했다. 목적은 같은 실행 파일·설정·인증 환경의 재현이며, 일부 금지 변수만 제거하면 부모 Claude 세션 변수·인증 FD·임의 비밀이 새 실행에 남는다는 R1 반례가 변경 근거다. `spawnEnv.baseKeys`를 공용 출처로 쓰고 HOME은 실행 기록으로 고정한다. 나머지 PATH·USER·LOGNAME·SHELL·LANG·LC_ALL·LC_CTYPE·TMPDIR·TERM은 `${VAR+"VAR=$VAR"}`로 사용자 셸에서 설정된 값만 인용해 전달한다. 환경 전체를 지우므로 인증 변수·FD·CLAUDECODE·PALANTIR_*·임의 비밀은 자동으로 제외된다. 브리프 자체는 수정하지 않았다.
+
+브라우저와 코어는 의존성 없는 공용 `ownedHandoffRejection` 순수 함수를 사용한다. active이고 대화 ID가 있으며 대상이 alive/orphaned/exited/never_started이면 진행 중 제어가 없을 때 요청 가능하다. 자연 종료·stop 뒤·orphaned에서도 버튼을 활성화하며, 실행 기록·해시·종료·하위 프로세스에 대한 최종 판정은 호스트가 한다. never_started라도 실행 기록이 없으면 완료 검증에서 거부한다. jsdom은 실제 공용 정책을 미리 로드한다.
+
+수정 전 증거 `/tmp/sh1-e1-r1-red.log`: tests 39, pass 22, fail 17. 복구 두 지점의 변조, HOME·경로·해시 변경, 영속 기록, close 중 변조/blocked 재시도, 세 셸의 독립 오염 환경, 네 실행 상태의 버튼 조건을 재현했다. 이후 크래시 접수 직후·close 직후 × 변조 유무 테스트를 실제 임시 실행 파일의 바이트 변경과 SDK 동기 해시 검사로 강화했다. 통과 대조는 같은 파일의 원래 바이트 또는 한 필드만 복원한 값이다.
+
+독립 오염 목록은 제품의 pin/허용 목록에서 만들지 않는다. 계약의 인증 변수 8개, 두 설정 루트, 인증 FD 2개, CLAUDECODE, ENTRYPOINT, SESSION_ID, PALANTIR_TOKEN, FOO_SECRET을 직접 주입한다. 가짜 실행 파일에서 받은 키가 독립 허용 목록의 부분집합이고 오염 키가 0임을 확인한다. macOS Node 런타임은 env -i 뒤에도 __CF_USER_TEXT_ENCODING을 자체 생성하므로, 정확한 exec 환경 검사는 작은 C fixture를 /usr/bin/cc로 임시 디렉터리에 컴파일하여 런타임 초기화 전 환경을 기록한다. 세 셸의 빈 값·미설정·특수 문자 전달과 실제 SDK + 기존 가짜 Claude 자식의 spawn 환경(공식 SDK 키 3개·표지 제외)이 같은지도 확인했다. 실제 Claude·LLM 호출과 네트워크 호출은 없다.
+
+집중 검증 `/tmp/sh1-e1-r1-final-focus.log`: tests 113, pass 113, fail 0. 지정 전체 최종 결과는 `/tmp/sh1-e1-r1-all-final.log`에 기록한다. owned a11y(`/tmp/sh1-e1-r1-a11y.log`)는 webServer가 127.0.0.1:4177에 listen할 때 EPERM으로 시작 전에 차단되었으며 호스트 재검증이 필요하다. git 조작·spec·package.json·전역 SSE 변경은 하지 않았다.
+
+최종 지정 전체 검증: tests 651, pass 628, fail 23, cancelled 0, skipped 0(`/tmp/sh1-e1-r1-all-final.log`). 실패 23개는 소켓 listen EPERM·실제 /bin/ps EPERM(query_failed 포함)·host_start_timeout인 기존 환경 제약이며 R1 신규 테스트는 모두 통과했다. 최종 전체에는 실제 파일 바이트 변조 크래시 조합, 공용 정책, 스키마 v4와 hello 변경도 포함된다. DoD의 호스트 전체 테스트·owned a11y 재실행은 남아 있다.

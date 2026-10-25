@@ -1,3 +1,4 @@
+import './handoffPolicy.js';
 // Pure selectors shared by the screen, controller hook, and component tests.
 export function getOwnedIncarnation(state) {
   return state?.incarnations?.find(incarnation => incarnation.id === state.current_incarnation_id);
@@ -115,4 +116,9 @@ export function getOwnedToolInputPreview(input) {
   const lines = text.split('\n');
   const long = lines.length > 12 || text.length > 600;
   return { long, preview: lines.slice(0, 12).join('\n').slice(0, 600) };
+}
+
+export function canHandoffOwnedSession(state) {
+  return globalThis.ownedHandoffRejection(state?.session, getOwnedIncarnation(state),
+    (state?.controls || []).some(control => control.state === 'accepted')) === null;
 }

@@ -390,3 +390,17 @@ test('R9 discard button appears after read-only miss and remains disabled during
   assert.equal(button('같은 키로 다시 시도').disabled, true);
   assert.equal(button('접수 확인').disabled, true);
 });
+
+for (const execution of ['alive', 'orphaned', 'exited', 'never_started']) {
+  test(`R1 handoff button supports ${execution} active conversation and rejects missing conversation`, t => {
+    const e = setup(t), s = state({ state: execution, control_available: execution === 'alive' });
+    s.session.claude_session_id = '12345678-1234-4234-8234-123456789abc';
+    const props = { sessionId: 's', controller: { snapshot: s, incarnation: s.incarnations[0],
+      host: 'running', disabled: false, controllable: execution === 'alive', events: [], submit() {} } };
+    e.mount('OwnedSession', props);
+    const button = () => [...e.document.querySelectorAll('button')].find(item => item.textContent === '터미널로 넘기기');
+    assert.equal(button().disabled, false);
+    s.session.claude_session_id = null; e.mount('OwnedSession', props);
+    assert.equal(button().disabled, true);
+  });
+}

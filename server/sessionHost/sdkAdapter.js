@@ -114,6 +114,9 @@ function createSdkAdapter({ sdk, executablePath = bundledExecutable(), executabl
   const adapter = {
     executablePath,
     home: fixedHome,
+    executionIdentity() {
+      return { home: fixedHome, executablePath: pinnedRealpath, executableSha256 };
+    },
     verifyExecutable() {
       try {
         return pinnedRealpath !== null && fs.realpathSync(executablePath) === pinnedRealpath &&
@@ -148,7 +151,7 @@ function createSdkAdapter({ sdk, executablePath = bundledExecutable(), executabl
         try {
           try { assertSpawnAllowed({ command: opts.command, source: 'sessionHost.sdkAdapter' }); }
           catch { throw failure('spawn_blocked'); }
-          const verdict = checkSpawnOptionsSync(opts, { pinnedPath: executablePath, pinnedSha256: executableSha256, hashFileSync });
+          const verdict = checkSpawnOptionsSync(opts, { pinnedPath: pinnedRealpath || executablePath, pinnedSha256: executableSha256, hashFileSync });
           if (!verdict.ok) {
             throw failure(verdict.reason === 'executable_check_failed' ? 'executable_mismatch' : verdict.reason);
           }

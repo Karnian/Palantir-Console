@@ -11,6 +11,7 @@ const handoffCopy = {
   guarantee: '넘긴 뒤 Palantir 는 그 실행을 제어·관측하지 않고 인증 게이트도 없다. 명령을 바꿔 실행하면 재현이 깨진다. ' +
     '넘긴 세션은 읽기 전용이고 다시 열지 않는다. Palantir 에서 다시 작업하려면 새 세션.',
   limit: '표지를 버리고 분리된 백그라운드 프로세스는 확인 범위 밖',
+  handoff_environment_mismatch: '실행 당시 HOME·실행 파일 기록과 현재 호스트가 달라 넘기지 않았습니다.',
   executable_hash_mismatch: '실행 파일 해시 불일치 — 넘기지 않았습니다.',
   subprocess_remaining: '하위 프로세스가 남았거나 조회할 수 없어 넘기기가 막혔습니다.',
   invalid_handoff_path: '넘기기 경로가 올바르지 않습니다.',
