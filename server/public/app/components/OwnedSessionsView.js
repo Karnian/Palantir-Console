@@ -46,6 +46,12 @@ export function OwnedSessionsView({ sessionId }) {
       ${pending && html`
         <p class="owned-unknown">${OWNED_COPY.acceptanceUnknown}
           <button class="btn btn-sm" disabled=${host !== 'running' || busy} onClick=${controller.retry}>${OWNED_COPY.retry}</button>
+          <button class="btn btn-sm" disabled=${host !== 'running' || busy}
+            onClick=${controller.checkPending}>${OWNED_COPY.checkRequest}</button>
+          ${controller.hasUnacceptedRequest && html`
+            <button class="btn btn-sm btn-danger" disabled=${!controller.canDiscardPending}
+              onClick=${controller.discardPending}>${OWNED_COPY.discardRequest}</button>
+          `}
         </p>
       `}
       ${controller.otherPending && html`

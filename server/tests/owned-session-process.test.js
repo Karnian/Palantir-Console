@@ -25,7 +25,7 @@ function processFixture(t, crash = false) {
       if (child.exitCode !== null || child.signalCode !== null) throw Error(child.errors || 'host_exited');
       const client = createClient({ runtimeDir, timeoutMs: 100 });
       try { await client.connect(); client.close(); return true; } catch { client.close(); return false; }
-    }, 1500);
+    }, 15000);
   }
   function bridge() {
     const service = createOwnedSessionService({ runtimeDir, diagnose: () => ({ held: true }),

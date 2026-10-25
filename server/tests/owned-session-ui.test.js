@@ -321,3 +321,39 @@ test('R7 idle disables the visible interrupt button and running enables it', t =
   environment.mount('OwnedSession', { sessionId: 's', controller });
   assert.equal(interruptButton().disabled, false);
 });
+
+test('R9 discard button appears after read-only miss and remains disabled during connection loss', async t => {
+  const environment = setup(t);
+  const listeners = {};
+  let posts = 0;
+  environment.context.EventSource = class {
+    addEventListener(name, callback) {
+      listeners[name] = callback;
+      if (name === 'open') setTimeout(callback, 0);
+    }
+    close() {}
+  };
+  environment.context.apiFetch = async (url, options) => {
+    if (options?.method) { posts++; return { acceptance: 'acceptance_unknown' }; }
+    if (url.includes('/requests/')) return { host: 'running', result: { found: false } };
+    if (url.includes('transcript')) return { host: 'running', events: [] };
+    return { host: 'running', state: state() };
+  };
+  environment.mount('OwnedSessionsView', { sessionId: 's' });
+  await flushEffects();
+  await flushEffects();
+  const button = label => [...environment.document.querySelectorAll('button')].find(row => row.textContent === label);
+  button('세션 끝내기').click();
+  await flushEffects(30);
+  assert.equal(button('요청 버리기'), undefined);
+  button('접수 확인').click();
+  await flushEffects(30);
+  assert.equal(posts, 1);
+  assert.equal(button('요청 버리기').disabled, false);
+  assert.equal(button('세션 끝내기').disabled, true);
+  listeners.error();
+  await flushEffects(30);
+  assert.equal(button('요청 버리기').disabled, true);
+  assert.equal(button('같은 키로 다시 시도').disabled, true);
+  assert.equal(button('접수 확인').disabled, true);
+});

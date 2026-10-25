@@ -27,6 +27,8 @@ export function useOwnedSessions(sessionId, { timers = globalThis, retryMs = 100
   const [syncError, setSyncError] = useState(null);
   const [storageWarning, setStorageWarning] = useState(() => loadOwnedPending().warning);
   const [busy, setBusy] = useState(false);
+  const [unaccepted, setUnaccepted] = useState(null);
+  const lookupLock = useRef(false);
   const activeSessionId = useRef(sessionId);
   activeSessionId.current = sessionId;
   const routeEpoch = useRef(0);
@@ -310,18 +312,24 @@ export function useOwnedSessions(sessionId, { timers = globalThis, retryMs = 100
   const resumeReady = canResumeOwnedSession(snapshot);
   const canStart = !busy && !pending && (ready() || connection.current.host === 'not_running');
   const receipt = request => clearOwnedPending(request.body.request_key);
-  const execute = async (path, body, method = 'POST', requestKey, expectedGeneration, allowQueue = false) => {
+  const execute = async (path, body, method = 'POST', requestKey, expectedGeneration, allowQueue = false, recovery = false) => {
     const transport = connection.current;
     const sendingGeneration = transport.generation;
-    if (submitLock.current || !ready()) return;
+    if (submitLock.current || (lookupLock.current && !recovery) || !ready()) return;
     if (expectedGeneration !== undefined && transport.generation !== expectedGeneration) return;
     const requestTarget = ownedRequestTarget(path);
     if (requestTarget !== target) return;
     const existing = loadOwnedPending(requestTarget).request;
     if (existing && existing.body.request_key !== requestKey) return;
-    if (path.endsWith('/interrupt') && !canInterruptOwnedSession(latestSnapshot.current, ready())) return;
-    if (path.endsWith('/prompt') && !canSubmitOwnedPrompt(latestSnapshot.current, ready(), allowQueue)) return;
-    const request = { path, method, allowQueue, session_id: requestTarget, body: { ...body, request_key: requestKey || ownedRequestKey() } };
+    const recovering = recovery && existing?.body.request_key === requestKey
+      && existing.path === path && existing.method === method;
+    if (recovery && !recovering) return;
+    if (!recovering && path.endsWith('/interrupt') && !canInterruptOwnedSession(latestSnapshot.current, ready())) return;
+    if (!recovering && path.endsWith('/prompt') && !canSubmitOwnedPrompt(latestSnapshot.current, ready(), allowQueue)) return;
+    const request = recovering ? existing : {
+      path, method, allowQueue, session_id: requestTarget, body: { ...body, request_key: requestKey || ownedRequestKey() }
+    };
+    setUnaccepted(null);
     submitLock.current = true;
     setBusy(true);
     setStorageWarning(saveOwnedPending(request));
@@ -360,7 +368,7 @@ export function useOwnedSessions(sessionId, { timers = globalThis, retryMs = 100
     }
   };
   const submit = (action, body = {}) => {
-    if (disabled || !ready() || submitLock.current) return;
+    if (disabled || !ready() || submitLock.current || lookupLock.current) return;
     if (['interrupt', 'interrupt-send'].includes(action) && !canInterruptOwnedSession(latestSnapshot.current, ready())) return;
     const allowQueue = action === 'queue-prompt';
     if (allowQueue) action = 'prompt';
@@ -379,10 +387,13 @@ export function useOwnedSessions(sessionId, { timers = globalThis, retryMs = 100
     if (action === 'prompt' || action === 'resume') setManualAction('');
     return execute(`${ownedApiPath(sessionId)}/${action}`, { ...body, incarnation_id: snapshot.current_incarnation_id }, 'POST', key, undefined, allowQueue);
   };
-  const retry = async () => {
+  const lookupPending = async (checkOnly) => {
     const saved = loadOwnedPending(target).request;
     if (!saved) { setPending(null); return; }
-    if (!ready() || busy) return;
+    if (!ready() || busy || lookupLock.current || submitLock.current) return;
+    lookupLock.current = true;
+    setBusy(true);
+    setUnaccepted(null);
     const epoch = routeEpoch.current;
     const generation = connection.current.generation;
     const current = () => routeEpoch.current === epoch && ready() && connection.current.generation === generation;
@@ -397,12 +408,35 @@ export function useOwnedSessions(sessionId, { timers = globalThis, retryMs = 100
         setNotice(ownedLabel(result.reason || result.state));
         if (saved.path.endsWith('/start') && result.session_id) location.hash = `owned/${result.session_id}`;
         else await reload.current();
+      } else if (result?.found === false) {
+        if (checkOnly) {
+          setUnaccepted({ key: saved.body.request_key, generation });
+          setNotice(OWNED_COPY.requestNotAccepted);
+        } else await execute(saved.path, saved.body, saved.method, saved.body.request_key, generation, saved.allowQueue === true, true);
       } else {
-        await execute(saved.path, saved.body, saved.method, saved.body.request_key, generation, saved.allowQueue === true);
+        setNotice(OWNED_COPY.acceptanceUnknown);
       }
     } catch {
       if (current()) setNotice(OWNED_COPY.acceptanceUnknown);
+    } finally {
+      lookupLock.current = false;
+      if (routeEpoch.current === epoch) setBusy(false);
     }
+  };
+  const retry = () => lookupPending(false);
+  const checkPending = () => lookupPending(true);
+  const hasUnacceptedRequest = !!pending && unaccepted?.key === pending.body.request_key;
+  const canDiscardPending = ready() && !busy && !lookupLock.current && !submitLock.current
+    && hasUnacceptedRequest && unaccepted.generation === connection.current.generation;
+  const discardPending = () => {
+    if (!canDiscardPending || !ready() || lookupLock.current || submitLock.current) return;
+    if (unaccepted.generation !== connection.current.generation) return;
+    const saved = loadOwnedPending(target).request;
+    if (!saved || saved.body.request_key !== unaccepted.key) return;
+    clearOwnedPending(unaccepted.key);
+    setPending(null);
+    setUnaccepted(null);
+    setNotice(OWNED_COPY.requestDiscarded);
   };
   const history = async () => {
     if (!ready() || deleted.current) return;
@@ -433,7 +467,7 @@ export function useOwnedSessions(sessionId, { timers = globalThis, retryMs = 100
   };
   return {
     snapshot, sessions, events, host, asOf, notice, nextPage, pending, otherPending, busy, storageWarning, canStart, synchronize,
-    syncError,
+    syncError, hasUnacceptedRequest, canDiscardPending, checkPending, discardPending,
     interruptNotice: manualAction === 'interrupt' ? OWNED_COPY.interruptManual : '',
     restartNotice: manualAction === 'stop' ? OWNED_COPY.restartManual : '',
     incarnation, interaction, controllable, disabled, resumeReady, execute, submit, retry, history

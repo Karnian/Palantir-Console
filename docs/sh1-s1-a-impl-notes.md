@@ -2376,3 +2376,22 @@ fake adapter 테스트는 A 종료 직후 interrupt → B의 별도 interrupt(pr
 - 실제 SDK + 가짜 claude 신규 시나리오: tests 1, pass 1, fail 0(`/tmp/sh1-c2-r8-sdk.log`). 최종 전체 실행에서도 해당 시나리오 통과.
 - 최종 지정 명령 `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session*.test.js server/tests/session-host-*.test.js server/tests/work-board.test.js`: tests 663, pass 640, fail 23, cancelled 0, skipped 0(`/tmp/sh1-c2-r8-final-done.log`). 실패는 이전 라운드와 같은 listen EPERM·실제 /bin/ps EPERM·host_start_timeout이며 호스트 재검증이 필요하다.
 - git 조작, 실제 Claude·LLM·외부 네트워크 호출, spec·전역 SSE·C1 화면·visual baseline 변경은 하지 않았다. core.js 변경은 인터럽트의 합류·종결·장벽 계산에 한정했다.
+
+### S1-c2 라운드 9 — 보존 요청 복구·미접수 요청 버리기
+
+수정 전 회귀 2개 모두 실패했다(`/tmp/sh1-c2-r9-red.log`: tests 2, pass 0, fail 2). 인터럽트 POST가 미접수인 채 턴이 끝난 뒤 동일 키 복구가 idle 판정에 막히는 문제와, 미접수 확인 뒤 사람이 보존 요청을 버릴 경로가 없는 문제를 재현했다.
+
+신규 제출과 보존 요청 복구를 분리했다. 신규 prompt/interrupt는 기존 현재 상태 검증을 그대로 사용한다. 복구는 저장소의 대상·경로·메서드·request_key가 일치하는 실제 보존 요청만 허용하며 저장된 본문을 그대로 재송신한다. 현재 idle/인터럽트 가능/귀속 상태를 다시 적용하지 않고 호스트의 기존 결과 또는 확정 거절을 받는다. SSE 연결·snapshot 동기화 세대, 삭제 fence, lookup 직후·POST 직전의 최신 ref 검사와 제출 잠금은 유지한다. accepted/rejected 또는 확정 HTTP 오류로 접수가 해소되면 pending을 지운다.
+
+접수 확인 버튼은 읽기 전용 lookup이다. found:false를 확인하면 aria-live 상태 안내와 요청 버리기 버튼을 표시한다. 그 확인의 요청 키와 연결 세대가 현재와 같을 때만 버리기를 허용한다. 연결이 끊기거나 동기화 중이면 재시도·확인·버리기를 잠그고, 재연결 뒤 버리기는 다시 미접수를 확인해야 한다. 버리면 저장소·메모리에서 요청을 제거하며 그 요청을 다시 시도하지 않는다. 재시도는 기존처럼 lookup 뒤 같은 키를 전송하지만, POST 전에 이전 미접수 확인을 무효화한다. 재전송 결과가 acceptance_unknown이면 과거 found:false를 근거로 버릴 수 없으며 다시 읽기 전용 확인이 필요하다.
+
+회귀 테스트는 idle 뒤 interrupt 복구의 동일 키·동일 본문·확정 결과 후 잠금 해제, 기존 incarnation prompt의 호스트 거절 후 해소, 버리기 전 다른 조작 차단과 버린 뒤 해제, 저장 본문 제거와 재전송 없음, 연결 손실 중 화면 버튼 비활성, 재송신 후 이전 미접수 근거 폐기를 검사한다.
+
+부하 대응은 프로세스 기동 대기에만 적용했다. owned-session-process의 ready 대기는 1.5초에서 15초, 공통 session-host-process helper의 ready 대기는 기본 2.5초에서 명시적 15초로 늘렸다. owned-session-http-process의 IPC ready 메시지도 15초로 늘리되 cleaned/stats/db-failed/socket-broken 등 다른 메시지는 기존 10초를 유지한다. poll 기본값·assertion·기동 이후 상태/종료/효과 대기는 바꾸지 않았다.
+
+검증:
+
+- 수정 전 회귀: tests 2, pass 0, fail 2(`/tmp/sh1-c2-r9-red.log`).
+- UI 집중: tests 55, pass 55, fail 0(`/tmp/sh1-c2-r9-ui-final.log`)이며 최종 전체 실행에서도 UI 전부 통과했다.
+- 최종 지정 명령 `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session*.test.js server/tests/session-host-*.test.js server/tests/work-board.test.js`: tests 668, pass 645, fail 23, cancelled 0, skipped 0(`/tmp/sh1-c2-r9-done.log`). 실패는 이전과 같은 샌드박스의 listen EPERM·실제 /bin/ps EPERM·host_start_timeout이다. 실제 macOS 부하에서 프로세스 기동 대기 변경을 재검증해야 한다.
+- 화면 소스 160자 제한 유지. 실제 Claude·LLM·외부 네트워크 호출, git 조작, 코어·spec·전역 SSE·C1 화면·visual baseline 변경은 하지 않았다.

@@ -21,7 +21,7 @@ async function message(child, type) {
     if (found) return found;
     if (child.exitCode !== null || child.signalCode !== null) throw Error(child.errors || 'child_exited');
     return false;
-  }, 10000);
+  }, type === 'ready' ? 15000 : 10000);
 }
 async function settledPrompt(server, requestKey) {
   return poll(async () => {
