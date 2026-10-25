@@ -560,10 +560,11 @@ for (const aborted of [false, true]) check(`R2 duplicate tool callback shares pe
   const prompt = f.prompt('tool');
   const tool = await f.pendingTool();
   const event = f.events.find(event => event.type === 'tool_request');
-  const first = callback(event.name, event.input, { signal: new AbortController().signal, toolUseID: tool.tool_use_id });
+  const requestId = f.log().find(row => row.type === 'tool_request_sent').request_id;
+  const first = callback(event.name, event.input, { signal: new AbortController().signal, toolUseID: tool.tool_use_id, requestId });
   const controller = new AbortController();
   if (aborted) controller.abort();
-  const second = callback(event.name, event.input, { signal: controller.signal, toolUseID: tool.tool_use_id });
+  const second = callback(event.name, event.input, { signal: controller.signal, toolUseID: tool.tool_use_id, requestId });
   assert.strictEqual(first, second);
   assert.equal(f.adapter.facts(f.iid, tool.tool_use_id).aborted, false);
   const answer = f.core.submit(f.req('tool_decision', { target_tool_use_id: tool.tool_use_id, body: { behavior: 'allow' } }));
@@ -572,7 +573,8 @@ for (const aborted of [false, true]) check(`R2 duplicate tool callback shares pe
   assert.equal(f.d(answer).state, 'provider_observed');
   assert.equal(f.log().filter(row => row.type === 'tool').length, 1);
   assert.equal(f.events.filter(event => event.type === 'tool_request').length, 1);
-  assert.deepEqual(await callback(event.name, event.input, { signal: controller.signal, toolUseID: tool.tool_use_id }),
+  assert.deepEqual(await callback(event.name, event.input,
+    { signal: controller.signal, toolUseID: tool.tool_use_id, requestId: requestId + '-different' }),
     { behavior: 'deny', message: 'duplicate_tool_request' });
   assert.equal(f.events.filter(event => event.type === 'tool_request').length, 1);
 });
@@ -697,3 +699,118 @@ check('R2 late original stays unknown while alive and never drains unrelated que
   assert.equal(f.d(blocked).outcome, null);
   assert.deepEqual(f.log().filter(row => row.type === 'user').map(row => row.uuid), [original.message_uuid]);
 });
+
+check('R3 default environment HOME is fixed at adapter creation', async (t, sdk) => {
+  const f = await fixture(t, sdk, {}, { baseEnv: undefined });
+  await f.adapter.checkSettings(f.dir);
+  const originalHome = process.env.HOME;
+  try {
+    process.env.HOME = originalHome + '-changed';
+    await assert.rejects(f.adapter.checkSettings(f.dir), { code: 'config_root_mismatch' });
+    assert.throws(() => f.adapter.start({ incarnation_id: randomUUID(), cwd: f.dir }), { code: 'config_root_mismatch' });
+    assert.equal(f.spawns.length, 0);
+    assert.deepEqual(f.log(), []);
+  } finally { process.env.HOME = originalHome; }
+  await f.adapter.checkSettings(f.dir);
+  assert.equal((await f.start()).state, 'done');
+  assert.equal(f.spawns[0].opts.env.HOME, originalHome);
+});
+
+check('R3 caller environment mutation cannot change child snapshot', async (t, sdk) => {
+  const baseEnv = { HOME: home, PATH: process.env.PATH, LANG: 'C' };
+  const f = await fixture(t, sdk, {}, { baseEnv });
+  baseEnv.HOME += '-changed';
+  baseEnv.PATH = '/invalid';
+  baseEnv.LANG = 'changed';
+  assert.equal((await f.start()).state, 'done');
+  assert.equal(f.spawns[0].opts.env.HOME, home);
+  assert.equal(f.spawns[0].opts.env.PATH, process.env.PATH);
+  assert.equal(f.spawns[0].opts.env.LANG, 'C');
+});
+
+for (const question of [false, true]) check(`R3 completed same request replays original result question=${question}`, async (t, sdk) => {
+  let callback;
+  const f = await fixture(t, sdk, {}, { testHooks: { onQuery({ canUseTool }) { callback = canUseTool; } } });
+  await f.start();
+  const prompt = f.prompt(question ? 'question' : 'tool');
+  const tool = await f.pendingTool();
+  const event = f.events.find(event => event.type === 'tool_request');
+  const requestId = f.log().find(row => row.type === 'tool_request_sent').request_id;
+  const options = { signal: new AbortController().signal, toolUseID: tool.tool_use_id, requestId };
+  const pending = callback(event.name, event.input, options);
+  f.adapter.decide(f.iid, tool.tool_use_id, question ? { behavior: 'answer', answer: 'A' } : { behavior: 'allow' });
+  const result = await pending;
+  await f.completed(prompt);
+  assert.strictEqual(await callback(event.name, event.input, options), result);
+  assert.equal(f.events.filter(event => event.type === 'tool_request').length, 1);
+  assert.equal(f.log().filter(row => row.type === 'tool').length, 1);
+});
+
+for (const question of [false, true]) check(`R3 wire redelivery preserves human decision question=${question}`, async (t, sdk) => {
+  const f = await fixture(t, sdk, { redeliverToolRequest: true });
+  await f.start();
+  const prompt = f.prompt(question ? 'question' : 'tool');
+  const tool = await f.pendingTool();
+  // Its reply is later in stdout than both copies, so SDK has processed the
+  // pre-response duplicate while the first human decision is still pending.
+  await f.adapter.accountInfo(f.iid);
+  const answer = f.core.submit(f.req(question ? 'question_answer' : 'tool_decision', {
+    target_tool_use_id: tool.tool_use_id, body: question ? { answer: 'A' } : { behavior: 'allow' }
+  }));
+  await f.completed(prompt);
+  await until(() => f.log().filter(row => row.type === 'permission_response').length >= 2, 'replayed wire response');
+  const replies = f.log().filter(row => row.type === 'permission_response');
+  assert.equal(replies.length, 2);
+  assert.deepEqual(replies[1].decision, replies[0].decision);
+  assert.equal(replies[0].decision.behavior, 'allow');
+  assert.equal(f.d(answer).state, 'provider_observed');
+  assert.equal(f.state().deliveries.filter(row => ['tool_decision', 'question_answer'].includes(row.kind)).length, 1);
+  assert.equal(f.events.filter(event => event.type === 'tool_request').length, 1);
+  assert.deepEqual(f.log().filter(row => row.type === 'tool_request_sent').map(row => row.phase),
+    ['initial', 'before_response', 'after_response']);
+  assert.equal(f.log().filter(row => row.type === 'tool').length, 1);
+});
+
+check('R3 wire cancellation aborts SDK signal and blocks late human approval', async (t, sdk) => {
+  const f = await fixture(t, sdk, { cancelToolRequest: true });
+  await f.start();
+  const prompt = f.prompt('tool');
+  const tool = await until(() => f.state().tool_requests.find(row => row.state === 'cancelled'), 'wire cancelled approval');
+  const event = f.events.find(event => event.type === 'tool_request');
+  assert.equal(event.signal.aborted, true);
+  assert.equal(f.adapter.facts(f.iid, tool.tool_use_id).aborted, true);
+  const late = f.core.submit(f.req('tool_decision', { target_tool_use_id: tool.tool_use_id, body: { behavior: 'allow' } }));
+  assert.equal(late.state, 'rejected');
+  await until(() => f.log().some(row => row.type === 'permission_response'), 'aborted permission response');
+  await until(() => f.d(prompt).outcome === 'interrupted', 'cancelled lifecycle');
+  assert.equal(f.log().filter(row => row.type === 'tool_cancel_sent').length, 1);
+  assert.equal(f.log().filter(row => row.type === 'tool').length, 0);
+  assert.ok(f.log().filter(row => row.type === 'permission_response').every(row => row.decision.behavior === 'deny'));
+  assert.equal(f.state().tool_requests[0].state, 'cancelled');
+});
+
+for (const requestId of ['different-request', undefined]) {
+  check(`R3 unrelated or missing request ID cannot reuse tool approval requestId=${requestId}`, async (t, sdk) => {
+    let callback;
+    const f = await fixture(t, sdk, {}, { testHooks: { onQuery({ canUseTool }) { callback = canUseTool; } } });
+    await f.start();
+    const prompt = f.prompt('tool');
+    const tool = await f.pendingTool();
+    const event = f.events.find(event => event.type === 'tool_request');
+    const originalId = f.log().find(row => row.type === 'tool_request_sent').request_id;
+    const options = { signal: new AbortController().signal, toolUseID: tool.tool_use_id, requestId };
+    const duplicate = callback(event.name, event.input, options);
+    assert.deepEqual(await duplicate, { behavior: 'deny', message: 'duplicate_tool_request' });
+    assert.equal(f.state().tool_requests[0].state, 'pending');
+    assert.equal(f.events.filter(event => event.type === 'tool_request').length, 1);
+    const pending = callback(event.name, event.input, { ...options, requestId: originalId });
+    const decision = f.core.submit(f.req('tool_decision', { target_tool_use_id: tool.tool_use_id, body: { behavior: 'allow' } }));
+    const originalResult = await pending;
+    await f.completed(prompt);
+    assert.equal(f.d(decision).state, 'provider_observed');
+    assert.deepEqual(await callback(event.name, event.input, options), { behavior: 'deny', message: 'duplicate_tool_request' });
+    assert.strictEqual(await callback(event.name, event.input, { ...options, requestId: originalId }), originalResult);
+    assert.equal(f.events.filter(event => event.type === 'tool_request').length, 1);
+    assert.equal(f.log().filter(row => row.type === 'tool').length, 1);
+  });
+}

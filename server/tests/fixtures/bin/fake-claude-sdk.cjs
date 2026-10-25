@@ -70,9 +70,20 @@ function finish(batch) {
     if (tool === 'AskUserQuestion' && config.questionCount === 2) {
       input.questions.push({ ...input.questions[0], question: 'Why?' });
     }
-    pendingTools.set(id, { message, toolUseId, tool, input });
-    send({ type: 'control_request', request_id: id,
-      request: { subtype: 'can_use_tool', tool_name: tool, input, tool_use_id: toolUseId } });
+    const frame = { type: 'control_request', request_id: id,
+      request: { subtype: 'can_use_tool', tool_name: tool, input, tool_use_id: toolUseId } };
+    pendingTools.set(id, { message, toolUseId, tool, input, frame, responses: 0, cancelled: !!config.cancelToolRequest });
+    log({ type: 'tool_request_sent', request_id: id, tool_use_id: toolUseId, phase: 'initial' });
+    send(frame);
+    if (config.redeliverToolRequest) {
+      send(frame);
+      log({ type: 'tool_request_sent', request_id: id, tool_use_id: toolUseId, phase: 'before_response' });
+    }
+    if (config.cancelToolRequest) {
+      send({ type: 'control_cancel_request', request_id: id });
+      log({ type: 'tool_cancel_sent', request_id: id, tool_use_id: toolUseId });
+      result([message.uuid], true);
+    }
   }
 }
 function user(message) {
@@ -127,8 +138,16 @@ lines.on('line', line => {
   else if (message.type === 'control_response') {
     const entry = pendingTools.get(message.response.request_id);
     if (!entry) return;
-    pendingTools.delete(message.response.request_id);
+    entry.responses++;
     const decision = message.response.response;
+    log({ type: 'permission_response', request_id: message.response.request_id,
+      tool_use_id: entry.toolUseId, response_count: entry.responses, decision });
+    if (entry.cancelled || entry.responses > 1) return;
+    if (config.redeliverToolRequest) {
+      send(entry.frame);
+      log({ type: 'tool_request_sent', request_id: message.response.request_id,
+        tool_use_id: entry.toolUseId, phase: 'after_response' });
+    } else pendingTools.delete(message.response.request_id);
     const allowDecision = decision?.behavior === 'allow';
     const expectedInput = entry.tool === 'AskUserQuestion' ?
       { ...entry.input, answers: decision?.updatedInput?.answers } : entry.input;

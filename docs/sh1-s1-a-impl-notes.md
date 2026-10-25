@@ -1227,3 +1227,115 @@ result 배열도 없는 별도 사례는 state=unknown, outcome=outcome_unknown�
 - `R2 real ps ignores unrelated multiline argv while identifying a marked child` — query_failed !== ok (실제 ps 조회 차단)
 - `real ps identifies marked child and grandchild then confirms exit` — query_failed !== ok (실제 ps 조회 차단)
 - `SDK real ps identity reads actual child and inherited grandchild marker then mismatch` — 'spawnSync /bin/ps EPERM'
+
+## S1-b2b 수정 라운드 3 — 설정 스냅샷과 requestId별 재전달
+
+이 절은 앞선 루트의 가변 baseEnv 참조와 완료 tool_use_id의 무조건 deny 계약을 대체한다.
+수정은 sdkAdapter, 테스트 전용 실행 파일, SDK 테스트, 이 기록에 한정했다.
+실제 Claude·LLM·네트워크·설치·git 조작은 하지 않았다.
+
+### 먼저 실행한 실패 테스트
+
+제품 수정 전에 fake의 tool_request_sent 로그와 재전달·취소 모드, 재현 테스트를 추가했다.
+실행 당시 줄 번호는 이후 테스트 보강으로 이동할 수 있다.
+
+| 지적 | 테스트 이름 | 수정 전 실패 줄·원문 요약 |
+|---|---|---|
+| 1 기본 env 참조 | `R3 default environment HOME is fixed at adapter creation` | sdk-adapter.test.js:707 `assert.rejects(...config_root_mismatch)` — Missing expected rejection |
+| 1 호출자 가변 객체 | `R3 caller environment mutation cannot change child snapshot` | :723 `assert.equal((await f.start()).state, 'done')` — 실제 failed |
+| 2 완료 allow·answer | `R3 completed same request replays original result question=false/true` | :742 `assert.strictEqual(await callback(...), result)` — 저장된 allow 대신 duplicate_tool_request deny |
+| 3 실제 wire 재전달 | `R3 wire redelivery preserves human decision question=false/true` | :759 `assert.deepEqual(replies[1].decision, replies[0].decision)` — 두 번째 응답이 allow에서 deny로 변경 |
+
+첫 명령은 tests 4, pass 0, fail 4였다.
+`PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test --test-name-pattern='R3 default environment|R3 caller environment|R3 completed same' server/tests/session-host-sdk-adapter.test.js`
+
+wire 명령은 tests 3, pass 1, fail 2였다. cancellation은 기존 구현에서도 통과했다.
+`PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test --test-name-pattern='R3 wire' server/tests/session-host-sdk-adapter.test.js`
+
+### 1. 설정 루트 불변 스냅샷
+
+어댑터 생성 시 Object.assign(Object.create(null), baseEnv)로 얕은 복사하고 Object.freeze한다.
+fixedHome은 이 스냅샷에서 한 번만 정한다.
+checkSettings·start는 현재 process.env.HOME과 fixedHome이 같은지,
+현재 프로세스와 스냅샷에 금지 설정 루트 키가 없는지 확인한다.
+초기 불일치 여부도 유지하므로 생성 때 잘못된 어댑터를 나중에 env만 바꿔 살릴 수 없다.
+자식 buildChildEnv는 원래 객체가 아니라 스냅샷을 받는다.
+
+기본 baseEnv=process.env에서도 HOME 변경은 config_root_mismatch이며 spawn·가짜 로그 0이다.
+같은 어댑터에서 HOME을 원복하면 설정 검사·시작이 통과한다.
+호출자가 넘긴 객체의 HOME·PATH·LANG을 생성 뒤 변경해도 자식에는 생성 시 값만 들어간다.
+SDK Pt의 HOME 캐시를 env 변경으로 갱신하려 하지 않고, 어댑터의 루트를 고정해 불일치를 차단한다.
+
+### 2. requestId와 결정 결과 보존
+
+근거는 sdk.d.ts:304의 CanUseTool 옵션 `requestId`와 3036–3038의 유실 응답 재전달·멱등 주석이다.
+requestId는 제어 프레임 바깥 request_id이며 toolUseID와 별개다.
+pending과 결정 기록 모두 requestId를 보관한다.
+
+- 같은 tool_use_id + 같은 비어 있지 않은 requestId: pending이면 같은 Promise,
+  완료 뒤에도 저장된 결과로 resolve된 같은 Promise를 반환한다. 이벤트·사람 결정은 추가하지 않는다.
+- 같은 tool_use_id + 다른 requestId 또는 requestId 누락: duplicate_tool_request deny다.
+  기존 pending·signals·사람 결정 결과는 바꾸지 않는다.
+- 처음 보는 ID는 정상 승인 경로를 따른다. requestId 없는 옛 콜백의 재전달에는 승인을 재사용하지 않는다.
+
+결정 Map에는 requestId·결과·Promise가 메모리로만 남으며 직접 자식 exit에서 지운다.
+exit 시 남은 pending도 deny로 정리한다. closed/exited 콜백은 request_aborted로 거부한다.
+settle의 자기 항목 확인은 유지한다.
+기존 직접 콜백 테스트는 실제 wire에서 얻은 request_id를 사용하도록 갱신하고,
+다른 requestId·누락 requestId를 pending/완료 양쪽에서 거부하는 대조를 추가했다.
+
+### 3. 실제 SDK 제어 프로토콜 검증
+
+가짜의 redeliverToolRequest는 같은 프레임을 응답 전 한 번 더 쓰고,
+첫 응답을 받은 뒤 같은 request_id·tool_use_id로 한 번 더 쓴다.
+각 전송 단계와 받은 응답 수·결정 전문을 provider 로그에 기록한다.
+실행은 첫 allow 응답에서만 한 번 수행하고 후속 응답은 기록만 한다.
+
+고정 시간 대기를 쓰지 않고, 두 사전 프레임 뒤의 initialize 응답을 실제 SDK가 처리할 때까지 기다린다.
+이 순서 장벽으로 첫 사람 결정 전에 SDK가 사전 중복 프레임을 읽었음을 보장한다.
+이 장벽이 없으면 OS pipe 분할에 따라 두 번째 프레임을 첫 응답 뒤에 처리할 수도 있어
+응답 수 2/3이 달라졌다. 장벽을 넣어 in-flight/응답 후 경로를 명시적으로 분리했다.
+
+설치된 SDK 0.3.308에서 관측한 결과:
+- 사전 중복은 SDK가 in-flight request_id로 거른다.
+  sdk.mjs:157 handleControlRequest의 cancelControllers 중복 검사와 일치한다.
+- 첫 응답 뒤 재전송은 canUseTool 콜백으로 다시 들어오고 두 번째 control_response가 나간다.
+- 따라서 프레임 전송 3회에 응답은 2회이며 두 응답의 결정 내용은 완전히 같다.
+  allow와 AskUserQuestion answer 각각에서 사람 결정 delivery 1개,
+  tool_request 이벤트 1회, provider 도구 실행 1회를 확인했다.
+
+cancelToolRequest는 can_use_tool 뒤
+`{type:'control_cancel_request', request_id:<같은 request_id>}`를 쓴다.
+정확한 형식은 sdk.d.ts:3967–3974다. 취소 자체에는 응답을 요구하지 않는다.
+실제 SDK가 callback signal을 abort했고 코어 승인 카드는 cancelled로 남았다.
+원래 permission 요청에 대한 deny 응답을 로그에서 확인했고,
+늦은 사람 allow는 rejected, 도구 실행은 0이었다.
+직접 콜백 호출 시험은 보조로 남겼으며 이 wire 시험이 재전달·취소 계약의 검증이다.
+
+### 최종 검증
+
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test --test-name-pattern='R3 |R2 duplicate' server/tests/session-host-sdk-adapter.test.js`
+  → tests 11, pass 11, fail 0.
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-*.test.js`
+  → tests 421, pass 404, fail 17, cancelled 0, skipped 0. 신규 9개는 모두 통과했다.
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/spawn-guard.test.js`
+  → tests 9, pass 9, fail 0.
+
+실제 macOS 재검증은 호스트가 해야 한다. 이번 샌드박스에서도 아래 기존 ps·소켓 제한 사례가 실패했다.
+- `X simultaneous hosts preserve winner socket inode and capability` — 'spawnSync /bin/ps EPERM'
+- `X lock does not survive in a live inherited-environment child` — 'spawnSync /bin/ps EPERM'
+- `X detached host survives launcher parent SIGKILL` — 'spawnSync /bin/ps EPERM'
+- `X detached host survives launcher parent SIGTERM` — 'spawnSync /bin/ps EPERM'
+- `X detached host survives launcher parent SIGHUP` — 'spawnSync /bin/ps EPERM'
+- `X before accepted crash is reconciled by lookup after boot change, effect occurs once` — 'spawnSync /bin/ps EPERM'
+- `X idle drain refuses arrival with not_accepted, new host retries exactly once` — 'spawnSync /bin/ps EPERM'
+- `X active ownership prevents idle and SIGTERM exit; zero ownership releases socket and lock` — 'spawnSync /bin/ps EPERM'
+- `X private file modes, capability absent from argv and env, launcher sanitizes env` — 'host_start_timeout'
+- `X SIGTERM with zero ownership exits cleanly and releases exclusion` — 'spawnSync /bin/ps EPERM'
+- `X R1-01 asynchronous throw, active ownership=false` — 'spawnSync /bin/ps EPERM'
+- `X R1-01 asynchronous throw, active ownership=true` — 'spawnSync /bin/ps EPERM'
+- `X R1-01 asynchronous rejection, active ownership=false` — 'spawnSync /bin/ps EPERM'
+- `X R1-01 asynchronous rejection, active ownership=true` — 'spawnSync /bin/ps EPERM'
+- `R2 real ps ignores unrelated multiline argv while identifying a marked child` — query_failed !== ok (실제 ps 조회 차단)
+- `real ps identifies marked child and grandchild then confirms exit` — query_failed !== ok (실제 ps 조회 차단)
+- `SDK real ps identity reads actual child and inherited grandchild marker then mismatch` — 'spawnSync /bin/ps EPERM'

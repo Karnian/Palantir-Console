@@ -49,10 +49,12 @@ function capabilityVerdict({ systemInitCapabilities, sdkVersion, cliVersion, per
 function createSdkAdapter({ sdk, executablePath = bundledExecutable(), executableSha256 = pin.cliSha256,
   cliVersion = pin.cliVersion, baseEnv = process.env, identityProbe = createPsIdentityProbe({ pinnedPath: executablePath }),
   hashFileSync, spawn = childProcess.spawn, extraArgs, testHooks = {} } = {}) {
+  const envSnapshot = Object.freeze(Object.assign(Object.create(null), baseEnv));
+  const fixedHome = envSnapshot.HOME;
   function rootsMatch() {
     const forbidden = ['CLAUDE_CONFIG_DIR', 'CLAUDE_SECURESTORAGE_CONFIG_DIR'];
-    return !forbidden.some(key => Object.hasOwn(process.env, key) || Object.hasOwn(baseEnv, key)) &&
-      typeof baseEnv.HOME === 'string' && baseEnv.HOME.length > 0 && baseEnv.HOME === process.env.HOME;
+    return !forbidden.some(key => Object.hasOwn(process.env, key) || Object.hasOwn(envSnapshot, key)) &&
+      typeof fixedHome === 'string' && fixedHome.length > 0 && fixedHome === process.env.HOME;
   }
   const initialRootsMatch = rootsMatch();
   function assertConfigRoot() {
@@ -102,7 +104,7 @@ function createSdkAdapter({ sdk, executablePath = bundledExecutable(), executabl
       if (resume === true ? typeof claude_session_id !== 'string' || !claude_session_id :
         resume !== undefined || claude_session_id !== undefined) throw failure('invalid_resume_contract');
       const sessionId = resume ? claude_session_id : randomUUID();
-      const row = { input: inputQueue(), pending: new Map(), signals: new Map(), decided: new Set(), exited: false, closed: false };
+      const row = { input: inputQueue(), pending: new Map(), signals: new Map(), decided: new Map(), exited: false, closed: false };
       let spawnError;
       function customSpawn(opts) {
         try {
@@ -112,7 +114,7 @@ function createSdkAdapter({ sdk, executablePath = bundledExecutable(), executabl
           if (!verdict.ok) {
             throw failure(verdict.reason === 'executable_check_failed' ? 'executable_mismatch' : verdict.reason);
           }
-          const env = buildChildEnv({ baseEnv, sdkEnv: opts.env, incarnationId: id });
+          const env = buildChildEnv({ baseEnv: envSnapshot, sdkEnv: opts.env, incarnationId: id });
           assertChildEnv(env, id);
           row.process = spawn(opts.command, opts.args, {
             cwd: opts.cwd, env, signal: opts.signal, stdio: ['pipe', 'pipe', 'pipe']
@@ -122,6 +124,9 @@ function createSdkAdapter({ sdk, executablePath = bundledExecutable(), executabl
           row.process.once('exit', () => {
             row.exited = true;
             row.input.end();
+            for (const pending of row.pending.values()) pending.settle({ behavior: 'deny', message: 'request_aborted' });
+            row.decided.clear();
+            row.signals.clear();
             identityProbe.exit?.(id);
             emit(id, 'child_exit');
           });
@@ -142,17 +147,20 @@ function createSdkAdapter({ sdk, executablePath = bundledExecutable(), executabl
           throw spawnError;
         }
       }
-      function canUseTool(name, input, { signal, toolUseID }) {
-        const existing = row.pending.get(toolUseID);
-        if (existing) return existing.promise;
-        if (row.decided.has(toolUseID)) return Promise.resolve({ behavior: 'deny', message: 'duplicate_tool_request' });
+      function canUseTool(name, input, { signal, toolUseID, requestId }) {
+        if (row.exited || row.closed) return Promise.resolve({ behavior: 'deny', message: 'request_aborted' });
+        const existing = row.pending.get(toolUseID) || row.decided.get(toolUseID);
+        if (existing) {
+          if (typeof requestId === 'string' && requestId.length > 0 && existing.requestId === requestId) return existing.promise;
+          return Promise.resolve({ behavior: 'deny', message: 'duplicate_tool_request' });
+        }
         let resolve;
         const promise = new Promise(done => { resolve = done; });
-        const pending = { input, promise, settle };
+        const pending = { input, requestId, promise, settle };
         function settle(result) {
           if (row.pending.get(toolUseID) !== pending) return;
           row.pending.delete(toolUseID);
-          row.decided.add(toolUseID);
+          row.decided.set(toolUseID, { requestId, result, promise });
           signal.removeEventListener('abort', abort);
           resolve(result);
         }
