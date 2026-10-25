@@ -392,7 +392,8 @@ lock-in 은 사용자가 실제 작업에 써 본 뒤 정한다. brief 는 화�
 | **S1-a1** | 저장소 + 상태 기계 + 제어 요청 + 복구·결함 주입, 가짜 어댑터·가짜 신원 조회 (in-process 라이브러리 `server/sessionHost/`) | ✅ 2026-10-24 — 테스트 102개(§8.1-(a) 중 in-process 사례), codex 적대리뷰 R1~R3 NO-GO → R4 GO, 리팩터링 동작 보존 GO, npm test 5234/5234. 기록 `docs/sh1-s1-a-impl-notes.md` |
 | **S1-a2** | 호스트 프로세스: 단일 인스턴스 잠금·소켓·capability·handshake·접수 응답·유휴 종료·기동(setsid)·치명 오류 정책 | ✅ 2026-10-24 — 테스트 167개(프로세스 층 실제 macOS 실행 포함), mutation 3종 검출, codex 적대리뷰 R1 NO-GO → R2 GO → R3 GO, npm test 5299/5299. 잠금은 `flock` 대신 SQLite 배타 잠금(의미 동일 — 기록 `docs/sh1-s1-a-impl-notes.md`) |
 | **S1-b1** | SDK 없이 시험하는 부품: 인증·설정 게이트 판정(`authGate`), 자식 env 구성·최종 검사(`spawnEnv`), argv·실행 파일 고정 확인(`argvCheck`), 실제 `ps` 기반 신원 조회(`psIdentity`), 고정값(`pin`) | ✅ 2026-10-24 — 테스트 212개(실제 ps 포함), codex 적대리뷰 R1·R2 NO-GO → R3 GO, npm test 5344/5344. 실측으로 잡은 것: argv 에 줄바꿈 든 프로세스가 전역 ps 출력을 깨뜨림(→ 전역=존재 판정, 귀속=pid 별 조회), `lstart` 출력 끝 열 맞춤 공백 |
-| **S1-b2** | SDK 설치·어댑터 연결(custom spawn·게이트 단계·능력 판정·rate limit 표시), 코어의 비동기 게이트 단계, SDK 프로토콜을 흉내 내는 가짜 실행 파일 | §8.1-(b) |
+| **S1-b2a** | 코어의 비동기 게이트 단계: spawn 전 설정 검사(절대 기한), spawn 뒤 초기화 응답 게이트와 실패 시 정리(close → 신원 재대조 SIGTERM → 표지 하위 확인), 게이트 전 승인 응답 차단, prompt 직전 account 재확인(delivery 별 1회 토큰), 첫 system/init 사후 탐지, rate limit 정제 기록, 자식 env 최종 검사 — 가짜 어댑터(동기·비동기 겸용) | ✅ 2026-10-25 — 테스트 337개(비동기 모드 대표 경로 포함), codex 적대리뷰 R1 NO-GO → R2 GO, npm test 5469/5469. 순서는 §4.4 원자성 때문에 "예약 → 설정 검사 → spawn"(spawn 전 검사 계약은 동일) |
+| **S1-b2b** | SDK 설치·실제 어댑터(custom spawn·argvCheck·spawnEnv·psIdentity 연결, 이벤트 변환, 능력 판정), SDK 제어 프로토콜을 흉내 내는 가짜 실행 파일 | §8.1-(b) |
 | **S1-c** | 서버 브리지(handshake·seq 재생·읽기 전용 장애 경로·cookie-only·origin) + 최소 화면(상태·전달 배지·승인 카드) | 서버 재시작·장애 사례 |
 | **S1-e** | 터미널 넘기기 + §8.2 최소 안전 실측 | 실측 기록. 미달이면 S1-d 진입 안 함 |
 | **S1-d** | 화면 다듬기 → 사용자 실사용(U8 기록지 병행) → lock-in. lock-in 뒤 e2e visual baseline | 사용자 lock-in 기록 + U8 |
