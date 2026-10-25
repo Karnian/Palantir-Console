@@ -9,7 +9,8 @@ const html = htm.bind(h);
 const handoffCopy = {
   title: '터미널로 넘기기',
   shell: '어느 셸에 붙여 넣어도 /bin/sh 로 실행됨',
-  handoff_identity_unavailable: '실제 실행의 HOME·실행 파일 신원 기록이 없어 넘기지 않았습니다.',
+  handoff_identity_unavailable: OWNED_COPY.handoff_identity_unavailable,
+  unsupported_path_character: OWNED_COPY.unsupported_path_character,
   guarantee: '넘긴 뒤 Palantir 는 그 실행을 제어·관측하지 않고 인증 게이트도 없다. 명령을 바꿔 실행하면 재현이 깨진다. ' +
     '넘긴 세션은 읽기 전용이고 다시 열지 않는다. Palantir 에서 다시 작업하려면 새 세션.',
   limit: '표지를 버리고 분리된 백그라운드 프로세스는 확인 범위 밖',

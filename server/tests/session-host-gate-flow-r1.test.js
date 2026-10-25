@@ -196,7 +196,7 @@ for (const [label, value] of [
 }
 
 for (const async of [false, true]) {
-  test(`B2a-R1-04 async=${async} late main exit preserves unverified control and descendants still block resume and handoff`, async t => {
+  test(`B2a-R1-04 async=${async} late main exit preserves unverified control; descendants block resume and failed gate blocks handoff`, async t => {
     const f = fixture(t, { async, noInitialization: true, noExit: true });
     const accepted = await start(f);
     f.probe.descendants.set(f.iid, { status: 'ok', pids: [{ pid: 3000, startedAt: 'tool-start' }] });
@@ -212,8 +212,8 @@ for (const async of [false, true]) {
     assert.equal(resume.state, 'rejected');
     assert.equal(resume.reason, 'subprocess_remaining');
     const handoff = f.core.submit(f.req('handoff'));
-    assert.equal(handoff.state, 'blocked');
-    assert.equal(handoff.reason, 'subprocess_remaining');
+    assert.equal(handoff.state, 'rejected');
+    assert.equal(handoff.reason, 'handoff_identity_unavailable');
     assert.equal(f.adapter.log.starts.length, 1);
     f.probe.descendants.delete(f.iid);
     f.adapter.options.noInitialization = false;

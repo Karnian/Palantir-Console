@@ -406,3 +406,15 @@ for (const execution of ['alive', 'orphaned', 'exited', 'never_started']) {
     assert.equal(button().disabled, true);
   });
 }
+
+test('R3 handoff refusal shows recovery advice and unsupported path explanation from copy', t => {
+  const e = setup(t), s = state();
+  const props = { state: s, incarnation: s.incarnations[0], host: 'running' };
+  s.controls.push({ kind: 'handoff', state: 'failed', reason: 'handoff_identity_unavailable' });
+  e.mount('OwnedSessionHeader', props);
+  assert.match(e.document.body.textContent, /이어서 시작.*넘기/);
+  assert.equal(e.context.ownedLabel('handoff_identity_unavailable'), e.context.C.handoff_identity_unavailable);
+  s.controls[0].reason = 'unsupported_path_character'; e.mount('OwnedSessionHeader', props);
+  assert.match(e.document.body.textContent, /백슬래시/);
+  assert.equal(e.context.ownedLabel('unsupported_path_character'), e.context.C.unsupported_path_character);
+});

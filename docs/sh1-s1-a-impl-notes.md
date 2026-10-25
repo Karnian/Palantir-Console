@@ -2481,3 +2481,24 @@ never_started의 예정 기록은 진단용으로 남지만 실행 증거로 쓰
 - 실제 Claude·LLM·외부 네트워크 호출 0. git 조작·spec·package.json·전역 SSE·스키마 변경 없음.
 
 최종 a11y fixture 수정 뒤 `npx --no-install playwright test --grep '@a11y.*owned' --list`는 정상 종료했으며 16개 시나리오를 발견했다(`/tmp/sh1-e1-r2-a11y-list.log`). 실제 브라우저 실행의 EPERM 차단을 통과로 간주하지 않는다.
+
+
+### S1-e1 라운드 4 — 적대리뷰 R3: 최신 incarnation만 허용
+
+호스트 판정에 따라 과거 실행 기록을 찾는 경로를 없앴다. `prepareHandoff`는 생성 순서상 최신 incarnation 하나를 `getLatestIncarnation`으로 읽고, `hasHandoffIdentity`로 다음 증거를 모두 요구한다: alive/orphaned/exited 상태, 양의 PID와 시작 시각 커밋, account_snapshot, 해당 incarnation의 start/resume done·done 게이트 완료 영수증, 기록된 HOME·canonical 실행 파일 경로·해시. never_started·spawning·liveness_unknown 및 증거 누락은 `handoff_identity_unavailable`이다. RAM의 accounts 캐시는 종료·재기동 때 사라지므로 게이트 판단에 쓰지 않고, 같은 게이트 통과 트랜잭션에 남긴 영속 snapshot과 완료 영수증을 사용한다. 증거가 없으면 과거 incarnation으로 돌아가거나 현재 어댑터 값으로 채우지 않는다. 저장소·스키마 v4는 변경하지 않았다.
+
+접수 단계에서도 같은 신원 판정을 사용하고, 효과 전·완료 직전에도 최신 incarnation과 기존 동기 해시 검증을 다시 확인한다. HOME=A 실행 종료 → HOME=B resume → after_spawn_before_identity 크래시 → 자식 종료 → 복구 never_started → HOME=A에서 넘기기는 거부한다. 실제로 실행이 있었는지 복구에서 모르는 최신 행을 건너뛰지 않는다. spawn 전 크래시도 HOME 변경 유무와 무관하게 거부한다. 기존 R2의 과거 실제 실행으로 우회하던 통과 기대는 제거했으며, 과거 행을 복원해도 최신 행이 미실행이면 계속 거부함을 검사한다. 정상 resume로 새 최신 실행을 만들고 게이트가 통과한 뒤 넘기는 대조는 통과한다.
+
+cwd·HOME·실행 파일 경로에 백슬래시가 하나라도 있으면 순수 명령 생성기가 `unsupported_path_character`로 거부한다. fish의 작은따옴표 안 연속 백슬래시 축약을 다루는 별도 인용 체계는 추가하지 않는다. 실제 넘기기 요청에서도 실행 종료 효과 전에 이 검사를 거쳐 세션 active·interrupt/close/signal 0·완료 명령 0을 유지한다. 작은따옴표·공백·달러·백틱은 기존대로 지원한다. 단일·연속 백슬래시와 작은따옴표 조합을 세 경로 각각 검사하고, 백슬래시만 제거한 통과 대조를 둔다.
+
+copy.js에 두 거부 코드를 추가했다. 신원 누락은 '실행 끝내고 이어서 시작(resume)으로 정상 실행을 만든 뒤 다시 넘기세요'라고 안내하고, 경로 거부는 백슬래시 없는 경로에서 작업하도록 안내한다. 헤더의 거부 사유와 요청 결과 안내가 같은 공용 문구를 사용한다. 기존 수동 stop → resume 흐름과 자동 실행 0회 계약은 변경하지 않았다.
+
+검증 기록:
+
+- 수정 전 `/tmp/sh1-e1-r3-red.log`: tests 49, pass 27, fail 22. 리뷰 반례·게이트 증거·생존 불명·백슬래시·화면 안내 누락을 재현했다.
+- 신규 회귀와 UI `/tmp/sh1-e1-r3-focus.log`: 49/49 통과. 최신 필드 누락은 해당 필드 하나만 복원한 대조를, 크래시 후에는 정상 최신 resume·종료 대조를 확인했다.
+- handoff 전체·control·owned UI `/tmp/sh1-e1-r3-focus2.log`: tests 145, pass 144, fail 0, skipped 1(fish 미설치). 기존 특수 문자·환경 허용 목록·SDK 가짜 자식 비교도 유지했다.
+- 게이트 실패 뒤 handoff를 하위 프로세스 조회까지 진행시키던 과거 gate-flow 테스트는 최신 계약에 맞춰 게이트 신원 미확인 거부로 갱신했다. 하위 프로세스가 남으면 resume를 막는 기존 단언은 유지했다.
+- 실제 Claude·LLM·외부 네트워크 호출 0. git 조작·spec·package.json·전역 SSE·스키마 변경 없음. 이번 DoD는 지정 Node 전체 테스트이며 a11y 실행은 요청 범위에 포함되지 않는다.
+
+최종 지정 전체 명령 `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session*.test.js server/tests/session-host-*.test.js`: tests 688, pass 664, fail 23, cancelled 0, skipped 1(`/tmp/sh1-e1-r3-all.log`). 실패 23개는 기존 소켓 listen EPERM·실제 ps EPERM/query_failed·host_start_timeout이며, 신규 R3와 갱신한 R2·gate-flow 회귀는 모두 통과했다. fish 미설치 1 skip은 유지한다. 호스트에서 지정 전체 명령의 최종 통과를 재확인해야 한다.

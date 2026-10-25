@@ -33,14 +33,14 @@ for (const changed of [false, true]) {
     assert.equal(resumeBeforeSpawn(f).cli_home, f.adapter.home);
     assert.equal(f.adapter.log.starts.length, 1);
     const result = f.core.submit(f.req('handoff'));
-    assert.equal(result.state, changed ? 'failed' : 'done');
-    if (changed) {
-      assert.equal(result.reason, 'handoff_environment_mismatch');
-      assert.equal(f.state().session.state, 'active'); assert.equal(f.state().handoff_command, undefined);
-      assert.equal(f.core.eventsSince(0).events.some(event => event.type === 'handoff_ready'), false);
-      f.adapter.home = '/home/A';
-      assert.equal(f.core.submit(f.req('handoff')).state, 'done');
-    }
+    assert.equal(result.state, 'rejected');
+    assert.equal(result.reason, 'handoff_identity_unavailable');
+    assert.equal(f.state().session.state, 'active'); assert.equal(f.state().handoff_command, undefined);
+    assert.equal(f.core.eventsSince(0).events.some(event => event.type === 'handoff_ready'), false);
+    f.adapter.home = '/home/A';
+    assert.equal(f.core.submit(f.req('handoff')).reason, 'handoff_identity_unavailable');
+    const fresh = f.core.submit(f.req('resume')); assert.equal(fresh.state, 'done'); f.iid = fresh.incarnation_id;
+    assert.equal(f.core.submit(f.req('handoff')).state, 'done');
     assert.equal(f.state().incarnations.find(row => row.id === actualId).cli_home, '/home/A');
     assert.equal(f.state().handoff_command, buildHandoffCommand({ cwd: '/private/work', home: '/home/A',
       executablePath: f.adapter.executablePath, claudeSessionId: f.sid }));
@@ -56,6 +56,8 @@ for (const field of ['cli_home', 'cli_path', 'cli_sha256']) {
     assert.equal(f.core.submit(f.req('handoff')).reason, 'handoff_identity_unavailable');
     assert.equal(f.state().handoff_command, undefined);
     update(f, `UPDATE incarnations SET ${field}=? WHERE id=?`, original, actualId);
+    assert.equal(f.core.submit(f.req('handoff')).reason, 'handoff_identity_unavailable');
+    const fresh = f.core.submit(f.req('resume')); assert.equal(fresh.state, 'done'); f.iid = fresh.incarnation_id;
     assert.equal(f.core.submit(f.req('handoff')).state, 'done');
   });
 }
@@ -80,6 +82,8 @@ test('R2 newest actual execution with missing identity never falls back to older
   assert.equal(f.core.submit(f.req('handoff')).reason, 'handoff_identity_unavailable');
   assert.equal(f.state().handoff_command, undefined);
   update(f, 'UPDATE incarnations SET cli_home=? WHERE id=?', original, actualId);
+  assert.equal(f.core.submit(f.req('handoff')).reason, 'handoff_identity_unavailable');
+  const fresh = f.core.submit(f.req('resume')); assert.equal(fresh.state, 'done'); f.iid = fresh.incarnation_id;
   assert.equal(f.core.submit(f.req('handoff')).state, 'done');
 });
 test('R2 never_started state is not actual execution evidence even with pid metadata', t => {

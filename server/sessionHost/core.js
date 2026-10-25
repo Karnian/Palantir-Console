@@ -563,14 +563,25 @@ function createHostCore({
     });
   }
 
+  function hasHandoffIdentity(execution) {
+    return !!execution && ['alive', 'orphaned', 'exited'].includes(execution.state) &&
+      Number.isSafeInteger(execution.pid) && execution.pid > 0 &&
+      typeof execution.pid_started_at === 'string' && execution.pid_started_at.length > 0 &&
+      !!execution.account_snapshot && !!execution.cli_home && !!execution.cli_path && !!execution.cli_sha256 &&
+      !!getRow("SELECT request_key FROM control_requests WHERE incarnation_id=? AND kind IN ('start','resume') " +
+        "AND state='done' AND stage='done'", execution.id);
+  }
+
   function prepareHandoff(controlRequest) {
-    // Planned metadata is not spawn evidence. Select the last committed process identity first;
-    // never skip its missing CLI/HOME fields in favor of an older, more convenient execution.
-    const execution = getRow("SELECT * FROM incarnations WHERE session_id=? AND pid>0 AND length(pid_started_at)>0 " +
-      "AND state IN ('alive','orphaned','exited','liveness_unknown') ORDER BY rowid DESC LIMIT 1", controlRequest.session_id);
-    if (!execution?.cli_home || !execution.cli_path || !execution.cli_sha256) {
-      return { reason: 'handoff_identity_unavailable' };
-    }
+    // Only the newest incarnation can authorize handoff. Never search older execution records.
+    const execution = getLatestIncarnation(controlRequest.session_id);
+    if (!hasHandoffIdentity(execution)) return { reason: 'handoff_identity_unavailable' };
+    let command;
+    try {
+      const session = getSession(controlRequest.session_id);
+      command = buildHandoffCommand({ cwd: session.cwd, home: execution.cli_home,
+        executablePath: execution.cli_path, claudeSessionId: session.claude_session_id });
+    } catch (error) { return { reason: error.code || 'handoff_environment_mismatch' }; }
     try {
       if (adapter.verifyExecutable?.() !== true) return { reason: 'executable_hash_mismatch' };
     } catch { return { reason: 'executable_hash_mismatch' }; }
@@ -581,11 +592,7 @@ function createHostCore({
     if (execution.cli_home !== current.home || execution.cli_path !== current.executablePath) {
       return { reason: 'handoff_environment_mismatch' };
     }
-    try {
-      const session = getSession(controlRequest.session_id);
-      return { command: buildHandoffCommand({ cwd: session.cwd, home: execution.cli_home,
-        executablePath: execution.cli_path, claudeSessionId: session.claude_session_id }) };
-    } catch (error) { return { reason: error.code || 'handoff_environment_mismatch' }; }
+    return { command };
   }
 
   function finishControlRequest(key) {
@@ -1091,7 +1098,12 @@ function createHostCore({
 
           }
         }
-        if (!reason && request.kind === 'handoff') reason = ownedHandoffRejection(session, incarnation);
+        if (!reason && request.kind === 'handoff') {
+          reason = ownedHandoffRejection(session, incarnation);
+          if (session.state === 'active' && incarnation && !hasHandoffIdentity(incarnation)) {
+            reason = 'handoff_identity_unavailable';
+          }
+        }
         if (!reason && request.kind === 'handoff' && request.incarnation_id !== undefined && request.incarnation_id !== incarnation?.id) {
           reason = 'incarnation_mismatch';
         }

@@ -6,6 +6,7 @@ const failure = code => Object.assign(new Error(code), { code });
 const quote = value => "'" + value.replace(/'/g, "'\\''") + "'";
 function buildHandoffCommand({ cwd, home, executablePath, claudeSessionId }) {
   for (const value of [cwd, home, executablePath]) {
+    if (typeof value === 'string' && value.includes('\\')) throw failure('unsupported_path_character');
     if (typeof value !== 'string' || !path.isAbsolute(value) || /[\0\r\n]/.test(value)) {
       throw failure('invalid_handoff_path');
     }
