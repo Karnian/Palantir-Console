@@ -51,13 +51,13 @@ for (const async of [false, true]) {
       const good = fixture(t, { async });
       assert.equal((await start(good)).state, 'done');
       good.adapter.toolRequest(good.iid, 'card', kind === 'question_answer' ? 'AskUserQuestion' : 'Bash');
-      assert.equal(good.core.submit(good.req(kind, { target_tool_use_id: 'card' })).state, 'provider_observed');
+      assert.equal(good.core.submit(good.req(kind, { target_tool_use_id: 'card', body: kind === 'question_answer' ? { answer: 'yes' } : { behavior: 'allow' } })).state, 'provider_observed');
       const f = fixture(t, { async, noInitialization: true, noExit: true });
       const accepted = await start(f);
-      f.adapter.toolRequest(f.iid, 'card');
+      f.adapter.toolRequest(f.iid, 'card', kind === 'question_answer' ? 'AskUserQuestion' : 'Bash');
       initialize(f, { remote_control_auto_enable: true });
       assert.equal(f.core.lookup(accepted.request_key).stage, 'gate_close_sent');
-      const reply = () => f.core.submit(f.req(kind, { target_tool_use_id: 'card' }));
+      const reply = () => f.core.submit(f.req(kind, { target_tool_use_id: 'card', body: kind === 'question_answer' ? { answer: 'yes' } : { behavior: 'allow' } }));
       assert.equal(reply().reason, 'gate_pending');
       assert.equal(f.state().tool_requests[0].state, 'pending');
       f.advance(pin.closeWaitMs); f.core.tick();
@@ -81,7 +81,7 @@ for (const async of [false, true]) {
     await start(f);
     assert.equal(f.state().tool_requests.length, 1);
     assert.equal(f.state().tool_requests[0].state, 'pending');
-    assert.equal(f.core.submit(f.req('tool_decision', { target_tool_use_id: 'early-card' })).reason, 'gate_pending');
+    assert.equal(f.core.submit(f.req('tool_decision', { target_tool_use_id: 'early-card', body: { behavior: 'allow' } })).reason, 'gate_pending');
     initialize(f, { current_permission_mode: 'plan' });
     assert.equal(f.state().tool_requests[0].state, 'expired');
     assert.equal(f.adapter.log.decisions.length, 0);

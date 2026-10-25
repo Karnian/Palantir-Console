@@ -99,8 +99,8 @@ test('R2-07 multiple tool effect barriers clear only their own cause and release
   const f = fixture(t, { manualTools: true }); f.start(); const decide = f.adapter.decide;
   f.adapter.decide = (...args) => { decide(...args); throw new Error('ambiguous_decision'); };
   f.adapter.toolRequest(f.iid, 'a'); f.adapter.toolRequest(f.iid, 'b');
-  const a = f.core.submit(f.req('tool_decision', { target_tool_use_id: 'a' }));
-  const b = f.core.submit(f.req('tool_decision', { target_tool_use_id: 'b' }));
+  const a = f.core.submit(f.req('tool_decision', { target_tool_use_id: 'a', body: { behavior: 'allow' } }));
+  const b = f.core.submit(f.req('tool_decision', { target_tool_use_id: 'b', body: { behavior: 'allow' } }));
   assert.equal(a.state, 'unknown'); assert.equal(b.state, 'unknown');
   f.adapter.emit(f.iid, 'tool_result', { tool_use_id: 'other', is_error: false, content: 'ok' });
   assert.equal(f.state().incarnations[0].attribution_uncertain, 2);
@@ -119,7 +119,7 @@ test('R2-07 unrelated unknown prompt cannot clear another delivery barrier', t =
   const p = f.prompt(); assert.equal(p.state, 'unknown');
   f.adapter.toolRequest(f.iid, 'a'); const decide = f.adapter.decide;
   f.adapter.decide = (...args) => { decide(...args); throw new Error('ambiguous_decision'); };
-  f.core.submit(f.req('tool_decision', { target_tool_use_id: 'a' }));
+  f.core.submit(f.req('tool_decision', { target_tool_use_id: 'a', body: { behavior: 'allow' } }));
   f.adapter.emit(f.iid, 'lifecycle', { command_uuid: p.message_uuid, state: 'queued' });
   assert.equal(f.state().incarnations.at(-1).attribution_uncertain, 2);
   f.adapter.emit(f.iid, 'tool_result', { tool_use_id: 'a', is_error: false, content: 'ok' });
@@ -130,7 +130,7 @@ test('R2-07 resolving temporary cause never clears permanent survivor barrier', 
   const f = fixture(t, { manualTools: true, noReceipt: true }); f.start();
   f.adapter.toolRequest(f.iid, 'a'); const decide = f.adapter.decide;
   f.adapter.decide = (...args) => { decide(...args); throw new Error('ambiguous_decision'); };
-  const a = f.core.submit(f.req('tool_decision', { target_tool_use_id: 'a' }));
+  const a = f.core.submit(f.req('tool_decision', { target_tool_use_id: 'a', body: { behavior: 'allow' } }));
   const interrupt = f.core.submit(f.req('interrupt'));
   f.adapter.emit(f.iid, 'interrupt_receipt', { interrupt_id: interrupt.id, still_queued: ['survivor'] });
   f.adapter.emit(f.iid, 'tool_result', { tool_use_id: 'a', is_error: false, content: 'ok' });

@@ -4,6 +4,7 @@ const { randomUUID, createHash } = require('node:crypto');
 const path = require('node:path');
 const childProcess = require('node:child_process');
 const pin = require('./pin');
+const { validateDecision } = require('./decisionValidation');
 const { assertSpawnAllowed } = require('../utils/spawnGuard');
 const { checkSpawnOptionsSync } = require('./argvCheck');
 const { buildChildEnv, assertChildEnv } = require('./spawnEnv');
@@ -262,25 +263,21 @@ function createSdkAdapter({ sdk, executablePath = bundledExecutable(), executabl
     },
     decide(id, toolUseId, decision) {
       const row = requireChild(id), pending = row.pending.get(toolUseId);
-      if (!pending || row.closed || row.exited) throw failure('tool_request_missing');
-      let result;
-      if (decision.behavior === 'allow') result = { behavior: 'allow', updatedInput: pending.input };
-      else if (decision.behavior === 'deny') result = { behavior: 'deny', message: decision.message };
-      else if (decision.behavior === 'answer') {
-        const answer = decision.answer, questions = pending.input.questions;
-        if (!Array.isArray(questions) || typeof answer === 'string' && questions.length !== 1) {
-          throw failure('invalid_decision');
-        }
-        const answers = typeof answer === 'string' ? { [questions[0].question]: answer } : answer;
-        if (!answers || typeof answers !== 'object' || Array.isArray(answers) ||
-            !Object.values(answers).every(value => typeof value === 'string' && value.trim().length > 0)) {
-          throw failure('invalid_decision');
-        }
-        const keys = Object.keys(answers), expected = new Set(questions.map(question => question.question));
-        if (keys.length !== expected.size || keys.some(key => !expected.has(key))) throw failure('invalid_decision');
-        result = { behavior: 'allow', updatedInput: { ...pending.input, answers } };
-      } else throw failure('invalid_decision');
-      pending.settle(result);
+      if (!pending) throw failure('tool_request_missing');
+      try {
+        if (row.closed || row.exited) throw failure('tool_request_missing');
+        testHooks.beforeDecide?.({ id, toolUseId, decision });
+        const validation = validateDecision(pending.input, decision);
+        if (!validation.ok) throw failure('invalid_decision');
+        let result;
+        if (decision.behavior === 'allow') result = { behavior: 'allow', updatedInput: pending.input };
+        else if (decision.behavior === 'deny') result = { behavior: 'deny', message: decision.message };
+        else result = { behavior: 'allow', updatedInput: { ...pending.input, answers: validation.answers } };
+        pending.settle(result);
+      } catch {
+        pending.settle({ behavior: 'deny', message: 'invalid_decision' });
+        throw failure('invalid_decision');
+      }
     },
     interrupt(id, interruptId) {
       const row = requireChild(id);

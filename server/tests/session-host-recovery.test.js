@@ -22,13 +22,13 @@ for (const point of ['after_sending_commit', 'after_effect_before_written', 'bef
 
 test('§8.1 decided commit crash preserves decided card and refuses second answer', t => {
   const f = fixture(t); f.start(); f.adapter.toolRequest(f.iid, 'baseline');
-  f.core.submit(f.req('tool_decision', { target_tool_use_id: 'baseline' }));
+  f.core.submit(f.req('tool_decision', { target_tool_use_id: 'baseline', body: { behavior: 'allow' } }));
   f.adapter.toolRequest(f.iid, 'crash'); f.faults.arm('after_decided_commit');
-  assert.throws(() => f.core.submit(f.req('tool_decision', { target_tool_use_id: 'crash' })), SimulatedCrash);
+  assert.throws(() => f.core.submit(f.req('tool_decision', { target_tool_use_id: 'crash', body: { behavior: 'allow' } })), SimulatedCrash);
   f.reboot().recover();
   assert.equal(f.state().tool_requests.find(t => t.tool_use_id === 'crash').state, 'decided');
   assert.equal(f.state().deliveries.find(d => d.target_tool_use_id === 'crash').state, 'unknown');
-  assert.equal(f.core.submit(f.req('tool_decision', { target_tool_use_id: 'crash' })).state, 'rejected');
+  assert.equal(f.core.submit(f.req('tool_decision', { target_tool_use_id: 'crash', body: { behavior: 'allow' } })).state, 'rejected');
   assert.equal(f.adapter.log.decisions.length, 1);
 });
 
@@ -67,7 +67,7 @@ test('§3.3 spawn identity gap query failure is liveness_unknown, never a second
 });
 
 test('§8.1 observed tool decision remains observed on recovery without prompt outcome', t => {
-  const f = fixture(t); f.start(); f.adapter.toolRequest(f.iid, 't'); const d = f.core.submit(f.req('tool_decision', { target_tool_use_id: 't' }));
+  const f = fixture(t); f.start(); f.adapter.toolRequest(f.iid, 't'); const d = f.core.submit(f.req('tool_decision', { target_tool_use_id: 't', body: { behavior: 'allow' } }));
   f.reboot().recover(); assert.equal(f.d(d.id).state, 'provider_observed'); assert.equal(f.d(d.id).outcome, null); assert.equal(f.adapter.log.executions.length, 1);
 });
 

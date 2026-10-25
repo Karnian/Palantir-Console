@@ -5,18 +5,18 @@ const { fixture } = require('./helpers/session-host-fixture');
 
 test('§8.1 interrupt before decision cancels card; provider resolve spy excludes second decision', t => {
   const f = fixture(t); f.start(); f.adapter.toolRequest(f.iid, 'first');
-  f.core.submit(f.req('tool_decision', { target_tool_use_id: 'first' }));
+  f.core.submit(f.req('tool_decision', { target_tool_use_id: 'first', body: { behavior: 'allow' } }));
   assert.equal(f.adapter.log.decisions.length, 1);
   f.adapter.toolRequest(f.iid, 'second'); f.core.submit(f.req('interrupt'));
-  assert.equal(f.core.submit(f.req('tool_decision', { target_tool_use_id: 'second' })).state, 'rejected');
+  assert.equal(f.core.submit(f.req('tool_decision', { target_tool_use_id: 'second', body: { behavior: 'allow' } })).state, 'rejected');
   assert.equal(f.adapter.log.decisions.length, 1); assert.equal(f.state().tool_requests.find(x => x.tool_use_id === 'second').state, 'cancelled');
 });
 
 test('§8.1 same-tick signal abort invalidates pre-effect decision and cannot cancel post-effect state', t => {
   const f = fixture(t, { manualTools: true }); f.start(); f.adapter.toolRequest(f.iid, 'ok');
-  const ok = f.core.submit(f.req('tool_decision', { target_tool_use_id: 'ok' })); assert.equal(f.adapter.log.decisions.length, 1);
+  const ok = f.core.submit(f.req('tool_decision', { target_tool_use_id: 'ok', body: { behavior: 'allow' } })); assert.equal(f.adapter.log.decisions.length, 1);
   const a = f.adapter.toolRequest(f.iid, 'abort'); a.abort();
-  assert.equal(f.core.submit(f.req('tool_decision', { target_tool_use_id: 'abort' })).state, 'rejected');
+  assert.equal(f.core.submit(f.req('tool_decision', { target_tool_use_id: 'abort', body: { behavior: 'allow' } })).state, 'rejected');
   assert.equal(f.adapter.log.decisions.length, 1);
   f.adapter.emit(f.iid, 'signal_abort', { tool_use_id: 'ok' }); assert.equal(f.d(ok.id).state, 'written');
   f.adapter.emit(f.iid, 'tool_result', { tool_use_id: 'ok', is_error: false, content: 'ok' });
@@ -58,9 +58,9 @@ test('§5-5 absent receipt unknown clears only on target generation result; dupl
 
 test('§8.1 interrupt after allow makes only that decision unknown; next turn positive allow observed', t => {
   const f = fixture(t, { manualTools: true }); f.start(); f.prompt(); f.adapter.toolRequest(f.iid, 'a');
-  const a = f.core.submit(f.req('tool_decision', { target_tool_use_id: 'a' })); f.core.submit(f.req('interrupt'));
+  const a = f.core.submit(f.req('tool_decision', { target_tool_use_id: 'a', body: { behavior: 'allow' } })); f.core.submit(f.req('interrupt'));
   f.adapter.emit(f.iid, 'tool_result', { tool_use_id: 'a', is_error: false, content: 'ok' }); assert.equal(f.d(a.id).state, 'unknown');
-  f.prompt(); f.adapter.toolRequest(f.iid, 'b'); const b = f.core.submit(f.req('tool_decision', { target_tool_use_id: 'b' }));
+  f.prompt(); f.adapter.toolRequest(f.iid, 'b'); const b = f.core.submit(f.req('tool_decision', { target_tool_use_id: 'b', body: { behavior: 'allow' } }));
   f.adapter.emit(f.iid, 'tool_result', { tool_use_id: 'b', is_error: false, content: 'ok' }); assert.equal(f.d(b.id).state, 'provider_observed');
   assert.equal(f.adapter.log.executions.length, 2);
 });

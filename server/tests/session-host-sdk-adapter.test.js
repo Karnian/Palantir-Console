@@ -611,9 +611,11 @@ for (const answer of [{}, { 'Which?': 'A' }, { 'Which?': 'A', 'Why?': 'B', Extra
     const tool = await f.pendingTool();
     assert.throws(() => f.adapter.decide(f.iid, tool.tool_use_id, { behavior: 'answer', answer }), { code: 'invalid_decision' });
     assert.equal(f.log().filter(row => row.type === 'tool').length, 0);
-    f.adapter.decide(f.iid, tool.tool_use_id, { behavior: 'answer', answer: { 'Which?': 'A', 'Why?': 'B' } });
     await f.completed(prompt);
-    assert.equal(f.log().filter(row => row.type === 'tool').length, 1);
+    assert.equal(f.log().filter(row => row.type === 'tool_response').length, 1);
+    assert.equal(f.log().filter(row => row.type === 'tool').length, 0);
+    assert.throws(() => f.adapter.decide(f.iid, tool.tool_use_id, { behavior: 'answer',
+      answer: { 'Which?': 'A', 'Why?': 'B' } }), { code: 'tool_request_missing' });
   });
 }
 
@@ -1050,3 +1052,68 @@ check('R4 missing fake configuration initializes SDK session with defaults', asy
   assert.equal((await f.start()).state, 'done');
   assert.ok(f.log().some(row => row.type === 'initialize'));
 });
+
+check('R5 invalid question key preserves pending card and zero responses; corrected answer completes', async (t, sdk) => {
+  const f = await fixture(t, sdk, { contentArray: true }); await f.start();
+  const prompt = f.prompt('question'); const tool = await f.pendingTool();
+  const before = f.state().deliveries.length;
+  const request = f.req('question_answer', { target_tool_use_id: tool.tool_use_id, body: { answer: { Choice: 'A' } } });
+  const rejected = f.core.submit(request);
+  assert.equal(rejected.state, 'rejected'); assert.equal(rejected.reason, 'invalid_answer');
+  assert.equal(f.state().deliveries.length, before);
+  assert.equal(f.state().tool_requests[0].state, 'pending');
+  assert.equal(f.log().filter(row => row.type === 'tool_response').length, 0);
+  // Only the answer field changes; the same key and card remain usable.
+  const accepted = f.core.submit({ ...request, body: { answer: 'A' } });
+  await f.completed(prompt);
+  assert.equal(f.d(accepted).state, 'provider_observed');
+  assert.equal(f.log().filter(row => row.type === 'tool').length, 1);
+});
+
+for (const count of [1, 2]) check('R5 string answer requires exactly one question count=' + count, async (t, sdk) => {
+  const f = await fixture(t, sdk, { questionCount: count, contentArray: true }); await f.start();
+  const prompt = f.prompt('question'); const tool = await f.pendingTool();
+  const before = f.state().deliveries.length;
+  const answer = f.core.submit(f.req('question_answer', { target_tool_use_id: tool.tool_use_id, body: { answer: 'A' } }));
+  if (count === 1) {
+    await f.completed(prompt); assert.equal(f.d(answer).state, 'provider_observed');
+  } else {
+    assert.equal(answer.state, 'rejected'); assert.equal(answer.reason, 'invalid_answer');
+    assert.equal(f.state().deliveries.length, before); assert.equal(f.state().tool_requests[0].state, 'pending');
+    assert.equal(f.log().filter(row => row.type === 'tool_response').length, 0);
+    f.core.submit(f.req('question_answer', { target_tool_use_id: tool.tool_use_id, body: { answer: { 'Which?': 'A', 'Why?': 'B' } } }));
+    await f.completed(prompt);
+  }
+});
+
+for (const force of [false, true]) check('R5 decide failure settles SDK promise with deny force=' + force, async (t, sdk) => {
+  const f = await fixture(t, sdk, {}, { testHooks: { beforeDecide() { if (force) throw Error('forced_decide_failure'); } } });
+  await f.start(); const prompt = f.prompt('tool'); const tool = await f.pendingTool();
+  const decision = f.core.submit(f.req('tool_decision', { target_tool_use_id: tool.tool_use_id, body: { behavior: 'allow' } }));
+  await f.completed(prompt);
+  if (force) {
+    assert.equal(f.d(decision).state, 'unknown'); assert.equal(f.d(decision).reason, 'effect_failed');
+    const response = f.log().find(row => row.type === 'tool_response');
+    assert.equal(response.behavior, 'deny'); assert.equal(response.message, 'invalid_decision');
+    assert.equal(f.log().filter(row => row.type === 'tool').length, 0);
+    assert.equal(f.core.idle(f.sid), true);
+    assert.equal(f.state().incarnations.at(-1).attribution_uncertain, 0);
+    await f.completed(f.prompt('after failed decision'));
+  } else {
+    assert.equal(f.d(decision).state, 'provider_observed'); assert.equal(f.log().filter(row => row.type === 'tool').length, 1);
+  }
+});
+
+for (const body of [{ behavior: 'invalid' }, { behavior: 'allow', message: 3 }]) {
+  check('R5 invalid tool decision preserves pending card ' + JSON.stringify(body), async (t, sdk) => {
+    const f = await fixture(t, sdk); await f.start(); const prompt = f.prompt('tool'); const tool = await f.pendingTool();
+    const before = f.state().deliveries.length;
+    const request = f.req('tool_decision', { target_tool_use_id: tool.tool_use_id, body });
+    const rejected = f.core.submit(request);
+    assert.equal(rejected.state, 'rejected'); assert.equal(rejected.reason, 'invalid_decision');
+    assert.equal(f.state().tool_requests[0].state, 'pending'); assert.equal(f.state().deliveries.length, before);
+    assert.equal(f.log().filter(row => row.type === 'tool_response').length, 0);
+    const accepted = f.core.submit({ ...request, body: { ...body, ...(body.behavior === 'invalid' ? { behavior: 'allow' } : { message: 'ok' }) } });
+    await f.completed(prompt); assert.equal(f.d(accepted).state, 'provider_observed');
+  });
+}

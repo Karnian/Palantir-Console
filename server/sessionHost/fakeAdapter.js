@@ -237,7 +237,8 @@ function createFakeAdapter(options = {}) {
       options.identityProbe?.exit(incarnationId);
       emit(incarnationId, 'child_exit');
     },
-    toolRequest(incarnationId, toolUseId, name = 'Bash', input = {}) {
+    toolRequest(incarnationId, toolUseId, name = 'Bash', input = name === 'AskUserQuestion' ?
+      { questions: [{ question: 'Which?' }] } : {}) {
       const controller = new AbortController();
       toolSignals.set(`${incarnationId}:${toolUseId}`, controller.signal);
       emit(incarnationId, 'tool_request', {

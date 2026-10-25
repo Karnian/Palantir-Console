@@ -156,7 +156,7 @@ test('HTTP real SDK socket failure preserves pending last-known; identical previ
       if (action) {
         const pending = await poll(async () => (await server.call('/' + id)).body.state.tool_requests.find(row => row.state === 'pending'));
         const body = { request_key: key(), incarnation_id, ...(action !== 'interrupt' ? { tool_use_id: pending.tool_use_id } : {}),
-          ...(action === 'tool-decision' ? { behavior: 'allow' } : {}), ...(action === 'question-answer' ? { answer: { Choice: 'A' } } : {}) };
+          ...(action === 'tool-decision' ? { behavior: 'allow' } : {}), ...(action === 'question-answer' ? { answer: { [JSON.parse(pending.input).questions[0].question]: 'A' } } : {}) };
         await send('/' + id + '/' + action, body);
       }
       await settledPrompt(server, prompt.request_key);

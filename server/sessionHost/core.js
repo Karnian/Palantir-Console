@@ -2,6 +2,7 @@
 
 const { randomUUID, createHash } = require('node:crypto');
 const authGate = require('./authGate');
+const { validateDecision } = require('./decisionValidation');
 const pin = require('./pin');
 const { openStore } = require('./store');
 const { SimulatedCrash } = require('./faults');
@@ -1014,6 +1015,17 @@ function createHostCore({
         if (!reason && (session.state !== 'active' || !incarnation || request.incarnation_id !== incarnation.id)) {
           reason = 'incarnation_mismatch';
         }
+        if (!reason && ['question_answer', 'tool_decision'].includes(request.kind)) {
+          const tool = getRow('SELECT * FROM tool_requests WHERE incarnation_id=? AND tool_use_id=?',
+            incarnation.id, request.target_tool_use_id || null);
+          const decision = request.kind === 'question_answer' ?
+            { behavior: 'answer', answer: request.body?.answer ?? request.body } : request.body;
+          // Validate before creating a delivery or consuming the pending card.
+          if (tool?.state === 'pending' && !validateDecision(JSON.parse(tool.input), decision, request.kind).ok) {
+            result = { state: 'rejected', reason: request.kind === 'question_answer' ? 'invalid_answer' : 'invalid_decision' };
+            return;
+          }
+        }
         if (!reason && request.kind === 'interrupt') {
           for (const [id, token] of rechecks) {
             const queued = getDelivery(id);
@@ -1235,7 +1247,8 @@ function createHostCore({
           const observed = isToolDecisionObserved(delivery, decision, adapterEvent);
           transitionDelivery(delivery, ['sending', 'written', 'unknown'], {
             state: observed ? 'provider_observed' : 'unknown',
-            reason: getToolResultReason(observed, adapterEvent)
+            reason: delivery.reason === 'effect_failed' && adapterEvent.is_error && adapterEvent.content === 'invalid_decision' ?
+              'effect_failed' : getToolResultReason(observed, adapterEvent)
           });
           // This exact tool has finished, so an ambiguous call cannot execute later.
           resolveAttributionCause(delivery);

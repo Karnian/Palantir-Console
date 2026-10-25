@@ -159,3 +159,15 @@ test('held lock diagnosis returns only pid and projected identity facts', t => {
   const status = lockStatus(h.f.dir, { readStartTime: () => ({ status: 'ok', startedAt: 'known-birth', env: 'PRIVATE' }) });
   assert.deepEqual(status, { held: true, pid: process.pid, identity: { status: 'ok', startedAt: 'known-birth' } });
 });
+
+test('R5 invalid answer is a definitive rejected receipt and can be corrected on the same pending card', async t => {
+  const h = bridge(t); h.f.start();
+  h.f.adapter.toolRequest(h.f.iid, 'question', 'AskUserQuestion', { questions: [{ question: 'Which?' }] });
+  const request = { kind: 'question_answer', request_key: h.f.key(), session_id: h.f.sid, incarnation_id: h.f.iid,
+    target_tool_use_id: 'question', body: { answer: { Choice: 'A' } } };
+  const invalid = await h.service.submit(request);
+  assert.equal(invalid.acceptance, 'rejected'); assert.equal(invalid.code, 'invalid_answer');
+  assert.equal(h.f.state().tool_requests[0].state, 'pending');
+  assert.equal((await h.service.submit({ ...request, body: { answer: 'A' } })).acceptance, 'accepted');
+  assert.equal(h.f.adapter.log.decisions.length, 1);
+});

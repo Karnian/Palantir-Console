@@ -159,7 +159,7 @@ function createOwnedSessionService({ runtimeDir = path.resolve(process.cwd(), 'r
     } catch (error) {
       if (error.message === 'acceptance_unknown' && request.kind === 'delete') purgeSession(request.session_id);
       if (error.message === 'acceptance_unknown') return { acceptance: 'acceptance_unknown', request_key: request.request_key };
-      const codes = new Set(['invalid_request', 'key_expired', 'key_future', 'fingerprint_conflict', 'not_accepted']);
+      const codes = new Set(['invalid_request', 'key_expired', 'key_future', 'fingerprint_conflict', 'not_accepted', 'invalid_answer', 'invalid_decision']);
       if (codes.has(error.code || error.message)) return { acceptance: 'rejected', request_key: request.request_key,
         code: error.code || error.message };
       throw failure('host_unreachable', 503);

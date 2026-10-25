@@ -64,7 +64,7 @@ test('§8.1 wrong correlation IDs cannot observe prompt or tool decision', t => 
   assert.equal(f.d(d.id).state, 'written');
   f.adapter.emit(f.iid, 'lifecycle', { command_uuid: d.message_uuid, state: 'queued' });
   assert.equal(f.d(d.id).state, 'provider_observed');
-  f.adapter.toolRequest(f.iid, 't'); const a = f.core.submit(f.req('tool_decision', { target_tool_use_id: 't' }));
+  f.adapter.toolRequest(f.iid, 't'); const a = f.core.submit(f.req('tool_decision', { target_tool_use_id: 't', body: { behavior: 'allow' } }));
   f.adapter.emit(f.iid, 'tool_result', { tool_use_id: 'other', content: 'ok', is_error: false }); assert.equal(f.d(a.id).state, 'written');
   f.adapter.emit(f.iid, 'tool_result', { tool_use_id: 't', content: 'ok', is_error: false }); assert.equal(f.d(a.id).state, 'provider_observed');
 });
@@ -79,11 +79,11 @@ test('§8.1 merged result attribution is zero and blocks next input permanently 
 
 for (const error of [false, true]) test(`§8.1 allowed tool ${error ? 'natural error is unknown' : 'positive result is observed'}`, t => {
   const f = fixture(t, { toolError: error }); f.start(); f.adapter.toolRequest(f.iid, 't');
-  const d = f.core.submit(f.req('tool_decision', { target_tool_use_id: 't' }));
+  const d = f.core.submit(f.req('tool_decision', { target_tool_use_id: 't', body: { behavior: 'allow' } }));
   assert.equal(d.state, error ? 'unknown' : 'provider_observed');
   if (error) assert.equal(d.reason, 'tool_finished_error');
   assert.equal(f.adapter.log.executions.length, 1);
-  assert.equal(f.core.submit(f.req('tool_decision', { target_tool_use_id: 't' })).state, 'rejected');
+  assert.equal(f.core.submit(f.req('tool_decision', { target_tool_use_id: 't', body: { behavior: 'allow' } })).state, 'rejected');
   assert.equal(f.adapter.log.executions.length, 1);
 });
 

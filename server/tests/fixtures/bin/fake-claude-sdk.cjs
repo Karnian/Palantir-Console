@@ -176,7 +176,7 @@ lines.on('line', line => {
     const expectedInput = entry.tool === 'AskUserQuestion' ?
       { ...entry.input, answers: decision?.updatedInput?.answers } : entry.input;
     const inputMatch = JSON.stringify(decision?.updatedInput) === JSON.stringify(expectedInput);
-    log({ type: 'tool_response', tool_use_id: entry.toolUseId, updatedInput: decision?.updatedInput, inputMatch });
+    log({ type: 'tool_response', tool_use_id: entry.toolUseId, behavior: decision?.behavior, message: decision?.message, updatedInput: decision?.updatedInput, inputMatch });
     if (allowDecision && !inputMatch) log({ type: 'input_mismatch', tool_use_id: entry.toolUseId });
     const allowed = allowDecision && inputMatch;
     if (allowed) log({ type: 'tool', tool_use_id: entry.toolUseId,

@@ -116,13 +116,13 @@ test('R1-09-17 error subtype is retained with errored prompt outcome', t => {
 
 test('R1-10 finished tool error unknown has no attribution barrier; resultless decision recovery stays unknown', t => {
   const f = fixture(t, { toolError: true }); f.start(); f.adapter.toolRequest(f.iid, 'done');
-  const done = f.core.submit(f.req('tool_decision', { target_tool_use_id: 'done' }));
+  const done = f.core.submit(f.req('tool_decision', { target_tool_use_id: 'done', body: { behavior: 'allow' } }));
   assert.equal(done.state, 'unknown'); assert.equal(f.state().incarnations[0].attribution_uncertain, 0);
   assert.equal(f.prompt().state, 'completed'); assert.equal(f.adapter.log.executions.length, 1);
   f.adapter.options.manualTools = true; f.adapter.toolRequest(f.iid, 'pending');
-  const pending = f.core.submit(f.req('tool_decision', { target_tool_use_id: 'pending' }));
+  const pending = f.core.submit(f.req('tool_decision', { target_tool_use_id: 'pending', body: { behavior: 'allow' } }));
   f.reboot().recover(); assert.equal(f.d(pending.id).state, 'unknown');
-  assert.equal(f.core.submit(f.req('tool_decision', { target_tool_use_id: 'pending' })).state, 'rejected');
+  assert.equal(f.core.submit(f.req('tool_decision', { target_tool_use_id: 'pending', body: { behavior: 'allow' } })).state, 'rejected');
   assert.equal(f.adapter.log.executions.length, 2);
 });
 
@@ -138,10 +138,10 @@ test('R1-11 updated by R2-04: missing capability and lifecycle closes on result,
 
 test('R1-12 abort at after_sending_commit cancels delivery with zero decide for that card', t => {
   const f = fixture(t); f.start(); f.adapter.toolRequest(f.iid, 'baseline');
-  f.core.submit(f.req('tool_decision', { target_tool_use_id: 'baseline' }));
+  f.core.submit(f.req('tool_decision', { target_tool_use_id: 'baseline', body: { behavior: 'allow' } }));
   const ac = f.adapter.toolRequest(f.iid, 'abort'); const old = f.faults.hit.bind(f.faults);
   f.faults.hit = point => { old(point); if (point === 'after_sending_commit') ac.abort(); };
-  const d = f.core.submit(f.req('tool_decision', { target_tool_use_id: 'abort' }));
+  const d = f.core.submit(f.req('tool_decision', { target_tool_use_id: 'abort', body: { behavior: 'allow' } }));
   assert.equal(d.state, 'cancelled'); assert.equal(f.adapter.log.decisions.length, 1);
   assert.equal(f.adapter.log.decisions.some(x => x.tool_use_id === 'abort'), false);
 });

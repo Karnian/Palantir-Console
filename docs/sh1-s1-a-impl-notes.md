@@ -1852,3 +1852,102 @@ DB 쓰기 실패 뒤 추가 효과 0의 기존 단언은 유지했다.
 - `R2 real ps ignores unrelated multiline argv while identifying a marked child` — `actual: 'query_failed', expected: 'ok'`
 - `real ps identifies marked child and grandchild then confirms exit` — `actual: 'query_failed', expected: 'ok'`
 - `SDK real ps identity reads actual child and inherited grandchild marker then mismatch` — `spawnSync /bin/ps EPERM`
+
+
+## S1-c1 라운드 5 — 잘못된 질문 답의 접수 거부와 decide 실패 정리
+
+실제 Claude·LLM·동봉 실행 파일·외부 네트워크 호출 및 git 조작은 0이다.
+실제 SDK 검증에는 기존 테스트 전용 가짜 실행 파일만 사용했다.
+
+### 수정 전 실패 증거
+
+제품 수정 전에 SDK 경계의 R5 테스트 7개를 추가했다.
+`PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test --test-name-pattern='R5 ' server/tests/session-host-sdk-adapter.test.js`
+→ tests 7, pass 2, fail 5.
+정상 단일 질문 문자열 답과 정상 allow 대조는 통과했고,
+잘못된 질문 키·두 질문에 문자열 답·decide 실패 정리·잘못된 behavior·잘못된 message 검사가 실패했다.
+잘못된 질문 답은 rejected/invalid_answer 대신 카드를 소비한 결과로 나왔다.
+이 실패 로그는 /tmp/sh1-r5-before.log에 남겼다.
+
+### 공유 검증과 접수 순서
+
+decisionValidation.js의 validateDecision 하나를 코어와 SDK 어댑터가 공유한다.
+question_answer는 저장된 tool_requests.input.questions로 검증한다.
+문자열 답은 질문이 정확히 하나이고 답이 비어 있지 않을 때만 허용한다.
+사전 답은 질문 텍스트의 키 집합과 정확히 같아야 하며 모든 값이 공백뿐이지 않은 문자열이어야 한다.
+배열·null·빈 답·잘못된 키·누락·추가 키·비문자열 값은 거부한다.
+tool_decision은 behavior가 allow/deny이고 선택적 message가 문자열인 경우만 허용한다.
+누락된 behavior나 answer behavior를 암묵적 allow로 바꾸지 않는다.
+
+코어 submit의 기존 키 조회·대상 검증 뒤, pending 카드의 검증을
+새 delivery 생성과 pending→decided보다 먼저 수행한다.
+실패는 비접수 rejected(invalid_answer/invalid_decision)이며 delivery·효과를 만들지 않는다.
+카드는 pending이고, 같은 request_key로 올바른 답을 다시 제출할 수 있다.
+브리지는 이 두 고정 코드를 definitive rejected로 반환하며 503으로 오인하지 않는다.
+
+가짜 어댑터의 기본 AskUserQuestion 카드에는 실제 질문 입력을 넣었다.
+기존 정상·gate·복구 테스트 중 생략했던 tool_decision body는 명시적 allow로 고쳤다.
+잘못된 입력 테스트의 단언을 약화하지 않고 정상 입력을 유효한 새 계약에 맞춘 것이다.
+
+### 어댑터의 최종 방어
+
+접수 뒤 SDK 쪽 상태 변경이나 내부 예외가 있어도 decide의 catch에서
+해당 pending Promise를 deny/invalid_decision으로 정리하고 invalid_decision을 던진다.
+사람이 허용하지 않은 도구를 실행하는 경로는 없다.
+코어 delivery는 unknown/effect_failed이고, 이 정리로 생긴 invalid_decision 오류 tool_result가
+그 원인을 tool_finished_error로 덮지 않도록 원인을 보존한다.
+기존 턴 종결·귀속 장벽 정리 규칙은 그대로 사용한다.
+강제 실패 테스트에서 가짜 provider의 deny 응답·tool 실행 0·턴 종결·idle·귀속 불명 해제와
+다음 prompt 완료를 확인했다.
+가짜 provider 응답 로그에 behavior·message를 추가해 어댑터 호출 횟수 대신 실제 wire 응답으로 검사한다.
+
+과거 R2의 어댑터 직접 호출 테스트는 이제 잘못된 직접 결정 뒤 deny로 턴이 끝나는 것을 검사한다.
+어댑터까지 도달한 실패 요청을 다시 allow로 바꾸지 않는다.
+사용자 재답변은 그 앞의 코어 접수 검증에서 pending 카드를 보존하는 경로다.
+
+### 질문 응답과 프로세스 테스트
+
+단일 질문은 잘못된 키 답에서 문자열 A로 answer 필드만 바꾼 대조로
+rejected/pending/응답 0 → observed/턴 종결을 검증했다.
+질문 수만 1→2로 바꾸면 같은 문자열 답이 거부되는 대조도 추가했다.
+유효한 사전 답의 기존 S1-e 관측 한계는 변경하지 않았다.
+두 질문의 유효한 사전 답은 SDK에 전달되고 턴은 끝나지만 기존 비교 규칙대로 unknown일 수 있다.
+
+HTTP 소켓 장애 테스트는 카드의 input을 파싱해 questions[0].question을 실제 응답 키로 사용한다.
+{Choice:A}처럼 header를 질문 텍스트로 잘못 쓰지 않는다.
+실제 HTTP/소켓 내부 단언은 이 샌드박스의 listen EPERM 때문에 macOS 재검증이 필요하다.
+
+### 라운드 5 최종 검증
+
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-*.test.js server/tests/owned-session*.test.js`
+  → tests 517, pass 494, fail 23, cancelled 0, skipped 0.
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test --test-name-pattern='R5 |R2 question rejects|B2a-R1-01' server/tests/session-host-sdk-adapter.test.js server/tests/session-host-decision-validation.test.js server/tests/owned-session-service.test.js server/tests/session-host-gate-flow-r1.test.js`
+  → tests 36, pass 36, fail 0.
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-hub-chat*.test.js server/tests/spawn-guard.test.js`
+  → tests 27, pass 27, fail 0.
+
+샌드박스에서 막힌 23개는 아래와 같다. macOS 호스트에서 내부 단언까지 재실행해야 한다.
+
+- `HTTP real SDK pending approval survives server SIGTERM with one provider tool effect` — `Error: listen EPERM: operation not permitted /private/tmp/owned-http-HmB99A/host.sock`
+- `HTTP real SDK pending approval survives server SIGKILL with one provider tool effect` — `Error: listen EPERM: operation not permitted /private/tmp/owned-http-T3GaKu/host.sock`
+- `HTTP real SDK socket failure preserves pending last-known; identical previously valid mutations all return 503` — `Error: listen EPERM: operation not permitted /private/tmp/owned-http-XwAdss/host.sock`
+- `process bridge replacement preserves pending approval; shutdown leaves fake host alive and decision effect once` — `Error: listen EPERM: operation not permitted /private/tmp/owned-x6KIbI/host.sock`
+- `process accepted-before-reply crash remains unknown; boot change lookup and same key retry cause one start effect` — `Error: listen EPERM: operation not permitted /private/tmp/owned-GzU8n7/host.sock`
+- `process broken socket exposes stale snapshot and lock pid only; all valid changes fail closed` — `Error: listen EPERM: operation not permitted /private/tmp/owned-y3WeN7/host.sock`
+- `X simultaneous hosts preserve winner socket inode and capability` — `spawnSync /bin/ps EPERM`
+- `X lock does not survive in a live inherited-environment child` — `spawnSync /bin/ps EPERM`
+- `X detached host survives launcher parent SIGKILL` — `spawnSync /bin/ps EPERM`
+- `X detached host survives launcher parent SIGTERM` — `spawnSync /bin/ps EPERM`
+- `X detached host survives launcher parent SIGHUP` — `spawnSync /bin/ps EPERM`
+- `X before accepted crash is reconciled by lookup after boot change, effect occurs once` — `spawnSync /bin/ps EPERM`
+- `X idle drain refuses arrival with not_accepted, new host retries exactly once` — `spawnSync /bin/ps EPERM`
+- `X active ownership prevents idle and SIGTERM exit; zero ownership releases socket and lock` — `spawnSync /bin/ps EPERM`
+- `X private file modes, capability absent from argv and env, launcher sanitizes env` — `host_start_timeout`
+- `X SIGTERM with zero ownership exits cleanly and releases exclusion` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous throw, active ownership=false` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous throw, active ownership=true` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous rejection, active ownership=false` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous rejection, active ownership=true` — `spawnSync /bin/ps EPERM`
+- `R2 real ps ignores unrelated multiline argv while identifying a marked child` — `actual: 'query_failed', expected: 'ok'`
+- `real ps identifies marked child and grandchild then confirms exit` — `actual: 'query_failed', expected: 'ok'`
+- `SDK real ps identity reads actual child and inherited grandchild marker then mismatch` — `spawnSync /bin/ps EPERM`
