@@ -88,9 +88,14 @@ function createSdkAdapter({ sdk, executablePath = bundledExecutable(), executabl
   }
   function translate(id, message) {
     // SDK stream messages are data; omit runtime objects before persistence.
-    const raw = JSON.parse(JSON.stringify(message, (_key, value) =>
-      typeof value === 'function' || typeof value === 'symbol' ||
-      value instanceof AbortSignal ? undefined : value));
+    let raw;
+    try {
+      raw = JSON.parse(JSON.stringify(message, (_key, value) =>
+        typeof value === 'function' || typeof value === 'symbol' ||
+        value instanceof AbortSignal ? undefined : value));
+    } catch {
+      raw = { type: message.type, serialization_failed: true };
+    }
     emit(id, 'sdk_message', { message: raw });
     if (message.type === 'system' && message.subtype === 'init') {
       emit(id, 'system_init', { capabilities: message.capabilities, apiKeySource: message.apiKeySource });

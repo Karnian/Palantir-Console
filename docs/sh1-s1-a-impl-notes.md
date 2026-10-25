@@ -1568,3 +1568,102 @@ hello·durable submit·접수 미확인·reconcile 동작은 그대로다.
 - `R2 real ps ignores unrelated multiline argv while identifying a marked child` — `actual: 'query_failed', expected: 'ok'`
 - `real ps identifies marked child and grandchild then confirms exit` — `actual: 'query_failed', expected: 'ok'`
 - `SDK real ps identity reads actual child and inherited grandchild marker then mismatch` — `spawnSync /bin/ps EPERM`
+
+
+## S1-c1 라운드 2 — 서버 서비스·라우트
+
+앞 절의 서버 서비스·라우트 미구현 항목을 이번 라운드에서 연결했다.
+실제 Claude·LLM·동봉 실행 파일·네트워크 호출 및 git 조작은 0이다.
+실제 SDK 검증은 기존 테스트 전용 가짜 실행 파일을 사용한다.
+프로세스 통합 테스트는 별도 Node 호스트 + createFakeAdapter + 실제 Unix 소켓으로 구성했다.
+
+### 직렬화 실패 격리
+
+translate의 원문 JSON 복사를 try/catch로 감싸고 실패하면
+`{type: message.type, serialization_failed: true}`만 원문 메시지로 기록한다.
+기존 lifecycle·result 변환과 이후 스트림 처리는 계속된다.
+순환 참조와 BigInt 메시지를 정상 lifecycle·result 앞에 삽입하는 두 테스트를 추가했다.
+try/catch를 제거한 변이에서 tests 2, pass 0, fail 2를 확인한 뒤 제품 코드를 복구했다.
+
+### 서버 브리지
+
+runtime/session-host를 기본 경로로 사용하며 runtimeDir·client·launcher·진단·타이머·시계를 주입할 수 있다.
+읽기는 createClient.connect만 사용하고, 잠금 보유자 없음은 not_running이다.
+보유자가 있는데 연결되지 않으면 unreachable + current_state_known:false + as_of + last_known을 반환한다.
+캐시는 서버 메모리뿐이고 서버 DB에 원문을 복제하지 않는다.
+진단은 host.lock만 검사하며 host.db는 열지 않는다.
+SQLite 배타 잠금 때문에 잠금 파일을 읽을 수 없으면 커밋된 잠금 메타데이터의 메모리 복사에서 pid만 추출한다.
+신원 조회는 시작 시각 조회 결과만 투영한다. 실패는 query_failed로 닫는다.
+
+변경은 연결을 먼저 시도하고 잠금 보유자가 없을 때만 ensureHost를 호출한다.
+잠금 보유자가 응답하지 않으면 고정 host_unreachable/503으로 거부한다.
+동일 client를 유지하여 launcher가 추적하는 미확인 요청을 잃지 않고 boot 변경 때 reconcile/lookup한다.
+접수 응답은 acceptance:accepted/rejected/acceptance_unknown으로 구분한다.
+브라우저 request_key는 형식만 검사하고 재생성하지 않는다.
+지시·승인·질문·인터럽트의 재제출은 lookup의 기존 incarnation_id를 사용한다.
+새 요청은 호스트 snapshot의 최신 incarnation에 묶는다.
+
+cwd는 원래 입력의 절대 경로 여부, realpath, 디렉터리 존재, 로컬 노드 여부를 확인한다.
+재사용 가능한 기존 위험 경로 차단 함수는 찾지 못했다.
+CLAUDE.md의 기존 /etc·/var·/usr 차단 정책을 적용하고 기존 pathGuard.isWithinRoot로 정규 경로를 비교한다.
+시스템 디렉터리와 해당 디렉터리를 가리키는 symlink는 거부한다.
+
+SSE는 구독자마다 since를 보존하고 구독자가 있을 때만 주입 가능한 500ms 타이머로 events_since를 조회한다.
+snapshot 뒤 구독 전에 삽입한 원문 이벤트가 seq_high+1로 중계되는 것을 검사한다.
+보존 범위 밖은 resync, 연결 상실은 host_unreachable + 마지막 seq,
+재연결은 reconnected, boot 변경은 resync다.
+resync 뒤 구독자는 새 snapshot과 새 SSE 연결을 사용해야 한다.
+느린 HTTP 구독자의 버퍼가 2MiB를 넘으면 연결을 닫아 재생으로 복구하게 한다.
+shutdown은 SSE·타이머·client만 닫고 호스트 stop·자식 close·signal은 호출하지 않는다.
+
+### 라우트와 인증
+
+requireSessionHubCookie 본문을 공유 미들웨어로 이동하고 기존 라우터 export도 유지했다.
+새 라우트는 /api/owned-sessions이며 요청된 list·snapshot·lookup·stream·settings-preview·start와
+prompt·tool-decision·question-answer·interrupt·stop·resume·close·delete를 제공한다.
+handoff는 없다. 기존 public SSE 채널과 화면 파일은 변경하지 않았다.
+새 경로는 전역 JSON 파서를 건너뛰고 cookie·origin 검사 뒤 전용 크기 제한으로 파싱한다.
+라우트는 요청 필드를 허용 목록으로 투영하고 자유문 오류·socket capability·host env를 응답에 넣지 않는다.
+앱은 options.ownedSessionService를 주입할 수 있어 테스트에서 실제 호스트를 기동하지 않는다.
+app.shutdown은 이 서비스의 shutdown을 한 번 호출한다.
+
+### 남은 계약 확인
+
+삭제된 delivery의 tombstone에는 원래 incarnation_id가 없어 브라우저의 축약 요청으로
+원본 fingerprint를 재구성할 수 없다. 이 경우 재제출을 accepted로 우회하지 않는다.
+acceptance:rejected, code:session_deleted와 기존 tombstone 결과를 함께 반환하고 효과는 실행하지 않는다.
+lookup은 기존 결과를 제공한다. 원 패킷의 삭제 후 재시도를 accepted 기존 결과로 통일하려면
+원래 대상 incarnation의 요청 증거를 브라우저가 보존하는 API 계약 등을 후속 검토해야 한다.
+코어의 fingerprint·상태 기계·게이트 규칙은 변경하지 않았다.
+
+### 라운드 2 검증 결과
+
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-*.test.js server/tests/owned-session*.test.js`
+  → tests 476, pass 456, fail 20, cancelled 0, skipped 0.
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-hub-chat*.test.js server/tests/spawn-guard.test.js`
+  → tests 27, pass 27, fail 0.
+- 서비스·라우트 집중: tests 26, pass 26, fail 0. 직렬화 변이: tests 2, pass 0, fail 2.
+
+샌드박스에서 실패한 20개는 아래와 같다. 신규 실제 소켓 3개는 listen EPERM이며, 기존 17개는 ps·소켓 제한이다.
+이 목록은 통과를 대신하지 않으며 호스트 macOS 재실행이 필요하다.
+
+- `process bridge replacement preserves pending approval; shutdown leaves fake host alive and decision effect once` — `Error: listen EPERM: operation not permitted /private/tmp/owned-2p3LxI/host.sock`
+- `process accepted-before-reply crash remains unknown; boot change lookup and same key retry cause one start effect` — `Error: listen EPERM: operation not permitted /private/tmp/owned-gZN31i/host.sock`
+- `process broken socket exposes stale snapshot and lock pid only; all valid changes fail closed` — `Error: listen EPERM: operation not permitted /private/tmp/owned-Dgd5UN/host.sock`
+- `X simultaneous hosts preserve winner socket inode and capability` — `spawnSync /bin/ps EPERM`
+- `X lock does not survive in a live inherited-environment child` — `spawnSync /bin/ps EPERM`
+- `X detached host survives launcher parent SIGKILL` — `spawnSync /bin/ps EPERM`
+- `X detached host survives launcher parent SIGTERM` — `spawnSync /bin/ps EPERM`
+- `X detached host survives launcher parent SIGHUP` — `spawnSync /bin/ps EPERM`
+- `X before accepted crash is reconciled by lookup after boot change, effect occurs once` — `spawnSync /bin/ps EPERM`
+- `X idle drain refuses arrival with not_accepted, new host retries exactly once` — `spawnSync /bin/ps EPERM`
+- `X active ownership prevents idle and SIGTERM exit; zero ownership releases socket and lock` — `spawnSync /bin/ps EPERM`
+- `X private file modes, capability absent from argv and env, launcher sanitizes env` — `host_start_timeout`
+- `X SIGTERM with zero ownership exits cleanly and releases exclusion` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous throw, active ownership=false` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous throw, active ownership=true` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous rejection, active ownership=false` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous rejection, active ownership=true` — `spawnSync /bin/ps EPERM`
+- `R2 real ps ignores unrelated multiline argv while identifying a marked child` — `actual: 'query_failed', expected: 'ok'`
+- `real ps identifies marked child and grandchild then confirms exit` — `actual: 'query_failed', expected: 'ok'`
+- `SDK real ps identity reads actual child and inherited grandchild marker then mismatch` — `spawnSync /bin/ps EPERM`

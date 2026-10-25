@@ -1007,3 +1007,26 @@ check('C1 SDK raw messages omit functions and AbortSignal runtime values', async
   assert.ok(messages.length > 0);
   for (const event of messages) assert.deepEqual(event.message.runtime, { text: 'retained text' });
 });
+
+for (const invalid of ['cycle', 'bigint']) {
+  check('C1 serialization failure preserves subsequent lifecycle and result: ' + invalid, async (t, sdk) => {
+    const wrapped = { ...sdk, query(args) {
+      const query = sdk.query(args);
+      const iterator = query[Symbol.asyncIterator].bind(query);
+      query[Symbol.asyncIterator] = async function* () {
+        const bad = { type: 'assistant' };
+        bad.extra = invalid === 'cycle' ? bad : 1n;
+        yield bad;
+        yield* { [Symbol.asyncIterator]: iterator };
+      };
+      return query;
+    } };
+    const f = await fixture(t, wrapped);
+    assert.equal((await f.start()).state, 'done');
+    const delivery = f.prompt('hello');
+    assert.equal((await f.completed(delivery)).state, 'completed');
+    assert.ok(f.events.some(event => event.type === 'lifecycle'));
+    assert.ok(f.events.some(event => event.type === 'result'));
+    assert.ok(f.events.some(event => event.type === 'sdk_message' && event.message.serialization_failed === true));
+  });
+}
