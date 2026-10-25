@@ -14,6 +14,9 @@
 
 // Task lifecycle (server/db `tasks.status`).
 export const OWNED_COPY = {
+  handoff_identity_unavailable: '최신 실행의 신원·게이트 통과 기록을 확인할 수 없어 넘기지 않았습니다. ' +
+    '실행 끝내고 이어서 시작(resume)으로 정상 실행을 만든 뒤 다시 넘기세요.',
+  unsupported_path_character: '경로에 백슬래시(\\)가 있어 넘길 수 없습니다. 백슬래시 없는 경로에서 작업하세요.',
   headerHost: '호스트', headerExecution: '실행', headerControl: '제어', headerInteraction: '상호작용', headerSession: '세션',
   hostConnected: '연결됨', hostLost: '응답 없음', executionAlive: '생존', executionExited: '종료',
   controlPossible: '가능', controlUnavailable: '불가', lastKnown: '기준 마지막', resultUnknown: '결과 불명',

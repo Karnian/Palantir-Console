@@ -71,11 +71,11 @@ function createOwnedSessionsRouter({ service }) {
       confirmed_settings: body.confirmed_settings, ...(body.node_id !== undefined ? { node_id: body.node_id } : {}) });
   }));
   for (const [route, kind] of [['prompt', 'prompt'], ['tool-decision', 'tool_decision'], ['question-answer', 'question_answer'],
-    ['interrupt', 'interrupt'], ['stop', 'stop'], ['resume', 'resume'], ['close', 'close']]) {
+    ['interrupt', 'interrupt'], ['stop', 'stop'], ['resume', 'resume'], ['close', 'close'], ['handoff', 'handoff']]) {
     router.post(`/:id/${route}`, handle(req => {
       const input = req.body || {};
       const request = { kind, request_key: input.request_key, session_id: req.params.id };
-      if (['prompt', 'tool_decision', 'question_answer', 'interrupt'].includes(kind)) {
+      if (['prompt', 'tool_decision', 'question_answer', 'interrupt', 'handoff'].includes(kind)) {
         request.incarnation_id = validateIncarnation(input.incarnation_id);
       }
       if (kind === 'prompt') {

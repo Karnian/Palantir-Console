@@ -2418,3 +2418,87 @@ submit은 abandoned tombstone을 본문 fingerprint와 무관하게 rejected/req
 - 코어 + 전체 UI 집중: tests 61, pass 61, fail 0(`/tmp/sh1-c2-r10-focus.log`). 추가 큐·응답 유실·launcher 경로 포함 집중: tests 9, pass 9, fail 0(`/tmp/sh1-c2-r10-extra.log`).
 - 최종 지정 명령 `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session*.test.js server/tests/session-host-*.test.js server/tests/work-board.test.js`: tests 680, pass 657, fail 23, cancelled 0, skipped 0(`/tmp/sh1-c2-r10-done.log`). 실패는 이전 라운드와 같은 샌드박스의 listen EPERM·실제 /bin/ps EPERM·host_start_timeout이며 호스트 재검증이 필요하다.
 - git 조작, 실제 Claude·LLM·외부 네트워크 호출, spec·전역 SSE·C1 화면·visual baseline 변경은 하지 않았다. 저장소 스키마 버전과 기존 tombstone 행은 변경하지 않았다.
+## S1-e1 — 터미널로 넘기기(한 방향)
+
+handoff 효과 전에 어댑터의 동기 `verifyExecutable()`을 호출한다. SDK 어댑터는 고정 realpath와 기존 동기 SHA-256 검사 함수를 재사용한다. 불일치 시 `executable_hash_mismatch`로 끝나며 세션 active, interrupt·close·signal 0회를 유지한다. fake adapter는 기본 통과하고 `executableValid: false`로 실패한다. 가짜 대화 ID도 UUID로 생성한다. 명령 입력 경로와 대화 UUID도 효과 전에 검사한다.
+
+순수 `buildHandoffCommand`는 pin의 인증 변수 목록과 두 설정 루트 변수를 합쳐 전부 unset한다. 모든 unset 옵션 뒤에 어댑터의 고정 HOME을 배치하고 동봉 실행 파일 절대 경로를 사용한다. POSIX 작은따옴표로 값을 인용하며 상대 경로·CR/LF·NUL 경로 및 UUID가 아닌 ID를 거부한다.
+
+기존 종료 확인·표지 하위 프로세스 확인을 통과한 트랜잭션에서 완료 명령을 이벤트에 저장한다. snapshot의 `handoff_command`는 handed_off에서만 반환하고 삭제 상태에는 없다. 이후 호스트 재시작에도 저장된 완료 명령을 조회한다. handoff 라우트는 기존 cookie·origin 검사와 접수 경로를 사용하며 incarnation ID를 검증한다. 코어도 제공된 incarnation이 현재 대상과 다른 요청을 거부한다.
+
+화면에는 확인 Modal과 보장 범위 문구, 진행 단계, 해시 불일치·하위 프로세스 차단 이유, PID·시작 시각 목록과 다시 확인 버튼을 추가했다. handed_off는 읽기 전용이며 삭제를 허용한다. 완료 명령은 선택 가능한 textarea와 clipboard 버튼으로 제공하고 복사 실패 시 텍스트를 선택해 수동 복사를 안내한다. owned a11y에는 두 테마의 확인 Modal·완료 명령 화면 시나리오를 추가했다.
+
+검증 기록:
+
+- 수정 전 코어 재현 2개 실패: 해시 불일치인데 넘기기 효과 발생, handed_off 뒤 명령 없음(`/tmp/sh1-e1-red.log`). 같은 실행에서 순수 함수·셸 argv·가짜 실행 파일 env 검사는 3개 통과했다. 순수 함수 자체의 수정 전 실패 증거는 별도로 수집하지 않았다.
+- 수정 후 집중 테스트 51/51 통과(`/tmp/sh1-e1-focus.log`): handoff 코어·SDK realpath/바이트 변경·순수 함수·실제 셸/가짜 실행 파일·라우트·기존 제어·UI. 거부 사례에는 한 필드만 바꾼 통과 대조를 추가했다. 셸 검사는 테스트 코드의 직접 `spawnSync('/bin/sh', ...)`로 실행했으며 production spawn guard나 전역 허용 환경변수를 변경하지 않았다.
+- 지정 전체 명령 `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session*.test.js server/tests/session-host-*.test.js` 실행 시작(`/tmp/sh1-e1-all.log`). 실행 도구 예산(5회 실행·4회 재개)에 도달해 최종 집계를 수집하지 못했다. 마지막 UI 재검증도 같은 셸에 예약했다(`/tmp/sh1-e1-ui-final.log`).
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH npx --no-install playwright test --grep '@a11y.*owned'`: exit 1을 관측했으나 상세 원인은 수집하지 못했다(`/tmp/sh1-e1-a11y.log`). 호스트에서 원인 확인과 재실행이 필요하다. DoD의 전체 테스트·a11y 통과는 아직 확정하지 않았다.
+- 실제 Claude·LLM 호출 0. 외부 네트워크·git 조작·spec·package.json·전역 SSE 변경 없음. 대화형 TUI 실측은 S1-e2에 남긴다.
+
+
+
+### S1-e1 라운드 2 — 적대리뷰 R1
+
+R1의 다섯 항목을 반영했다. 넘기기 효과 전과 완료 직전의 검증을 `prepareHandoff`로 모았다. `finishControlRequest`에서 종료·하위 프로세스 확인 뒤 다시 동기 실행 파일 검증을 수행하므로 정상 종료, close 이후 exit 콜백, 호스트 복구, blocked 뒤 새 키 재시도 모두 같은 완료 검증을 거친다. 검증 실패는 `executable_hash_mismatch`이고 active를 유지하며 명령 이벤트·handed_off를 만들지 않는다. 검증 예외도 같은 고정 코드로 처리한다.
+
+spawn_sent를 저장하는 트랜잭션에 incarnation의 canonical `cli_path`, 고정 `cli_sha256`, `cli_home`을 함께 기록한다. SDK는 설정한 실행 파일의 canonical 경로와 pin 해시 및 고정 HOME 스냅샷을 제공하며 실제 spawn도 그 canonical 경로와 해시를 검사한다. 넘기기 때 기록과 현재 어댑터의 세 값이 모두 같아야 한다. 해시 차이는 `executable_hash_mismatch`, HOME·경로 차이 또는 기록 누락은 `handoff_environment_mismatch`다. 완료 명령은 기록값으로만 만든다. 삭제 때 cli_home도 null로 지운다.
+
+스키마 v4는 incarnation에 nullable TEXT cli_home을 추가한다. v1~v3은 기존 순차 마이그레이션 뒤 v4로 이동하고 v4 재시작은 변경하지 않는다. 과거 실행의 HOME은 현재 호스트 값으로 채우지 않는다. 기록이 없는 과거 세션은 넘기기를 거부하며 새 세션에서 작업해야 한다. 프로토콜 hello도 store의 SCHEMA_VERSION(4)을 사용한다.
+
+사용자 지시에 따라 브리프 §5-8의 -u 나열을 `env -i`와 명시적 환경 허용 목록으로 대체했다. 목적은 같은 실행 파일·설정·인증 환경의 재현이며, 일부 금지 변수만 제거하면 부모 Claude 세션 변수·인증 FD·임의 비밀이 새 실행에 남는다는 R1 반례가 변경 근거다. `spawnEnv.baseKeys`를 공용 출처로 쓰고 HOME은 실행 기록으로 고정한다. 나머지 PATH·USER·LOGNAME·SHELL·LANG·LC_ALL·LC_CTYPE·TMPDIR·TERM은 `${VAR+"VAR=$VAR"}`로 사용자 셸에서 설정된 값만 인용해 전달한다. 환경 전체를 지우므로 인증 변수·FD·CLAUDECODE·PALANTIR_*·임의 비밀은 자동으로 제외된다. 브리프 자체는 수정하지 않았다.
+
+브라우저와 코어는 의존성 없는 공용 `ownedHandoffRejection` 순수 함수를 사용한다. active이고 대화 ID가 있으며 대상이 alive/orphaned/exited/never_started이면 진행 중 제어가 없을 때 요청 가능하다. 자연 종료·stop 뒤·orphaned에서도 버튼을 활성화하며, 실행 기록·해시·종료·하위 프로세스에 대한 최종 판정은 호스트가 한다. never_started라도 실행 기록이 없으면 완료 검증에서 거부한다. jsdom은 실제 공용 정책을 미리 로드한다.
+
+수정 전 증거 `/tmp/sh1-e1-r1-red.log`: tests 39, pass 22, fail 17. 복구 두 지점의 변조, HOME·경로·해시 변경, 영속 기록, close 중 변조/blocked 재시도, 세 셸의 독립 오염 환경, 네 실행 상태의 버튼 조건을 재현했다. 이후 크래시 접수 직후·close 직후 × 변조 유무 테스트를 실제 임시 실행 파일의 바이트 변경과 SDK 동기 해시 검사로 강화했다. 통과 대조는 같은 파일의 원래 바이트 또는 한 필드만 복원한 값이다.
+
+독립 오염 목록은 제품의 pin/허용 목록에서 만들지 않는다. 계약의 인증 변수 8개, 두 설정 루트, 인증 FD 2개, CLAUDECODE, ENTRYPOINT, SESSION_ID, PALANTIR_TOKEN, FOO_SECRET을 직접 주입한다. 가짜 실행 파일에서 받은 키가 독립 허용 목록의 부분집합이고 오염 키가 0임을 확인한다. macOS Node 런타임은 env -i 뒤에도 __CF_USER_TEXT_ENCODING을 자체 생성하므로, 정확한 exec 환경 검사는 작은 C fixture를 /usr/bin/cc로 임시 디렉터리에 컴파일하여 런타임 초기화 전 환경을 기록한다. 세 셸의 빈 값·미설정·특수 문자 전달과 실제 SDK + 기존 가짜 Claude 자식의 spawn 환경(공식 SDK 키 3개·표지 제외)이 같은지도 확인했다. 실제 Claude·LLM 호출과 네트워크 호출은 없다.
+
+집중 검증 `/tmp/sh1-e1-r1-final-focus.log`: tests 113, pass 113, fail 0. 지정 전체 최종 결과는 `/tmp/sh1-e1-r1-all-final.log`에 기록한다. owned a11y(`/tmp/sh1-e1-r1-a11y.log`)는 webServer가 127.0.0.1:4177에 listen할 때 EPERM으로 시작 전에 차단되었으며 호스트 재검증이 필요하다. git 조작·spec·package.json·전역 SSE 변경은 하지 않았다.
+
+최종 지정 전체 검증: tests 651, pass 628, fail 23, cancelled 0, skipped 0(`/tmp/sh1-e1-r1-all-final.log`). 실패 23개는 소켓 listen EPERM·실제 /bin/ps EPERM(query_failed 포함)·host_start_timeout인 기존 환경 제약이며 R1 신규 테스트는 모두 통과했다. 최종 전체에는 실제 파일 바이트 변조 크래시 조합, 공용 정책, 스키마 v4와 hello 변경도 포함된다. DoD의 호스트 전체 테스트·owned a11y 재실행은 남아 있다.
+
+
+### S1-e1 라운드 3 — 적대리뷰 R2
+
+두 항목 모두 수정 전 회귀로 재현했다(`/tmp/sh1-e1-r2-red.log`: tests 37, pass 24, fail 12, skipped 1). HOME=A의 실제 실행 뒤 HOME=B의 resume가 after_spawn_sent_before_spawn에서 죽으면, 예정 기록만으로 B 명령을 내주던 문제를 확인했다. 마지막 실제 실행의 HOME·경로·해시 null, pid·시작 시각 누락, 새 실제 실행의 null 기록을 건너뛰는 우회, never_started 상태의 pid 기록 오인, 셸 지정 누락과 안내 문구 누락도 각각 재현했다. fish는 PATH에서 찾지 못해 선택적 테스트 1개를 건너뛰었다.
+
+넘기기 검증은 제어 대상 incarnation의 예정 값 대신, 해당 세션에서 pid와 pid_started_at이 커밋되고 spawning/never_started가 아닌 마지막 실행 기록을 먼저 고른다. 최신 실제 실행의 CLI/HOME 필드가 null이면 더 오래된 완전한 기록으로 건너뛰지 않는다. 근거가 없거나 필드가 null이면 `handoff_identity_unavailable`로 실패하고 active 유지·명령 0을 보장한다. 기록이 있으면 종전처럼 현재 실행 파일의 동기 해시를 재검증하고 현재 어댑터 HOME·canonical 경로·해시와 비교한다. 명령도 그 마지막 실제 실행 기록으로만 만든다. 새 컬럼이나 스키마 변경은 없으며 v4를 유지한다.
+
+never_started의 예정 기록은 진단용으로 남지만 실행 증거로 쓰지 않는다. 이전 실제 실행이 확인된 기록이고 현재 어댑터가 그 기록과 같으면, 시작하지 않은 최신 resume를 건너뛰고 그 이전 실행에서 넘길 수 있다. HOME B 예정 resume만 있고 실제 실행은 A라면 B 호스트에서 거부하며, 현재 HOME만 A로 돌린 대조는 통과한다. R1의 단독 never_started 행을 실제 실행 근거로 인정하던 테스트는 제거하고, R2의 '실제 실행 없음 → 거부'와 '이전 실제 실행 있음 → 그 기록 사용' 회귀로 대체했다.
+
+복구의 requested/settings_checking/settings_checked를 never_started로 판정하는 조회도 start/resume에 한정했다. 기존 조회는 handoff 접수 직후의 requested까지 미실행으로 취급해, 실제 pid·시작 시각이 있던 실행을 never_started로 바꾸고 있었다. R1의 접수 직후·close 직후 × 실제 파일 바이트 변조/정상 대조를 계속 통과한다.
+
+브리프 §5-8의 S1-e1 허용 목록 판정은 유지하고, 사용자 R2 지시에 따라 화면 명령 전체를 POSIX 인용한 `/bin/sh -c '<명령>'`으로 감쌌다. 바깥 셸은 인용된 문자열 하나만 전달하고 변수 전개·cd·env 구성은 /bin/sh가 담당한다. 내부 env도 절대 경로 /usr/bin/env를 사용한다. sh가 자체 생성하는 미export SHELL·TERM 기본값이 '미설정 변수는 전달하지 않음'을 깨지 않도록, 공용 허용 키 각각을 /usr/bin/printenv로 확인하여 상속되지 않은 로컬 기본값을 제거한 뒤 기존 선택적 전개를 수행한다. 인증 변수나 임의 환경 변수는 조회하지 않는다. 확인 Modal과 완료 명령 옆에는 '어느 셸에 붙여 넣어도 /bin/sh 로 실행됨'을 표시한다. 브리프 자체는 수정하지 않았다.
+
+/bin/sh·bash·zsh에서 생성 문자열을 그대로 실행하여 native 가짜 실행 파일의 cwd·--resume argv·환경 전체가 같은지 검사했다. cwd·실행 파일·HOME·USER의 공백, 작은따옴표, 달러, 백틱과 빈 LOGNAME도 포함한다. 바깥 /bin/sh argv를 실제 셸로 파싱하여 `/bin/sh`, `-c`, 내부 명령 하나임을 확인하는 검사와 기존 독립 오염 환경·SDK 자식 환경 비교도 유지했다. UI와 owned a11y에는 확인창·완료 명령 옆 안내 검사를 추가했고, a11y 완료 mock도 실제 순수 명령 생성기를 사용한다.
+
+검증:
+
+- 집중 검증(`/tmp/sh1-e1-r2-focus2.log`): tests 120, pass 119, fail 0, skipped 1(fish 미설치).
+- 지정 전체 `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session*.test.js server/tests/session-host-*.test.js`(`/tmp/sh1-e1-r2-all.log`): tests 663, pass 639, fail 23, skipped 1. 실패는 기존 샌드박스 소켓 listen EPERM·실제 ps EPERM/query_failed·host_start_timeout이며 R2 신규 회귀는 통과했다.
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH npx --no-install playwright test --grep '@a11y.*owned'`(`/tmp/sh1-e1-r2-a11y.log`): webServer의 127.0.0.1:4177 listen EPERM으로 실행 전 차단. 호스트에서 재실행해야 한다.
+- 실제 Claude·LLM·외부 네트워크 호출 0. git 조작·spec·package.json·전역 SSE·스키마 변경 없음.
+
+최종 a11y fixture 수정 뒤 `npx --no-install playwright test --grep '@a11y.*owned' --list`는 정상 종료했으며 16개 시나리오를 발견했다(`/tmp/sh1-e1-r2-a11y-list.log`). 실제 브라우저 실행의 EPERM 차단을 통과로 간주하지 않는다.
+
+
+### S1-e1 라운드 4 — 적대리뷰 R3: 최신 incarnation만 허용
+
+호스트 판정에 따라 과거 실행 기록을 찾는 경로를 없앴다. `prepareHandoff`는 생성 순서상 최신 incarnation 하나를 `getLatestIncarnation`으로 읽고, `hasHandoffIdentity`로 다음 증거를 모두 요구한다: alive/orphaned/exited 상태, 양의 PID와 시작 시각 커밋, account_snapshot, 해당 incarnation의 start/resume done·done 게이트 완료 영수증, 기록된 HOME·canonical 실행 파일 경로·해시. never_started·spawning·liveness_unknown 및 증거 누락은 `handoff_identity_unavailable`이다. RAM의 accounts 캐시는 종료·재기동 때 사라지므로 게이트 판단에 쓰지 않고, 같은 게이트 통과 트랜잭션에 남긴 영속 snapshot과 완료 영수증을 사용한다. 증거가 없으면 과거 incarnation으로 돌아가거나 현재 어댑터 값으로 채우지 않는다. 저장소·스키마 v4는 변경하지 않았다.
+
+접수 단계에서도 같은 신원 판정을 사용하고, 효과 전·완료 직전에도 최신 incarnation과 기존 동기 해시 검증을 다시 확인한다. HOME=A 실행 종료 → HOME=B resume → after_spawn_before_identity 크래시 → 자식 종료 → 복구 never_started → HOME=A에서 넘기기는 거부한다. 실제로 실행이 있었는지 복구에서 모르는 최신 행을 건너뛰지 않는다. spawn 전 크래시도 HOME 변경 유무와 무관하게 거부한다. 기존 R2의 과거 실제 실행으로 우회하던 통과 기대는 제거했으며, 과거 행을 복원해도 최신 행이 미실행이면 계속 거부함을 검사한다. 정상 resume로 새 최신 실행을 만들고 게이트가 통과한 뒤 넘기는 대조는 통과한다.
+
+cwd·HOME·실행 파일 경로에 백슬래시가 하나라도 있으면 순수 명령 생성기가 `unsupported_path_character`로 거부한다. fish의 작은따옴표 안 연속 백슬래시 축약을 다루는 별도 인용 체계는 추가하지 않는다. 실제 넘기기 요청에서도 실행 종료 효과 전에 이 검사를 거쳐 세션 active·interrupt/close/signal 0·완료 명령 0을 유지한다. 작은따옴표·공백·달러·백틱은 기존대로 지원한다. 단일·연속 백슬래시와 작은따옴표 조합을 세 경로 각각 검사하고, 백슬래시만 제거한 통과 대조를 둔다.
+
+copy.js에 두 거부 코드를 추가했다. 신원 누락은 '실행 끝내고 이어서 시작(resume)으로 정상 실행을 만든 뒤 다시 넘기세요'라고 안내하고, 경로 거부는 백슬래시 없는 경로에서 작업하도록 안내한다. 헤더의 거부 사유와 요청 결과 안내가 같은 공용 문구를 사용한다. 기존 수동 stop → resume 흐름과 자동 실행 0회 계약은 변경하지 않았다.
+
+검증 기록:
+
+- 수정 전 `/tmp/sh1-e1-r3-red.log`: tests 49, pass 27, fail 22. 리뷰 반례·게이트 증거·생존 불명·백슬래시·화면 안내 누락을 재현했다.
+- 신규 회귀와 UI `/tmp/sh1-e1-r3-focus.log`: 49/49 통과. 최신 필드 누락은 해당 필드 하나만 복원한 대조를, 크래시 후에는 정상 최신 resume·종료 대조를 확인했다.
+- handoff 전체·control·owned UI `/tmp/sh1-e1-r3-focus2.log`: tests 145, pass 144, fail 0, skipped 1(fish 미설치). 기존 특수 문자·환경 허용 목록·SDK 가짜 자식 비교도 유지했다.
+- 게이트 실패 뒤 handoff를 하위 프로세스 조회까지 진행시키던 과거 gate-flow 테스트는 최신 계약에 맞춰 게이트 신원 미확인 거부로 갱신했다. 하위 프로세스가 남으면 resume를 막는 기존 단언은 유지했다.
+- 실제 Claude·LLM·외부 네트워크 호출 0. git 조작·spec·package.json·전역 SSE·스키마 변경 없음. 이번 DoD는 지정 Node 전체 테스트이며 a11y 실행은 요청 범위에 포함되지 않는다.
+
+최종 지정 전체 명령 `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session*.test.js server/tests/session-host-*.test.js`: tests 688, pass 664, fail 23, cancelled 0, skipped 1(`/tmp/sh1-e1-r3-all.log`). 실패 23개는 기존 소켓 listen EPERM·실제 ps EPERM/query_failed·host_start_timeout이며, 신규 R3와 갱신한 R2·gate-flow 회귀는 모두 통과했다. fish 미설치 1 skip은 유지한다. 호스트에서 지정 전체 명령의 최종 통과를 재확인해야 한다.

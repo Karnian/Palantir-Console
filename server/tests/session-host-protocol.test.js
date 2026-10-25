@@ -31,7 +31,7 @@ test('P wrong capability closes without response; correct capability returns met
   const good = harness({}, { sdkVersion: 'fake-v1' });
   good.hello();
   await flush();
-  assert.deepEqual(good.output, [{ type: 'hello', host_boot_id: 'boot', schema_version: 3, sdk_version: 'fake-v1' }]);
+  assert.deepEqual(good.output, [{ type: 'hello', host_boot_id: 'boot', schema_version: 4, sdk_version: 'fake-v1' }]);
 });
 test('P pre-hello request closes without invoking core', async () => {
   let calls = 0;

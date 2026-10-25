@@ -1,7 +1,7 @@
 import { h } from '../../../vendor/preact.module.js';
 import htm from '../../../vendor/htm.module.js';
 import { OWNED_COPY } from '../../lib/copy.js';
-import { canRestartOwnedSession, canInterruptOwnedSession } from './state.js';
+import { canRestartOwnedSession, canInterruptOwnedSession, canHandoffOwnedSession } from './state.js';
 import { OwnedSessionHeader } from './OwnedSessionHeader.js';
 import { OwnedConversation } from './OwnedConversation.js';
 import { OwnedApproval } from './OwnedApproval.js';
@@ -17,7 +17,8 @@ export function OwnedSession({ sessionId, controller, onRemove }) {
   return html`
     <a href="#owned">${OWNED_COPY.back}</a>
     <${OwnedSessionHeader} state=${snapshot} incarnation=${incarnation} host=${controller.host}
-      asOf=${controller.asOf} />
+      asOf=${controller.asOf} onHandoff=${() => submit('handoff')}
+      handoffDisabled=${disabled || !canHandoffOwnedSession(snapshot)} />
     <div class="owned-actions">
       <button class="btn btn-sm" disabled=${!canInterruptOwnedSession(snapshot, !disabled)}
         onClick=${() => submit('interrupt')}>${OWNED_COPY.interrupt}</button>
@@ -25,7 +26,8 @@ export function OwnedSession({ sessionId, controller, onRemove }) {
       <button class="btn btn-sm" disabled=${disabled || !resumeReady} onClick=${() => submit('resume')}>${OWNED_COPY.resume}</button>
       <button class="btn btn-sm btn-danger" disabled=${disabled || snapshot.session.state !== 'active'}
         onClick=${() => submit('close')}>${OWNED_COPY.close}</button>
-      <button class="btn btn-sm btn-danger" disabled=${disabled || snapshot.session.state !== 'closed'} onClick=${onRemove}>${OWNED_COPY.remove}</button>
+      <button class="btn btn-sm btn-danger" disabled=${disabled || !['closed', 'handed_off'].includes(snapshot.session.state)}
+        onClick=${onRemove}>${OWNED_COPY.remove}</button>
     </div>
     ${controller.restartNotice && html`<p role="status">${controller.restartNotice}</p>`}
     <${OwnedConversation} state=${snapshot} events=${controller.events} sessionId=${sessionId}

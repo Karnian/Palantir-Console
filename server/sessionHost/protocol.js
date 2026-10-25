@@ -1,4 +1,5 @@
 'use strict';
+const { SCHEMA_VERSION } = require('./store');
 const { createHash, timingSafeEqual } = require('node:crypto');
 const digest = value => createHash('sha256').update(typeof value === 'string' ? value : '').digest();
 
@@ -18,7 +19,7 @@ function createProtocol({ stream, core, capability, hostBootId, sdkVersion = nul
     if (!authenticated) {
       if (message.type !== 'hello' || !timingSafeEqual(digest(message.capability), digest(capability))) return close();
       authenticated = true;
-      send({ type: 'hello', host_boot_id: hostBootId, schema_version: 3, sdk_version: sdkVersion });
+      send({ type: 'hello', host_boot_id: hostBootId, schema_version: SCHEMA_VERSION, sdk_version: sdkVersion });
       return;
     }
     if (isFatal()) {

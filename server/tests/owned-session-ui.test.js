@@ -30,6 +30,41 @@ function setup(t) {
 }
 const state = (extra = {}) => ({ current_incarnation_id: 'inc', session: { state: 'active', cwd: '/safe' },
   incarnations: [{ id: 'inc', state: 'alive', control_available: true, ...extra }], deliveries: [], tool_requests: [], controls: [] });
+
+test('handoff confirmation, completion-only command and clipboard failure fallback', async t => {
+  const e = setup(t); let calls = 0;
+  const s = state();
+  const props = { state: s, incarnation: s.incarnations[0], host: 'running', handoffDisabled: false, onHandoff: () => calls++ };
+  e.mount('OwnedSessionHeader', props);
+  assert.equal(e.document.querySelector('.owned-handoff-command'), null);
+  [...e.document.querySelectorAll('button')].find(x => x.textContent === '터미널로 넘기기').click();
+  await flushEffects(20);
+  assert.match(e.document.body.textContent, /인증 게이트도 없다/);
+  assert.match(e.document.body.textContent, /어느 셸에 붙여 넣어도 \/bin\/sh 로 실행됨/);
+  [...e.document.querySelectorAll('button')].find(x => x.textContent === '확인하고 넘기기').click();
+  assert.equal(calls, 1);
+  s.session.state = 'handed_off'; s.handoff_command = "cd '/safe' && env --resume";
+  e.mount('OwnedSessionHeader', props); await flushEffects(20);
+  assert.match(e.document.body.textContent, /읽기 전용/);
+  const command = e.document.querySelector('.owned-handoff-command');
+  assert.equal(command.value, s.handoff_command);
+  assert.match(e.document.body.textContent, /어느 셸에 붙여 넣어도 \/bin\/sh 로 실행됨/);
+  [...e.document.querySelectorAll('button')].find(x => x.textContent === '명령 복사').click();
+  await flushEffects(20);
+  assert.match(e.document.body.textContent, /직접 복사/);
+  assert.equal(command.selectionEnd, command.value.length);
+});
+
+test('handed off session disables mutations and keeps deletion available', t => {
+  const e = setup(t), s = state({ state: 'exited', control_available: false });
+  s.session.state = 'handed_off';
+  e.mount('OwnedSession', { sessionId: 's', controller: { snapshot: s, incarnation: s.incarnations[0],
+    host: 'running', disabled: false, controllable: false, events: [], submit() {} }, onRemove() {} });
+  for (const button of e.document.querySelectorAll('.owned-actions button')) {
+    assert.equal(button.disabled, button.textContent !== e.context.C.remove);
+  }
+  assert.equal(e.document.querySelector('textarea').disabled, true);
+});
 test('delivery unknown is emphasized and outcome is separate', t => {
   const e = setup(t); e.mount('OwnedDeliveryBadge', { delivery: { state: 'provider_observed', outcome: 'outcome_unknown' } });
   assert.equal(e.document.querySelector('.owned-delivery-badge').textContent, '받음 · 결과 불명'); assert.ok(e.document.querySelector('.owned-unknown'));
@@ -356,4 +391,30 @@ test('R9 discard button appears after read-only miss and remains disabled during
   assert.equal(button('요청 버리기').disabled, true);
   assert.equal(button('같은 키로 다시 시도').disabled, true);
   assert.equal(button('접수 확인').disabled, true);
+});
+
+for (const execution of ['alive', 'orphaned', 'exited', 'never_started']) {
+  test(`R1 handoff button supports ${execution} active conversation and rejects missing conversation`, t => {
+    const e = setup(t), s = state({ state: execution, control_available: execution === 'alive' });
+    s.session.claude_session_id = '12345678-1234-4234-8234-123456789abc';
+    const props = { sessionId: 's', controller: { snapshot: s, incarnation: s.incarnations[0],
+      host: 'running', disabled: false, controllable: execution === 'alive', events: [], submit() {} } };
+    e.mount('OwnedSession', props);
+    const button = () => [...e.document.querySelectorAll('button')].find(item => item.textContent === '터미널로 넘기기');
+    assert.equal(button().disabled, false);
+    s.session.claude_session_id = null; e.mount('OwnedSession', props);
+    assert.equal(button().disabled, true);
+  });
+}
+
+test('R3 handoff refusal shows recovery advice and unsupported path explanation from copy', t => {
+  const e = setup(t), s = state();
+  const props = { state: s, incarnation: s.incarnations[0], host: 'running' };
+  s.controls.push({ kind: 'handoff', state: 'failed', reason: 'handoff_identity_unavailable' });
+  e.mount('OwnedSessionHeader', props);
+  assert.match(e.document.body.textContent, /이어서 시작.*넘기/);
+  assert.equal(e.context.ownedLabel('handoff_identity_unavailable'), e.context.C.handoff_identity_unavailable);
+  s.controls[0].reason = 'unsupported_path_character'; e.mount('OwnedSessionHeader', props);
+  assert.match(e.document.body.textContent, /백슬래시/);
+  assert.equal(e.context.ownedLabel('unsupported_path_character'), e.context.C.unsupported_path_character);
 });

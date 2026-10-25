@@ -131,6 +131,7 @@ function createPreactEnv() {
   // `window.preactHooks` are already accessible (set by the UMD bundles).
   // htm UMD sets `self.htm` — ensure it's also reachable as `this.htm`.
   vm.runInContext('this.htm = htm;', context);
+  vm.runInContext(fs.readFileSync(path.join(COMPONENTS_DIR, 'owned/handoffPolicy.js'), 'utf8'), context);
   vm.runInContext(clientMessageKeySrc.replace(/^export /gm, ''), context);
 
   // Components import the shared timestamp parser directly. Preload the real

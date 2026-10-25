@@ -1,6 +1,7 @@
 'use strict';
 
 const Database = require('better-sqlite3');
+const SCHEMA_VERSION = 4;
 
 function openStore(dbPath, {
   faults,
@@ -52,7 +53,7 @@ function openStore(dbPath, {
       CREATE INDEX IF NOT EXISTS event_session ON events(session_id,seq);
       CREATE INDEX IF NOT EXISTS delivery_incarnation ON deliveries(incarnation_id,state);`);
     const version = database.prepare('SELECT MAX(version) v FROM host_schema_versions').get().v;
-    if (![1, 2, 3].includes(version)) {
+    if (![1, 2, 3, SCHEMA_VERSION].includes(version)) {
       throw new Error('host_schema_unsupported');
     }
     if (version === 1) {
@@ -65,6 +66,10 @@ function openStore(dbPath, {
         UPDATE deliveries SET attribution_pending=1 WHERE state='unknown' AND reason='effect_failed'
           AND incarnation_id IN (SELECT id FROM incarnations WHERE attribution_uncertain=2);
         INSERT INTO host_schema_versions VALUES(3);`);
+    }
+    if (version < 4) {
+      database.exec(`ALTER TABLE incarnations ADD COLUMN cli_home TEXT;
+        INSERT INTO host_schema_versions VALUES(4);`);
     }
   })();
   const store = {
@@ -110,5 +115,6 @@ function openStore(dbPath, {
   return store;
 }
 module.exports = {
+  SCHEMA_VERSION,
   openStore
 };

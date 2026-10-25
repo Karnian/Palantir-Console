@@ -7,7 +7,7 @@ const { createPsIdentityProbe } = require('../sessionHost/psIdentity');
 const { isWithinRoot } = require('../utils/pathGuard');
 const POLL_MS = 500;
 const MAX_BODY_BYTES = 512 * 1024;
-const KINDS = new Set(['start', 'prompt', 'tool_decision', 'question_answer', 'interrupt', 'stop', 'resume', 'close', 'delete']);
+const KINDS = new Set(['start', 'prompt', 'tool_decision', 'question_answer', 'interrupt', 'stop', 'resume', 'close', 'handoff', 'delete']);
 const DELIVERY_KINDS = new Set(['prompt', 'tool_decision', 'question_answer', 'interrupt']);
 const failure = (code, status = 400) => Object.assign(new Error(code), { code, status });
 function validateKey(key) {
@@ -163,7 +163,7 @@ function createOwnedSessionService({ runtimeDir = path.resolve(process.cwd(), 'r
   async function submit(request) {
     validateKey(request?.request_key);
     if (!KINDS.has(request.kind)) throw failure('invalid_request');
-    if (DELIVERY_KINDS.has(request.kind)) validateIncarnation(request.incarnation_id);
+    if (DELIVERY_KINDS.has(request.kind) || request.kind === 'handoff') validateIncarnation(request.incarnation_id);
     if (Buffer.byteLength(JSON.stringify(request)) > MAX_BODY_BYTES) throw failure('body_too_large', 413);
     if (request.node_id !== undefined && request.node_id !== 'local') throw failure('local_node_required');
     if (request.kind === 'start') {
