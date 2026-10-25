@@ -1117,3 +1117,24 @@ for (const body of [{ behavior: 'invalid' }, { behavior: 'allow', message: 3 }])
     await f.completed(prompt); assert.equal(f.d(accepted).state, 'provider_observed');
   });
 }
+
+check('R8 SDK late A interrupt and active B interrupt reach fake provider separately', async (t, sdk) => {
+  const f = await fixture(t, sdk);
+  await f.start();
+  const first = f.prompt('A');
+  await f.completed(first);
+  const old = f.core.submit(f.req('interrupt'));
+  await until(() => f.d(old).state === 'completed', 'old target result settles interrupt');
+  await until(() => f.log().filter(row => row.type === 'interrupt_response').length === 1, 'first interrupt receipt');
+  const second = f.prompt('tool');
+  await f.pendingTool();
+  const interrupt = f.core.submit(f.req('interrupt'));
+  const duplicate = f.core.submit(f.req('interrupt'));
+  assert.notEqual(interrupt.id, old.id);
+  assert.equal(duplicate.id, interrupt.id);
+  await until(() => f.d(interrupt).state === 'completed', 'B interrupt completed');
+  await until(() => f.d(second).outcome === 'interrupted', 'B cancelled');
+  assert.equal(f.log().filter(row => row.type === 'interrupt_response').length, 2);
+  assert.equal(f.d(interrupt).turn_gen, f.d(second).turn_gen);
+  assert.equal(f.core.idle(f.sid), true);
+});

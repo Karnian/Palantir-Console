@@ -60,7 +60,7 @@ function setup(t) {
       if (child && (child.exitCode !== null || child.signalCode !== null)) throw new Error('host exited: ' + child.errors);
       const client = createClient({ runtimeDir, timeoutMs: 100 });
       try { await client.connect(); clients.push(client); return client; } catch { client.close(); return false; }
-    });
+    }, 15000);
   }
   return { runtimeDir, launch, ready, track, tracked, clients, children };
 }

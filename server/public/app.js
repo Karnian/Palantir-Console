@@ -23,6 +23,7 @@ import { clickableProps } from './app/lib/a11y.js';
 
 // Components
 import { RunInspector } from './app/components/RunInspector.js';
+import { OwnedSessionsView } from './app/components/OwnedSessionsView.js';
 import { DriftDrawer } from './app/components/DriftDrawer.js';
 import { Dropdown } from './app/components/Dropdown.js';
 import { EmptyState } from './app/components/EmptyState.js';
@@ -406,6 +407,7 @@ function App() {
   ), [runs]);
 
   const renderView = () => {
+    if (routeBase === 'owned') return html`<${OwnedSessionsView} key=${route} sessionId=${route.split('/')[1] || null} />`;
     if (observe.loading && !location.hash) {
       return html`<div class="work-entry-loading" role="status">${WORK_BOARD_LABELS.pending}</div>`;
     }

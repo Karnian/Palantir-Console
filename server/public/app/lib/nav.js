@@ -37,9 +37,11 @@ export const NAV_ITEMS = [
 ];
 
 // Only the active assistant absorbs the standalone snapshot board.
-export const getNavItems = (activation, sessionHubActive = false) =>
-  !sessionHubActive && activation === 'on'
-    ? [...NAV_ITEMS, { hash: 'work', icon: '≡', label: NAV_LABELS.work }] : NAV_ITEMS;
+export const getNavItems = (activation, sessionHubActive = false) => [
+  ...NAV_ITEMS,
+  { hash: 'owned', icon: '◷', label: NAV_LABELS.owned },
+  ...(!sessionHubActive && activation === 'on' ? [{ hash: 'work', icon: '≡', label: NAV_LABELS.work }] : []),
+];
 
 // Sub-items for CommandPalette search — deep-linkable canonical hashes.
 // Number-key shortcuts in CommandPalette are NOT wired to these

@@ -4,6 +4,7 @@ const { randomUUID, createHash } = require('node:crypto');
 const authGate = require('./authGate');
 const { validateDecision } = require('./decisionValidation');
 const pin = require('./pin');
+const { capabilityVerdict: evaluateCapabilities } = require('./capability');
 const { openStore } = require('./store');
 const { SimulatedCrash } = require('./faults');
 const {
@@ -488,7 +489,35 @@ function createHostCore({
       transitionDelivery(delivery, ['sending'], {
         state: 'written'
       });
+      if (delivery.kind === 'interrupt') settleTurnInterrupts(incarnation, delivery.turn_gen);
     });
+  }
+
+  // Only the bound turn's result proves completion; lifecycle alone preserves the uncertainty barrier.
+  function settleTurnInterrupts(incarnation, turnGen) {
+    const prompt = getRow("SELECT * FROM deliveries WHERE incarnation_id=? AND kind='prompt' AND turn_gen=?", incarnation.id, turnGen);
+    if (!prompt) return false;
+    const hasResult = !!prompt.result_json;
+    const ended = hasResult || prompt.state === 'completed' || prompt.outcome === 'interrupted';
+    if (!ended) return false;
+    const interrupts = getRows("SELECT * FROM deliveries WHERE incarnation_id=? AND kind='interrupt' AND turn_gen=? " +
+      "AND state IN ('sending','written','provider_observed','unknown')", incarnation.id, turnGen);
+    if (!interrupts.length) return true;
+    for (const delivery of interrupts) {
+      const state = hasResult ? 'completed' : 'unknown';
+      const reason = hasResult ? null : 'interrupt_unconfirmed';
+      if (delivery.state !== state || delivery.reason !== reason) {
+        transitionDelivery(delivery, ['sending', 'written', 'provider_observed', 'unknown'], { state, reason });
+      }
+      if (hasResult) resolveAttributionCause(delivery);
+    }
+    const unknown = !!getRow("SELECT id FROM deliveries WHERE incarnation_id=? AND kind='interrupt' AND " +
+      "(state='unknown' OR (state='provider_observed' AND reason='interrupt_unconfirmed')) LIMIT 1", incarnation.id);
+    const latest = getIncarnation(incarnation.id);
+    if (latest.interrupt_unknown !== (unknown ? 1 : 0)) {
+      transitionIncarnation(latest, ['alive'], { interrupt_unknown: unknown ? 1 : 0 });
+    }
+    return true;
   }
 
   function tick() {
@@ -520,6 +549,14 @@ function createHostCore({
         transitionIncarnation(getIncarnation(delivery.incarnation_id), ['alive'], {
           interrupt_unknown: 1
         });
+      }
+      // Upgrade live rows left by earlier hosts without waiting for another SDK callback.
+      for (const target of getRows("SELECT DISTINCT incarnation_id,turn_gen FROM deliveries WHERE kind='interrupt' AND " +
+        "state IN ('sending','written','provider_observed','unknown') AND turn_gen IS NOT NULL")) {
+        const incarnation = getIncarnation(target.incarnation_id);
+        if (incarnation?.state === 'alive' && incarnation.host_boot_id === hostBootId) {
+          settleTurnInterrupts(incarnation, target.turn_gen);
+        }
       }
     });
   }
@@ -870,6 +907,42 @@ function createHostCore({
       request.body ?? null), hash(request.cwd ?? null)]);
   }
 
+  function abandonedResult(requestKey) {
+    return { request_key: requestKey, state: 'rejected', reason: 'request_abandoned' };
+  }
+
+  function keyRejection(requestKey) {
+    const match = typeof requestKey === 'string' && /^rk_(\d{1,16})_([a-fA-F0-9]{16,})$/.exec(requestKey);
+    if (!match) return { state: 'rejected', reason: 'invalid_request' };
+    if (+match[1] < now() - DAY) return { state: 'expired', reason: 'key_expired' };
+    if (+match[1] > now() + 300000) return { state: 'rejected', reason: 'key_future' };
+    return null;
+  }
+
+  function abandon(requestKey) {
+    if (crashed) throw new SimulatedCrash('core_crashed');
+    if (store.failed) throw new Error('storage_unavailable');
+    const invalid = keyRejection(requestKey);
+    if (invalid?.reason === 'invalid_request') throw new Error(invalid.reason);
+    let result;
+    // This transaction is synchronous with submit's acceptance: no await separates the lookup and fence.
+    writeTransaction(() => {
+      const alias = getRow('SELECT * FROM request_aliases WHERE request_key=?', requestKey);
+      const existing = (alias && getDelivery(alias.target_delivery_id))
+        || getRow('SELECT * FROM deliveries WHERE request_key=?', requestKey) || getControl(requestKey)
+        || getRow('SELECT * FROM request_tombstones WHERE request_key=?', requestKey);
+      if (existing) {
+        result = { abandoned: false, existing: existing.state === 'abandoned' ? abandonedResult(requestKey) : existing };
+        return;
+      }
+      if (invalid) { result = { invalid: invalid.reason }; return; }
+      execute('INSERT INTO request_tombstones VALUES(?,?,?,?,?)', requestKey, '', 'abandoned', 0, now() + 30 * DAY);
+      result = { abandoned: true };
+    });
+    if (result.invalid) throw new Error(result.invalid);
+    return result;
+  }
+
   function submit(request) {
 
     function getLatestRequestResult(result) {
@@ -899,6 +972,7 @@ function createHostCore({
     const existing = getRow('SELECT * FROM deliveries WHERE request_key=?', request.request_key) || getControl(request.request_key) || getRow(
       'SELECT * FROM request_tombstones WHERE request_key=?', request.request_key);
     if (existing) {
+      if (existing.state === 'abandoned') return abandonedResult(request.request_key);
       if (existing.fingerprint !== fingerprint) {
         return {
           state: 'rejected',
@@ -908,29 +982,18 @@ function createHostCore({
       }
       return existing;
     }
-    const keyMatch = /^rk_(\d{1,16})_([a-fA-F0-9]{16,})$/.exec(request.request_key || '');
-    if (!keyMatch || !KINDS.has(request.kind)) {
-      return {
-        state: 'rejected',
-        reason: 'invalid_request'
-      };
-    }
-    if (+keyMatch[1] < now() - DAY) {
-      return {
-        state: 'expired',
-        reason: 'key_expired'
-      };
-    }
-    if (+keyMatch[1] > now() + 300000) {
-      return {
-        state: 'rejected',
-        reason: 'key_future'
-      };
-    }
+    if (!KINDS.has(request.kind)) return { state: 'rejected', reason: 'invalid_request' };
+    const invalid = keyRejection(request.request_key);
+    if (invalid) return invalid;
     const isControl = CONTROLS.has(request.kind);
     let result;
     const sessionId = request.kind === 'start' ? randomUUID() : request.session_id;
     enqueue(sessionId, () => {
+      const tombstone = getRow('SELECT * FROM request_tombstones WHERE request_key=?', request.request_key);
+      if (tombstone?.state === 'abandoned') {
+        result = abandonedResult(request.request_key);
+        return;
+      }
       let session = sessionId && getSession(sessionId);
       let incarnation = session && getLatestIncarnation(sessionId);
       let reason;
@@ -1058,8 +1121,8 @@ function createHostCore({
             token.invalidated = true;
             writeTransaction(() => transitionDelivery(queued, ['queued'], { state: 'rejected', reason: 'auth_recheck_failed' }));
           }
-          const pending = getRow("SELECT * FROM deliveries WHERE incarnation_id=? AND kind='interrupt' AND state IN " +
-            "('queued','sending','written','provider_observed','unknown') ORDER BY rowid DESC LIMIT 1", incarnation.id);
+          const pending = getRow("SELECT * FROM deliveries WHERE incarnation_id=? AND turn_gen=? AND kind='interrupt' AND state IN " +
+            "('queued','sending','written','provider_observed','unknown') ORDER BY rowid DESC LIMIT 1", incarnation.id, incarnation.turn_gen);
           if (pending) {
             writeTransaction(() => {
               execute(
@@ -1234,6 +1297,7 @@ function createHostCore({
               outcome: 'interrupted'
             });
           }
+          if (['completed', 'cancelled'].includes(adapterEvent.state)) settleTurnInterrupts(incarnation, delivery.turn_gen);
         } else if (adapterEvent.type === 'result') {
           const uuids = adapterEvent.user_message_uuids || [];
           if (uuids.length !== 1) {
@@ -1252,16 +1316,7 @@ function createHostCore({
           transitionDelivery(delivery, ['sending', 'written', 'provider_observed', 'unknown', 'completed'], {
             result_json: JSON.stringify(adapterEvent)
           });
-          for (const interruptDelivery of getRows("SELECT * FROM deliveries WHERE incarnation_id=? AND kind='interrupt' AND turn_gen=? AND " +
-            "state IN ('sending','written','provider_observed','unknown')", incarnation.id, delivery.turn_gen)) {
-            transitionDelivery(interruptDelivery, ['sending', 'written', 'provider_observed', 'unknown'], {
-              state: 'completed'
-            });
-            resolveAttributionCause(interruptDelivery);
-            transitionIncarnation(incarnation, ['alive'], {
-              interrupt_unknown: 0
-            });
-          }
+          settleTurnInterrupts(incarnation, delivery.turn_gen);
         } else if (adapterEvent.type === 'tool_result') {
           const toolRequest = getRow('SELECT * FROM tool_requests WHERE incarnation_id=? AND tool_use_id=?', incarnation.id, adapterEvent.tool_use_id);
           if (!toolRequest?.answer_delivery_id) {
@@ -1283,15 +1338,15 @@ function createHostCore({
           if (!delivery || !['sending', 'written', 'unknown', 'provider_observed', 'completed'].includes(delivery.state)) {
             return;
           }
-          if (delivery.state === 'written' && delivery.updated_at <= now() - INTERRUPT_RECEIPT_TIMEOUT_MS) {
-            transitionIncarnation(incarnation, ['alive'], {
-              interrupt_unknown: 1
-            });
+          const settled = delivery.state === 'completed' || settleTurnInterrupts(incarnation, delivery.turn_gen);
+          if (!settled) {
+            if (delivery.state === 'written' && delivery.updated_at <= now() - INTERRUPT_RECEIPT_TIMEOUT_MS) {
+              transitionIncarnation(incarnation, ['alive'], { interrupt_unknown: 1 });
+            }
+            transitionDelivery(delivery, ['sending', 'written', 'unknown'], { state: 'provider_observed' });
+            resolveAttributionCause(delivery);
           }
-          transitionDelivery(delivery, ['sending', 'written', 'unknown'], {
-            state: 'provider_observed'
-          });
-          resolveAttributionCause(delivery);
+          // A late receipt cannot revive a settled delivery, but survivor evidence remains a permanent barrier.
           if (adapterEvent.still_queued?.length) {
             markAttributionUncertain(incarnation);
             for (const uuid of adapterEvent.still_queued) {
@@ -1472,10 +1527,19 @@ function createHostCore({
         current_incarnation_id: getLatestIncarnation(sessionId)?.id || null,
         incarnations: rows('SELECT * FROM incarnations WHERE session_id=?', [sessionId], incarnation => {
           const event = getRow("SELECT json FROM events WHERE incarnation_id=? AND type='rate_limit' ORDER BY seq DESC LIMIT 1", incarnation.id);
-          return { ...incarnation, rate_limit_info: event ? JSON.parse(event.json) : null };
+          // Only a live, locally verified gate provides version and control evidence.
+          const verified = incarnation.host_boot_id === hostBootId && hasPassedGate(incarnation);
+          const caps = incarnation.capabilities === null ? undefined : JSON.parse(incarnation.capabilities);
+          const capabilityVerdict = verified ? evaluateCapabilities({
+            sdkVersion: pin.sdkVersion, cliVersion: pin.cliVersion, permissionMode: 'default', systemInitCapabilities: caps
+          }) : null;
+          return { ...incarnation, rate_limit_info: event ? JSON.parse(event.json) : null,
+            cli_version: verified ? pin.cliVersion : null, control_available: !!verified && incarnation.state === 'alive', capabilityVerdict };
         }),
         deliveries: rows('SELECT * FROM deliveries WHERE session_id=?', [sessionId]),
-        tool_requests: rows('SELECT * FROM tool_requests WHERE incarnation_id IN (SELECT id FROM incarnations WHERE session_id=?)', [sessionId]),
+        tool_requests: rows('SELECT * FROM tool_requests WHERE incarnation_id IN (SELECT id FROM incarnations WHERE session_id=?)', [sessionId], card => ({
+          ...card, created_at: getRow("SELECT created_at FROM events WHERE incarnation_id=? AND type='sdk' AND json_extract(json,'$.type')='tool_request' AND json_extract(json,'$.tool_use_id')=? ORDER BY seq LIMIT 1", card.incarnation_id, card.tool_use_id)?.created_at || null
+        })),
         controls: rows('SELECT * FROM control_requests WHERE session_id=?', [sessionId])
       };
       store.readCheckpoint();
@@ -1575,6 +1639,24 @@ function createHostCore({
       return { events, seq_high: high, more: last < high };
     });
   }
+  function transcript(sessionId, beforeSeq, limit = 50) {
+    if (beforeSeq !== undefined && (!Number.isSafeInteger(beforeSeq) || beforeSeq < 0) ||
+        !Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error('invalid_request');
+    return store.read(() => {
+      const session = getSession(sessionId);
+      if (!session || ['deleting', 'deleted'].includes(session.state)) return { events: [], next_before_seq: null };
+      const rows = getRows("SELECT seq,session_id,incarnation_id,type,created_at,substr(CAST(json AS BLOB),1,4100) preview," +
+    "length(CAST(json AS BLOB)) bytes FROM events WHERE session_id=? AND type='sdk_message' AND seq<? ORDER BY seq DESC LIMIT ?",
+      sessionId, beforeSeq ?? Number.MAX_SAFE_INTEGER, limit + 1);
+      const more = rows.length > limit;
+      const events = rows.slice(0, limit).map(({ preview, ...row }) => {
+        const text = utf8Prefix(preview, 4096);
+        return { ...row, preview: text, truncated: Buffer.byteLength(text) < row.bytes,
+          ref: { source: 'event', id_or_seq: row.seq } };
+      });
+      return { events, next_before_seq: more ? events.at(-1).seq : null };
+    });
+  }
   function chunk(sessionId, source, ref, offset = 0) {
     const fail = code => { throw Object.assign(new Error(code), { code }); };
     if (!Number.isSafeInteger(offset) || offset < 0) fail('invalid_offset');
@@ -1604,6 +1686,7 @@ function createHostCore({
   adapter.events.on('event', onEvent);
   return {
     submit,
+    abandon,
     async flush() {
       while (pending.size) await Promise.all([...pending]);
       if (asyncErrors.length) throw asyncErrors.shift();
@@ -1614,13 +1697,14 @@ function createHostCore({
     settingsPreview,
     eventsSince,
     chunk,
+    transcript,
     submitWithReceipt(request) {
       const result = this.submit(request);
       return store.read(() => {
         const persisted = getRow('SELECT * FROM request_aliases WHERE request_key=?', request.request_key) ||
           getRow('SELECT * FROM deliveries WHERE request_key=?', request.request_key) || getControl(request.request_key) ||
           getRow('SELECT * FROM request_tombstones WHERE request_key=?', request.request_key);
-        const durable = Boolean(persisted && persisted.fingerprint === requestFingerprint(request));
+        const durable = Boolean(persisted && (persisted.state === 'abandoned' || persisted.fingerprint === requestFingerprint(request)));
         return { durable, result, ...(!durable ? { code: result.reason || 'not_recorded' } : {}) };
       });
     },
@@ -1636,9 +1720,10 @@ function createHostCore({
     lookup(requestKey) {
       return store.read(() => {
         const alias = getRow('SELECT * FROM request_aliases WHERE request_key=?', requestKey);
-        return (alias && getDelivery(alias.target_delivery_id)) ||
+        const result = (alias && getDelivery(alias.target_delivery_id)) ||
           getRow('SELECT * FROM deliveries WHERE request_key=?', requestKey) || getControl(requestKey) ||
           getRow('SELECT * FROM request_tombstones WHERE request_key=?', requestKey) || { found: false };
+        return result.state === 'abandoned' ? abandonedResult(requestKey) : result;
       });
     },
     activity() {

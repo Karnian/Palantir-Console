@@ -29,7 +29,7 @@ function createProtocol({ stream, core, capability, hostBootId, sdkVersion = nul
       send({ type: 'not_accepted', id: message.id });
       return close();
     }
-    if (!['submit', 'lookup', 'snapshot', 'events_since', 'list', 'settings_preview', 'chunk'].includes(message.type) ||
+    if (!['submit', 'abandon', 'lookup', 'snapshot', 'events_since', 'list', 'settings_preview', 'chunk', 'transcript'].includes(message.type) ||
         !['string', 'number'].includes(typeof message.id)) return close();
     const token = { id: message.id };
     pending.add(token);
@@ -41,8 +41,10 @@ function createProtocol({ stream, core, capability, hostBootId, sdkVersion = nul
         if (!message.request || typeof message.request !== 'object') throw new Error('invalid_request');
         receipt = await core.submitWithReceipt(message.request);
         result = receipt.result;
-      } else if (message.type === 'lookup') result = await core.lookup(message.request_key);
+      } else if (message.type === 'abandon') result = core.abandon(message.request_key);
+      else if (message.type === 'lookup') result = await core.lookup(message.request_key);
       else if (message.type === 'snapshot') result = await core.snapshot(message.session_id);
+      else if (message.type === 'transcript') result = await core.transcript(message.session_id, message.before_seq, message.limit);
       else if (message.type === 'list') result = await core.listSessions();
       else if (message.type === 'settings_preview') result = await core.settingsPreview(message.cwd);
       else if (message.type === 'chunk') result = await core.chunk(message.session_id, message.source, message.id_or_seq, message.offset);
@@ -55,7 +57,8 @@ function createProtocol({ stream, core, capability, hostBootId, sdkVersion = nul
       }
     } catch (error) {
       if (pending.has(token)) send({ type: 'error', id: message.id,
-        code: ['invalid_request', 'invalid_chunk', 'invalid_offset', 'snapshot_too_large'].includes(error.message) ? error.message : 'storage_unavailable' });
+        code: ['invalid_request', 'key_expired', 'key_future', 'invalid_chunk', 'invalid_offset', 'snapshot_too_large']
+          .includes(error.message) ? error.message : 'storage_unavailable' });
     } finally {
       pending.delete(token);
       onActivity();

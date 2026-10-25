@@ -115,6 +115,11 @@ function createClient({ runtimeDir, timeoutMs = 2000 }) {
                 if (entry.type === 'lookup' && uncertain.has(entry.fields.request_key)) {
                   remember(uncertain.get(entry.fields.request_key), message.result);
                 }
+                if (entry.type === 'abandon') {
+                  const metadata = uncertain.get(entry.fields.request_key);
+                  if (message.result.abandoned) uncertain.delete(entry.fields.request_key);
+                  else if (metadata && message.result.existing) remember(metadata, message.result.existing);
+                }
                 if (entry.type === 'events_since') observeEvents(message.result.events);
                 entry.resolve(message.result);
               }
@@ -144,7 +149,9 @@ function createClient({ runtimeDir, timeoutMs = 2000 }) {
     get hostBootChanged() { return bootChanged; },
     submit: value => request('submit', { request: value }),
     lookup: request_key => request('lookup', { request_key }),
+    abandon: request_key => request('abandon', { request_key }),
     snapshot: session_id => request('snapshot', { session_id }),
+    transcript: (session_id, before_seq, limit = 50) => request('transcript', { session_id, before_seq, limit }),
     chunk: (session_id, source, id_or_seq, offset = 0) => request('chunk', { session_id, source, id_or_seq, offset }),
     list: () => request('list', {}),
     settingsPreview: cwd => request('settings_preview', { cwd }),

@@ -4,6 +4,7 @@ const { randomUUID, createHash } = require('node:crypto');
 const path = require('node:path');
 const childProcess = require('node:child_process');
 const pin = require('./pin');
+const { capabilityVerdict } = require('./capability');
 const { validateDecision } = require('./decisionValidation');
 const { assertSpawnAllowed } = require('../utils/spawnGuard');
 const { checkSpawnOptionsSync } = require('./argvCheck');
@@ -40,18 +41,6 @@ function inputFingerprint(input) {
   const canonical = JSON.stringify(input, (_key, value) => value && typeof value === 'object' && !Array.isArray(value) ?
     Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]])) : value);
   return createHash('sha256').update(canonical).digest('hex');
-}
-function capabilityVerdict({ systemInitCapabilities, sdkVersion, cliVersion, permissionMode } = {}) {
-  const verdict = { observe: 'supported', prompt: 'unknown', tool_approval: 'supported', cancel: 'unknown', resume: 'supported' };
-  if (sdkVersion !== pin.sdkVersion || cliVersion !== pin.cliVersion || permissionMode !== 'default') {
-    return Object.fromEntries(Object.keys(verdict).map(key => [key, 'unsupported']));
-  }
-  if (systemInitCapabilities !== undefined) {
-    const caps = Array.isArray(systemInitCapabilities) ? systemInitCapabilities : [];
-    verdict.prompt = caps.includes('msg_lifecycle_v1') ? 'supported' : 'unsupported';
-    verdict.cancel = caps.includes('interrupt_receipt_v1') ? 'supported' : 'unsupported';
-  }
-  return verdict;
 }
 function createSdkAdapter({ sdk, executablePath = bundledExecutable(), executableSha256 = pin.cliSha256,
   cliVersion = pin.cliVersion, baseEnv = process.env, identityProbe = createPsIdentityProbe({ pinnedPath: executablePath }),

@@ -18,6 +18,7 @@ function bridge(t, options = {}) {
     async reconcile() { reconcileCalls++; return client.lookup('unknown'); },
     list: () => f.core.listSessions(), snapshot: id => f.core.snapshot(id),
     lookup(key) { lookups++; return f.core.lookup(key); },
+    abandon: key => f.core.abandon(key),
     settingsPreview: cwd => f.core.settingsPreview(cwd),
     eventsSince: seq => f.core.eventsSince(seq),
     async submit(req) {
@@ -178,4 +179,38 @@ test('R8 metadata overflow is an explicit 413, not a stale snapshot or host rest
   h.client.snapshot = () => { throw Object.assign(Error('snapshot_too_large'), { code: 'snapshot_too_large' }); };
   await assert.rejects(h.service.snapshot('session'), { code: 'snapshot_too_large', status: 413 });
   assert.equal((await h.service.list()).host, 'running'); assert.equal(h.launches, 0);
+});
+
+test('R2 offline approval cache preserves the exact status field set including request time', async t => {
+  const host = bridge(t);
+  host.f.start();
+  host.f.adapter.toolRequest(host.f.iid, 'approval', 'Bash', { command: 'private input' });
+  const known = await host.service.snapshot(host.f.sid);
+  const card = known.state.tool_requests[0];
+  assert.equal(card.created_at, host.f.time);
+  host.online = false;
+  host.held = true;
+  const offline = await host.service.snapshot(host.f.sid);
+  assert.deepEqual(offline.last_known.state.tool_requests, [{
+    id: card.id,
+    incarnation_id: card.incarnation_id,
+    tool_use_id: card.tool_use_id,
+    tool_name: card.tool_name,
+    state: card.state,
+    created_at: card.created_at
+  }]);
+  assert.deepEqual(Object.keys(offline.last_known.state.tool_requests[0]).sort(), [
+    'created_at', 'id', 'incarnation_id', 'state', 'tool_name', 'tool_use_id'
+  ]);
+});
+
+test('abandon reaches the live host and never starts an absent host', async t => {
+  const h = bridge(t);
+  const key = h.f.key();
+  assert.deepEqual(await h.service.abandon(key), { host: 'running', abandoned: true });
+  assert.equal((await h.service.lookup(key)).result.reason, 'request_abandoned');
+  h.online = false;
+  await assert.rejects(h.service.abandon(h.f.key()), { code: 'host_unreachable', status: 503 });
+  assert.equal(h.launches, 0);
+  await assert.rejects(h.service.abandon('invalid'), { code: 'invalid_request_key', status: 400 });
 });

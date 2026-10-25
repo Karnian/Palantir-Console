@@ -101,3 +101,22 @@ test('dedicated SSE relays frames, disconnect unsubscribes, app shutdown closes 
   await h.app.shutdown(); await h.app.shutdown();
   assert.equal(h.shutdowns, 1); assert.equal(h.subscribers.size, 0); assert.equal(frames.at(-1), 'END');
 });
+
+test('abandon route requires cookie and exact origin, forwards only the path key, and returns 503 offline', async t => {
+  const h = setup(t);
+  const calls = [];
+  h.service.abandon = async requestKey => { calls.push(requestKey); return { host: 'running', abandoned: true }; };
+  const suffix = '/requests/' + key + '/abandon';
+  const response = await mutate(h.app, 'post', suffix, { body: 'ignored', request_key: 'ignored' });
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body, { host: 'running', abandoned: true });
+  assert.deepEqual(calls, [key]);
+  assert.equal((await request(h.app).post(base + suffix).set('Cookie', COOKIE).send({})).status, 403);
+  assert.equal((await request(h.app).post(base + suffix).set('Authorization', `Bearer ${TOKEN}`)
+    .set('Origin', 'http://localhost').send({})).status, 403);
+  assert.equal((await request(h.app).post(base + suffix).set('Cookie', COOKIE)
+    .set('Origin', 'http://elsewhere').send({})).status, 403);
+  assert.equal(calls.length, 1);
+  h.service.abandon = async () => { throw Object.assign(new Error('host_unreachable'), { status: 503, code: 'host_unreachable' }); };
+  assert.equal((await mutate(h.app, 'post', suffix, {})).status, 503);
+});

@@ -21,7 +21,7 @@ async function message(child, type) {
     if (found) return found;
     if (child.exitCode !== null || child.signalCode !== null) throw Error(child.errors || 'child_exited');
     return false;
-  }, 10000);
+  }, type === 'ready' ? 15000 : 10000);
 }
 async function settledPrompt(server, requestKey) {
   return poll(async () => {
@@ -196,7 +196,14 @@ test('HTTP real SDK socket failure preserves pending last-known; identical previ
     server.child.send('break-socket'); await message(server.child, 'socket-broken');
     const offline = await server.call('/' + activeId);
     assert.equal(offline.body.current_state_known, false); assert.equal(typeof offline.body.as_of, 'number');
-    const status = row => ({ id: row.id, incarnation_id: row.incarnation_id, tool_use_id: row.tool_use_id, tool_name: row.tool_name, state: row.state });
+    const status = row => ({
+      id: row.id,
+      incarnation_id: row.incarnation_id,
+      tool_use_id: row.tool_use_id,
+      tool_name: row.tool_name,
+      state: row.state,
+      created_at: row.created_at
+    });
     assert.deepEqual(offline.body.last_known.state.tool_requests, known.state.tool_requests.map(status));
     assert.equal(Object.hasOwn(offline.body.last_known.state.tool_requests[0], 'input'), false);
     for (const { route, body, method } of controls) assert.equal((await server.call(route, method, body)).status, 503);

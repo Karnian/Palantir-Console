@@ -906,13 +906,19 @@ test('snapshot nav is absorbed into manager in both sidebar items and palette', 
   const navSource = fs.readFileSync(path.join(__dirname, '../public/app/lib/nav.js'), 'utf8');
   vm.runInContext(navSource.replace(/^import .*$/gm, '').replace(/^export /gm, ''), env.context);
   const get = (state, hub = true) => vm.runInContext(`getNavItems('${state}', ${hub})`, env.context);
-  assert.equal(get('on').length, 5);
+  assert.equal(get('on').length, 6);
+  assert.deepEqual(Array.from(get('on'), item => [item.hash, item.label]), [
+    ['manager', '매니저'], ['operator', '오퍼레이터'], ['board', '작업 보드'],
+    ['resources', '리소스'], ['memory', '메모리'], ['owned', '내 세션']
+  ]);
   assert.equal(get('on')[0].label, '매니저');
   assert.equal(get('on')[0].hash, 'manager');
-  assert.equal(get('on', false).length, 6);
+  assert.equal(get('on')[5].hash, 'owned');
+  assert.equal(get('on')[5].label, '내 세션');
+  assert.equal(get('on', false).length, 7);
   assert.equal(get('on', false).at(-1).hash, 'work');
   for (const state of ['pending', 'off', 'error']) {
-    assert.equal(get(state).length, 5);
+    assert.equal(get(state).length, 6);
     assert.equal(get(state).some(item => item.hash === 'work'), false);
   }
   env.context.useEscape = () => {};
@@ -922,19 +928,20 @@ test('snapshot nav is absorbed into manager in both sidebar items and palette', 
   t.after(() => { env.render(null, root); env.cleanup(); });
   env.render(env.h(env.context.CommandPalette, { open: true, onClose: () => {}, navItems: get('on') }), root);
   await flushEffects();
-  assert.equal(root.querySelectorAll('.command-palette-item').length, 5);
+  assert.equal(root.querySelectorAll('.command-palette-item').length, 6);
   assert.equal(root.querySelector('.command-palette-label').textContent, '매니저');
   const input = root.querySelector('input');
   input.dispatchEvent(new env.window.KeyboardEvent('keydown', { key: '1', bubbles: true }));
   assert.equal(env.window.location.hash, '#manager');
   env.render(env.h(env.context.CommandPalette, { open: true, onClose: () => {}, navItems: get('off') }), root);
   await flushEffects();
-  assert.equal(root.querySelectorAll('.command-palette-item').length, 5);
+  assert.equal(root.querySelectorAll('.command-palette-item').length, 6);
   assert.equal(root.querySelector('.command-palette-label').textContent, '매니저');
   env.render(env.h(env.context.CommandPalette, { open: true, onClose: () => {}, navItems: get('on', false) }), root);
   await flushEffects();
-  assert.equal(root.querySelectorAll('.command-palette-item').length, 6);
-  assert.equal(root.querySelectorAll('.command-palette-label')[5].textContent, '작업');
+  assert.equal(root.querySelectorAll('.command-palette-item').length, 7);
+  assert.equal(root.querySelectorAll('.command-palette-label')[5].textContent, '내 세션');
+  assert.equal(root.querySelectorAll('.command-palette-label')[6].textContent, '작업');
 });
 
 test('clipboard success receives exact id#ref; total failures never expose raw errors', async t => {

@@ -2193,3 +2193,228 @@ pending 2,100개에서는 모든 행을 보존하면서 미리보기를 줄여 8
 - `R2 real ps ignores unrelated multiline argv while identifying a marked child` — `expected: 'ok'; actual: 'query_failed'`
 - `real ps identifies marked child and grandchild then confirms exit` — `real /bin/ps must be available; sandbox EPERM requires host rerun`
 - `SDK real ps identity reads actual child and inherited grandchild marker then mismatch` — `error: 'spawnSync /bin/ps EPERM'`
+## S1-c2 — 내 세션 최소 화면
+
+`#owned` 목록과 `#owned/<session_id>` 세션 화면을 추가했다. 내비 라벨은 `copy.js`의 “내 세션”이며 기존 C1 화면과 전역 useSSE 채널은 수정하지 않았다. 목록에는 cwd·세션 상태·실행 상태·승인 대기 수·마지막 활동 순번을 표시한다. 이번 화면은 사용자 배치 lock-in 전의 최소 구현이다.
+
+세션별 `GET /api/owned-sessions/:id/transcript?before_seq=&limit=`는 기존 cookie·Fetch-Site 검사를 통과한 뒤 서비스 → 소켓 프로토콜 → 코어로 전달된다. 세션 소속 sdk_message만 seq 내림차순으로 페이지를 나누며 기본 50개·최대 100개다. UTF-8 경계를 지킨 4KiB 미리보기와 event ref를 반환하고 전문은 기존 chunk API로 읽는다. 삭제 중·삭제됨·없는 세션은 빈 목록이며 다른 세션 ref로 전문을 읽을 수 없다.
+
+snapshot에는 현재 호스트에서 초기화 게이트를 통과했다는 증거가 있을 때 CLI 버전·제어 가능 여부·기존 capabilityVerdict 결과를 함께 싣는다. 증거가 없으면 null/false이며 화면이 능력을 추정하지 않는다. 승인 카드 요청 시각은 해당 tool_request 이벤트의 기록 시각을 사용한다. 저장소 스키마와 실행 상태 기계는 바꾸지 않았다.
+
+시작 모달은 기존 로컬 DirectoryPicker와 설정 미리보기를 사용한다. 프로젝트·사용자 hooks/MCP 실행 문구, 출처 경로, PermissionRequest 경고, 거부 사유를 표시하며 확인 체크 전에는 시작할 수 없다. 승인 입력과 긴 prompt·SDK 이벤트는 전문 조각을 복원한다. 전문을 받기 전 승인·질문 제출은 잠긴다. 질문 답은 질문 텍스트를 키로 하는 문자열 사전이며 다중 선택은 선택한 라벨을 쉼표로 연결한다.
+
+대화는 사용자 prompt와 SDK 메시지를 기록 시각으로 정렬한다. assistant 텍스트는 기존 renderMarkdown을 거치고 도구 입력·결과는 텍스트 노드로 표시한다. 전달 unknown과 outcome_unknown을 별개로 강조한다. unknown prompt의 새 키 재전송은 원래 incarnation 종료가 확인되고 현재 실행이 제어 가능한 경우의 사람 버튼으로만 가능하다.
+
+전용 EventSource는 snapshot의 seq_high에서 시작하고 전환·unmount 때 닫는다. 전이 이벤트는 디바운스로 snapshot을 갱신하고 sdk_message는 seq로 중복 제거한다. 호스트 응답 없음이나 SSE 연결 오류에서는 마지막으로 표시한 원문을 유지하고 모든 제출을 잠근다. 서버 재연결·브라우저 SSE 재연결·resync는 snapshot 이후 구독을 다시 잡는다. snapshot_too_large는 별도 오류 문구를 표시한다. id·수명·호스트 상실 세대 fence로 늦은 응답 반영을 막는다.
+
+request_key는 브라우저에서 rk_<시각>_<16바이트 난수 hex>로 만든다. 네트워크 오류·acceptance_unknown은 본문과 키를 보관하고 사람이 누른 같은 키 재시도에서 lookup 후 동일 요청을 재생한다. 모든 세션 제출에 snapshot의 incarnation_id를 함께 보낸다. 중단하고 보내기는 해당 키의 interrupt completed와 idle을 기다린다. 실행 끝내고 이어서 시작은 해당 키의 stop done을 기다린 뒤 resume한다. 독립 resume 버튼은 stop으로 하위 프로세스 확인까지 통과한 종료 실행에서만 활성화한다. 그 외 종료 실행은 실행 끝내고 이어서 시작 경로에서 stop 확인부터 다시 진행한다.
+
+검증 결과:
+
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session*.test.js server/tests/session-host-*.test.js`: tests 548, pass 525, fail 23, cancelled 0, skipped 0. 기존 기록과 동일한 소켓 listen EPERM·실제 /bin/ps EPERM·그에 따른 host_start_timeout 사례다. 로그 `/tmp/sh1-c2-done.log`.
+- UI·transcript·nav·SSE 집중 실행: tests 24, pass 24, fail 0. 로그 `/tmp/sh1-c2-confirmed.log`. unknown/outcome, 입력 규칙, 승인 전문 chunk, 다중 선택 사전, 시작 확인·hook 경고, 호스트 상실 비활성화, 같은 키 재시도, XSS 안전 경로, 세션 소속·페이지·삭제를 검사했다.
+- 지정 boot.smoke + sse-channels 실행은 boot HTTP listen EPERM으로 38개 boot 사례 중 37개 실패·1개 통과를 출력한 뒤 열린 핸들로 끝나지 않아 50초 후 중단했다. SSE 채널 검사는 집중 실행에서 별도로 8/8 통과했다. 로그 `/tmp/sh1-c2-final-smoke.log`.
+- `npm run test:a11y -- --project=chromium --grep 'minimum owned session screen'`: 서버의 127.0.0.1:4177 listen EPERM으로 시나리오 실행 전 종료. owned 목록·세션에 dark/light × 360px API mock 시나리오 4개를 추가했다. 호스트에서 전체 `npm run test:a11y` 재검증이 필요하다. visual baseline은 추가하지 않았다.
+
+실제 Claude·LLM 호출, 외부 네트워크 호출, git 조작은 수행하지 않았다. 라이트·다크·360px의 실제 브라우저 검증과 화면 배치 lock-in은 호스트 및 S1-d에서 수행한다. 과거 실행에 버전·능력 판정 증거가 없으면 판정 전으로 남기며, 마지막 활동은 서버가 기존에 제공하던 순번으로 표시한다.
+
+
+## S1-c2 라운드 2 — 호스트 검증 반영과 화면 모듈 분리
+
+호스트 라운드 1의 관련 테스트 594개 중 593개 통과, a11y 74/74 통과 결과를 받아 남은 결정적 실패를 수정했다. `owned-session-http-process.test.js`의 장애 캐시 기대값은 id·incarnation_id·tool_use_id·tool_name·state·created_at 여섯 필드를 정확히 비교한다. 원문 input 비보존 단언도 유지했다. 별도 in-process 서비스 테스트에서도 동일한 여섯 필드만 남고 요청 시각이 보존됨을 확인했다. 캐시 허용 필드는 변경하지 않았다.
+
+화면은 `OwnedSessionsView.js` 라우트 셸과 `components/owned/` 하위 모듈로 분리했다. 목록, 세션 구성, 세션 머리, 대화, prompt, SDK 메시지, 전달 배지, 승인 카드, 질문 카드, 입력창, 시작 모달을 각각 읽고 고칠 수 있다. API·조각 조회는 client, JSON·시각·라벨 표시는 format, 전용 SSE·멱등 제출·후속 조작·async fence는 useOwnedSessions가 맡는다. 상호작용·제어 가능·resume 가능·재시작 가능·재전송 가능·대화 정렬은 state의 순수 함수다. 동작과 서버 계약을 유지하는 리팩터링이며, 화면 파일 16개는 상대 import 대상 존재와 줄당 160자 이내를 검사했다.
+
+jsdom helper는 하위 경로를 읽되 export 이름은 basename으로 처리한다. 기존 UI 테스트는 실제 owned 모듈을 의존 순서대로 불러오도록 경로 로딩만 바꿨고 기존 단언은 유지했다. 순수 상태 함수의 제어 증거·호스트 상실·진행 중 제어 요청·stop 미확인/blocked/done·닫힌 세션·승인/질문 대기 경계도 추가 검증했다.
+
+`capabilityVerdict`는 pin만 참조하는 `sessionHost/capability.js`로 옮겼다. sdkAdapter는 같은 함수 객체를 re-export하고 코어는 순수 모듈만 import한다. 코어의 SDK 어댑터 require는 제거했다. 기존 능력 판정 테스트와 re-export 동일성 검사가 통과했다.
+
+a11y에는 dark/light 각각 360px로 상태별 여덟 시나리오를 추가했다. 긴 승인 입력은 잘린 미리보기와 전문 chunk 응답을 나눠 전문 마지막 표지까지 복원됨을 확인한다. 질문 카드의 선택·답변 활성화, 전달 unknown·outcome_unknown·귀속 불명 결과, 호스트 상실 뒤 본문 유지·모든 버튼 비활성, 실제 DirectoryPicker를 거친 시작 모달의 설정 출처·PermissionRequest 경고·확인 체크·설정 거부 사유를 검사한다. 시작 모달은 정상 미리보기와 거부 미리보기 양쪽에서 axe를 실행한다. 기존 owned 네 시나리오와 합쳐 12개가 수집되며, 모두 가로 스크롤 검사를 유지한다. SSE 테스트 더블은 owned URL에만 적용하고 전역 SSE 채널은 바꾸지 않았다.
+
+검증:
+
+- UI·서비스·jsdom 변환·기존 capability·nav·SSE 집중 테스트: tests 72, pass 72, fail 0 (`/tmp/sh1-c2-r2-final-focus.log`).
+- SDK 어댑터를 포함한 모듈 집중 테스트: tests 130, pass 129, fail 1. 실패는 기존 실제 /bin/ps EPERM 사례다 (`/tmp/sh1-c2-r2-modules.log`).
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session*.test.js server/tests/session-host-*.test.js`: tests 551, pass 528, fail 23, cancelled 0, skipped 0. 실패는 기존 소켓·ps 권한 제한과 이에 따른 host_start_timeout이다 (`/tmp/sh1-c2-r2-final-host.log`).
+- 지정 DoD 전체 명령은 boot HTTP listen EPERM으로 boot 사례 pass 1/fail 37을 출력한 뒤 열린 핸들로 끝나지 않아 45초 후 해당 검증 프로세스 그룹만 중단했다 (`/tmp/sh1-c2-r2-dod.log`). owned/session-host와 SSE 결과는 위 별도 실행에서 확인했다.
+- `npm run test:a11y -- --project=chromium --grep owned`: 127.0.0.1:4177 listen EPERM으로 실행 전 종료 (`/tmp/sh1-c2-r2-a11y.log`). `--list`에서는 owned 시나리오 12개가 정상 수집됐다. 호스트에서 전체 a11y 재실행이 필요하다.
+
+실제 Claude·LLM·외부 네트워크 호출과 git 조작은 수행하지 않았다. visual baseline·전역 SSE 채널·C1 화면·스펙·패키지 설정은 변경하지 않았다.
+
+## S1-c2 라운드 3 — 호스트 화면 확인에서 발견한 사용성 결함
+
+호스트의 라운드 2 관련 597/597·owned a11y 12/12 통과 이후 직접 화면에서 발견한 결함을 반영했다. 배치 lock-in이나 visual baseline은 변경하지 않았다.
+
+모든 owned 자체 버튼에 기존 btn·btn-sm 클래스 체계를 적용했다. 허용·보내기·질문 답변·시작은 btn-primary, 거부·삭제·세션 끝내기는 btn-danger다. 기존 버튼 CSS가 특정 화면에만 정의되어 있어 클래스만으로는 owned에 버튼 외형이 생기지 않으므로, owned 범위에 배경·테두리·패딩·hover·disabled 규칙을 추가했다. 색은 기존 토큰만 사용하며 비활성 버튼은 흐린 색·점선 테두리·not-allowed 커서로 구분한다.
+
+getOwnedHeaderState 순수 함수는 호스트가 응답하지 않으면 실행·제어·상호작용·세션의 현재 값을 unknown으로 반환한다. snapshot 값은 별도 lastKnown에만 두고 화면에서는 각 값 앞에 기준 시각과 “기준 마지막”을 붙인다. 연결 중에는 “호스트: 연결됨”, “실행: 생존”, “제어: 가능”, “상호작용: 질문 대기”, “세션: 열림”처럼 필드 이름을 표시한다. 호스트가 연결되지 않은 동안 기존 snapshot을 현재 생존·상호작용 사실로 표시하지 않는다.
+
+prompt 본문은 일반 크기의 별도 블록으로 바꾸고 줄바꿈·긴 문자열 줄바꿈을 유지한다. 전달 배지는 그 아래 별도 행이다. provider_observed + outcome_unknown 조합은 “받음 · 결과 불명”으로 표시하며 수신 문구를 중복하지 않는다.
+
+승인 결정 버튼과 거부 사유를 도구명·요청 시각 다음으로 옮겼다. 긴 입력은 최대 12줄·600자 미리보기와 기본 접힌 “전문 펼치기”로 표시한다. 단일 긴 줄도 미리보기 높이를 12줄로 제한하므로 결정을 밀어내지 않는다. 전문은 종전대로 chunk 조회로 모두 받아 별도 전문 영역에 그대로 보관하며, 미리보기 제한은 원문에 적용하지 않는다. 짧은 입력은 기본 펼침을 유지한다. 전문을 받기 전 승인 버튼 비활성 규칙도 유지한다.
+
+UI 테스트에 현재 불명/기준 시각·이전 값 분리, 필드 이름, 배지 중복 제거와 본문/배지 분리, 긴 입력에서 결정 영역의 DOM 선행과 펼친 전문의 마지막 표지, 짧은 입력 기본 펼침 단언을 추가했다. 기존 a11y 시나리오도 접힌 전문을 펼쳐 확인하고, 호스트 상실 때 머리의 불명과 마지막 값 표시를 검사하도록 갱신했다.
+
+검증 결과:
+
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session*.test.js server/tests/session-host-*.test.js`: tests 555, pass 532, fail 23, cancelled 0, skipped 0. 실패는 종전과 같은 소켓·실제 ps EPERM 및 이에 따른 host_start_timeout이다 (`/tmp/sh1-c2-r3-all.log`).
+- UI: tests 14, pass 14, fail 0. UI·nav·SSE 집중 실행: tests 27, pass 27, fail 0 (`/tmp/sh1-c2-r3-focused.log`). 화면 모듈의 줄당 160자 제한도 유지했다.
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH npx playwright test --grep '@a11y.*owned'`: 127.0.0.1:4177 listen EPERM으로 실행 전 종료했다 (`/tmp/sh1-c2-r3-a11y.log`). 같은 필터의 --list에서 owned 시나리오 12개가 정상 수집됐다. 실제 브라우저 검증은 호스트에서 필요하다.
+
+실제 Claude·LLM·외부 네트워크 호출, git 조작, 전역 SSE·C1 화면·서버 실행 상태 기계 변경은 수행하지 않았다.
+
+## S1-c2 라운드 4 — 적대리뷰 R1의 비동기 경계 수정
+
+수정 전에 별도 `owned-session-ui-r4.test.js`로 여섯 지적을 재현했다. SSE error 뒤 남은 타이머의 HTTP 성공으로 조작이 열림, lookup 대기 중 연결 상실 뒤 POST 재생, 라우트 unmount 뒤 시작 키 유실, 기존 interrupt delivery에 합류한 후속 prompt 누락, 불명 상태의 재전송 허용, 삭제 뒤 늦은 transcript 재삽입 여섯 사례가 모두 실패했다. `/tmp/sh1-c2-r4-red.log`: tests 6, pass 0, fail 6. 기존 nav 단일 테스트도 수정 전 tests 1, pass 0, fail 1이었다(`/tmp/sh1-c2-r4-nav-red.log`).
+
+조작 가능 여부는 최신 connection ref의 SSE open·연결 세대·그 세대의 snapshot 확인을 함께 요구한다. HTTP snapshot 성공만으로 연결 상태를 복원하지 않는다. error는 갱신 타이머를 취소하고 세대를 올리며, 재연결·resync는 snapshot을 다시 읽고 필요한 구독을 교체한 뒤에만 열린다. lookup 후와 POST 직전도 최신 ref·세대를 검사한다. 호스트가 꺼진 초기 목록에서는 새 세션 설정 화면을 열 수 있지만, 실제 start POST는 설정 미리보기가 호스트를 띄운 뒤 SSE와 snapshot 동기화가 끝나야 가능하다.
+
+미확정 요청의 경로·메서드·본문·키는 POST 전에 탭 단위 sessionStorage에 기록한다. 응답 유실뿐 아니라 응답 전에 화면을 떠난 경우에도 같은 의도를 복구한다. accepted/rejected 또는 확정 lookup 결과에서만 보관분을 지우며, 확정 lookup은 POST를 반복하지 않는다. 저장 실패는 모듈 메모리로 내려가고 경고를 표시한다. 저장소 변경 구독으로 이전 화면에서 늦게 확정된 요청도 현재 화면에 반영한다. 메모리 보관은 라우트 이동을 견디지만 저장소 실패 상태의 새로고침·탭 닫힘은 견디지 못하므로 경고에 명시한다.
+
+중단하고 보내기는 접수 응답의 실제 delivery id를 저장한다. 따라서 새 request_key가 기존 interrupt의 alias가 되어도 기존 delivery의 completed를 관측해 후속 prompt를 보낸다. prompt 허용은 공통 순수 함수에서 제어 증거·귀속 정상·interrupt 정상과 idle을 확인한다. 명시적인 대기열 제출만 큐 모드를 사용하며, 즉시 전송·재전송·자동 후속은 idle을 요구한다. queued 모드도 귀속 불명과 중단 불명은 우회하지 못한다.
+
+삭제 이벤트 또는 deleting/deleted snapshot을 관측하면 데이터 세대를 올리고 본문을 비운다. 이전 세대 transcript·snapshot은 폐기하며 삭제가 확인된 화면은 조작 가능 상태로 복원하지 않는다.
+
+`work-board.test.js`는 getNavItems와 CommandPalette의 실제 항목 수를 6개(별도 작업 화면 유지 시 7개)로 갱신했다. 전체 hash·한국어 라벨 순서와 owned의 6번째 위치·내 세션 라벨, 뒤따르는 work 위치도 정확히 검사한다. 다른 nav·CommandPalette 관련 테스트를 검색했고, 정적 NAV_ITEMS 자체의 5개 기대값은 유효하므로 바꾸지 않았다.
+
+검증:
+
+- 수정 전: R1 재현 0/6, nav 단일 0/1.
+- 수정 후: 기존 UI 14개와 R4 경계 테스트 10개, 총 24/24 통과. 재연결 snapshot 대기·저장소 예외·확정 lookup·응답 전 이동 사례도 포함한다.
+- nav 단일 테스트 1/1 통과. nav·jsdom 변환·SSE 별도 테스트 26/26 통과(`/tmp/sh1-c2-r4-other.log`).
+- 지정 owned/session-host/work-board 전체 실행: tests 629, pass 606, fail 23, cancelled 0, skipped 0(`/tmp/sh1-c2-r4-verified.log`). 실패는 기존 소켓·실제 ps EPERM 및 이에 따른 host_start_timeout이다.
+- `npx playwright test --grep '@a11y.*owned'`: 127.0.0.1:4177 listen EPERM으로 실행 전에 중단됐다(`/tmp/sh1-c2-r4-a11y.log`). 호스트에서 재검증한다.
+
+실제 Claude·LLM·외부 네트워크 호출, git 조작, 전역 SSE 채널·C1 화면·서버 상태 기계 변경은 수행하지 않았다.
+
+## S1-c2 라운드 5 — 적대리뷰 R2의 복구 고착·대상·후속 의도 수정
+
+수정 전 재현 테스트 5개는 모두 실패했다(`/tmp/sh1-c2-r5-red.log`: tests 5, pass 0, fail 5). 재현은 snapshot 대기 중 SSE error→open→이전 HTTP reject, SSE 정상 중 HTTP 1회 실패, A의 pending이 B를 잠그는 문제, 이동 후 interrupt 후속 prompt 소실, incarnation 변경 뒤 보류 표시 소실이다.
+
+HTTP snapshot 요청 번호와 SSE 연결 세대를 별도로 검사한다. 성공뿐 아니라 catch도 자신이 시작한 요청 번호·연결 세대·데이터 세대가 최신일 때만 동기화 상태를 바꾼다. HTTP 실패는 SSE open을 내리지 않고 snapshot 유효성만 지우며 “동기화 실패 — 다시 시도 중”으로 조작을 잠근다. useOwnedSessions의 timers·retryMs 인자로 주입 가능한 주기(기본 1초)로 다시 읽고 성공하면 조작이 열린다. SSE error는 연결 세대를 올리고 타이머를 정리하며, open은 반드시 새 동기화를 요청한다. 구세대 POST 실패도 새 연결의 동기화 상태를 무효화하지 않는다.
+
+탭 저장소는 같은 키 아래 version 2 문서로 요청과 후속 의도를 세션별로 보관한다. 이전 단일 요청 문서는 대상 session_id를 경로에서 복원하여 읽는다. 시작 요청의 대상은 start다. 현재 화면의 대상 요청만 pending으로 표시하고 그 대상의 신규 요청만 막는다. 다른 대상의 미확정 요청은 이동 링크로 표시하며 현재 화면의 조작을 막지 않는다. 재시도는 저장된 대상과 현재 화면이 같아야 하므로, A의 원래 incarnation·본문·키를 A의 최신 snapshot으로 검사한다. 목록·B의 snapshot으로 A의 prompt를 판단하지 않는다.
+
+복합 작업은 후속 종류·본문·대상 incarnation·원래 interrupt/stop 키·접수된 delivery id·접수 확인 여부를 같은 저장소에 보관한다. 접수 응답이 유실되어도 복귀 후 lookup에서 실제 delivery id를 복원한다. interrupt completed + idle + 정상 귀속, 또는 stop done + resume 허용 조건을 다시 검사한 뒤 이어간다. incarnation 변경·귀속/중단 불명·종료된 prompt 대상·거부/실패/blocked 결과는 held로 남기고 “후속 지시가 보류됨 — 직접 보내기”와 원문 및 사람 버튼을 표시한다. 사람 버튼도 현재 snapshot의 prompt/resume 조건을 검사한다.
+
+후속 효과 전에 소비 표시와 후속 제출의 고정 request_key·본문을 한 번의 저장소 쓰기로 함께 예약한다. 따라서 소비 직후 응답 유실·이동·새로고침이 발생해도 새 후속 키를 만들어 자동 전송하지 않고, 이미 예약한 동일 키를 조회·재시도한다. 저장 실패는 메모리로 보존하고 기존 경고를 표시하며, 소비 기록을 영속화하지 못했을 때 자동 효과를 내지 않는다.
+
+검증:
+
+- 수정 전 R2 재현 0/5 통과 → 수정 후 통과.
+- 기존 UI·R4·R5 집중 테스트 30/30 통과. R5는 위 5개와 stop 응답 유실 후 resume 복구 사례다. 테스트에서 메모리 모듈을 새로 로드해 sessionStorage만으로 복구하고, 후속 prompt/resume 1회·incarnation 변경 시 자동 전송 0회·사람 버튼 전송을 검사한다(`/tmp/sh1-c2-r5-ui-done.log`).
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session*.test.js server/tests/session-host-*.test.js server/tests/work-board.test.js`: tests 635, pass 612, fail 23, cancelled 0, skipped 0. 실패는 기존 소켓·실제 ps EPERM과 host_start_timeout이다(`/tmp/sh1-c2-r5-verified.log`, 최종 재실행 `/tmp/sh1-c2-r5-done.log`).
+- nav·jsdom 변환·SSE 별도 26/26 통과(`/tmp/sh1-c2-r5-other.log`). 화면 모듈의 줄당 160자 제한을 유지했다.
+- `npx playwright test --grep '@a11y.*owned'`: 127.0.0.1:4177 listen EPERM으로 실행 전 종료(`/tmp/sh1-c2-r5-a11y.log`). --list는 owned 12개를 정상 수집했다. 호스트에서 실제 실행이 필요하다.
+
+실제 Claude·LLM·외부 네트워크 호출, git 조작, 서버 상태 기계·전역 SSE·C1 화면·스펙·visual baseline 변경은 수행하지 않았다.
+
+## S1-c2 라운드 6 — 자동 복합 후속 제거로 R3 범위 축소
+
+호스트의 라운드 5 관련 635/635·owned a11y 12/12·전체 npm test 5703/5703 결과 이후 적대리뷰 R3를 반영했다. 이번 계약은 S1-e 전 최소 화면에 적용하며 S1-d에서 사용자가 판단할 대상이다. 스펙 파일과 화면 lock-in은 변경하지 않았다.
+
+수정 전 새 재현 테스트 4개가 모두 실패했다(`/tmp/sh1-c2-r6-red.log`: tests 4, pass 0, fail 4). interrupt 완료 뒤 자동 prompt, stop 완료 뒤 자동 resume, 삭제된 세션의 pending·본문 잔류와 lookup 누락, snapshot 413의 반복 재시도를 각각 재현했다.
+
+자동 후속 의도·delivery 추적·보류/소비 상태·후속 요청 예약·자동 POST 코드를 전부 제거했다. 중단하고 보내기는 interrupt만 제출하며 입력창의 초안은 그대로 둔다. “중단 요청함 — 턴이 끝나면 보내기를 누르세요”를 입력창 근처에 표시한다. interrupt completed·idle·정상 귀속 조건을 확인한 뒤 사람이 일반 보내기를 누른다. 실행 끝내고 이어서 시작은 stop만 제출하며 “실행을 끝내는 중 — 끝나면 이어서 시작을 누르세요”를 표시한다. stop done과 기존 resume 조건을 통과하면 이어서 시작 버튼이 켜지고, resume도 사람이 누른다. 두 단계 사이에 자동 제출은 없다. 빠른 연속 클릭도 제출 잠금을 먼저 확인하므로 한 요청만 저장·전송한다.
+
+탭 저장소는 version 3으로 요청만 보관한다. 이전 문서는 실제 미확정 요청만 유지하고 그 외 필드·후속 본문·소비 표시를 제거해 다시 기록한다. 따라서 과거 문서가 저장된 탭을 복제하거나 새로 읽어도 후속 지시를 생성하지 않는다. 초안은 현재 입력 컴포넌트에 유지하며 자동 후속 의도로 저장하지 않는다.
+
+현재 화면 또는 다른 세션의 deleting/deleted 이벤트·snapshot을 관측하면 해당 대상 pending을 정리한다. 미확정 요청이 있으면 조작 가능 여부와 독립적으로 읽기 전용 lookup을 한 번 시작한 뒤 저장소·메모리·이동 링크에서 본문을 즉시 제거한다. lookup이 실패하거나 응답하지 않아도 삭제된 본문을 기다리며 보존하지 않는다. 삭제 전 transcript·snapshot 응답을 버리는 데이터 세대 fence는 유지했다.
+
+자동 HTTP 동기화 재시도는 네트워크·5xx·host unreachable 같은 일시 장애에 한정한다. snapshot_too_large(413)와 다른 4xx는 원인 문구와 사람의 다시 시도 버튼을 표시하고 재시도 타이머·대기 갱신을 중단한다. SSE의 추가 이벤트나 open만으로 이 확정 오류를 지우거나 HTTP를 반복하지 않는다. 사람이 다시 시도해야 새 동기화를 시작하며, 성공하면 오류가 사라진다.
+
+기존 R4·R5의 후속 의도 복구·소비 테스트는 새 수동 계약으로 바꿨다. 새 테스트는 자동 prompt/resume 0회, 실제 입력창의 줄바꿈 포함 초안 유지, 조건 충족 후 보내기·resume 버튼 활성 및 사람 클릭 후 1회, 빠른 연속 클릭 1회, 구버전 후속 본문 제거, 다른 화면에서 삭제한 대상 정리, interrupt 미확인 중 즉시 prompt 금지, 413 자동 요청 중지와 수동 재시도를 검사한다.
+
+검증:
+
+- 수정 전 새 재현 0/4 → 수정 후 통과.
+- UI 전체 집중 테스트: tests 40, pass 40, fail 0(`/tmp/sh1-c2-r6-ui-final.log`).
+- 지정 owned/session-host/work-board 전체: tests 645, pass 622, fail 23, cancelled 0, skipped 0(`/tmp/sh1-c2-r6-final.log`). 실패는 종전과 같은 소켓·실제 ps EPERM 및 host_start_timeout이다.
+- nav·jsdom 변환·SSE 별도 26/26 통과(`/tmp/sh1-c2-r6-other.log`). 화면 모듈의 줄당 160자 제한을 유지했고 production 경로에 자동 후속 관련 식별자가 남지 않음을 확인했다.
+- `npx playwright test --grep '@a11y.*owned'`: 127.0.0.1:4177 listen EPERM으로 실행 전 차단(`/tmp/sh1-c2-r6-a11y.log`). 실제 owned a11y는 호스트에서 재검증한다.
+
+실제 Claude·LLM·외부 네트워크 호출, git 조작, 서버 상태 기계·전역 SSE·C1 화면·visual baseline 변경은 수행하지 않았다.
+
+### S1-c2 라운드 7 — R4 잔여 항목
+
+수정 전 회귀 테스트는 4개 모두 실패했다(`/tmp/sh1-c2-r7-red.log`: tests 4, pass 0, fail 4). idle에서 두 인터럽트 진입점이 실제 POST를 만드는 문제, 이미 result가 있는 턴의 인터럽트 영수증이 다음 보내기를 막는 문제, 연결 손실 중 삭제된 다른 대상 pending이 남는 문제, 삭제 후 snapshot 갱신 실패 시 이전 원문이 남는 문제를 각각 재현했다.
+
+인터럽트의 화면 버튼과 제출 진입점은 같은 순수 함수 `canInterruptOwnedSession`을 사용한다. 조작 가능하고 상호작용이 running/awaiting_permission/awaiting_user인 경우만 허용하며 idle/unknown에서는 제출하지 않는다. 진행 중 턴 판정과 별도로 미확인 인터럽트는 기존 잠금을 유지한다. 영수증이 확인된 provider_observed이고 대상 turn_gen의 prompt result_json이 이미 있거나 turn_gen=0인 경우에만 다음 prompt의 잠금 사유에서 제외한다. delivery를 completed로 바꾸거나 lifecycle 종결만으로 result를 추측하지 않는다. attribution_uncertain/interrupt_unknown 잠금도 유지한다.
+
+코어의 늦은 인터럽트 접수 경쟁을 fake adapter로 검증했다. 턴 result와 lifecycle completed 뒤 접수된 interrupt는 그 turn_gen의 provider_observed로 남지만, 코어는 다음 prompt를 정상 전달한다. 코어 변경은 하지 않았다. 추가로 확인된 코어 한계: 위 interrupt가 남은 상태에서 다음 턴의 인터럽트를 요청하면 core.js의 기존 incarnation 단위 alias 조회가 이전 turn_gen의 delivery를 반환한다(재현 출력: next_prompt=provider_observed, interrupt_turn=1, next_turn=2, later_interrupt_aliases_old=true, provider_interrupt_calls=1). 이는 화면의 다음 prompt 잠금과 별개이며, 코어 변경 금지 지시에 따라 호스트 후속 검토 대상으로 남긴다.
+
+동기화 시 보존 요청 대상(start 제외)을 목록과 대조한다. 목록에 없는 대상은 개별 snapshot으로 확인하며 deleting/deleted, session 없음 또는 404일 때 조작 가능 여부와 무관하게 lookup을 한 번 시작하고 즉시 대상의 저장 본문과 이동 링크를 지운다. 조회 실패·호스트 불명만으로 삭제를 추정하지 않는다. 목록에서 직접 관측한 deleting/deleted도 정리한다. 모든 조회 응답은 기존 연결·요청·데이터 세대 fence를 통과해야 한다.
+
+현재 세션 삭제 관측 시 데이터 세대를 올리고 snapshot과 latestSnapshot을 원문 없는 삭제 상태로 즉시 교체한다. deliveries/tool_requests/incarnations/controls/events와 이전 기록 페이지 위치를 비운다. 삭제 후 snapshot HTTP 실패나 삭제 전 늦은 응답이 원문을 다시 넣을 수 없다.
+
+기존 멱등성·연결 손실 테스트 중 idle에서 interrupt를 임의 조작으로 사용하던 사례는 close로 바꿨으며, 실제 인터럽트 연속 클릭 테스트는 진행 중 prompt를 갖도록 했다. 새 UI 회귀는 idle 버튼 비활성/진행 중 활성, 대상 result 없는 인터럽트 잠금 유지, 삭제 이벤트 누락 후 없음/deleting/deleted/404 정리와 lookup 1회, 삭제 후 HTTP 413에도 즉시 원문 제거를 검사한다.
+
+검증:
+
+- 수정 전 재현: tests 4, pass 0, fail 4. 수정 후 UI 전체: tests 50, pass 50, fail 0(`/tmp/sh1-c2-r7-ui-final.log`).
+- 지정 명령 `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session*.test.js server/tests/session-host-*.test.js server/tests/work-board.test.js`: tests 655, pass 632, fail 23, cancelled 0, skipped 0(`/tmp/sh1-c2-r7-final.log`). 실패는 이전 라운드와 같은 샌드박스의 소켓 listen EPERM, 실제 /bin/ps EPERM, host_start_timeout이다. 호스트에서 전체 재실행이 필요하다.
+- 화면 소스의 줄당 160자 제한을 확인했다. 실제 Claude·LLM·외부 네트워크 호출, git 조작, 코어·spec·전역 SSE·C1 화면·visual baseline 변경은 하지 않았다.
+
+### S1-c2 라운드 8 — 인터럽트 합류·종결을 턴 세대로 제한
+
+수정 전 fake adapter 회귀 4개 모두 실패했다(`/tmp/sh1-c2-r8-red.log`: tests 4, pass 0, fail 4). A 턴이 종료된 직후 접수한 interrupt의 미종결 상태, lifecycle completed/cancelled만 관측한 interrupt의 불명 장벽 누락, 영수증이 있어도 result 없는 종결의 불명 장벽이 누락되는 문제를 재현했다. 이전 버전이 남긴 행을 tick에서 정리하는 추가 회귀도 수정 전 실패했다(`/tmp/sh1-c2-r8-legacy-red.log`: tests 1, pass 0, fail 1).
+
+core.js의 합류 조회는 현재 incarnation과 turn_gen이 모두 같은 진행 중 interrupt만 반환한다. 종결 판단은 `settleTurnInterrupts`로 모았다. 그 세대 prompt의 result_json이 있으면 completed로 정리한다. lifecycle completed/cancelled만 있고 result가 없으면 unknown과 interrupt_unknown 장벽을 유지하며, 해당 세대 result가 도착해야 해제한다. 다른 세대 result로 장벽을 해제하지 않는다. effect 후 커밋, lifecycle/result/영수증 처리, tick에서 같은 규칙을 적용한다. tick은 이전 버전의 live 비종결 행도 정리하며 동일 상태를 반복 기록하지 않는다.
+
+늦은 영수증은 이미 completed인 delivery를 provider_observed로 되살리지 않으며, 턴이 끝났지만 result가 없는 unknown도 되돌리지 않는다. 단 still_queued의 survivor 증거는 종결 여부와 별개로 영구 attribution_uncertain 장벽을 세운다. 기존 R3-03 보안 회귀를 유지했다.
+
+화면의 result_json/turn_gen 기반 잠금 우회는 제거했다. 화면은 코어가 반환한 completed만 사용하며, 비종결 interrupt와 interrupt_unknown/attribution_uncertain 장벽은 그대로 막는다. 라운드 7 관련 테스트도 이 계약으로 갱신했다.
+
+fake adapter 테스트는 A 종료 직후 interrupt → B의 별도 interrupt(provider 효과 2회) → B 중단 성공, 같은 턴 중복 합류, 결과 없는 lifecycle 종결과 늦은 영수증, 이전 세대 legacy 행의 합류 제외, 다른 세대 result에 의한 장벽 해제 방지, tick 정리를 검사한다. 실제 SDK + 기존 fake-claude-sdk.cjs 1개로 A/B의 별도 control 요청 2회·같은 턴 합류·B 중단을 확인했다(`/tmp/sh1-c2-r8-sdk.log`: tests 1, pass 1, fail 0). 실제 Claude·LLM·외부 네트워크 호출은 없다.
+
+기존 R1-02 영수증 상관관계 테스트는 첫 턴을 끝낸 뒤 다음 prompt를 실제로 시작하도록 고쳤다. 따라서 이전 영수증이 새 턴의 written interrupt를 완료시키지 않는 원래 단언을 유지하면서 새 종결 규칙과도 맞는다.
+
+검증:
+
+- 수정 전 새 회귀 0/4, legacy tick 재현 0/1 통과 → 수정 후 통과.
+- UI + interrupt 집중: tests 63, pass 63, fail 0(`/tmp/sh1-c2-r8-focused-final.log`). 기존 R3 보안 회귀 포함 core 집중: tests 23, pass 23, fail 0(`/tmp/sh1-c2-r8-core-final.log`).
+- 실제 SDK + 가짜 claude 신규 시나리오: tests 1, pass 1, fail 0(`/tmp/sh1-c2-r8-sdk.log`). 최종 전체 실행에서도 해당 시나리오 통과.
+- 최종 지정 명령 `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session*.test.js server/tests/session-host-*.test.js server/tests/work-board.test.js`: tests 663, pass 640, fail 23, cancelled 0, skipped 0(`/tmp/sh1-c2-r8-final-done.log`). 실패는 이전 라운드와 같은 listen EPERM·실제 /bin/ps EPERM·host_start_timeout이며 호스트 재검증이 필요하다.
+- git 조작, 실제 Claude·LLM·외부 네트워크 호출, spec·전역 SSE·C1 화면·visual baseline 변경은 하지 않았다. core.js 변경은 인터럽트의 합류·종결·장벽 계산에 한정했다.
+
+### S1-c2 라운드 9 — 보존 요청 복구·미접수 요청 버리기
+
+수정 전 회귀 2개 모두 실패했다(`/tmp/sh1-c2-r9-red.log`: tests 2, pass 0, fail 2). 인터럽트 POST가 미접수인 채 턴이 끝난 뒤 동일 키 복구가 idle 판정에 막히는 문제와, 미접수 확인 뒤 사람이 보존 요청을 버릴 경로가 없는 문제를 재현했다.
+
+신규 제출과 보존 요청 복구를 분리했다. 신규 prompt/interrupt는 기존 현재 상태 검증을 그대로 사용한다. 복구는 저장소의 대상·경로·메서드·request_key가 일치하는 실제 보존 요청만 허용하며 저장된 본문을 그대로 재송신한다. 현재 idle/인터럽트 가능/귀속 상태를 다시 적용하지 않고 호스트의 기존 결과 또는 확정 거절을 받는다. SSE 연결·snapshot 동기화 세대, 삭제 fence, lookup 직후·POST 직전의 최신 ref 검사와 제출 잠금은 유지한다. accepted/rejected 또는 확정 HTTP 오류로 접수가 해소되면 pending을 지운다.
+
+접수 확인 버튼은 읽기 전용 lookup이다. found:false를 확인하면 aria-live 상태 안내와 요청 버리기 버튼을 표시한다. 그 확인의 요청 키와 연결 세대가 현재와 같을 때만 버리기를 허용한다. 연결이 끊기거나 동기화 중이면 재시도·확인·버리기를 잠그고, 재연결 뒤 버리기는 다시 미접수를 확인해야 한다. 버리면 저장소·메모리에서 요청을 제거하며 그 요청을 다시 시도하지 않는다. 재시도는 기존처럼 lookup 뒤 같은 키를 전송하지만, POST 전에 이전 미접수 확인을 무효화한다. 재전송 결과가 acceptance_unknown이면 과거 found:false를 근거로 버릴 수 없으며 다시 읽기 전용 확인이 필요하다.
+
+회귀 테스트는 idle 뒤 interrupt 복구의 동일 키·동일 본문·확정 결과 후 잠금 해제, 기존 incarnation prompt의 호스트 거절 후 해소, 버리기 전 다른 조작 차단과 버린 뒤 해제, 저장 본문 제거와 재전송 없음, 연결 손실 중 화면 버튼 비활성, 재송신 후 이전 미접수 근거 폐기를 검사한다.
+
+부하 대응은 프로세스 기동 대기에만 적용했다. owned-session-process의 ready 대기는 1.5초에서 15초, 공통 session-host-process helper의 ready 대기는 기본 2.5초에서 명시적 15초로 늘렸다. owned-session-http-process의 IPC ready 메시지도 15초로 늘리되 cleaned/stats/db-failed/socket-broken 등 다른 메시지는 기존 10초를 유지한다. poll 기본값·assertion·기동 이후 상태/종료/효과 대기는 바꾸지 않았다.
+
+검증:
+
+- 수정 전 회귀: tests 2, pass 0, fail 2(`/tmp/sh1-c2-r9-red.log`).
+- UI 집중: tests 55, pass 55, fail 0(`/tmp/sh1-c2-r9-ui-final.log`)이며 최종 전체 실행에서도 UI 전부 통과했다.
+- 최종 지정 명령 `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session*.test.js server/tests/session-host-*.test.js server/tests/work-board.test.js`: tests 668, pass 645, fail 23, cancelled 0, skipped 0(`/tmp/sh1-c2-r9-done.log`). 실패는 이전과 같은 샌드박스의 listen EPERM·실제 /bin/ps EPERM·host_start_timeout이다. 실제 macOS 부하에서 프로세스 기동 대기 변경을 재검증해야 한다.
+- 화면 소스 160자 제한 유지. 실제 Claude·LLM·외부 네트워크 호출, git 조작, 코어·spec·전역 SSE·C1 화면·visual baseline 변경은 하지 않았다.
+
+### S1-c2 라운드 10 — 요청 버리기의 호스트 영속 abandon
+
+수정 전 회귀 6개 모두 실패했다(`/tmp/sh1-c2-r10-red.log`: tests 6, pass 0, fail 6). 코어 abandon API 부재, 기존 접수 보존과 경쟁 직렬화 부재, 키 창 검증 부재, 화면의 호스트 확인 없는 로컬 제거를 재현했다.
+
+기존 request_tombstones의 state는 자유 TEXT이므로 스키마 변경·마이그레이션 없이 abandoned를 기록한다. fingerprint는 빈 문자열이고 session_deleted=0, expires_at은 기존 tombstone과 같은 30일이다. 키 외에 본문·세션 원문을 남기지 않는다. 기존 행은 변경하지 않는다.
+
+core.abandon(request_key)는 submit과 같은 키 형식·24시간 창·5분 미래 허용 범위를 검사한다. 한 동기 write transaction 안에서 delivery/control/alias/tombstone을 조회하고, 있으면 abandoned:false와 기존 결과를 반환한다. 없으면 abandoned tombstone을 커밋한 뒤 abandoned:true를 반환한다. 기존 결과 조회가 키 만료보다 먼저인 순서도 submit과 같다. 잘못된 키는 정상 검증 오류이며 저장소 장애로 오인하지 않는다.
+
+submit은 abandoned tombstone을 본문 fingerprint와 무관하게 rejected/request_abandoned로 반환한다. submitWithReceipt에서도 영속 tombstone을 접수 근거로 인정하므로 프로토콜이 같은 키를 미접수로 오인하지 않는다. 세션 큐에 이미 들어간 submit도 실제 처리를 시작할 때 tombstone을 다시 확인한다. 따라서 앞선 큐 작업 뒤에 대기 중이던 요청도 abandon 뒤 효과를 만들 수 없다. lookup도 같은 확정 거절을 반환하며 재시작 뒤에도 유지된다.
+
+인증된 호스트 프로토콜에 abandon, launcher에 abandon(request_key), 서비스에 abandon(key), 라우트에 POST /api/owned-sessions/requests/:request_key/abandon을 추가했다. cookie·정확한 origin 검사를 기존 미들웨어로 적용한다. 서비스는 캐시로 성공을 대신하거나 호스트를 새로 띄우지 않으며, 연결 실패·응답 유실이면 503이다. launcher의 미확정 상태 메타데이터도 확정 결과에 맞춰 정리한다.
+
+요청 버리기는 이제 위 API를 호출한다. 응답 전에는 본문과 pending을 유지한다. abandoned:true일 때만 영속 차단 완료로 지우며, abandoned:false면 기존 결과를 확정 처리하고 “이미 접수된 요청이었습니다.”를 표시한 뒤 snapshot을 다시 받는다. 시작 요청의 기존 결과는 해당 세션으로 이동한다. 실패·응답 불명에서는 원래 키와 본문을 유지하고 접수 확인 후 다시 시도하도록 안내한다. 연결·세대 fence와 중복 제출 잠금은 유지한다. 라운드 9의 found:false는 버튼을 제공하는 근거이며, 로컬 삭제의 근거로 사용하지 않는다.
+
+검증 범위는 abandon 후 지연 submit 효과 0회·변경 본문도 거절·재시작 보존·30일 만료와 원문 없음, 기존 row/alias/tombstone 불변, 두 호출 순서의 경쟁 효과 0/1회, 큐에 대기하던 submit 차단, 프로토콜 양방향 순서, launcher→인증 프로토콜→코어 경로, 서비스 오프라인 503·새 호스트 시작 0회, 라우트 cookie/origin, 화면 두 응답 분기와 응답 유실 시 pending 유지다. 실제 Claude·LLM·외부 네트워크 호출은 없다.
+
+검증 결과:
+
+- 수정 전 재현: tests 6, pass 0, fail 6(`/tmp/sh1-c2-r10-red.log`).
+- 코어 + 전체 UI 집중: tests 61, pass 61, fail 0(`/tmp/sh1-c2-r10-focus.log`). 추가 큐·응답 유실·launcher 경로 포함 집중: tests 9, pass 9, fail 0(`/tmp/sh1-c2-r10-extra.log`).
+- 최종 지정 명령 `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session*.test.js server/tests/session-host-*.test.js server/tests/work-board.test.js`: tests 680, pass 657, fail 23, cancelled 0, skipped 0(`/tmp/sh1-c2-r10-done.log`). 실패는 이전 라운드와 같은 샌드박스의 listen EPERM·실제 /bin/ps EPERM·host_start_timeout이며 호스트 재검증이 필요하다.
+- git 조작, 실제 Claude·LLM·외부 네트워크 호출, spec·전역 SSE·C1 화면·visual baseline 변경은 하지 않았다. 저장소 스키마 버전과 기존 tombstone 행은 변경하지 않았다.
