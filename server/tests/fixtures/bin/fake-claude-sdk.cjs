@@ -121,7 +121,8 @@ lines.on('line', line => {
   if (message.type === 'control_request') {
     const request = message.request;
     if (request.subtype === 'initialize') {
-      config = JSON.parse(fs.readFileSync('fake-claude.json', 'utf8'));
+      try { config = JSON.parse(fs.readFileSync('fake-claude.json', 'utf8')); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; config = {}; }
       log({ type: 'initialize' });
       if (config.initializationError) {
         send({ type: 'control_response', response: { subtype: 'error', request_id: message.request_id, error: 'fake_initialization_error' } });

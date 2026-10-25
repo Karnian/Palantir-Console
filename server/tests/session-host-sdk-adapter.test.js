@@ -1043,3 +1043,10 @@ check('R1 raw rate limit message cannot bypass field allowlist', async (t, sdk) 
   const f = await fixture(t, wrapped); await f.start();
   assert.equal(JSON.stringify(f.core.eventsSince(0)).includes('SECRET-RATE'), false);
 });
+
+check('R4 missing fake configuration initializes SDK session with defaults', async (t, sdk) => {
+  const f = await fixture(t, sdk);
+  fs.unlinkSync(path.join(f.dir, 'fake-claude.json'));
+  assert.equal((await f.start()).state, 'done');
+  assert.ok(f.log().some(row => row.type === 'initialize'));
+});

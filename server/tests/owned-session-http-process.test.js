@@ -23,6 +23,18 @@ async function message(child, type) {
     return false;
   }, 10000);
 }
+async function settledPrompt(server, requestKey) {
+  return poll(async () => {
+    const row = (await server.call('/requests/' + requestKey)).body.result;
+    return row && row.outcome !== null && row.outcome !== undefined && row;
+  });
+}
+async function settledControl(server, requestKey) {
+  return poll(async () => {
+    const row = (await server.call('/requests/' + requestKey)).body.result;
+    return row && row.state !== 'accepted' && row;
+  });
+}
 async function setup(t) {
   const dir = fs.mkdtempSync('/private/tmp/owned-http-'); const children = [], controllers = [];
   let host;
@@ -83,6 +95,7 @@ for (const signal of ['SIGTERM', 'SIGKILL']) {
     await server.call('/' + id + '/tool-decision', 'POST', decision);
     await poll(() => f.logs().some(row => row.type === 'tool'));
     assert.equal(f.logs().filter(row => row.type === 'tool').length, 1);
+    await settledPrompt(server, target.request_key);
     // Authentication changes alone; the request remains otherwise identical.
     assert.equal((await server.call('/' + id + '/prompt', 'POST', target, true)).status, 403);
     if (signal === 'SIGTERM') {
@@ -92,7 +105,7 @@ for (const signal of ['SIGTERM', 'SIGKILL']) {
       await poll(() => f.logs().filter(row => row.type === 'user').length === 2);
       const controller = new AbortController(); f.controllers.push(controller);
       const completed = await poll(async () => { const value = (await server.call('/' + id)).body;
-        return value.state.deliveries.some(row => row.request_key === prompt.request_key && row.state === 'completed') && value; });
+        return value.state.deliveries.some(row => row.request_key === prompt.request_key && row.state === 'completed' && row.outcome !== null) && value; });
       const high = completed.seq_high;
       const response = await fetch(server.origin + root + '/stream?since=' + seq,
         { headers: { Cookie: 'palantir_token=owned-test-token' }, signal: controller.signal });
@@ -112,7 +125,7 @@ for (const signal of ['SIGTERM', 'SIGKILL']) {
         server.child.messages = server.child.messages.filter(item => item.type !== 'stats');
         server.child.send('stats'); return (await message(server.child, 'stats')).subscriptions === 0;
       });
-      await poll(async () => (await server.call('/' + id)).body.state.deliveries.some(row => row.request_key === prompt.request_key && row.state === 'completed'));
+      await poll(async () => (await server.call('/' + id)).body.state.deliveries.some(row => row.request_key === prompt.request_key && row.state === 'completed' && row.outcome !== null));
       const effects = f.logs().filter(row => row.type === 'user').length;
       f.host.send('fail-db'); await message(f.host, 'db-failed');
       for (const [route, body] of [['/' + id + '/prompt', { ...prompt, request_key: key() }],
@@ -134,14 +147,8 @@ test('HTTP real SDK socket failure preserves pending last-known; identical previ
       assert.equal(result.status, 200); assert.notEqual(result.body.result?.state, 'rejected');
       controls.push({ route, body, method }); return result.body;
     }
-    async function settled(request_key) {
-      return poll(async () => {
-        const row = (await server.call('/requests/' + request_key)).body.result;
-        return row?.state !== 'accepted' && row?.state !== 'queued' && row?.state !== 'written' && row?.state !== 'sending' && row;
-      });
-    }
     const started = await send('/start', { request_key: key(), cwd: f.dir, confirmed_settings: true });
-    await settled(started.request_key); const id = started.result.session_id;
+    await settledControl(server, started.request_key); const id = started.result.session_id;
     let incarnation_id = (await server.call('/' + id)).body.state.current_incarnation_id;
     await send('/settings-preview', { cwd: f.dir });
     for (const [text, action] of [['hello', null], ['tool', 'tool-decision'], ['question', 'question-answer'], ['tool', 'interrupt']]) {
@@ -152,13 +159,13 @@ test('HTTP real SDK socket failure preserves pending last-known; identical previ
           ...(action === 'tool-decision' ? { behavior: 'allow' } : {}), ...(action === 'question-answer' ? { answer: { Choice: 'A' } } : {}) };
         await send('/' + id + '/' + action, body);
       }
-      await settled(prompt.request_key);
+      await settledPrompt(server, prompt.request_key);
     }
-    const stop = await send('/' + id + '/stop', { request_key: key() }); await settled(stop.request_key);
-    const resume = await send('/' + id + '/resume', { request_key: key() }); await settled(resume.request_key);
-    const close = await send('/' + id + '/close', { request_key: key() }); await settled(close.request_key);
-    const deletion = await send('/' + id, { request_key: key() }, 'DELETE'); await settled(deletion.request_key);
-    const active = await send('/start', { request_key: key(), cwd: f.dir, confirmed_settings: true }); await settled(active.request_key);
+    const stop = await send('/' + id + '/stop', { request_key: key() }); await settledControl(server, stop.request_key);
+    const resume = await send('/' + id + '/resume', { request_key: key() }); await settledControl(server, resume.request_key);
+    const close = await send('/' + id + '/close', { request_key: key() }); await settledControl(server, close.request_key);
+    const deletion = await send('/' + id, { request_key: key() }, 'DELETE'); await settledControl(server, deletion.request_key);
+    const active = await send('/start', { request_key: key(), cwd: f.dir, confirmed_settings: true }); await settledControl(server, active.request_key);
     const activeId = active.result.session_id;
     incarnation_id = (await server.call('/' + activeId)).body.state.current_incarnation_id;
     await send('/' + activeId + '/prompt', { request_key: key(), incarnation_id, body: 'tool' });
@@ -172,3 +179,22 @@ test('HTTP real SDK socket failure preserves pending last-known; identical previ
     assert.deepEqual(offline.body.last_known.state.tool_requests, known.state.tool_requests);
     for (const { route, body, method } of controls) assert.equal((await server.call(route, method, body)).status, 503);
   });
+
+
+test('R4 prompt settlement waits past provider observation; control waits past acceptance', async () => {
+  let calls = 0;
+  const prompt = { async call() {
+    calls++;
+    return { body: { result: calls === 1 ? { state: 'provider_observed', outcome: null } :
+      { state: 'completed', outcome: 'completed' } } };
+  } };
+  assert.equal((await settledPrompt(prompt, 'prompt-key')).outcome, 'completed');
+  assert.equal(calls, 2);
+  calls = 0;
+  const control = { async call() {
+    calls++;
+    return { body: { result: { state: calls === 1 ? 'accepted' : 'done' } } };
+  } };
+  assert.equal((await settledControl(control, 'control-key')).state, 'done');
+  assert.equal(calls, 2);
+});
