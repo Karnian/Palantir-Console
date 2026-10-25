@@ -9,7 +9,7 @@ import {
 } from './pending.js';
 import {
   getOwnedIncarnation, ownedInteraction, canControlOwnedSession, canResumeOwnedSession,
-  canSubmitOwnedPrompt, mergeOwnedEvents
+  canSubmitOwnedPrompt, canInterruptOwnedSession, mergeOwnedEvents
 } from './state.js';
 
 export function useOwnedSessions(sessionId, { timers = globalThis, retryMs = 1000 } = {}) {
@@ -93,10 +93,42 @@ export function useOwnedSessions(sessionId, { timers = globalThis, retryMs = 100
       }
       clearOwnedPendingTarget(deletedId);
     };
-    const purge = () => {
+    const reconcilePendingTargets = async (list, valid) => {
+      const targets = loadOwnedPending().others.map(request => request.session_id).filter(id => id !== 'start');
+      if (!targets.length) return;
+      let inventory = list;
+      if (!inventory) {
+        inventory = await apiFetch(ownedApiPath());
+        if (!valid()) return;
+      }
+      if (inventory.host !== 'running' || !Array.isArray(inventory.sessions)) return;
+      for (const session of inventory.sessions) {
+        if (['deleting', 'deleted'].includes(session.state)) forgetDeletedRequest(session.id);
+      }
+      const visible = new Set(inventory.sessions.map(session => session.id));
+      for (const id of targets) {
+        if (!valid()) return;
+        if (visible.has(id)) continue;
+        try {
+          const detail = await apiFetch(ownedApiPath(id));
+          if (!valid()) return;
+          if (detail.host === 'running' && detail.state && (!detail.state.session
+            || ['deleting', 'deleted'].includes(detail.state.session.state))) forgetDeletedRequest(id);
+        } catch (error) {
+          if (!valid()) return;
+          if (error.status === 404) forgetDeletedRequest(id);
+          // A transient failure is not evidence of deletion. Keep the request for the next synchronization.
+        }
+      }
+    };
+    const purge = (state = 'deleted') => {
       dataGeneration.current++;
       deleted.current = true;
       if (requestedId) forgetDeletedRequest(requestedId);
+      const tombstone = { session: { id: requestedId, state }, current_incarnation_id: null,
+        incarnations: [], deliveries: [], tool_requests: [], controls: [] };
+      latestSnapshot.current = tombstone;
+      setSnapshot(tombstone);
       setEvents([]);
       setNextPage(null);
     };
@@ -134,7 +166,7 @@ export function useOwnedSessions(sessionId, { timers = globalThis, retryMs = 100
         sequence.current = Math.max(sequence.current, event.seq || 0);
         const deletion = event.json?.table === 'owned_sessions' && ['deleting', 'deleted'].includes(event.json.state);
         if (deletion) {
-          if (event.session_id === requestedId) purge();
+          if (event.session_id === requestedId) purge(event.json.state);
           else if (event.session_id) forgetDeletedRequest(event.session_id);
         }
         if (!deleted.current && event.type === 'sdk_message' && event.session_id === requestedId) {
@@ -187,15 +219,19 @@ export function useOwnedSessions(sessionId, { timers = globalThis, retryMs = 100
         const isDeleted = ['deleting', 'deleted'].includes(result.state?.session?.state);
         if (deleted.current && !isDeleted) return;
         if (requestedId) {
-          latestSnapshot.current = result.state;
-          setSnapshot(result.state);
-          if (isDeleted && !deleted.current) purge();
+          if (isDeleted) purge(result.state.session.state);
+          else {
+            latestSnapshot.current = result.state;
+            setSnapshot(result.state);
+          }
         } else {
           setSessions(result.sessions || []);
           for (const session of result.sessions || []) {
             if (['deleting', 'deleted'].includes(session.state)) forgetDeletedRequest(session.id);
           }
         }
+        await reconcilePendingTargets(requestedId ? null : result, valid);
+        if (!valid()) return;
         lastDraw.current = Date.now();
         setAsOf(lastDraw.current);
         sequence.current = result.seq_high || 0;
@@ -283,6 +319,7 @@ export function useOwnedSessions(sessionId, { timers = globalThis, retryMs = 100
     if (requestTarget !== target) return;
     const existing = loadOwnedPending(requestTarget).request;
     if (existing && existing.body.request_key !== requestKey) return;
+    if (path.endsWith('/interrupt') && !canInterruptOwnedSession(latestSnapshot.current, ready())) return;
     if (path.endsWith('/prompt') && !canSubmitOwnedPrompt(latestSnapshot.current, ready(), allowQueue)) return;
     const request = { path, method, allowQueue, session_id: requestTarget, body: { ...body, request_key: requestKey || ownedRequestKey() } };
     submitLock.current = true;
@@ -324,7 +361,7 @@ export function useOwnedSessions(sessionId, { timers = globalThis, retryMs = 100
   };
   const submit = (action, body = {}) => {
     if (disabled || !ready() || submitLock.current) return;
-    if (action === 'interrupt-send' && !canSubmitOwnedPrompt(latestSnapshot.current, ready(), true)) return;
+    if (['interrupt', 'interrupt-send'].includes(action) && !canInterruptOwnedSession(latestSnapshot.current, ready())) return;
     const allowQueue = action === 'queue-prompt';
     if (allowQueue) action = 'prompt';
     if (action === 'prompt' && !canSubmitOwnedPrompt(latestSnapshot.current, ready(), allowQueue)) return;

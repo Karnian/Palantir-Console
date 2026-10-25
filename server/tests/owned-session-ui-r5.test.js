@@ -109,7 +109,7 @@ test('R5 pending A does not block B and is retried only on A with its original k
   assert.equal(environment.current.disabled, false);
   assert.equal(environment.current.pending, null);
   assert.equal(environment.current.otherPending.session_id, 'A');
-  await environment.current.submit('interrupt');
+  await environment.current.submit('close');
   await environment.remount('A');
   await environment.current.retry();
   assert.equal(posts.filter(post => post.url.includes('/B/')).length, 1);

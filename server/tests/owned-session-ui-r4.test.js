@@ -76,7 +76,7 @@ test('R4 lookup completing after SSE loss must not replay a POST', async t => {
     return url.includes('transcript') ? { host: 'running', events: [] }
       : { host: 'running', seq_high: 1, state: snapshot() };
   } });
-  await environment.current.execute('/api/owned-sessions/s/interrupt', { incarnation_id: 'inc' });
+  await environment.current.execute('/api/owned-sessions/s/close', { incarnation_id: 'inc' });
   await flushEffects(30);
   const retry = environment.current.retry();
   environment.stream().emit('error');
@@ -177,7 +177,7 @@ test('R4 storage failure warns and retains the same request in memory across rem
     if (url.includes('transcript')) return { host: 'running', events: [] };
     return { host: 'running', seq_high: 1, state: snapshot() };
   } });
-  await environment.current.execute('/api/owned-sessions/s/interrupt', { incarnation_id: 'inc' });
+  await environment.current.execute('/api/owned-sessions/s/close', { incarnation_id: 'inc' });
   await flushEffects(30);
   const key = environment.current.pending.body.request_key;
   assert.equal(environment.current.storageWarning, 'pendingStorageWarning');
@@ -193,7 +193,7 @@ test('R4 definitive lookup clears the retained request without another POST', as
     if (url.includes('transcript')) return { host: 'running', events: [] };
     return { host: 'running', seq_high: 1, state: snapshot() };
   } });
-  await environment.current.execute('/api/owned-sessions/s/interrupt', { incarnation_id: 'inc' });
+  await environment.current.execute('/api/owned-sessions/s/close', { incarnation_id: 'inc' });
   await flushEffects(30);
   await environment.current.retry();
   await flushEffects(30);

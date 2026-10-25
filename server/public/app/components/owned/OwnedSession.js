@@ -1,7 +1,7 @@
 import { h } from '../../../vendor/preact.module.js';
 import htm from '../../../vendor/htm.module.js';
 import { OWNED_COPY } from '../../lib/copy.js';
-import { canRestartOwnedSession } from './state.js';
+import { canRestartOwnedSession, canInterruptOwnedSession } from './state.js';
 import { OwnedSessionHeader } from './OwnedSessionHeader.js';
 import { OwnedConversation } from './OwnedConversation.js';
 import { OwnedApproval } from './OwnedApproval.js';
@@ -19,7 +19,8 @@ export function OwnedSession({ sessionId, controller, onRemove }) {
     <${OwnedSessionHeader} state=${snapshot} incarnation=${incarnation} host=${controller.host}
       asOf=${controller.asOf} />
     <div class="owned-actions">
-      <button class="btn btn-sm" disabled=${disabled || !controllable} onClick=${() => submit('interrupt')}>${OWNED_COPY.interrupt}</button>
+      <button class="btn btn-sm" disabled=${!canInterruptOwnedSession(snapshot, !disabled)}
+        onClick=${() => submit('interrupt')}>${OWNED_COPY.interrupt}</button>
       <button class="btn btn-sm" disabled=${disabled || !canRestartOwnedSession(snapshot)} onClick=${() => submit('restart')}>${OWNED_COPY.restart}</button>
       <button class="btn btn-sm" disabled=${disabled || !resumeReady} onClick=${() => submit('resume')}>${OWNED_COPY.resume}</button>
       <button class="btn btn-sm btn-danger" disabled=${disabled || snapshot.session.state !== 'active'}

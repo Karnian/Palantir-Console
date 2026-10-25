@@ -91,7 +91,7 @@ test('acceptance_unknown retries same key after lookup', async t => {
     return { host: 'running', state: state(), seq_high: 0 };
   };
   e.mount('OwnedSessionsView', { sessionId: 's' }); await flushEffects(); await flushEffects();
-  [...e.document.querySelectorAll('button')].find(x => x.textContent === '인터럽트').click(); await flushEffects(30);
+  [...e.document.querySelectorAll('button')].find(x => x.textContent === '세션 끝내기').click(); await flushEffects(30);
   [...e.document.querySelectorAll('button')].find(x => x.textContent === '같은 키로 다시 시도').click(); await flushEffects(30);
   assert.equal(posted.length, 2); assert.equal(posted[0].request_key, posted[1].request_key);
   assert.match(posted[0].request_key, /^rk_\d+_[a-f0-9]{32}$/); assert.equal(posted[0].incarnation_id, 'inc');
@@ -305,4 +305,19 @@ test('R6 stop enables the resume button but never invokes it for the user', asyn
   resume.click();
   await flushEffects(30);
   assert.equal(posts.filter(url => url.endsWith('/resume')).length, 1);
+});
+
+test('R7 idle disables the visible interrupt button and running enables it', t => {
+  const environment = setup(t);
+  const current = state();
+  const controller = { snapshot: current, incarnation: current.incarnations[0], host: 'running',
+    disabled: false, controllable: true, interaction: 'idle', events: [], submit() {} };
+  environment.mount('OwnedSession', { sessionId: 's', controller });
+  const interruptButton = () => [...environment.document.querySelectorAll('button')]
+    .find(button => button.textContent === '인터럽트');
+  assert.equal(interruptButton().disabled, true);
+  current.deliveries.push({ kind: 'prompt', incarnation_id: 'inc', state: 'written' });
+  controller.interaction = 'running';
+  environment.mount('OwnedSession', { sessionId: 's', controller });
+  assert.equal(interruptButton().disabled, false);
 });

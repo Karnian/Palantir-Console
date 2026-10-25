@@ -194,7 +194,9 @@ test('R6 rapid interrupt clicks reserve only one request and never persist the d
   const environment = await harness(t, { api: async (url, options) => {
     if (options?.method) { posts++; return response.promise; }
     if (url.includes('transcript')) return { host: 'running', events: [] };
-    return { host: 'running', seq_high: 1, state: snapshot() };
+    return { host: 'running', seq_high: 1, state: snapshot({ deliveries: [
+      { kind: 'prompt', incarnation_id: 'inc', state: 'written', outcome: null }
+    ] }) };
   } });
   const first = environment.current.submit('interrupt-send', { body: 'first private draft' });
   const second = environment.current.submit('interrupt-send', { body: 'second private draft' });

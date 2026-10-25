@@ -2334,3 +2334,23 @@ HTTP snapshot 요청 번호와 SSE 연결 세대를 별도로 검사한다. 성�
 - `npx playwright test --grep '@a11y.*owned'`: 127.0.0.1:4177 listen EPERM으로 실행 전 차단(`/tmp/sh1-c2-r6-a11y.log`). 실제 owned a11y는 호스트에서 재검증한다.
 
 실제 Claude·LLM·외부 네트워크 호출, git 조작, 서버 상태 기계·전역 SSE·C1 화면·visual baseline 변경은 수행하지 않았다.
+
+### S1-c2 라운드 7 — R4 잔여 항목
+
+수정 전 회귀 테스트는 4개 모두 실패했다(`/tmp/sh1-c2-r7-red.log`: tests 4, pass 0, fail 4). idle에서 두 인터럽트 진입점이 실제 POST를 만드는 문제, 이미 result가 있는 턴의 인터럽트 영수증이 다음 보내기를 막는 문제, 연결 손실 중 삭제된 다른 대상 pending이 남는 문제, 삭제 후 snapshot 갱신 실패 시 이전 원문이 남는 문제를 각각 재현했다.
+
+인터럽트의 화면 버튼과 제출 진입점은 같은 순수 함수 `canInterruptOwnedSession`을 사용한다. 조작 가능하고 상호작용이 running/awaiting_permission/awaiting_user인 경우만 허용하며 idle/unknown에서는 제출하지 않는다. 진행 중 턴 판정과 별도로 미확인 인터럽트는 기존 잠금을 유지한다. 영수증이 확인된 provider_observed이고 대상 turn_gen의 prompt result_json이 이미 있거나 turn_gen=0인 경우에만 다음 prompt의 잠금 사유에서 제외한다. delivery를 completed로 바꾸거나 lifecycle 종결만으로 result를 추측하지 않는다. attribution_uncertain/interrupt_unknown 잠금도 유지한다.
+
+코어의 늦은 인터럽트 접수 경쟁을 fake adapter로 검증했다. 턴 result와 lifecycle completed 뒤 접수된 interrupt는 그 turn_gen의 provider_observed로 남지만, 코어는 다음 prompt를 정상 전달한다. 코어 변경은 하지 않았다. 추가로 확인된 코어 한계: 위 interrupt가 남은 상태에서 다음 턴의 인터럽트를 요청하면 core.js의 기존 incarnation 단위 alias 조회가 이전 turn_gen의 delivery를 반환한다(재현 출력: next_prompt=provider_observed, interrupt_turn=1, next_turn=2, later_interrupt_aliases_old=true, provider_interrupt_calls=1). 이는 화면의 다음 prompt 잠금과 별개이며, 코어 변경 금지 지시에 따라 호스트 후속 검토 대상으로 남긴다.
+
+동기화 시 보존 요청 대상(start 제외)을 목록과 대조한다. 목록에 없는 대상은 개별 snapshot으로 확인하며 deleting/deleted, session 없음 또는 404일 때 조작 가능 여부와 무관하게 lookup을 한 번 시작하고 즉시 대상의 저장 본문과 이동 링크를 지운다. 조회 실패·호스트 불명만으로 삭제를 추정하지 않는다. 목록에서 직접 관측한 deleting/deleted도 정리한다. 모든 조회 응답은 기존 연결·요청·데이터 세대 fence를 통과해야 한다.
+
+현재 세션 삭제 관측 시 데이터 세대를 올리고 snapshot과 latestSnapshot을 원문 없는 삭제 상태로 즉시 교체한다. deliveries/tool_requests/incarnations/controls/events와 이전 기록 페이지 위치를 비운다. 삭제 후 snapshot HTTP 실패나 삭제 전 늦은 응답이 원문을 다시 넣을 수 없다.
+
+기존 멱등성·연결 손실 테스트 중 idle에서 interrupt를 임의 조작으로 사용하던 사례는 close로 바꿨으며, 실제 인터럽트 연속 클릭 테스트는 진행 중 prompt를 갖도록 했다. 새 UI 회귀는 idle 버튼 비활성/진행 중 활성, 대상 result 없는 인터럽트 잠금 유지, 삭제 이벤트 누락 후 없음/deleting/deleted/404 정리와 lookup 1회, 삭제 후 HTTP 413에도 즉시 원문 제거를 검사한다.
+
+검증:
+
+- 수정 전 재현: tests 4, pass 0, fail 4. 수정 후 UI 전체: tests 50, pass 50, fail 0(`/tmp/sh1-c2-r7-ui-final.log`).
+- 지정 명령 `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session*.test.js server/tests/session-host-*.test.js server/tests/work-board.test.js`: tests 655, pass 632, fail 23, cancelled 0, skipped 0(`/tmp/sh1-c2-r7-final.log`). 실패는 이전 라운드와 같은 샌드박스의 소켓 listen EPERM, 실제 /bin/ps EPERM, host_start_timeout이다. 호스트에서 전체 재실행이 필요하다.
+- 화면 소스의 줄당 160자 제한을 확인했다. 실제 Claude·LLM·외부 네트워크 호출, git 조작, 코어·spec·전역 SSE·C1 화면·visual baseline 변경은 하지 않았다.
