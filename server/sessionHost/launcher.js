@@ -9,7 +9,7 @@ function hostEnvironment(source = process.env) {
     !key.startsWith('PALANTIR_') && key !== 'CLAUDE_CODE_OAUTH_TOKEN' &&
     !(key === 'ANTHROPIC_API_KEY' && isClaudeOAuthTokenValue(value))));
 }
-function createClient({ runtimeDir, timeoutMs = 2000 }) {
+function createClient({ runtimeDir, timeoutMs = 2000, onDisconnect = () => {} }) {
   let socket;
   let bootId;
   let bootChanged = false;
@@ -130,6 +130,7 @@ function createClient({ runtimeDir, timeoutMs = 2000 }) {
         current.on('close', () => {
           clearTimeout(timer);
           connected = false;
+          if (greeted) onDisconnect();
           if (!greeted) reject(new Error('handshake_closed'));
           for (const entry of pending.values()) {
             clearTimeout(entry.timer);
@@ -169,10 +170,40 @@ function createClient({ runtimeDir, timeoutMs = 2000 }) {
   };
   return api;
 }
+// Resolve the directory once so exclusion and storage use the same runtime.
+// Reject file aliases before SQLite can follow them into another host's store.
+function inspectHostRuntime(runtimeDir, create = false) {
+  const syncFs = require('node:fs');
+  if (create) syncFs.mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
+  let canonical;
+  try { canonical = syncFs.realpathSync(runtimeDir); }
+  catch (error) {
+    if (!create && error.code === 'ENOENT') return { runtimeDir: path.resolve(runtimeDir), history: false };
+    throw Object.assign(new Error('invalid_host_storage'), { code: 'invalid_host_storage' });
+  }
+  if (!syncFs.statSync(canonical).isDirectory()) {
+    throw Object.assign(new Error('invalid_host_storage'), { code: 'invalid_host_storage' });
+  }
+  let history = false;
+  for (const name of ['host.db', 'host.db-wal', 'host.db-shm', 'host.db-journal', 'host.lock', 'host.lock-journal', 'host.lock-wal', 'host.lock-shm']) {
+    const file = path.join(canonical, name);
+    try {
+      const stat = syncFs.lstatSync(file);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || syncFs.realpathSync(file) !== file) {
+        throw Object.assign(new Error('invalid_host_storage'), { code: 'invalid_host_storage' });
+      }
+      if (name === 'host.db') history = true;
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw Object.assign(new Error('invalid_host_storage'), { code: 'invalid_host_storage' });
+    }
+  }
+  return { runtimeDir: canonical, history };
+}
 async function ensureHost({ runtimeDir, entry = path.join(__dirname, 'main.js'), timeoutMs = 5000 }) {
   if (process.env.PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS === '1') {
     throw Object.assign(new Error('legacy_credential_mode'), { code: 'legacy_credential_mode' });
   }
+  runtimeDir = inspectHostRuntime(runtimeDir).runtimeDir;
   const deadline = Date.now() + timeoutMs;
   let launched = false;
   while (Date.now() < deadline) {
@@ -189,4 +220,4 @@ async function ensureHost({ runtimeDir, entry = path.join(__dirname, 'main.js'),
   }
   throw new Error('host_start_timeout');
 }
-module.exports = { ensureHost, createClient, hostEnvironment };
+module.exports = { ensureHost, createClient, hostEnvironment, inspectHostRuntime };

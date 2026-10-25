@@ -18,6 +18,8 @@ export function useOwnedSessions(sessionId, { timers = globalThis, retryMs = 100
   const [sessions, setSessions] = useState([]);
   const [events, setEvents] = useState([]);
   const [host, setHost] = useState('loading');
+  const [hostRecovery, setHostRecovery] = useState(null);
+  const reconnectLock = useRef(false);
   const [asOf, setAsOf] = useState(null);
   const [notice, setNotice] = useState('');
   const [nextPage, setNextPage] = useState(null);
@@ -142,7 +144,19 @@ export function useOwnedSessions(sessionId, { timers = globalThis, retryMs = 100
       source = stream;
       const activeStream = () => current() && source === stream;
       stream.addEventListener('error', () => { if (activeStream()) markLost(); });
-      stream.addEventListener('host_unreachable', () => { if (activeStream()) markLost(); });
+      stream.addEventListener('host_unreachable', frame => {
+        if (!activeStream()) return;
+        markLost();
+        let status;
+        try { status = JSON.parse(frame.data); } catch { return; }
+        if (status.host === 'not_running') {
+          source?.close(); source = null;
+          connection.current.host = 'not_running';
+          setHost('not_running');
+          setHostRecovery(status);
+          retryTimer = timers.setTimeout(() => { void refresh(false); }, 10000);
+        }
+      });
       stream.addEventListener('open', () => {
         if (!activeStream()) return;
         connection.current.open = true;
@@ -210,14 +224,20 @@ export function useOwnedSessions(sessionId, { timers = globalThis, retryMs = 100
         const result = await apiFetch(ownedApiPath(requestedId));
         if (!valid()) return;
         if (result.host !== 'running') {
-          if (result.host === 'not_running' && !source && !connection.current.lost) {
+          if (result.host === 'not_running') {
+            source?.close(); source = null;
+            connection.current.open = false;
+            connection.current.snapshotGeneration = -1;
             connection.current.host = 'not_running';
             setHost('not_running');
+            setHostRecovery(result);
+            retryTimer = timers.setTimeout(() => { void refresh(false); }, 10000);
           } else {
             synchronizationFailed();
           }
           return;
         }
+        setHostRecovery(null);
         const isDeleted = ['deleting', 'deleted'].includes(result.state?.session?.state);
         if (deleted.current && !isDeleted) return;
         if (requestedId) {
@@ -488,7 +508,25 @@ export function useOwnedSessions(sessionId, { timers = globalThis, retryMs = 100
     }
     return reload.current(true);
   };
+  const reconnectHost = async () => {
+    if (reconnectLock.current || busy) return;
+    reconnectLock.current = true;
+    setBusy(true);
+    const epoch = routeEpoch.current;
+    try {
+      const result = await apiFetch(`${ownedApiPath()}/reconnect`, { method: 'POST', body: '{}' });
+      if (epoch !== routeEpoch.current) return;
+      setHostRecovery(result.host === 'running' ? null : result);
+      await reload.current(true);
+    } catch {
+      if (epoch === routeEpoch.current) setNotice(OWNED_COPY.hostRecoveryFailed);
+    } finally {
+      reconnectLock.current = false;
+      if (epoch === routeEpoch.current) setBusy(false);
+    }
+  };
   return {
+    hostRecovery, reconnectHost,
     snapshot, sessions, events, host, asOf, notice, nextPage, pending, otherPending, busy, storageWarning, canStart, synchronize,
     syncError, hasUnacceptedRequest, canDiscardPending, checkPending, discardPending,
     interruptNotice: manualAction === 'interrupt' ? OWNED_COPY.interruptManual : '',

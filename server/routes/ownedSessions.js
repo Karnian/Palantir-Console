@@ -15,6 +15,7 @@ function createOwnedSessionsRouter({ service }) {
     } catch (error) { next(error); }
   };
   router.get('/', handle(() => service.list()));
+  router.post('/reconnect', handle(() => service.reconnect()));
   router.post('/requests/:request_key/abandon', handle(req => service.abandon(req.params.request_key)));
   router.get('/requests/:request_key', handle(req => service.lookup(req.params.request_key)));
   router.get('/stream', (req, res, next) => {

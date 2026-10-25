@@ -45,9 +45,9 @@ function bridge(t, options = {}) {
 }
 test('reads without host history never launch host, distinguish absent lock and unreachable stale values', async t => {
   const h = bridge(t); h.online = false;
-  assert.deepEqual(await h.service.list(), { host: 'not_running' });
-  assert.deepEqual(await h.service.snapshot('missing'), { host: 'not_running' });
-  assert.deepEqual(await h.service.lookup(h.f.key()), { host: 'not_running' });
+  assert.deepEqual(await h.service.list(), { host: 'not_running', reason: 'never_started' });
+  assert.deepEqual(await h.service.snapshot('missing'), { host: 'not_running', reason: 'never_started' });
+  assert.deepEqual(await h.service.lookup(h.f.key()), { host: 'not_running', reason: 'never_started' });
   assert.equal(h.launches, 0);
   h.online = true; h.f.start();
   const known = await h.service.snapshot(h.f.sid);
@@ -239,7 +239,8 @@ test('S1-e2 history startup is single flight and failure has diagnostics', async
   assert.equal(h.launches, 1);
   const broken = bridge(t, { runtimeDir: dir, ensureHost: async () => { throw Error('secret path'); } });
   broken.online = false;
-  assert.deepEqual(await broken.service.list(), { host: 'not_running', diagnostics: { code: 'host_start_failed' } });
+  assert.deepEqual(await broken.service.list(), { host: 'not_running', reason: 'recovery_failed',
+    diagnostics: { code: 'host_start_failed', next_retry_at: broken.f.time + 1000 } });
 });
 test('S1-e2 SSE recovery only runs on scheduled polls', async t => {
   const dir = fs.mkdtempSync('/private/tmp/sh1-e2-unit-');

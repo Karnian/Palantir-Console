@@ -29,7 +29,13 @@ export function OwnedSessionsView({ sessionId }) {
   if (host === 'unreachable') {
     hostStatus = html`<p class="owned-unknown">${OWNED_COPY.lost} ${formatOwnedTime(asOf)} ${OWNED_COPY.asOf}</p>`;
   } else if (host === 'not_running') {
-    hostStatus = OWNED_COPY.off;
+    const recovery = controller.hostRecovery;
+    hostStatus = recovery && recovery.reason !== 'never_started' ? html`
+      <p>${OWNED_COPY.hostRecoveryFailed}</p>
+      <p>${OWNED_COPY[recovery.diagnostics?.code] || OWNED_COPY.hostRecoveryFailed}</p>
+      ${recovery.diagnostics?.next_retry_at != null && html`<p>${OWNED_COPY.hostNextRetry}: ${formatOwnedTime(recovery.diagnostics.next_retry_at)}</p>`}
+      <button class="btn btn-sm" disabled=${busy} onClick=${controller.reconnectHost}>${OWNED_COPY.hostReconnect}</button>
+    ` : OWNED_COPY.hostNeverStarted;
   }
   let content = html`<${OwnedSessionList} sessions=${controller.sessions}
     disabled=${startDisabled} onStart=${() => setStartOpen(true)} />`;

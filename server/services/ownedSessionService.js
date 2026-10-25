@@ -74,7 +74,7 @@ function statusOnly(value) {
 function createOwnedSessionService({ runtimeDir = path.resolve(process.cwd(), 'runtime', 'session-host'),
   createClient = launcher.createClient, ensureHost = launcher.ensureHost, diagnose = () => lockStatus(runtimeDir),
   timers = globalThis, pollMs = POLL_MS, clock = Date.now } = {}) {
-  const client = createClient({ runtimeDir });
+  const client = createClient({ runtimeDir, onDisconnect: disconnected });
   const cache = new Map();
   const deletedSessions = new Set();
   const subscribers = new Set();
@@ -85,6 +85,41 @@ function createOwnedSessionService({ runtimeDir = path.resolve(process.cwd(), 'r
   let bootId;
   let startup;
   let startupFailed = false;
+  let storageInvalid = false;
+  let failures = 0;
+  let nextRetryAt = 0;
+  let connectedSince = null;
+  let monitorStartup = false;
+  function restartFailed() {
+    failures++;
+    nextRetryAt = clock() + Math.min(60000, 1000 * 2 ** Math.min(failures - 1, 6));
+    startupFailed = true;
+  }
+  function stableConnection() {
+    if (connectedSince !== null && clock() - connectedSince >= 30000) {
+      failures = 0;
+      nextRetryAt = 0;
+      startupFailed = false;
+      monitorStartup = false;
+    }
+  }
+  function disconnected() {
+    if (!closed) {
+      stableConnection();
+      if (monitorStartup) { monitorStartup = false; restartFailed(); }
+    }
+    connectedSince = null;
+  }
+  function history() {
+    try {
+      const runtime = launcher.inspectHostRuntime(runtimeDir);
+      storageInvalid = false;
+      return runtime;
+    } catch {
+      storageInvalid = true;
+      return null;
+    }
+  }
   function emit(subscriber, event, data) {
     if (!subscribers.has(subscriber)) return;
     try { subscriber.send(event, data); } catch { subscribers.delete(subscriber); }
@@ -97,6 +132,9 @@ function createOwnedSessionService({ runtimeDir = path.resolve(process.cwd(), 'r
       if (closed) { client.close(); throw failure('service_closed', 503); }
       const changed = bootId !== undefined && bootId !== client.hostBootId;
       if (changed) await client.reconcile();
+      if (changed) connectedSince = null;
+      connectedSince ??= clock();
+      stableConnection();
       bootId = client.hostBootId;
       for (const subscriber of subscribers) {
         if (subscriber.offline) emit(subscriber, 'reconnected', { host_boot_id: bootId, seq: subscriber.seq });
@@ -108,13 +146,22 @@ function createOwnedSessionService({ runtimeDir = path.resolve(process.cwd(), 'r
       }
       return client;
     })();
-    try { return await connecting; } finally { connecting = null; }
+    try { return await connecting; } catch (error) {
+      disconnected();
+      throw error;
+    } finally { connecting = null; }
   }
-  function unavailable(key) {
+  function unavailable(key, error) {
     const diagnosis = diagnose();
     const previous = cache.get(key);
-    if (!diagnosis.held) return { host: 'not_running',
-      ...(startupFailed ? { diagnostics: { code: 'host_start_failed' } } : {}) };
+    if (!diagnosis.held) {
+      const runtime = history();
+      if (storageInvalid) return { host: 'not_running', reason: 'recovery_failed', diagnostics: { code: 'invalid_host_storage' } };
+      if (!runtime?.history && !startupFailed) return { host: 'not_running', reason: 'never_started' };
+      const backoff = clock() < nextRetryAt && error?.code !== 'host_unreachable';
+      return { host: 'not_running', reason: backoff ? 'restart_backoff' : 'recovery_failed',
+        diagnostics: { code: backoff ? 'host_restart_backoff' : 'host_start_failed', next_retry_at: nextRetryAt } };
+    }
     return { host: 'unreachable', current_state_known: false, as_of: previous?.as_of ?? null,
       last_known: previous?.value ?? null, diagnostics: { pid: diagnosis.pid ?? null,
         identity: diagnosis.identity || { status: 'query_failed' } } };
@@ -149,25 +196,35 @@ function createOwnedSessionService({ runtimeDir = path.resolve(process.cwd(), 'r
       return { host: 'running', host_boot_id: bootId, ...result };
     } catch (error) {
       if (error.code === 'snapshot_too_large' || error.message === 'snapshot_too_large') throw failure('snapshot_too_large', 413);
-      return unavailable(key);
+      return unavailable(key, error);
     }
   }
   async function readable() {
     return writable(true);
   }
-  async function writable(readOnly = false) {
+  async function writable(readOnly = false, manual = false) {
     try { return await connect(); } catch {
-      if (closed || diagnose().held || (readOnly && !fs.existsSync(path.join(runtimeDir, 'host.db')))) {
-        throw failure('host_unreachable', 503);
-      }
-      if (!startup) startup = (async () => {
+      if (closed || diagnose().held) throw failure('host_unreachable', 503);
+      const runtime = history();
+      if (!runtime) throw failure('invalid_host_storage', 503);
+      if (readOnly && !runtime.history) throw failure('host_unreachable', 503);
+      // Join an in-flight manual or automatic attempt before applying its cooldown.
+      if (startup) return startup;
+      if (!manual && clock() < nextRetryAt) throw failure('host_restart_backoff', 503);
+      startup = (async () => {
         startupFailed = false;
         try {
-          const ready = await ensureHost({ runtimeDir });
+          const ready = await ensureHost({ runtimeDir: runtime.runtimeDir });
           ready.close();
-        } catch (error) { startupFailed = true; throw error; }
+          const host = await connect();
+          monitorStartup = true;
+          return host;
+        } catch {
+          restartFailed();
+          throw failure('host_unreachable', 503);
+        }
       })().finally(() => { startup = null; });
-      try { await startup; return await connect(); } catch { throw failure('host_unreachable', 503); }
+      return startup;
     }
   }
   async function submit(request) {
@@ -217,9 +274,10 @@ function createOwnedSessionService({ runtimeDir = path.resolve(process.cwd(), 'r
           }
         }
       }
-    } catch {
+    } catch (error) {
+      const status = unavailable('list', error);
       for (const subscriber of subscribers) {
-        if (!subscriber.offline) emit(subscriber, 'host_unreachable', { seq: subscriber.seq, current_state_known: false });
+        if (!subscriber.offline) emit(subscriber, 'host_unreachable', { ...status, seq: subscriber.seq, current_state_known: false });
         subscriber.offline = true;
       }
     }
@@ -233,6 +291,10 @@ function createOwnedSessionService({ runtimeDir = path.resolve(process.cwd(), 'r
     timer?.unref?.();
   }
   return {
+    async reconnect() {
+      try { await writable(true, true); return { host: 'running', host_boot_id: bootId }; }
+      catch (error) { return unavailable('list', error); }
+    },
     list: () => read('list', host => host.list()),
     snapshot: id => read(`snapshot:${id}`, host => host.snapshot(id)),
     transcript: (id, before, limit) => read(`transcript:${id}`, host => host.transcript(id, before, limit)),
@@ -243,7 +305,7 @@ function createOwnedSessionService({ runtimeDir = path.resolve(process.cwd(), 'r
         return { host: 'running', host_boot_id: bootId, ...result };
       } catch (error) {
         if (['invalid_chunk', 'invalid_offset'].includes(error.code || error.message)) throw failure(error.code || error.message);
-        return unavailable('chunk');
+        return unavailable('chunk', error);
       }
     },
     lookup(key) { validateKey(key); return read(`lookup:${key}`, async host => ({ result: await host.lookup(key) })); },
