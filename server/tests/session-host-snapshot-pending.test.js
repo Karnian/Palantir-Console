@@ -15,7 +15,7 @@ for (const state of ['pending', 'decided']) {
     const f = fixture(t); f.start(); const input = cards(f, 200, state);
     const snapshot = f.core.snapshot(f.sid);
     assert.equal(snapshot.state.tool_requests.length, 200);
-    assert.equal(snapshot.more.tool_requests, false);
+    assert.equal(Object.hasOwn(snapshot, 'more'), false);
     assert.deepEqual(snapshot.state.tool_requests.map(row => row.id), Array.from({ length: 200 }, (_, n) => 'card-' + n));
     for (let n = 0; n < 200; n++) {
       const row = snapshot.state.tool_requests[n];
@@ -25,16 +25,16 @@ for (const state of ['pending', 'decided']) {
     }
   });
 }
-test('R7 terminal approval history remains capped with more=true', t => {
+test('R8 terminal approval history remains complete without a more flag', t => {
   const f = fixture(t); f.start(); cards(f, 200, 'expired');
   const snapshot = f.core.snapshot(f.sid);
-  assert.equal(snapshot.state.tool_requests.length, 128); assert.equal(snapshot.more.tool_requests, true);
-  assert.equal(snapshot.state.tool_requests[0].id, 'card-72');
+  assert.equal(snapshot.state.tool_requests.length, 200); assert.equal(Object.hasOwn(snapshot, 'more'), false);
+  assert.equal(snapshot.state.tool_requests[0].id, 'card-0');
 });
 test('R7 excessive pending previews shrink without dropping any approval or exceeding snapshot budget', t => {
   const f = fixture(t); f.start(); cards(f, 2100, 'pending');
   const snapshot = f.core.snapshot(f.sid);
-  assert.equal(snapshot.state.tool_requests.length, 2100); assert.equal(snapshot.more.tool_requests, false);
+  assert.equal(snapshot.state.tool_requests.length, 2100); assert.equal(Object.hasOwn(snapshot, 'more'), false);
   assert.ok(Buffer.byteLength(JSON.stringify(snapshot)) < 8 * 1024 * 1024);
   assert.ok(snapshot.state.tool_requests.some(row => Buffer.byteLength(row.input) < 4096));
   assert.ok(snapshot.state.tool_requests.every(row => !row.input.includes('\ufffd') && row.input_bytes > 4096));
@@ -57,9 +57,10 @@ test('R7 unresolved deliveries and an older accepted control survive newer termi
   })(); db.close();
   const snapshot = f.core.snapshot(f.sid);
   assert.equal(snapshot.state.deliveries.filter(row => row.id.startsWith('ongoing-')).length, 200);
-  assert.equal(snapshot.state.deliveries.filter(row => row.id.startsWith('finished-')).length, 128);
+  assert.equal(snapshot.state.deliveries.filter(row => row.id.startsWith('finished-')).length, 200);
   assert.ok(snapshot.state.controls.some(row => row.request_key === 'accepted-control'));
-  assert.equal(snapshot.more.deliveries, true); assert.equal(snapshot.more.controls, true);
+  assert.equal(Object.hasOwn(snapshot, 'more'), false);
+  assert.equal(snapshot.state.controls.filter(row => row.request_key.startsWith('finished-control-')).length, 200);
 });
 
 test('R7 metadata alone beyond wire budget fails explicitly instead of silently omitting approvals', t => {

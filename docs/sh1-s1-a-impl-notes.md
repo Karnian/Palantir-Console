@@ -2147,3 +2147,49 @@ pending 2,100개에서는 모든 행을 보존하면서 미리보기를 줄여 8
 - `R2 real ps ignores unrelated multiline argv while identifying a marked child` — `actual: 'query_failed', expected: 'ok'`
 - `real ps identifies marked child and grandchild then confirms exit` — `actual: 'query_failed', expected: 'ok'`
 - `SDK real ps identity reads actual child and inherited grandchild marker then mismatch` — `spawnSync /bin/ps EPERM`
+
+
+### S1-c1 라운드 8 — snapshot 행 상한 제거
+
+- snapshot에서 행 수 상한, 필수/종결 행 분류, `more`를 제거했다. 생성 순서대로 모든 incarnation·delivery·tool_request·control 행을 반환한다. 삭제 중/삭제된 세션의 원문 차단은 유지한다.
+- 기본 8MiB 예산은 `{state, seq_high}` 전체 JSON의 실제 UTF-8 바이트 수로 검사한다. 본문·입력 미리보기만 4KiB에서 2KiB, 1KiB 순으로 0까지 줄인다. 원본 바이트 수와 truncated 표시는 축소 후에도 정확하며, 전문은 기존 세션 소속 검사와 조각 조회로 복원한다.
+- 행 메타데이터 수백 바이트 × 수만 행까지 예산 안에 들어간다. 미리보기가 0이어도 메타데이터가 예산을 넘으면 행을 빼는 대신 고정 코드 `snapshot_too_large`로 명시적으로 실패한다. 관측 중인 unknown을 종결로 오분류해 누락시키는 것보다 안전하다. 서버는 호스트 장애나 오래된 캐시로 바꾸지 않고 HTTP 413과 같은 코드를 전달한다. 프로토콜의 기존 고정 오류 전달·연결 유지 처리는 그대로 사용한다.
+- 테스트 전용 `snapshotMaxBytes` 주입으로 작은 예산에서도 동일한 축소·실패 경로를 검사한다. 상태 기계·접수·멱등 규칙은 변경하지 않았다.
+
+수정 전 실패 증거:
+
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-snapshot-all.test.js` — `# tests 3`, `# pass 0`, `# fail 3`.
+- 종결 delivery 300개 + 기존 unknown prompt(attribution_pending=1)·unknown interrupt: `128 !== 302`.
+- 큰 본문 300개와 주입 예산: `128 !== 300`.
+- 메타데이터만으로 4096바이트 예산 초과: `Missing expected exception.`.
+
+수정 후 검증:
+
+- snapshot 신규·기존 승인·서비스·HTTP 집중 테스트 38/38 통과. 300개 큰 본문 모두 유지·UTF-8 경계·원본 바이트 수·전문 조각 복원·주입 예산·고정 오류 및 HTTP 413을 확인했다. 기존 200개 pending/decided 승인, 2100개 pending 축소, 200/500개 종결 이력 테스트도 행 전체를 요구하도록 갱신했다.
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-*.test.js server/tests/owned-session*.test.js` — `# tests 537`, `# pass 514`, `# fail 23`, `# cancelled 0`, `# skipped 0`. 실패는 소켓 listen·실제 ps 제한 및 이에 따른 host_start_timeout이다. 실제 Claude·LLM·동봉 실행 파일·네트워크·git 조작은 수행하지 않았다.
+
+샌드박스 실패 사례 및 오류 원문(실제 macOS 재검증 필요):
+
+- `HTTP real SDK pending approval survives server SIGTERM with one provider tool effect` — `Error: listen EPERM: operation not permitted /private/tmp/owned-http-hNwWI2/host.sock`
+- `HTTP real SDK pending approval survives server SIGKILL with one provider tool effect` — `Error: listen EPERM: operation not permitted /private/tmp/owned-http-kzQlUe/host.sock`
+- `HTTP real SDK socket failure preserves pending last-known; identical previously valid mutations all return 503` — `Error: listen EPERM: operation not permitted /private/tmp/owned-http-Fhd6LM/host.sock`
+- `process bridge replacement preserves pending approval; shutdown leaves fake host alive and decision effect once` — `Error: listen EPERM: operation not permitted /private/tmp/owned-G2rAa0/host.sock`
+- `process accepted-before-reply crash remains unknown; boot change lookup and same key retry cause one start effect` — `Error: listen EPERM: operation not permitted /private/tmp/owned-VVaf8p/host.sock`
+- `process broken socket exposes stale snapshot and lock pid only; all valid changes fail closed` — `Error: listen EPERM: operation not permitted /private/tmp/owned-rIXBQ0/host.sock`
+- `X simultaneous hosts preserve winner socket inode and capability` — `error: 'spawnSync /bin/ps EPERM'`
+- `X lock does not survive in a live inherited-environment child` — `error: 'spawnSync /bin/ps EPERM'`
+- `X detached host survives launcher parent SIGKILL` — `error: 'spawnSync /bin/ps EPERM'`
+- `X detached host survives launcher parent SIGTERM` — `error: 'spawnSync /bin/ps EPERM'`
+- `X detached host survives launcher parent SIGHUP` — `error: 'spawnSync /bin/ps EPERM'`
+- `X before accepted crash is reconciled by lookup after boot change, effect occurs once` — `error: 'spawnSync /bin/ps EPERM'`
+- `X idle drain refuses arrival with not_accepted, new host retries exactly once` — `error: 'spawnSync /bin/ps EPERM'`
+- `X active ownership prevents idle and SIGTERM exit; zero ownership releases socket and lock` — `error: 'spawnSync /bin/ps EPERM'`
+- `X private file modes, capability absent from argv and env, launcher sanitizes env` — `error: 'host_start_timeout'`
+- `X SIGTERM with zero ownership exits cleanly and releases exclusion` — `error: 'spawnSync /bin/ps EPERM'`
+- `X R1-01 asynchronous throw, active ownership=false` — `error: 'spawnSync /bin/ps EPERM'`
+- `X R1-01 asynchronous throw, active ownership=true` — `error: 'spawnSync /bin/ps EPERM'`
+- `X R1-01 asynchronous rejection, active ownership=false` — `error: 'spawnSync /bin/ps EPERM'`
+- `X R1-01 asynchronous rejection, active ownership=true` — `error: 'spawnSync /bin/ps EPERM'`
+- `R2 real ps ignores unrelated multiline argv while identifying a marked child` — `expected: 'ok'; actual: 'query_failed'`
+- `real ps identifies marked child and grandchild then confirms exit` — `real /bin/ps must be available; sandbox EPERM requires host rerun`
+- `SDK real ps identity reads actual child and inherited grandchild marker then mismatch` — `error: 'spawnSync /bin/ps EPERM'`

@@ -7,8 +7,8 @@ const { fixture } = require('./helpers/session-host-fixture');
 const { request } = require('./helpers/session-hub-fixture.cjs');
 const { createOwnedSessionService } = require('../services/ownedSessionService');
 const { createOwnedSessionsRouter } = require('../routes/ownedSessions');
-function bridge(t) {
-  const f = fixture(t); let online = true; const tasks = new Set();
+function bridge(t, options = {}) {
+  const f = fixture(t, options); let online = true; const tasks = new Set();
   const client = { hostBootId: 'boot', connect() { if (!online) throw Error('offline'); }, close() {},
     list: () => f.core.listSessions(), lookup: key => f.core.lookup(key), snapshot: id => f.core.snapshot(id),
     eventsSince: (seq, options) => f.core.eventsSince(seq, options), chunk: (...args) => f.core.chunk(...args) };
@@ -48,13 +48,13 @@ test('R2 snapshot previews are bounded and UTF-8 safe; full originals remain ava
   assert.equal(h.f.core.chunk(h.f.sid, 'delivery_body', prompt.id, 0).data, JSON.stringify(body));
   assert.equal(h.f.core.chunk(h.f.sid, 'tool_input', tool.id, 0).data, JSON.stringify({ text: body }));
 });
-test('R2 snapshot has finite row count and explicit more flag', t => {
+test('R8 snapshot retains every terminal row within its byte budget', t => {
   const h = bridge(t); h.f.start();
   const db = new Database(h.f.dbPath);
   const insert = db.prepare("INSERT INTO tool_requests(id,incarnation_id,tool_use_id,tool_name,input,state) VALUES(?,?,?,'Bash','{}','expired')");
   db.transaction(() => { for (let n = 0; n < 500; n++) insert.run('row-' + n, h.f.iid, 'tool-' + n); })(); db.close();
   const snapshot = h.f.core.snapshot(h.f.sid);
-  assert.ok(snapshot.state.tool_requests.length < 500); assert.equal(snapshot.more.tool_requests, true);
+  assert.equal(snapshot.state.tool_requests.length, 500); assert.equal(Object.hasOwn(snapshot, 'more'), false);
   assert.ok(Buffer.byteLength(JSON.stringify(snapshot)) < 8 * 1024 * 1024);
 });
 test('R2 13MiB SDK event relays placeholder and HTTP chunks reconstruct exact bytes; foreign/deleted refs reveal nothing', async t => {
@@ -99,4 +99,15 @@ test('R2 chunks reject continuation-byte offsets and invalid sources without lea
   assert.throws(() => h.f.core.chunk(h.f.sid, 'delivery_body', delivery.id, 2), { code: 'invalid_offset' });
   assert.throws(() => h.f.core.chunk(h.f.sid, 'not-a-source', delivery.id, 0), { code: 'invalid_chunk' });
   assert.equal(h.f.core.chunk(h.f.sid, 'delivery_body', delivery.id, 0).data, JSON.stringify('가🙂'));
+});
+
+test('R8 HTTP snapshot metadata overflow returns explicit 413 while the host remains readable', async t => {
+  const h = bridge(t, { snapshotMaxBytes: 4096 }); h.f.start();
+  const db = new Database(h.f.dbPath);
+  const insert = db.prepare("INSERT INTO tool_requests(id,incarnation_id,tool_use_id,tool_name,input,state) VALUES(?,?,?,'Bash','{}','expired')");
+  db.transaction(() => { for (let n = 0; n < 50; n++) insert.run('row-' + n, h.f.iid, 'tool-' + n); })(); db.close();
+  const response = await request(h.app).get('/api/owned-sessions/' + h.f.sid);
+  assert.equal(response.status, 413);
+  assert.deepEqual(response.body, { error: 'snapshot_too_large', reason: 'snapshot_too_large' });
+  assert.equal((await request(h.app).get('/api/owned-sessions')).status, 200);
 });

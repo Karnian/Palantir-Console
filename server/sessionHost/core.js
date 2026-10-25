@@ -60,7 +60,7 @@ function snapshotPreview(row, previewBytes = 4096) {
     }
     if (typeof value !== 'string') continue;
     const buffer = Buffer.from(value);
-    const limit = ['body', 'input', 'decision', 'result_json', 'account_snapshot', 'capabilities'].includes(key) ? previewBytes : 4096;
+    const limit = ['body', 'input'].includes(key) ? previewBytes : 4096;
     const total = row[key + '_bytes'] ?? buffer.length;
     if (key === 'body' || key === 'input' || buffer.length > limit || row[key + '_bytes'] !== undefined) {
       result[key] = utf8Prefix(buffer, limit);
@@ -78,7 +78,8 @@ function createHostCore({
   clock = Date.now,
   hostBootId = randomUUID(),
   faults,
-  readHooks
+  readHooks,
+  snapshotMaxBytes = 8 * 1024 * 1024
 } = {}) {
   const now = typeof clock === 'function' ? clock : () => clock.now();
   const store = openStore(dbPath, {
@@ -1451,78 +1452,44 @@ function createHostCore({
     return store.read(() => {
       const session = getSession(sessionId);
       if (session && ['deleting', 'deleted'].includes(session.state)) {
-        return {
+        const result = {
           state: {
             session: snapshotPreview(session),
             current_incarnation_id: getLatestIncarnation(sessionId)?.id || null
           },
           seq_high: getRow('SELECT COALESCE(MAX(seq),0) n FROM events').n
         };
-      }
-      const more = {};
-      const groups = {};
-      function rows(name, sql, parameters, required, transform = value => value) {
-        const selected = sql.replace('SELECT *', 'SELECT rowid AS snapshot_rowid,*');
-        const group = { required: [], history: [] };
-        more[name] = false;
-        for (const row of database.prepare(selected + ` AND (${required}) ORDER BY rowid ASC`).iterate(...parameters)) {
-          const { snapshot_rowid, ...value } = row;
-          group.required.push({ rowid: snapshot_rowid, value: snapshotPreview(transform(value)) });
+        if (Buffer.byteLength(JSON.stringify(result)) > snapshotMaxBytes) {
+          throw Object.assign(new Error('snapshot_too_large'), { code: 'snapshot_too_large' });
         }
-        for (const row of database.prepare(selected + ` AND NOT (${required}) ORDER BY rowid DESC LIMIT 129`).iterate(...parameters)) {
-          if (group.history.length === 128) { more[name] = true; break; }
-          const { snapshot_rowid, ...value } = row;
-          group.history.push({ rowid: snapshot_rowid, value: snapshotPreview(transform(value)) });
-        }
-        groups[name] = group;
+        return result;
       }
-      rows('incarnations', 'SELECT * FROM incarnations WHERE session_id=?', [sessionId],
-        "state NOT IN ('exited','never_started')", incarnation => {
-          const event = getRow("SELECT json FROM events WHERE incarnation_id=? AND type='rate_limit' ORDER BY seq DESC LIMIT 1", incarnation.id);
-          return { ...incarnation, rate_limit_info: event ? JSON.parse(event.json) : null };
-        });
-      rows('deliveries', 'SELECT * FROM deliveries WHERE session_id=?', [sessionId],
-        "(state IN ('queued','sending','written','provider_observed') AND (kind!='prompt' OR outcome IS NULL)) OR " +
-        "(kind='prompt' AND state='completed' AND outcome IS NULL)");
-      rows('tool_requests',
-        'SELECT * FROM tool_requests WHERE incarnation_id IN (SELECT id FROM incarnations WHERE session_id=?)', [sessionId],
-        "state IN ('pending','decided')");
-      rows('controls', 'SELECT * FROM control_requests WHERE session_id=?', [sessionId], "state='accepted'");
+      function rows(sql, parameters, transform = value => value) {
+        return Array.from(database.prepare(sql + ' ORDER BY rowid ASC').iterate(...parameters), row => snapshotPreview(transform(row)));
+      }
       const state = {
         session: session ? snapshotPreview(session) : null,
-        current_incarnation_id: getLatestIncarnation(sessionId)?.id || null
+        current_incarnation_id: getLatestIncarnation(sessionId)?.id || null,
+        incarnations: rows('SELECT * FROM incarnations WHERE session_id=?', [sessionId], incarnation => {
+          const event = getRow("SELECT json FROM events WHERE incarnation_id=? AND type='rate_limit' ORDER BY seq DESC LIMIT 1", incarnation.id);
+          return { ...incarnation, rate_limit_info: event ? JSON.parse(event.json) : null };
+        }),
+        deliveries: rows('SELECT * FROM deliveries WHERE session_id=?', [sessionId]),
+        tool_requests: rows('SELECT * FROM tool_requests WHERE incarnation_id IN (SELECT id FROM incarnations WHERE session_id=?)', [sessionId]),
+        controls: rows('SELECT * FROM control_requests WHERE session_id=?', [sessionId])
       };
-      const requiredBytes = () => {
-        for (const [name, group] of Object.entries(groups)) state[name] = group.required.map(row => row.value);
-        return Buffer.byteLength(JSON.stringify({ state, more })) + 4096;
-      };
-      let bytes = requiredBytes();
-      // Never omit an unresolved row to make room for a preview or terminal history.
-      for (let limit = 2048; bytes > 7 * 1024 * 1024; limit = Math.floor(limit / 2)) {
-        for (const group of Object.values(groups)) {
-          for (const row of group.required) row.value = snapshotPreview(row.value, limit);
+      store.readCheckpoint();
+      const result = { state, seq_high: getRow('SELECT COALESCE(MAX(seq),0) n FROM events').n };
+      const bytes = () => Buffer.byteLength(JSON.stringify(result));
+      // Preserve every row; only body/input previews shrink to meet the byte budget.
+      for (let limit = 2048; bytes() > snapshotMaxBytes; limit = Math.floor(limit / 2)) {
+        for (const name of ['incarnations', 'deliveries', 'tool_requests', 'controls']) {
+          state[name] = state[name].map(row => snapshotPreview(row, limit));
         }
-        bytes = requiredBytes();
         if (limit === 0) break;
       }
-      // An explicit small error preserves the connection if identifiers alone exceed the wire budget.
-      if (bytes > 7 * 1024 * 1024) throw Object.assign(new Error('snapshot_too_large'), { code: 'snapshot_too_large' });
-      for (const [name, group] of Object.entries(groups)) {
-        const included = [...group.required];
-        for (const row of group.history) {
-          const size = Buffer.byteLength(JSON.stringify(row.value)) + 1;
-          if (bytes + size > 7 * 1024 * 1024) { more[name] = true; break; }
-          bytes += size;
-          included.push(row);
-        }
-        state[name] = included.sort((left, right) => left.rowid - right.rowid).map(row => row.value);
-      }
-      store.readCheckpoint();
-      return {
-        state,
-        more,
-        seq_high: getRow('SELECT COALESCE(MAX(seq),0) n FROM events').n
-      };
+      if (bytes() > snapshotMaxBytes) throw Object.assign(new Error('snapshot_too_large'), { code: 'snapshot_too_large' });
+      return result;
     });
   }
 
