@@ -1,6 +1,8 @@
 'use strict';
 
 const { randomUUID, createHash } = require('node:crypto');
+const authGate = require('./authGate');
+const pin = require('./pin');
 const { openStore } = require('./store');
 const { SimulatedCrash } = require('./faults');
 const {
@@ -16,6 +18,22 @@ const CONTROLS = new Set(['start', 'resume', 'stop', 'close', 'handoff', 'delete
 const KINDS = new Set([...CONTROLS, 'prompt', 'tool_decision', 'question_answer', 'interrupt']);
 const DAY = 86400000;
 const INTERRUPT_RECEIPT_TIMEOUT_MS = 10000;
+const RATE_LIMIT_FIELDS = Object.freeze([
+  'status', 'resetsAt', 'rateLimitType', 'overageStatus', 'overageDisabledReason', 'isUsingOverage'
+]);
+
+function sanitizeRateLimit(info) {
+  if (!info || typeof info !== 'object' || Array.isArray(info)) return {};
+  const result = {};
+  for (const key of RATE_LIMIT_FIELDS) {
+    if (!Object.hasOwn(info, key)) continue;
+    const value = info[key];
+    if (value === null || typeof value === 'string' || typeof value === 'boolean' ||
+        typeof value === 'number' && Number.isFinite(value)) result[key] = value;
+  }
+  return result;
+}
+
 
 function canonical(value) {
   if (Array.isArray(value)) {
@@ -47,6 +65,55 @@ function createHostCore({
   const queues = new Map();
   const signals = new Map();
   let crashed = false;
+  let disposed = false;
+  const accounts = new Map();
+  const rechecks = new Map();
+  const cleanups = new Map();
+  const deadlines = new Map();
+  const pending = new Set();
+  const asyncErrors = [];
+  const settingsTimers = new Map();
+  let timerSequence = 0;
+  function deadlineTimers(deadline) {
+    return {
+      setTimeout(callback) {
+        const id = ++timerSequence;
+        // The adapter call and promise assimilation share this original deadline.
+        settingsTimers.set(id, { callback, at: deadline });
+        return id;
+      },
+      clearTimeout(id) { settingsTimers.delete(id); }
+    };
+  }
+  // Normalize adapter values in one place; only pending results leave the queue.
+  function continueResult(read, sessionId, operation, {
+    synchronous = value => value,
+    asynchronous = value => Promise.resolve(value).then(synchronous),
+    failed = () => ({ ok: false })
+  } = {}) {
+    const complete = value => {
+      if (!disposed && !crashed) enqueue(sessionId, () => operation(value));
+    };
+    let value;
+    let result;
+    let asynchronousResult;
+    try {
+      value = read();
+      asynchronousResult = value !== null && value !== undefined && typeof value.then === 'function';
+      result = asynchronousResult ? asynchronous(value) : synchronous(value);
+    } catch {
+      complete(failed());
+      return;
+    }
+    if (!asynchronousResult) {
+      complete(result);
+      return;
+    }
+    const task = Promise.resolve(result).then(complete, () => complete(failed()))
+      .catch(error => { asyncErrors.push(error); })
+      .finally(() => pending.delete(task));
+    pending.add(task);
+  }
   const getRow = (sql, ...parameters) => database.prepare(sql).get(...parameters);
   const getRows = (sql, ...parameters) => database.prepare(sql).all(...parameters);
   const execute = (sql, ...parameters) => database.prepare(sql).run(...parameters);
@@ -161,17 +228,13 @@ function createHostCore({
   // §4.3: queued prompts have no provider effect and must not block queue draining.
   function isIdle(incarnation) {
     return incarnation?.state === 'alive' && incarnation.host_boot_id === hostBootId && !incarnation.attribution_uncertain &&
-      !incarnation.interrupt_unknown && !getRow("SELECT id FROM deliveries WHERE incarnation_id=? AND kind='prompt' AND state IN " +
+      !incarnation.interrupt_unknown && accounts.has(incarnation.id) && !getRow("SELECT id FROM deliveries WHERE incarnation_id=? AND kind='prompt' AND state IN " +
         "('sending','written','provider_observed') AND outcome IS NULL LIMIT 1", incarnation.id);
   }
 
-  function passesAdapterCheck(method, ...parameters) {
-    try {
-      const checkResult = adapter[method]?.(...parameters);
-      return checkResult === true;
-    } catch {
-      return false;
-    }
+  function hasPassedGate(incarnation) {
+    const gate = getRow("SELECT * FROM control_requests WHERE incarnation_id=? AND kind IN ('start','resume') AND state='done' AND stage='done'", incarnation.id);
+    return accounts.has(incarnation.id) && gate && !cleanups.has(gate.request_key);
   }
 
   function areDescendantsClear(incarnation) {
@@ -239,7 +302,7 @@ function createHostCore({
       if (['sending', 'written'].includes(delivery.state)) {
         transitionDelivery(delivery, ['sending', 'written'], {
           state: 'unknown',
-          reason: 'host_lost'
+          reason: delivery.outcome === 'errored' ? delivery.reason : 'host_lost'
         });
       }
       if (delivery.state === 'queued') {
@@ -276,14 +339,26 @@ function createHostCore({
     }
   }
 
-  function dispatchDelivery(id) {
+  function dispatchDelivery(id, checked = false) {
     let delivery = getDelivery(id);
     let incarnation = getIncarnation(delivery.incarnation_id);
     if (delivery.state !== 'queued') {
+      rechecks.delete(id);
       return;
     }
     if (delivery.kind === 'prompt' && incarnation?.state === 'alive' && !isIdle(incarnation) && !incarnation.attribution_uncertain &&
       !incarnation.interrupt_unknown && !incarnation.close_after_turn) {
+      return;
+    }
+    if (delivery.kind === 'prompt' && !checked && isIdle(incarnation)) {
+      if (rechecks.has(id) || getRow("SELECT id FROM deliveries WHERE incarnation_id=? AND kind='prompt' AND state='queued' ORDER BY rowid LIMIT 1", incarnation.id)?.id !== id) return;
+      const token = { passed: false, turn: incarnation.turn_gen };
+      rechecks.set(id, token);
+      continueResult(() => adapter.accountInfo(incarnation.id), delivery.session_id, result => {
+        token.passed = result.ok && !token.invalidated;
+        dispatchDelivery(id, true);
+        drainPromptQueue(delivery.session_id);
+      }, { synchronous: account => authGate.evaluateAccountRecheck(accounts.get(incarnation.id), account) });
       return;
     }
     let decision;
@@ -295,12 +370,15 @@ function createHostCore({
         reason = 'not_controllable';
       } else if (delivery.kind === 'prompt' && (!isIdle(incarnation) || incarnation.close_after_turn)) {
         reason = 'not_idle';
-      } else if (delivery.kind === 'prompt' && !passesAdapterCheck('authCheck', incarnation.id)) {
-        reason = 'auth_failed';
+      } else if (delivery.kind === 'prompt' && (!rechecks.get(id)?.passed || rechecks.get(id).turn !== incarnation.turn_gen)) {
+        reason = 'auth_recheck_failed';
+      } else if (['tool_decision', 'question_answer'].includes(delivery.kind) && !hasPassedGate(incarnation)) {
+        reason = 'gate_pending';
       } else if (['tool_decision', 'question_answer'].includes(delivery.kind) && toolRequest?.state !== 'pending') {
         reason = 'tool_not_pending';
       }
       if (reason) {
+        rechecks.delete(id);
         transitionDelivery(delivery, ['queued'], {
           state: 'rejected',
           reason
@@ -317,6 +395,7 @@ function createHostCore({
         }, incarnation);
       }
       if (delivery.kind === 'prompt') {
+        rechecks.delete(id);
         transitionIncarnation(incarnation, ['alive'], {
           turn_gen: incarnation.turn_gen + 1
         });
@@ -389,6 +468,21 @@ function createHostCore({
   function tick() {
     if (crashed) {
       throw new SimulatedCrash('core_crashed');
+    }
+    for (const [id, timer] of settingsTimers) {
+      if (now() >= timer.at) { settingsTimers.delete(id); timer.callback(); }
+    }
+    for (const [key, at] of deadlines) {
+      if (now() < at) continue;
+      const control = getControl(key);
+      enqueue(control.session_id, () => {
+        const current = getControl(key);
+        if (current?.state === 'accepted' && current.stage === 'gating') rejectGate(current, 'initialization_timeout');
+      });
+    }
+    for (const [key] of cleanups) {
+      const control = getControl(key);
+      enqueue(control.session_id, () => advanceGateCleanup(key));
     }
     writeTransaction(() => {
       for (const delivery of getRows("SELECT * FROM deliveries WHERE kind='interrupt' AND state='written' AND updated_at<=?", now(
@@ -534,6 +628,47 @@ function createHostCore({
       return;
     }
     if (controlRequest.kind === 'start' || controlRequest.kind === 'resume') {
+      if (controlRequest.stage === 'requested') {
+        writeTransaction(() => transitionControl(controlRequest, { stage: 'settings_checking' }));
+        injectFault('after_settings_checking');
+        const cwd = getSession(controlRequest.session_id).cwd;
+        const deadline = now() + pin.resolveSettingsDeadlineMs;
+        const failedSettings = () => ({ ok: false, reason: 'settings_check_failed' });
+        continueResult(() => adapter.checkSettings(cwd), controlRequest.session_id, result => {
+          const current = getControl(key);
+          if (current.state !== 'accepted' || current.stage !== 'settings_checking') return;
+          if (now() >= deadline) result = failedSettings();
+          if (!result.ok) {
+            writeTransaction(() => {
+              recordEvent(current.session_id, current.incarnation_id, 'settings_rejected', result);
+              transitionIncarnation(incarnation, ['spawning'], { state: 'never_started' });
+              transitionControl(current, { state: 'failed', reason: result.reason === 'settings_auth_override' ? 'settings_rejected' : 'settings_check_failed' });
+            });
+          } else {
+            writeTransaction(() => {
+              recordEvent(current.session_id, current.incarnation_id, 'settings_checked', result);
+              transitionControl(current, { stage: 'settings_checked' });
+            });
+            executeControlRequest(key);
+          }
+        }, {
+          synchronous: value => now() >= deadline ? failedSettings() : authGate.evaluateResolvedSettings(value),
+          asynchronous: value => {
+            const remaining = deadline - now();
+            if (remaining <= 0) {
+              // Observe even an already rejected promise without giving it extra time.
+              Promise.resolve(value).catch(() => {});
+              return Promise.resolve(failedSettings());
+            }
+            return authGate.resolveSettingsChecked(() => value, cwd, {
+              deadlineMs: remaining, clock: now, timers: deadlineTimers(deadline)
+            });
+          },
+          failed: failedSettings
+        });
+        return;
+      }
+      if (controlRequest.stage !== 'settings_checked') return;
       writeTransaction(() => transitionControl(controlRequest, {
         stage: 'spawn_sent'
       }));
@@ -559,7 +694,7 @@ function createHostCore({
           });
           transitionControl(controlRequest, {
             state: 'failed',
-            reason: 'spawn_failed'
+            reason: error.code === 'invalid_child_env' ? 'invalid_child_env' : 'spawn_failed'
           });
         });
         return;
@@ -579,28 +714,9 @@ function createHostCore({
           });
         }
       });
-      if (!passesAdapterCheck('authCheck', incarnation.id)) {
-        adapter.close(incarnation.id);
-        if (getIncarnation(incarnation.id).state !== 'exited') {
-          if (checkIdentity(getIncarnation(incarnation.id)) === 'match') {
-            adapter.signal?.(incarnation.id, 'SIGTERM');
-          }
-          if (getIncarnation(incarnation.id).state !== 'exited') {
-            writeTransaction(() => transitionIncarnation(getIncarnation(incarnation.id), ['alive'], {
-              state: 'liveness_unknown'
-            }));
-          }
-        }
-        writeTransaction(() => transitionControl(controlRequest, {
-          state: 'failed',
-          reason: 'auth_failed'
-        }));
-      } else {
-        writeTransaction(() => transitionControl(controlRequest, {
-          stage: 'done',
-          state: 'done'
-        }));
-      }
+      writeTransaction(() => transitionControl(controlRequest, { stage: 'gating' }));
+      deadlines.set(key, now() + pin.initializationDeadlineMs);
+      injectFault('after_gating');
       return;
     }
     if (!incarnation || ['exited', 'never_started'].includes(incarnation.state)) {
@@ -644,13 +760,62 @@ function createHostCore({
     finishControlRequest(key);
   }
 
-  function closeForMissingCapability(incarnation) {
+  function advanceGateCleanup(key) {
+    const flow = cleanups.get(key);
+    const control = getControl(key);
+    if (!flow || control?.state !== 'accepted') return;
+    const incarnation = getIncarnation(control.incarnation_id);
+    if (incarnation.state === 'exited') { finishGateCleanup(control); return; }
+    if (now() < flow.at) return;
+    if (flow.signalled) { finishGateCleanup(control); return; }
+    writeTransaction(() => transitionControl(control, { stage: 'gate_signal_sent' }));
+    flow.signalled = true;
+    flow.at = now() + pin.sigtermWaitMs;
+    try {
+      identityProbe.verifyThenSignal(incarnation.pid, incarnation.pid_started_at, 'SIGTERM');
+    } catch {
+      // Failed identity/signalling cannot establish death; still await and query.
+    }
+  }
+
+  function finishGateCleanup(control) {
+    if (!cleanups.has(control.request_key) || getControl(control.request_key).state !== 'accepted') return;
+    const incarnation = getIncarnation(control.incarnation_id);
+    const dead = incarnation.state === 'exited' || checkIdentity(incarnation) === 'mismatch_confirmed';
+    const clear = areDescendantsClear(incarnation);
+    const verified = dead && clear;
+    const flow = cleanups.get(control.request_key);
+    writeTransaction(() => {
+      finishIncarnationDeliveries(incarnation);
+      transitionIncarnation(incarnation, [incarnation.state], { state: verified ? 'exited' : 'liveness_unknown', end_reason: 'gate_rejected' });
+      transitionControl(control, { state: 'failed', reason: verified ? (flow?.reason === 'gate_rejected' ? 'gate_rejected_cleaned' : flow?.reason || 'gate_rejected_cleaned') : 'gate_rejected_unverified' });
+    });
+    cleanups.delete(control.request_key);
+    accounts.delete(incarnation.id);
+  }
+
+  function rejectGate(control, reason = 'gate_rejected', detail = reason) {
+    if (control.state !== 'accepted' || cleanups.has(control.request_key)) return;
+    deadlines.delete(control.request_key);
+    writeTransaction(() => {
+      recordEvent(control.session_id, control.incarnation_id, 'gate_rejected', { reason: detail });
+      transitionControl(control, { stage: 'gate_close_sent' });
+    });
+    cleanups.set(control.request_key, { reason, at: now() + pin.closeWaitMs, signalled: false });
+    try {
+      Promise.resolve(adapter.close(control.incarnation_id)).catch(() => {});
+    } catch {}
+    if (getIncarnation(control.incarnation_id).state === 'exited') finishGateCleanup(control);
+  }
+
+  function closeForInitFailure(incarnation) {
+    const failureReason = incarnation.end_reason === 'auth_source_not_subscription' ? incarnation.end_reason : 'capability_missing';
     if (incarnation.state !== 'alive' || getSession(incarnation.session_id).state !== 'active' || getRow(
-      "SELECT request_key FROM control_requests WHERE incarnation_id=? AND reason='capability_missing'", incarnation.id) || getRow(
+      "SELECT request_key FROM control_requests WHERE incarnation_id=? AND reason IN ('capability_missing','auth_source_not_subscription')", incarnation.id) || getRow(
         "SELECT request_key FROM control_requests WHERE session_id=? AND state='accepted'", incarnation.session_id)) {
       return;
     }
-    const key = `rk_${now()}_${hash(['capability_missing', incarnation.id])}`;
+    const key = `rk_${now()}_${hash([failureReason, incarnation.id])}`;
     writeTransaction(() => {
       execute(
         "INSERT INTO control_requests(request_key,fingerprint,kind,session_id,incarnation_id,stage," +
@@ -662,13 +827,13 @@ function createHostCore({
         incarnation.id,
         'requested',
         'accepted',
-        'capability_missing',
+        failureReason,
         now(),
         now()
       );
       recordEvent(incarnation.session_id, incarnation.id, 'control_accepted', {
         request_key: key,
-        reason: 'capability_missing'
+        reason: failureReason
       });
     });
     executeControlRequest(key);
@@ -761,13 +926,10 @@ function createHostCore({
       if (isControl) {
         if (!reason && request.kind === 'stop' && session?.state === 'active' && incarnation?.close_after_turn) {
           reason = 'capability_close_pending';
-          closeForMissingCapability(incarnation);
+          closeForInitFailure(incarnation);
         }
         if (!reason && getRow("SELECT request_key FROM control_requests WHERE session_id=? AND state='accepted'", sessionId)) {
           reason = 'busy';
-        }
-        if (!reason && request.kind === 'start' && !passesAdapterCheck('settingsCheck', request.cwd)) {
-          reason = 'settings_failed';
         }
         if (!reason && request.kind === 'resume') {
           if (session.state !== 'active') {
@@ -776,8 +938,7 @@ function createHostCore({
             reason = incarnation?.state === 'liveness_unknown' ? 'liveness_unknown' : 'busy';
           } else if (!areDescendantsClear(incarnation)) {
             reason = 'subprocess_remaining';
-          } else if (!passesAdapterCheck('settingsCheck', session.cwd)) {
-            reason = 'settings_failed';
+
           }
         }
         if (!reason && ['stop', 'close', 'handoff'].includes(request.kind)) {
@@ -854,6 +1015,12 @@ function createHostCore({
           reason = 'incarnation_mismatch';
         }
         if (!reason && request.kind === 'interrupt') {
+          for (const [id, token] of rechecks) {
+            const queued = getDelivery(id);
+            if (queued?.incarnation_id !== incarnation.id || queued.state !== 'queued') continue;
+            token.invalidated = true;
+            writeTransaction(() => transitionDelivery(queued, ['queued'], { state: 'rejected', reason: 'auth_recheck_failed' }));
+          }
           const pending = getRow("SELECT * FROM deliveries WHERE incarnation_id=? AND kind='interrupt' AND state IN " +
             "('queued','sending','written','provider_observed','unknown') ORDER BY rowid DESC LIMIT 1", incarnation.id);
           if (pending) {
@@ -917,8 +1084,36 @@ function createHostCore({
     if (crashed || store.failed) {
       return;
     }
+    if (adapterEvent.type === 'rate_limit') {
+      adapterEvent = {
+        type: 'rate_limit',
+        incarnation_id: adapterEvent.incarnation_id,
+        rate_limit_info: sanitizeRateLimit(adapterEvent.rate_limit_info)
+      };
+    }
     const incarnation = getIncarnation(adapterEvent.incarnation_id);
     if (!incarnation || ['deleting', 'deleted'].includes(getSession(incarnation.session_id)?.state)) {
+      return;
+    }
+    if (['initialization', 'initialization_failed'].includes(adapterEvent.type)) {
+      enqueue(incarnation.session_id, () => {
+        const control = getRow("SELECT * FROM control_requests WHERE incarnation_id=? AND state='accepted' AND stage='gating'", incarnation.id);
+        if (!control) return;
+        if (getIncarnation(incarnation.id).state !== 'alive') { rejectGate(control, 'initialization_failed'); return; }
+        if (now() >= deadlines.get(control.request_key)) { rejectGate(control, 'initialization_timeout'); return; }
+        const init = adapterEvent.initialization || adapterEvent;
+        const result = adapterEvent.type === 'initialization_failed' ? { ok: false, reason: 'initialization_failed' } :
+          authGate.evaluateInitialization(init, { expectedPid: getIncarnation(incarnation.id).pid, pin });
+        if (!result.ok) { rejectGate(control, result.reason === 'initialization_failed' ? result.reason : 'gate_rejected', result.reason); return; }
+        const account = structuredClone(init.account);
+        accounts.set(incarnation.id, account);
+        deadlines.delete(control.request_key);
+        writeTransaction(() => {
+          transitionIncarnation(incarnation, ['alive'], { account_snapshot: JSON.stringify({ subscriptionType: account.subscriptionType, apiProvider: account.apiProvider }) });
+          transitionControl(control, { state: 'done', stage: 'done' });
+        });
+        drainPromptQueue(incarnation.session_id);
+      });
       return;
     }
     // §4.5: exit and abort must invalidate effects even while a command owns the queue.
@@ -933,8 +1128,11 @@ function createHostCore({
           ...raw
         } = adapterEvent;
         recordEvent(incarnation.session_id, incarnation.id, 'sdk', raw);
+        if (adapterEvent.type === 'rate_limit') {
+          recordEvent(incarnation.session_id, incarnation.id, 'rate_limit', adapterEvent.rate_limit_info);
+        }
         if (adapterEvent.type === 'tool_request') {
-          if (incarnation.state !== 'alive') {
+          if (getIncarnation(incarnation.id).state !== 'alive') {
             return;
           }
           execute(
@@ -1066,16 +1264,30 @@ function createHostCore({
           if (getIncarnation(incarnation.id).capabilities !== null) {
             return;
           }
+          const verdict = authGate.evaluateSystemInit({ ...adapterEvent, type: 'system', subtype: 'init' });
           transitionIncarnation(incarnation, ['alive'], {
             capabilities: JSON.stringify(adapterEvent.capabilities || []),
-            close_after_turn: ['msg_lifecycle_v1', 'interrupt_receipt_v1'].every(capability => adapterEvent.capabilities?.includes(
-              capability)) && (!adapterEvent.apiKeySource || adapterEvent.apiKeySource === 'none') ? 0 : 1
+            close_after_turn: verdict.ok ? 0 : 1,
+            ...(!verdict.ok ? { end_reason: verdict.reason } : {})
           });
+          if (!verdict.ok && verdict.reason === 'auth_source_not_subscription') {
+            for (const delivery of getRows("SELECT * FROM deliveries WHERE incarnation_id=? AND kind='prompt' AND outcome IS NULL AND state IN ('sending','written','provider_observed')", incarnation.id)) {
+              transitionDelivery(delivery, [delivery.state], { outcome: 'errored', reason: verdict.reason });
+            }
+            capabilityTurnEnded = true;
+          }
         } else if (adapterEvent.type === 'child_exit') {
           finishIncarnationDeliveries(getIncarnation(incarnation.id));
         }
       });
       if (adapterEvent.type === 'child_exit') {
+        for (const [key] of cleanups) {
+          const control = getControl(key);
+          if (control.incarnation_id === incarnation.id) finishGateCleanup(control);
+        }
+        for (const control of getRows("SELECT * FROM control_requests WHERE incarnation_id=? AND state='accepted' AND stage='gating'", incarnation.id)) {
+          rejectGate(control, 'initialization_failed');
+        }
         for (const controlRequest of getRows("SELECT * FROM control_requests WHERE incarnation_id=? AND state='accepted' AND kind IN " +
           "('stop','close','handoff')", incarnation.id)) {
           finishControlRequest(controlRequest.request_key);
@@ -1083,7 +1295,7 @@ function createHostCore({
       }
       const current = getIncarnation(incarnation.id);
       if (current?.state === 'alive' && current.close_after_turn && (capabilityTurnEnded || isIdle(current))) {
-        closeForMissingCapability(current);
+        closeForInitFailure(current);
       } else {
         drainPromptQueue(incarnation.session_id);
       }
@@ -1097,6 +1309,7 @@ function createHostCore({
           state: 'exited',
           ended_at: now()
         });
+        accounts.delete(incarnation.id);
         taintPendingDecisions(incarnation);
       } else {
         const toolRequest = getRow('SELECT * FROM tool_requests WHERE incarnation_id=? AND tool_use_id=?', incarnation.id, adapterEvent.tool_use_id);
@@ -1131,7 +1344,9 @@ function createHostCore({
     }
     for (let incarnation of getRows("SELECT * FROM incarnations WHERE state IN ('spawning','alive','orphaned','liveness_unknown')")) {
       let verdict;
-      if (!incarnation.pid) {
+      if (getRow("SELECT request_key FROM control_requests WHERE incarnation_id=? AND state='accepted' AND stage IN ('requested','settings_checking','settings_checked')", incarnation.id)) {
+        verdict = 'never_started';
+      } else if (!incarnation.pid) {
         let found;
         try {
           found = identityProbe.findMarked(incarnation.id);
@@ -1203,7 +1418,10 @@ function createHostCore({
       }
       const state = {
         session: session || null,
-        incarnations: getRows('SELECT * FROM incarnations WHERE session_id=?', sessionId),
+        incarnations: getRows('SELECT * FROM incarnations WHERE session_id=?', sessionId).map(incarnation => {
+          const event = getRow("SELECT json FROM events WHERE incarnation_id=? AND type='rate_limit' ORDER BY seq DESC LIMIT 1", incarnation.id);
+          return { ...incarnation, rate_limit_info: event ? JSON.parse(event.json) : null };
+        }),
         deliveries: getRows('SELECT * FROM deliveries WHERE session_id=?', sessionId),
         tool_requests: getRows('SELECT * FROM tool_requests WHERE incarnation_id IN (SELECT id FROM incarnations WHERE session_id=?)', sessionId),
         controls: getRows('SELECT * FROM control_requests WHERE session_id=?', sessionId)
@@ -1238,6 +1456,10 @@ function createHostCore({
   adapter.events.on('event', onEvent);
   return {
     submit,
+    async flush() {
+      while (pending.size) await Promise.all([...pending]);
+      if (asyncErrors.length) throw asyncErrors.shift();
+    },
     recover,
     snapshot,
     eventsSince,
@@ -1253,7 +1475,7 @@ function createHostCore({
     },
     submitUnavailable(request) {
       const result = submit(request);
-      if (['start', 'resume'].includes(request.kind) && result.state === 'failed' && result.reason === 'spawn_failed') {
+      if (['start', 'resume'].includes(request.kind) && result.state === 'failed' && ['spawn_failed', 'settings_check_failed'].includes(result.reason)) {
         writeTransaction(() => transitionRow('control_requests', request.request_key, ['failed'],
           { reason: 'adapter_unavailable' }, result.session_id, result.incarnation_id));
         return getControl(request.request_key);
@@ -1278,6 +1500,9 @@ function createHostCore({
     tick,
     idle: sessionId => isIdle(getLatestIncarnation(sessionId)),
     close() {
+      disposed = true;
+      accounts.clear();
+      settingsTimers.clear();
       adapter.events.off('event', onEvent);
       store.close();
     }

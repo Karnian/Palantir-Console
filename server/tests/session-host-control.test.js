@@ -89,16 +89,21 @@ for (const gate of ['settings', 'auth']) test(`§8.1 injected ${gate} failure fa
   const f = fixture(t); f.start(); f.prompt(); assert.equal(f.adapter.log.received.length, 1);
   f.adapter.options[gate] = false;
   if (gate === 'settings') {
-    const c = f.core.submit({ request_key: f.key(), kind: 'start' }); assert.equal(c.reason, 'settings_failed'); assert.equal(f.adapter.log.starts.length, 1);
+    const c = f.core.submit({ request_key: f.key(), kind: 'start' }); assert.equal(c.reason, 'settings_rejected'); assert.equal(f.adapter.log.starts.length, 1);
   } else {
-    assert.equal(f.prompt().reason, 'auth_failed'); assert.equal(f.adapter.log.received.length, 1);
-    const c = f.core.submit({ request_key: f.key(), kind: 'start' }); assert.equal(c.reason, 'auth_failed'); assert.equal(f.adapter.log.closes.length, 1);
+    assert.equal(f.prompt().reason, 'auth_recheck_failed'); assert.equal(f.adapter.log.received.length, 1);
+    const c = f.core.submit({ request_key: f.key(), kind: 'start' }); assert.equal(c.reason, 'gate_rejected_cleaned'); assert.equal(f.adapter.log.closes.length, 1);
   }
 });
 
 test('§8.1 failed auth with no exit signals after identity recheck and records liveness_unknown', t => {
   const f = fixture(t, { noExit: true }); f.start(); f.adapter.options.auth = false;
   const c = f.core.submit({ request_key: f.key(), kind: 'start' });
-  assert.equal(c.state, 'failed'); assert.equal(f.core.snapshot(c.session_id).state.incarnations[0].state, 'liveness_unknown');
-  assert.equal(f.adapter.log.closes.length, 1); assert.equal(f.adapter.log.signals.length, 1);
+  assert.equal(c.state, 'accepted');
+  f.advance(5000); f.core.tick();
+  f.advance(5000); f.core.tick();
+  assert.equal(f.core.lookup(c.request_key).state, 'failed');
+  assert.equal(f.core.lookup(c.request_key).reason, 'gate_rejected_unverified');
+  assert.equal(f.core.snapshot(c.session_id).state.incarnations[0].state, 'liveness_unknown');
+  assert.equal(f.adapter.log.closes.length, 1); assert.equal(f.probe.signals.length, 1);
 });
