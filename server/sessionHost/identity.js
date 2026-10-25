@@ -4,6 +4,7 @@
  * IdentityProbe (synchronous, no process operations in this package):
  * findMarked(id), listMarkedDescendants(id): {status:'ok',pids:[{pid,startedAt}]}
  *   | {status:'query_failed'}
+ * readStartTime(pid): {status:'ok',startedAt} | {status:'query_failed'}.
  * check(pid, startedAt): 'match' | 'mismatch_confirmed' | 'query_failed'.
  * verifyThenSignal(pid, startedAt, signal): recheck before signalling.
  * signal(pid, startedAt, signal): optional fake/adapter transport, never an OS call.
@@ -12,6 +13,10 @@ function createFakeIdentityProbe() {
   const marked = new Map(), checks = new Map(), descendants = new Map(), signals = [];
   return {
     marked, checks, descendants, signals,
+    readStartTime(pid) {
+      if (!Number.isSafeInteger(pid) || pid <= 0) return { status: 'query_failed' };
+      return { status: 'ok', startedAt: `fake-${pid}` };
+    },
     findMarked(id) { return marked.get(id) || { status: 'ok', pids: [] }; },
     check(pid, startedAt) { return checks.get(`${pid}:${startedAt}`) || 'mismatch_confirmed'; },
     listMarkedDescendants(id) { return descendants.get(id) || { status: 'ok', pids: [] }; },

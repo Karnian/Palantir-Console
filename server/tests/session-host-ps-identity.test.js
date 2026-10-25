@@ -102,9 +102,13 @@ test('real ps identifies marked child and grandchild then confirms exit', { time
   const found = probe.findMarked(id);
   assert.equal(found.status, 'ok', 'real /bin/ps must be available; sandbox EPERM requires host rerun');
   assert.equal(found.pids[0].pid, child.pid);
+  assert.ok(found.diagnostics.elapsedMs < 2000, JSON.stringify(found.diagnostics));
   const identity = found.pids[0];
   assert.equal(probe.check(identity.pid, identity.startedAt), 'match');
-  assert.deepEqual(probe.listMarkedDescendants(id).pids.map(row => row.pid), [grandchild]);
+  const descendants = probe.listMarkedDescendants(id);
+  assert.equal(descendants.status, 'ok');
+  assert.deepEqual(descendants.pids.map(row => row.pid), [grandchild]);
+  assert.ok(descendants.diagnostics.elapsedMs < 2000, JSON.stringify(descendants.diagnostics));
   const exited = once(child, 'exit');
   child.kill();
   await exited;

@@ -44,8 +44,9 @@ test('R3-01 actual macOS lstart literal accepts ASCII padding and rejects other 
 test('R3-02 candidate command and parent are bracketed by equal lstart reads', () => {
   const { state, probe } = fixture();
   assert.equal(probe.findMarked(id).status, 'ok');
-  assert.deepEqual(state.calls.slice(2).map(call => call.args[1] === '-ww' ? 'command=' : call.args[1]),
+  assert.deepEqual(state.calls.slice(2, 6).map(call => call.args[1] === '-ww' ? 'command=' : call.args[1]),
     ['lstart=', 'command=', 'ppid=', 'lstart=']);
+  assert.ok(state.calls[6].args.includes('pid=,command='));
 });
 test('R3-02 reused PID between command and parent cannot establish main or descendant identity', () => {
   for (const method of ['findMarked', 'listMarkedDescendants']) {
@@ -65,7 +66,8 @@ test('R3-03 persistent global-positive individual-negative mismatch retries once
     const result = probe[method](id);
     assert.equal(result.status, 'query_failed');
     assert.equal(state.pass, 2);
-    assert.equal(result.diagnostics.queryCount, 8);
+    // Each failed candidate adds before/command probes before the unchanged full scan.
+    assert.equal(result.diagnostics.queryCount, 12);
   }
 });
 test('R3-03 retry resolves transient mismatch by rerunning global and individual queries', () => {
@@ -74,8 +76,9 @@ test('R3-03 retry resolves transient mismatch by rerunning global and individual
   const result = probe.findMarked(id);
   assert.equal(result.status, 'ok');
   assert.deepEqual(result.pids, [{ pid: 10, startedAt }]);
-  assert.equal(state.pass, 2);
-  assert.equal(result.diagnostics.queryCount, 10);
+  assert.equal(state.pass, 3);
+  assert.equal(state.calls.filter(call => call.args.includes('pid=')).length, 2);
+  assert.equal(result.diagnostics.queryCount, 13);
 });
 test('R3-03 retry may confirm globally absent marker but never returns empty on persistent disappearance', () => {
   const { state, probe } = fixture();
@@ -105,7 +108,7 @@ test('R3-03 retries share the original deadline and PID budget', () => {
   limited.state.marked = () => false;
   assert.equal(limited.probe.findMarked(id).status, 'query_failed');
   assert.equal(limited.state.pass, 2);
-  assert.equal(limited.state.calls.filter(call => call.args.includes('command=')).length, 2);
+  assert.equal(limited.state.calls.filter(call => call.args.includes('command=')).length, 3);
 });
 const account = () => ({ email: 'person@example.test', organization: 'org', subscriptionType: 'Claude Max', apiProvider: 'firstParty' });
 function evaluate(value) {
