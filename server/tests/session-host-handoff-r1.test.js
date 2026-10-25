@@ -139,19 +139,15 @@ test('R1 schema v3 migration leaves old identity unknown and refuses handoff wit
   assert.equal(migrated.prepare('SELECT MAX(version) v FROM host_schema_versions').get().v, 4);
   assert.equal(migrated.prepare('SELECT cli_home FROM incarnations').get().cli_home, null);
   migrated.close();
-  assert.equal(f.core.submit(f.req('handoff')).reason, 'handoff_environment_mismatch');
+  assert.equal(f.core.submit(f.req('handoff')).reason, 'handoff_identity_unavailable');
   assert.equal(f.state().handoff_command, undefined);
 });
 
-for (const execution of ['alive', 'orphaned', 'exited', 'never_started']) {
+for (const execution of ['alive', 'orphaned', 'exited']) {
   test(`R1 core handoff supports recorded ${execution} incarnation`, t => {
     const f = fixture(t); f.start();
     if (execution === 'orphaned') f.reboot().recover();
-    if (['exited', 'never_started'].includes(execution)) f.adapter.exit(f.iid);
-    if (execution === 'never_started') {
-      const Database = require('better-sqlite3'), db = new Database(f.dbPath);
-      db.prepare("UPDATE incarnations SET state='never_started' WHERE id=?").run(f.iid); db.close();
-    }
+    if (execution === 'exited') f.adapter.exit(f.iid);
     assert.equal(f.core.submit(f.req('handoff')).state, 'done');
     assert.ok(f.state().handoff_command);
   });

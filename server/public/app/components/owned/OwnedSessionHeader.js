@@ -8,6 +8,8 @@ import { Modal } from '../Modal.js';
 const html = htm.bind(h);
 const handoffCopy = {
   title: '터미널로 넘기기',
+  shell: '어느 셸에 붙여 넣어도 /bin/sh 로 실행됨',
+  handoff_identity_unavailable: '실제 실행의 HOME·실행 파일 신원 기록이 없어 넘기지 않았습니다.',
   guarantee: '넘긴 뒤 Palantir 는 그 실행을 제어·관측하지 않고 인증 게이트도 없다. 명령을 바꿔 실행하면 재현이 깨진다. ' +
     '넘긴 세션은 읽기 전용이고 다시 열지 않는다. Palantir 에서 다시 작업하려면 새 세션.',
   limit: '표지를 버리고 분리된 백그라운드 프로세스는 확인 범위 밖',
@@ -70,7 +72,9 @@ export function OwnedSessionHeader({ state, incarnation, host, asOf, onHandoff, 
       ${confirmHandoff && html`<${Modal} open=${true} labelledBy="owned-handoff-title"
         onClose=${() => setConfirmHandoff(false)}>
         <div class="modal-header"><h2 id="owned-handoff-title">${handoffCopy.title}</h2></div>
-        <div class="modal-body"><p>${handoffCopy.guarantee}</p><p>${handoffCopy.limit}</p></div>
+        <div class="modal-body">
+          <p>${handoffCopy.guarantee}</p><p>${handoffCopy.limit}</p><p>${handoffCopy.shell}</p>
+        </div>
         <div class="modal-footer">
           <button class="btn" onClick=${() => setConfirmHandoff(false)}>취소</button>
           <button class="btn" disabled=${handoffDisabled} onClick=${() => {
@@ -79,7 +83,7 @@ export function OwnedSessionHeader({ state, incarnation, host, asOf, onHandoff, 
           }}>확인하고 넘기기</button>
         </div>
       </${Modal}>`}
-      ${handedOff && state.handoff_command && html`<label>터미널에서 실행할 명령
+      ${handedOff && state.handoff_command && html`<p>${handoffCopy.shell}</p><label>터미널에서 실행할 명령
         <textarea ref=${commandRef} class="owned-handoff-command" readonly=${true} rows="6"
           style="width:100%;box-sizing:border-box" value=${state.handoff_command} />
         </label><button class="btn btn-sm" onClick=${copyCommand}>명령 복사</button>

@@ -40,6 +40,7 @@ test('handoff confirmation, completion-only command and clipboard failure fallba
   [...e.document.querySelectorAll('button')].find(x => x.textContent === '터미널로 넘기기').click();
   await flushEffects(20);
   assert.match(e.document.body.textContent, /인증 게이트도 없다/);
+  assert.match(e.document.body.textContent, /어느 셸에 붙여 넣어도 \/bin\/sh 로 실행됨/);
   [...e.document.querySelectorAll('button')].find(x => x.textContent === '확인하고 넘기기').click();
   assert.equal(calls, 1);
   s.session.state = 'handed_off'; s.handoff_command = "cd '/safe' && env --resume";
@@ -47,6 +48,7 @@ test('handoff confirmation, completion-only command and clipboard failure fallba
   assert.match(e.document.body.textContent, /읽기 전용/);
   const command = e.document.querySelector('.owned-handoff-command');
   assert.equal(command.value, s.handoff_command);
+  assert.match(e.document.body.textContent, /어느 셸에 붙여 넣어도 \/bin\/sh 로 실행됨/);
   [...e.document.querySelectorAll('button')].find(x => x.textContent === '명령 복사').click();
   await flushEffects(20);
   assert.match(e.document.body.textContent, /직접 복사/);

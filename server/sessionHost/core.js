@@ -563,23 +563,28 @@ function createHostCore({
     });
   }
 
-  function prepareHandoff(controlRequest, incarnation) {
+  function prepareHandoff(controlRequest) {
+    // Planned metadata is not spawn evidence. Select the last committed process identity first;
+    // never skip its missing CLI/HOME fields in favor of an older, more convenient execution.
+    const execution = getRow("SELECT * FROM incarnations WHERE session_id=? AND pid>0 AND length(pid_started_at)>0 " +
+      "AND state IN ('alive','orphaned','exited','liveness_unknown') ORDER BY rowid DESC LIMIT 1", controlRequest.session_id);
+    if (!execution?.cli_home || !execution.cli_path || !execution.cli_sha256) {
+      return { reason: 'handoff_identity_unavailable' };
+    }
     try {
       if (adapter.verifyExecutable?.() !== true) return { reason: 'executable_hash_mismatch' };
     } catch { return { reason: 'executable_hash_mismatch' }; }
     let current;
     try { current = adapter.executionIdentity?.(); } catch { /* Refuse missing identity evidence. */ }
-    if (!incarnation?.cli_home || !incarnation.cli_path || !incarnation.cli_sha256 || !current) {
-      return { reason: 'handoff_environment_mismatch' };
-    }
-    if (incarnation.cli_sha256 !== current.executableSha256) return { reason: 'executable_hash_mismatch' };
-    if (incarnation.cli_home !== current.home || incarnation.cli_path !== current.executablePath) {
+    if (!current) return { reason: 'handoff_environment_mismatch' };
+    if (execution.cli_sha256 !== current.executableSha256) return { reason: 'executable_hash_mismatch' };
+    if (execution.cli_home !== current.home || execution.cli_path !== current.executablePath) {
       return { reason: 'handoff_environment_mismatch' };
     }
     try {
       const session = getSession(controlRequest.session_id);
-      return { command: buildHandoffCommand({ cwd: session.cwd, home: incarnation.cli_home,
-        executablePath: incarnation.cli_path, claudeSessionId: session.claude_session_id }) };
+      return { command: buildHandoffCommand({ cwd: session.cwd, home: execution.cli_home,
+        executablePath: execution.cli_path, claudeSessionId: session.claude_session_id }) };
     } catch (error) { return { reason: error.code || 'handoff_environment_mismatch' }; }
   }
 
@@ -603,7 +608,7 @@ function createHostCore({
       return;
     }
     // Every completion path, including recovery, must revalidate immediately before publishing.
-    const handoff = controlRequest.kind === 'handoff' ? prepareHandoff(controlRequest, incarnation) : null;
+    const handoff = controlRequest.kind === 'handoff' ? prepareHandoff(controlRequest) : null;
     if (handoff?.reason) {
       writeTransaction(() => transitionControl(controlRequest, { state: 'failed', reason: handoff.reason }));
       return;
@@ -824,7 +829,7 @@ function createHostCore({
       return;
     }
     if (controlRequest.kind === 'handoff') {
-      const { reason } = prepareHandoff(controlRequest, incarnation);
+      const { reason } = prepareHandoff(controlRequest);
       if (reason) {
         writeTransaction(() => transitionControl(controlRequest, { state: 'failed', reason }));
         return;
@@ -1493,7 +1498,7 @@ function createHostCore({
     }
     for (let incarnation of getRows("SELECT * FROM incarnations WHERE state IN ('spawning','alive','orphaned','liveness_unknown')")) {
       let verdict;
-      if (getRow("SELECT request_key FROM control_requests WHERE incarnation_id=? AND state='accepted' AND stage IN ('requested','settings_checking','settings_checked')", incarnation.id)) {
+      if (getRow("SELECT request_key FROM control_requests WHERE incarnation_id=? AND kind IN ('start','resume') AND state='accepted' AND stage IN ('requested','settings_checking','settings_checked')", incarnation.id)) {
         verdict = 'never_started';
       } else if (!incarnation.pid) {
         let found;

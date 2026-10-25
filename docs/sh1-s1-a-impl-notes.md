@@ -2457,3 +2457,27 @@ spawn_sent를 저장하는 트랜잭션에 incarnation의 canonical `cli_path`, 
 집중 검증 `/tmp/sh1-e1-r1-final-focus.log`: tests 113, pass 113, fail 0. 지정 전체 최종 결과는 `/tmp/sh1-e1-r1-all-final.log`에 기록한다. owned a11y(`/tmp/sh1-e1-r1-a11y.log`)는 webServer가 127.0.0.1:4177에 listen할 때 EPERM으로 시작 전에 차단되었으며 호스트 재검증이 필요하다. git 조작·spec·package.json·전역 SSE 변경은 하지 않았다.
 
 최종 지정 전체 검증: tests 651, pass 628, fail 23, cancelled 0, skipped 0(`/tmp/sh1-e1-r1-all-final.log`). 실패 23개는 소켓 listen EPERM·실제 /bin/ps EPERM(query_failed 포함)·host_start_timeout인 기존 환경 제약이며 R1 신규 테스트는 모두 통과했다. 최종 전체에는 실제 파일 바이트 변조 크래시 조합, 공용 정책, 스키마 v4와 hello 변경도 포함된다. DoD의 호스트 전체 테스트·owned a11y 재실행은 남아 있다.
+
+
+### S1-e1 라운드 3 — 적대리뷰 R2
+
+두 항목 모두 수정 전 회귀로 재현했다(`/tmp/sh1-e1-r2-red.log`: tests 37, pass 24, fail 12, skipped 1). HOME=A의 실제 실행 뒤 HOME=B의 resume가 after_spawn_sent_before_spawn에서 죽으면, 예정 기록만으로 B 명령을 내주던 문제를 확인했다. 마지막 실제 실행의 HOME·경로·해시 null, pid·시작 시각 누락, 새 실제 실행의 null 기록을 건너뛰는 우회, never_started 상태의 pid 기록 오인, 셸 지정 누락과 안내 문구 누락도 각각 재현했다. fish는 PATH에서 찾지 못해 선택적 테스트 1개를 건너뛰었다.
+
+넘기기 검증은 제어 대상 incarnation의 예정 값 대신, 해당 세션에서 pid와 pid_started_at이 커밋되고 spawning/never_started가 아닌 마지막 실행 기록을 먼저 고른다. 최신 실제 실행의 CLI/HOME 필드가 null이면 더 오래된 완전한 기록으로 건너뛰지 않는다. 근거가 없거나 필드가 null이면 `handoff_identity_unavailable`로 실패하고 active 유지·명령 0을 보장한다. 기록이 있으면 종전처럼 현재 실행 파일의 동기 해시를 재검증하고 현재 어댑터 HOME·canonical 경로·해시와 비교한다. 명령도 그 마지막 실제 실행 기록으로만 만든다. 새 컬럼이나 스키마 변경은 없으며 v4를 유지한다.
+
+never_started의 예정 기록은 진단용으로 남지만 실행 증거로 쓰지 않는다. 이전 실제 실행이 확인된 기록이고 현재 어댑터가 그 기록과 같으면, 시작하지 않은 최신 resume를 건너뛰고 그 이전 실행에서 넘길 수 있다. HOME B 예정 resume만 있고 실제 실행은 A라면 B 호스트에서 거부하며, 현재 HOME만 A로 돌린 대조는 통과한다. R1의 단독 never_started 행을 실제 실행 근거로 인정하던 테스트는 제거하고, R2의 '실제 실행 없음 → 거부'와 '이전 실제 실행 있음 → 그 기록 사용' 회귀로 대체했다.
+
+복구의 requested/settings_checking/settings_checked를 never_started로 판정하는 조회도 start/resume에 한정했다. 기존 조회는 handoff 접수 직후의 requested까지 미실행으로 취급해, 실제 pid·시작 시각이 있던 실행을 never_started로 바꾸고 있었다. R1의 접수 직후·close 직후 × 실제 파일 바이트 변조/정상 대조를 계속 통과한다.
+
+브리프 §5-8의 S1-e1 허용 목록 판정은 유지하고, 사용자 R2 지시에 따라 화면 명령 전체를 POSIX 인용한 `/bin/sh -c '<명령>'`으로 감쌌다. 바깥 셸은 인용된 문자열 하나만 전달하고 변수 전개·cd·env 구성은 /bin/sh가 담당한다. 내부 env도 절대 경로 /usr/bin/env를 사용한다. sh가 자체 생성하는 미export SHELL·TERM 기본값이 '미설정 변수는 전달하지 않음'을 깨지 않도록, 공용 허용 키 각각을 /usr/bin/printenv로 확인하여 상속되지 않은 로컬 기본값을 제거한 뒤 기존 선택적 전개를 수행한다. 인증 변수나 임의 환경 변수는 조회하지 않는다. 확인 Modal과 완료 명령 옆에는 '어느 셸에 붙여 넣어도 /bin/sh 로 실행됨'을 표시한다. 브리프 자체는 수정하지 않았다.
+
+/bin/sh·bash·zsh에서 생성 문자열을 그대로 실행하여 native 가짜 실행 파일의 cwd·--resume argv·환경 전체가 같은지 검사했다. cwd·실행 파일·HOME·USER의 공백, 작은따옴표, 달러, 백틱과 빈 LOGNAME도 포함한다. 바깥 /bin/sh argv를 실제 셸로 파싱하여 `/bin/sh`, `-c`, 내부 명령 하나임을 확인하는 검사와 기존 독립 오염 환경·SDK 자식 환경 비교도 유지했다. UI와 owned a11y에는 확인창·완료 명령 옆 안내 검사를 추가했고, a11y 완료 mock도 실제 순수 명령 생성기를 사용한다.
+
+검증:
+
+- 집중 검증(`/tmp/sh1-e1-r2-focus2.log`): tests 120, pass 119, fail 0, skipped 1(fish 미설치).
+- 지정 전체 `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session*.test.js server/tests/session-host-*.test.js`(`/tmp/sh1-e1-r2-all.log`): tests 663, pass 639, fail 23, skipped 1. 실패는 기존 샌드박스 소켓 listen EPERM·실제 ps EPERM/query_failed·host_start_timeout이며 R2 신규 회귀는 통과했다.
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH npx --no-install playwright test --grep '@a11y.*owned'`(`/tmp/sh1-e1-r2-a11y.log`): webServer의 127.0.0.1:4177 listen EPERM으로 실행 전 차단. 호스트에서 재실행해야 한다.
+- 실제 Claude·LLM·외부 네트워크 호출 0. git 조작·spec·package.json·전역 SSE·스키마 변경 없음.
+
+최종 a11y fixture 수정 뒤 `npx --no-install playwright test --grep '@a11y.*owned' --list`는 정상 종료했으며 16개 시나리오를 발견했다(`/tmp/sh1-e1-r2-a11y-list.log`). 실제 브라우저 실행의 EPERM 차단을 통과로 간주하지 않는다.

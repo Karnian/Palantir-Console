@@ -67,11 +67,17 @@ test('handoff command appears only after exit and clear descendants', t => {
 test('handoff shell parses quoted paths and starts with a clean environment', () => {
   const cwd = "/tmp/space ' $HOME `id`";
   const command = buildHandoffCommand({ ...input, cwd });
-  const parsed = spawnSync('/bin/sh', ['-c', 'unset SHELL TERM LOGNAME; ' + command.replace(/^cd /, 'printf "%s\\0" ').replace(' && env ', ' env ')],
+  const outer = spawnSync('/bin/sh', ['-c', 'printf "%s\\0" ' + command], { encoding: 'utf8' });
+  assert.equal(outer.status, 0, outer.stderr);
+  const argv = outer.stdout.split('\0').slice(0, -1);
+  assert.deepEqual(argv.slice(0, 2), ['/bin/sh', '-c']); assert.equal(argv.length, 3);
+  const inner = argv[2].slice(argv[2].indexOf('cd '));
+  const parsed = spawnSync('/bin/sh', ['-c', 'unset SHELL TERM LOGNAME; ' +
+    inner.replace(/^cd /, 'printf "%s\\0" ').replace(' && /usr/bin/env ', ' /usr/bin/env ')],
     { encoding: 'utf8', env: { PATH: '/bin', USER: '' } });
   assert.equal(parsed.status, 0, parsed.stderr);
   assert.deepEqual(parsed.stdout.split('\0').slice(0, -1),
-    [cwd, 'env', '-i', 'PATH=/bin', 'USER=', 'HOME=/tmp/home', '/fake/claude', '--resume', id]);
+    [cwd, '/usr/bin/env', '-i', 'PATH=/bin', 'USER=', 'HOME=/tmp/home', '/fake/claude', '--resume', id]);
 });
 
 test('handoff rejects invalid paths and UUID, each with one-field passing control', () => {

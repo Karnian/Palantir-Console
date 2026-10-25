@@ -30,6 +30,7 @@
 // selector / failureSummary so the maintainer can fix it without re-running.
 
 const { test, expect } = require('@playwright/test');
+const { buildHandoffCommand } = require('../../sessionHost/handoffCommand');
 const AxeBuilder = require('@axe-core/playwright').default;
 const fs = require('fs');
 const path = require('path');
@@ -164,7 +165,10 @@ async function installOwnedStateFixture(page, theme, scenario) {
       body = { host: 'running', events: transcript, next_before_seq: null };
     } else if (url.pathname.endsWith('/owned-a11y')) {
       body = { host: 'running', seq_high: 15, state: { session, current_incarnation_id: 'inc',
-        ...(scenario === 'handoff-complete' ? { handoff_command: "cd '/safe/project' && env -i HOME='/home/test' '/bundled/claude' --resume '12345678-1234-1234-1234-123456789abc'" } : {}),
+        ...(scenario === 'handoff-complete' ? { handoff_command: buildHandoffCommand({
+          cwd: '/safe/project', home: '/home/test', executablePath: '/bundled/claude',
+          claudeSessionId: '12345678-1234-4234-8234-123456789abc'
+        }) } : {}),
         incarnations: [incarnation], deliveries, controls: [], tool_requests: toolRequests } };
     } else {
       body = { host: 'running', seq_high: 15, sessions: [session] };
@@ -190,10 +194,12 @@ for (const theme of ['dark', 'light']) {
         await page.getByRole('button', { name: '터미널로 넘기기', exact: true }).click();
         await expect(page.getByRole('dialog', { name: '터미널로 넘기기' })).toBeVisible();
         await expect(page.getByRole('dialog')).toContainText('인증 게이트도 없다');
+        await expect(page.getByRole('dialog')).toContainText('어느 셸에 붙여 넣어도 /bin/sh 로 실행됨');
       } else {
         await expect(page.getByText('터미널로 넘김 · 읽기 전용', { exact: true })).toBeVisible();
         await expect(page.getByRole('textbox', { name: '터미널에서 실행할 명령' })).toHaveValue(/--resume/);
         await expect(page.getByRole('button', { name: '명령 복사', exact: true })).toBeEnabled();
+        await expect(page.getByText('어느 셸에 붙여 넣어도 /bin/sh 로 실행됨', { exact: true })).toBeVisible();
       }
       await checkOwnedStateAccessibility(page);
     });
