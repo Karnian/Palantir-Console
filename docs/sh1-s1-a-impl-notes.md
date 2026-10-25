@@ -2354,3 +2354,25 @@ HTTP snapshot 요청 번호와 SSE 연결 세대를 별도로 검사한다. 성�
 - 수정 전 재현: tests 4, pass 0, fail 4. 수정 후 UI 전체: tests 50, pass 50, fail 0(`/tmp/sh1-c2-r7-ui-final.log`).
 - 지정 명령 `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session*.test.js server/tests/session-host-*.test.js server/tests/work-board.test.js`: tests 655, pass 632, fail 23, cancelled 0, skipped 0(`/tmp/sh1-c2-r7-final.log`). 실패는 이전 라운드와 같은 샌드박스의 소켓 listen EPERM, 실제 /bin/ps EPERM, host_start_timeout이다. 호스트에서 전체 재실행이 필요하다.
 - 화면 소스의 줄당 160자 제한을 확인했다. 실제 Claude·LLM·외부 네트워크 호출, git 조작, 코어·spec·전역 SSE·C1 화면·visual baseline 변경은 하지 않았다.
+
+### S1-c2 라운드 8 — 인터럽트 합류·종결을 턴 세대로 제한
+
+수정 전 fake adapter 회귀 4개 모두 실패했다(`/tmp/sh1-c2-r8-red.log`: tests 4, pass 0, fail 4). A 턴이 종료된 직후 접수한 interrupt의 미종결 상태, lifecycle completed/cancelled만 관측한 interrupt의 불명 장벽 누락, 영수증이 있어도 result 없는 종결의 불명 장벽이 누락되는 문제를 재현했다. 이전 버전이 남긴 행을 tick에서 정리하는 추가 회귀도 수정 전 실패했다(`/tmp/sh1-c2-r8-legacy-red.log`: tests 1, pass 0, fail 1).
+
+core.js의 합류 조회는 현재 incarnation과 turn_gen이 모두 같은 진행 중 interrupt만 반환한다. 종결 판단은 `settleTurnInterrupts`로 모았다. 그 세대 prompt의 result_json이 있으면 completed로 정리한다. lifecycle completed/cancelled만 있고 result가 없으면 unknown과 interrupt_unknown 장벽을 유지하며, 해당 세대 result가 도착해야 해제한다. 다른 세대 result로 장벽을 해제하지 않는다. effect 후 커밋, lifecycle/result/영수증 처리, tick에서 같은 규칙을 적용한다. tick은 이전 버전의 live 비종결 행도 정리하며 동일 상태를 반복 기록하지 않는다.
+
+늦은 영수증은 이미 completed인 delivery를 provider_observed로 되살리지 않으며, 턴이 끝났지만 result가 없는 unknown도 되돌리지 않는다. 단 still_queued의 survivor 증거는 종결 여부와 별개로 영구 attribution_uncertain 장벽을 세운다. 기존 R3-03 보안 회귀를 유지했다.
+
+화면의 result_json/turn_gen 기반 잠금 우회는 제거했다. 화면은 코어가 반환한 completed만 사용하며, 비종결 interrupt와 interrupt_unknown/attribution_uncertain 장벽은 그대로 막는다. 라운드 7 관련 테스트도 이 계약으로 갱신했다.
+
+fake adapter 테스트는 A 종료 직후 interrupt → B의 별도 interrupt(provider 효과 2회) → B 중단 성공, 같은 턴 중복 합류, 결과 없는 lifecycle 종결과 늦은 영수증, 이전 세대 legacy 행의 합류 제외, 다른 세대 result에 의한 장벽 해제 방지, tick 정리를 검사한다. 실제 SDK + 기존 fake-claude-sdk.cjs 1개로 A/B의 별도 control 요청 2회·같은 턴 합류·B 중단을 확인했다(`/tmp/sh1-c2-r8-sdk.log`: tests 1, pass 1, fail 0). 실제 Claude·LLM·외부 네트워크 호출은 없다.
+
+기존 R1-02 영수증 상관관계 테스트는 첫 턴을 끝낸 뒤 다음 prompt를 실제로 시작하도록 고쳤다. 따라서 이전 영수증이 새 턴의 written interrupt를 완료시키지 않는 원래 단언을 유지하면서 새 종결 규칙과도 맞는다.
+
+검증:
+
+- 수정 전 새 회귀 0/4, legacy tick 재현 0/1 통과 → 수정 후 통과.
+- UI + interrupt 집중: tests 63, pass 63, fail 0(`/tmp/sh1-c2-r8-focused-final.log`). 기존 R3 보안 회귀 포함 core 집중: tests 23, pass 23, fail 0(`/tmp/sh1-c2-r8-core-final.log`).
+- 실제 SDK + 가짜 claude 신규 시나리오: tests 1, pass 1, fail 0(`/tmp/sh1-c2-r8-sdk.log`). 최종 전체 실행에서도 해당 시나리오 통과.
+- 최종 지정 명령 `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session*.test.js server/tests/session-host-*.test.js server/tests/work-board.test.js`: tests 663, pass 640, fail 23, cancelled 0, skipped 0(`/tmp/sh1-c2-r8-final-done.log`). 실패는 이전 라운드와 같은 listen EPERM·실제 /bin/ps EPERM·host_start_timeout이며 호스트 재검증이 필요하다.
+- git 조작, 실제 Claude·LLM·외부 네트워크 호출, spec·전역 SSE·C1 화면·visual baseline 변경은 하지 않았다. core.js 변경은 인터럽트의 합류·종결·장벽 계산에 한정했다.

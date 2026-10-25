@@ -72,17 +72,17 @@ test('R7 idle cannot submit either interrupt entry point', async t => {
   assert.equal(posts, 0);
 });
 
-test('R7 receipt for a finished target turn cannot lock the next prompt', async t => {
+test('R8 UI requires core completion even when a target result preview exists', async t => {
   const environment = await harness(t);
   const current = snapshot();
   current.deliveries.push(
     { kind: 'prompt', incarnation_id: 'inc', turn_gen: 1, state: 'completed', outcome: 'completed', result_json: '{}' },
     { kind: 'interrupt', incarnation_id: 'inc', turn_gen: 1, state: 'provider_observed' }
   );
-  assert.equal(environment.context.canSubmitOwnedPrompt(current, true), true);
+  assert.equal(environment.context.canSubmitOwnedPrompt(current, true), false);
   current.deliveries[0].result_json = null;
   assert.equal(environment.context.canSubmitOwnedPrompt(current, true), false);
-  current.deliveries = [{ kind: 'interrupt', incarnation_id: 'inc', turn_gen: 0, state: 'provider_observed' }];
+  current.deliveries[1].state = 'completed';
   assert.equal(environment.context.canSubmitOwnedPrompt(current, true), true);
 });
 
@@ -147,7 +147,7 @@ test('R7 host accepts the next prompt after an interrupt races an already finish
   f.adapter.emit(f.iid, 'lifecycle', { command_uuid: prompt.message_uuid, state: 'completed' });
   assert.equal(f.core.idle(f.sid), true);
   const interrupt = f.core.submit(f.req('interrupt'));
-  assert.equal(interrupt.state, 'provider_observed');
+  assert.equal(interrupt.state, 'completed');
   assert.equal(f.d(interrupt.id).turn_gen, f.d(prompt.id).turn_gen);
   assert.ok(f.d(prompt.id).result_json);
   const next = f.prompt('explicit next prompt');

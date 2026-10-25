@@ -54,15 +54,6 @@ export function canInterruptOwnedSession(state, operational) {
     && ['running', 'awaiting_permission', 'awaiting_user'].includes(ownedInteraction(state));
 }
 
-function hasFinishedInterruptTarget(state, interrupt) {
-  if (interrupt.state !== 'provider_observed' || !Number.isSafeInteger(interrupt.turn_gen)) return false;
-  // A receipt proves this effect has happened. Only an actual result proves a target turn has ended.
-  return interrupt.turn_gen === 0 || (state.deliveries || []).some(prompt => (
-    prompt.kind === 'prompt' && prompt.incarnation_id === interrupt.incarnation_id
-    && prompt.turn_gen === interrupt.turn_gen && !!prompt.result_json
-  ));
-}
-
 export function canSubmitOwnedPrompt(state, operational, allowQueue = false) {
   const incarnation = getOwnedIncarnation(state);
   if (!operational || !canControlOwnedSession('running', state)) return false;
@@ -71,7 +62,6 @@ export function canSubmitOwnedPrompt(state, operational, allowQueue = false) {
   const interruptPending = (state.deliveries || []).some(delivery => (
     delivery.incarnation_id === incarnation.id && delivery.kind === 'interrupt'
     && ['queued', 'sending', 'written', 'provider_observed', 'unknown'].includes(delivery.state)
-    && !hasFinishedInterruptTarget(state, delivery)
   ));
   if (!allowQueue && interruptPending) return false;
   return ownedInteraction(state) === 'idle' || allowQueue;

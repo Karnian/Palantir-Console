@@ -27,6 +27,8 @@ test('R1-02 receipts correlate request id and late receipt cannot clear unknown 
   f.adapter.emit(f.iid, 'result', { user_message_uuids: [p.message_uuid], is_error: true, subtype: 'error_during_execution' });
   assert.equal(f.d(a.id).state, 'completed'); assert.equal(f.state().incarnations[0].interrupt_unknown, 0);
   f.adapter.emit(f.iid, 'lifecycle', { command_uuid: p.message_uuid, state: 'cancelled' });
+  const next = f.prompt('next turn');
+  assert.equal(next.turn_gen, p.turn_gen + 1);
   const b = f.core.submit(f.req('interrupt'));
   f.adapter.emit(f.iid, 'interrupt_receipt', { interrupt_id: a.id, still_queued: [] });
   assert.equal(f.d(b.id).state, 'written');

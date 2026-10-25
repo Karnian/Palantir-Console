@@ -489,7 +489,35 @@ function createHostCore({
       transitionDelivery(delivery, ['sending'], {
         state: 'written'
       });
+      if (delivery.kind === 'interrupt') settleTurnInterrupts(incarnation, delivery.turn_gen);
     });
+  }
+
+  // Only the bound turn's result proves completion; lifecycle alone preserves the uncertainty barrier.
+  function settleTurnInterrupts(incarnation, turnGen) {
+    const prompt = getRow("SELECT * FROM deliveries WHERE incarnation_id=? AND kind='prompt' AND turn_gen=?", incarnation.id, turnGen);
+    if (!prompt) return false;
+    const hasResult = !!prompt.result_json;
+    const ended = hasResult || prompt.state === 'completed' || prompt.outcome === 'interrupted';
+    if (!ended) return false;
+    const interrupts = getRows("SELECT * FROM deliveries WHERE incarnation_id=? AND kind='interrupt' AND turn_gen=? " +
+      "AND state IN ('sending','written','provider_observed','unknown')", incarnation.id, turnGen);
+    if (!interrupts.length) return true;
+    for (const delivery of interrupts) {
+      const state = hasResult ? 'completed' : 'unknown';
+      const reason = hasResult ? null : 'interrupt_unconfirmed';
+      if (delivery.state !== state || delivery.reason !== reason) {
+        transitionDelivery(delivery, ['sending', 'written', 'provider_observed', 'unknown'], { state, reason });
+      }
+      if (hasResult) resolveAttributionCause(delivery);
+    }
+    const unknown = !!getRow("SELECT id FROM deliveries WHERE incarnation_id=? AND kind='interrupt' AND " +
+      "(state='unknown' OR (state='provider_observed' AND reason='interrupt_unconfirmed')) LIMIT 1", incarnation.id);
+    const latest = getIncarnation(incarnation.id);
+    if (latest.interrupt_unknown !== (unknown ? 1 : 0)) {
+      transitionIncarnation(latest, ['alive'], { interrupt_unknown: unknown ? 1 : 0 });
+    }
+    return true;
   }
 
   function tick() {
@@ -521,6 +549,14 @@ function createHostCore({
         transitionIncarnation(getIncarnation(delivery.incarnation_id), ['alive'], {
           interrupt_unknown: 1
         });
+      }
+      // Upgrade live rows left by earlier hosts without waiting for another SDK callback.
+      for (const target of getRows("SELECT DISTINCT incarnation_id,turn_gen FROM deliveries WHERE kind='interrupt' AND " +
+        "state IN ('sending','written','provider_observed','unknown') AND turn_gen IS NOT NULL")) {
+        const incarnation = getIncarnation(target.incarnation_id);
+        if (incarnation?.state === 'alive' && incarnation.host_boot_id === hostBootId) {
+          settleTurnInterrupts(incarnation, target.turn_gen);
+        }
       }
     });
   }
@@ -1059,8 +1095,8 @@ function createHostCore({
             token.invalidated = true;
             writeTransaction(() => transitionDelivery(queued, ['queued'], { state: 'rejected', reason: 'auth_recheck_failed' }));
           }
-          const pending = getRow("SELECT * FROM deliveries WHERE incarnation_id=? AND kind='interrupt' AND state IN " +
-            "('queued','sending','written','provider_observed','unknown') ORDER BY rowid DESC LIMIT 1", incarnation.id);
+          const pending = getRow("SELECT * FROM deliveries WHERE incarnation_id=? AND turn_gen=? AND kind='interrupt' AND state IN " +
+            "('queued','sending','written','provider_observed','unknown') ORDER BY rowid DESC LIMIT 1", incarnation.id, incarnation.turn_gen);
           if (pending) {
             writeTransaction(() => {
               execute(
@@ -1235,6 +1271,7 @@ function createHostCore({
               outcome: 'interrupted'
             });
           }
+          if (['completed', 'cancelled'].includes(adapterEvent.state)) settleTurnInterrupts(incarnation, delivery.turn_gen);
         } else if (adapterEvent.type === 'result') {
           const uuids = adapterEvent.user_message_uuids || [];
           if (uuids.length !== 1) {
@@ -1253,16 +1290,7 @@ function createHostCore({
           transitionDelivery(delivery, ['sending', 'written', 'provider_observed', 'unknown', 'completed'], {
             result_json: JSON.stringify(adapterEvent)
           });
-          for (const interruptDelivery of getRows("SELECT * FROM deliveries WHERE incarnation_id=? AND kind='interrupt' AND turn_gen=? AND " +
-            "state IN ('sending','written','provider_observed','unknown')", incarnation.id, delivery.turn_gen)) {
-            transitionDelivery(interruptDelivery, ['sending', 'written', 'provider_observed', 'unknown'], {
-              state: 'completed'
-            });
-            resolveAttributionCause(interruptDelivery);
-            transitionIncarnation(incarnation, ['alive'], {
-              interrupt_unknown: 0
-            });
-          }
+          settleTurnInterrupts(incarnation, delivery.turn_gen);
         } else if (adapterEvent.type === 'tool_result') {
           const toolRequest = getRow('SELECT * FROM tool_requests WHERE incarnation_id=? AND tool_use_id=?', incarnation.id, adapterEvent.tool_use_id);
           if (!toolRequest?.answer_delivery_id) {
@@ -1284,15 +1312,15 @@ function createHostCore({
           if (!delivery || !['sending', 'written', 'unknown', 'provider_observed', 'completed'].includes(delivery.state)) {
             return;
           }
-          if (delivery.state === 'written' && delivery.updated_at <= now() - INTERRUPT_RECEIPT_TIMEOUT_MS) {
-            transitionIncarnation(incarnation, ['alive'], {
-              interrupt_unknown: 1
-            });
+          const settled = delivery.state === 'completed' || settleTurnInterrupts(incarnation, delivery.turn_gen);
+          if (!settled) {
+            if (delivery.state === 'written' && delivery.updated_at <= now() - INTERRUPT_RECEIPT_TIMEOUT_MS) {
+              transitionIncarnation(incarnation, ['alive'], { interrupt_unknown: 1 });
+            }
+            transitionDelivery(delivery, ['sending', 'written', 'unknown'], { state: 'provider_observed' });
+            resolveAttributionCause(delivery);
           }
-          transitionDelivery(delivery, ['sending', 'written', 'unknown'], {
-            state: 'provider_observed'
-          });
-          resolveAttributionCause(delivery);
+          // A late receipt cannot revive a settled delivery, but survivor evidence remains a permanent barrier.
           if (adapterEvent.still_queued?.length) {
             markAttributionUncertain(incarnation);
             for (const uuid of adapterEvent.still_queued) {
