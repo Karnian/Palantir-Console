@@ -54,13 +54,8 @@ export function OwnedSessionsView({ sessionId }) {
           ${OWNED_COPY.otherPending}
         </a></p>
       `}
-      ${controller.followUpNotice && html`
-        <div role="status"><p>${controller.followUpNotice}</p>
-          ${controller.followUpBody && html`<pre>${controller.followUpBody}</pre>`}
-          <button class="btn btn-sm btn-primary" disabled=${!controller.followUpCanSend} onClick=${controller.sendHeldFollowUp}>
-            ${controller.followUpKind === 'resume' ? OWNED_COPY.followUpResume : OWNED_COPY.followUpSend}
-          </button>
-        </div>
+      ${controller.syncError && html`
+        <button class="btn btn-sm" disabled=${busy} onClick=${controller.synchronize}>${OWNED_COPY.retrySync}</button>
       `}
       ${controller.storageWarning && html`<p role="alert">${OWNED_COPY.pendingStorageWarning}</p>`}
       ${content}

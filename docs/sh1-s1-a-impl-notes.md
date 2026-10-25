@@ -2308,3 +2308,29 @@ HTTP snapshot 요청 번호와 SSE 연결 세대를 별도로 검사한다. 성�
 - `npx playwright test --grep '@a11y.*owned'`: 127.0.0.1:4177 listen EPERM으로 실행 전 종료(`/tmp/sh1-c2-r5-a11y.log`). --list는 owned 12개를 정상 수집했다. 호스트에서 실제 실행이 필요하다.
 
 실제 Claude·LLM·외부 네트워크 호출, git 조작, 서버 상태 기계·전역 SSE·C1 화면·스펙·visual baseline 변경은 수행하지 않았다.
+
+## S1-c2 라운드 6 — 자동 복합 후속 제거로 R3 범위 축소
+
+호스트의 라운드 5 관련 635/635·owned a11y 12/12·전체 npm test 5703/5703 결과 이후 적대리뷰 R3를 반영했다. 이번 계약은 S1-e 전 최소 화면에 적용하며 S1-d에서 사용자가 판단할 대상이다. 스펙 파일과 화면 lock-in은 변경하지 않았다.
+
+수정 전 새 재현 테스트 4개가 모두 실패했다(`/tmp/sh1-c2-r6-red.log`: tests 4, pass 0, fail 4). interrupt 완료 뒤 자동 prompt, stop 완료 뒤 자동 resume, 삭제된 세션의 pending·본문 잔류와 lookup 누락, snapshot 413의 반복 재시도를 각각 재현했다.
+
+자동 후속 의도·delivery 추적·보류/소비 상태·후속 요청 예약·자동 POST 코드를 전부 제거했다. 중단하고 보내기는 interrupt만 제출하며 입력창의 초안은 그대로 둔다. “중단 요청함 — 턴이 끝나면 보내기를 누르세요”를 입력창 근처에 표시한다. interrupt completed·idle·정상 귀속 조건을 확인한 뒤 사람이 일반 보내기를 누른다. 실행 끝내고 이어서 시작은 stop만 제출하며 “실행을 끝내는 중 — 끝나면 이어서 시작을 누르세요”를 표시한다. stop done과 기존 resume 조건을 통과하면 이어서 시작 버튼이 켜지고, resume도 사람이 누른다. 두 단계 사이에 자동 제출은 없다. 빠른 연속 클릭도 제출 잠금을 먼저 확인하므로 한 요청만 저장·전송한다.
+
+탭 저장소는 version 3으로 요청만 보관한다. 이전 문서는 실제 미확정 요청만 유지하고 그 외 필드·후속 본문·소비 표시를 제거해 다시 기록한다. 따라서 과거 문서가 저장된 탭을 복제하거나 새로 읽어도 후속 지시를 생성하지 않는다. 초안은 현재 입력 컴포넌트에 유지하며 자동 후속 의도로 저장하지 않는다.
+
+현재 화면 또는 다른 세션의 deleting/deleted 이벤트·snapshot을 관측하면 해당 대상 pending을 정리한다. 미확정 요청이 있으면 조작 가능 여부와 독립적으로 읽기 전용 lookup을 한 번 시작한 뒤 저장소·메모리·이동 링크에서 본문을 즉시 제거한다. lookup이 실패하거나 응답하지 않아도 삭제된 본문을 기다리며 보존하지 않는다. 삭제 전 transcript·snapshot 응답을 버리는 데이터 세대 fence는 유지했다.
+
+자동 HTTP 동기화 재시도는 네트워크·5xx·host unreachable 같은 일시 장애에 한정한다. snapshot_too_large(413)와 다른 4xx는 원인 문구와 사람의 다시 시도 버튼을 표시하고 재시도 타이머·대기 갱신을 중단한다. SSE의 추가 이벤트나 open만으로 이 확정 오류를 지우거나 HTTP를 반복하지 않는다. 사람이 다시 시도해야 새 동기화를 시작하며, 성공하면 오류가 사라진다.
+
+기존 R4·R5의 후속 의도 복구·소비 테스트는 새 수동 계약으로 바꿨다. 새 테스트는 자동 prompt/resume 0회, 실제 입력창의 줄바꿈 포함 초안 유지, 조건 충족 후 보내기·resume 버튼 활성 및 사람 클릭 후 1회, 빠른 연속 클릭 1회, 구버전 후속 본문 제거, 다른 화면에서 삭제한 대상 정리, interrupt 미확인 중 즉시 prompt 금지, 413 자동 요청 중지와 수동 재시도를 검사한다.
+
+검증:
+
+- 수정 전 새 재현 0/4 → 수정 후 통과.
+- UI 전체 집중 테스트: tests 40, pass 40, fail 0(`/tmp/sh1-c2-r6-ui-final.log`).
+- 지정 owned/session-host/work-board 전체: tests 645, pass 622, fail 23, cancelled 0, skipped 0(`/tmp/sh1-c2-r6-final.log`). 실패는 종전과 같은 소켓·실제 ps EPERM 및 host_start_timeout이다.
+- nav·jsdom 변환·SSE 별도 26/26 통과(`/tmp/sh1-c2-r6-other.log`). 화면 모듈의 줄당 160자 제한을 유지했고 production 경로에 자동 후속 관련 식별자가 남지 않음을 확인했다.
+- `npx playwright test --grep '@a11y.*owned'`: 127.0.0.1:4177 listen EPERM으로 실행 전 차단(`/tmp/sh1-c2-r6-a11y.log`). 실제 owned a11y는 호스트에서 재검증한다.
+
+실제 Claude·LLM·외부 네트워크 호출, git 조작, 서버 상태 기계·전역 SSE·C1 화면·visual baseline 변경은 수행하지 않았다.

@@ -5,7 +5,7 @@ import { canSubmitOwnedPrompt } from './state.js';
 import { OWNED_COPY } from '../../lib/copy.js';
 const html = htm.bind(h);
 
-export function OwnedComposer({ interaction, disabled, uncertain, interruptUnknown, onSubmit, state }) {
+export function OwnedComposer({ interaction, disabled, uncertain, interruptUnknown, onSubmit, state, manualNotice }) {
   const [body, setBody] = useState('');
   const eligible = state ? canSubmitOwnedPrompt(state, !disabled, interaction !== 'idle') : interaction !== 'unknown';
   const locked = disabled || uncertain || interruptUnknown || !eligible;
@@ -25,6 +25,7 @@ export function OwnedComposer({ interaction, disabled, uncertain, interruptUnkno
     <div>
       ${uncertain && html`<p class="owned-unknown">${OWNED_COPY.uncertain}</p>`}
       ${interruptUnknown && html`<p class="owned-unknown">${OWNED_COPY.interruptUnknown}</p>`}
+      ${manualNotice && html`<p role="status">${manualNotice}</p>`}
       <label>${OWNED_COPY.prompt}
         <textarea value=${body} disabled=${locked} onInput=${event => setBody(event.target.value)} />
       </label>

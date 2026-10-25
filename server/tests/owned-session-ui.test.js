@@ -235,3 +235,74 @@ test('R3 short approval input remains expanded', t => {
   assert.equal(environment.document.querySelector('.owned-tool-input').open, true);
   assert.equal(environment.document.querySelector('.owned-tool-preview'), null);
 });
+
+test('R6 interrupt leaves the draft intact and enables only the later human send', async t => {
+  const environment = setup(t);
+  let settled = false;
+  const posts = [];
+  environment.context.apiFetch = async (url, options) => {
+    if (options?.method) {
+      posts.push(url);
+      settled = true;
+      return { acceptance: 'accepted', result: { id: 'interrupt', state: 'completed' } };
+    }
+    if (url.includes('transcript')) return { host: 'running', events: [] };
+    const current = state();
+    if (!settled) current.deliveries.push({ kind: 'prompt', incarnation_id: 'inc', state: 'written', outcome: null });
+    else current.deliveries.push({ id: 'interrupt', kind: 'interrupt', incarnation_id: 'inc', state: 'completed' });
+    return { host: 'running', seq_high: 1, state: current };
+  };
+  environment.mount('OwnedSessionsView', { sessionId: 's' });
+  await flushEffects();
+  await flushEffects();
+  const textarea = environment.document.querySelector('textarea');
+  textarea.value = '첫 줄\n남길 초안';
+  textarea.dispatchEvent(new environment.window.Event('input', { bubbles: true }));
+  await flushEffects(20);
+  const interrupt = [...environment.document.querySelectorAll('button')].find(button => button.textContent === '중단하고 보내기');
+  interrupt.click();
+  await flushEffects(100);
+  assert.equal(environment.document.querySelector('textarea').value, '첫 줄\n남길 초안');
+  assert.equal(posts.filter(url => url.endsWith('/prompt')).length, 0);
+  assert.match(environment.document.body.textContent, /중단 요청함 — 턴이 끝나면 보내기를 누르세요/);
+  const send = [...environment.document.querySelectorAll('button')].find(button => button.textContent.trim() === '보내기');
+  assert.equal(send.disabled, false);
+  send.click();
+  await flushEffects(30);
+  assert.equal(posts.filter(url => url.endsWith('/prompt')).length, 1);
+});
+
+test('R6 stop enables the resume button but never invokes it for the user', async t => {
+  const environment = setup(t);
+  let stopped = false, stopKey;
+  const posts = [];
+  environment.context.apiFetch = async (url, options) => {
+    if (options?.method) {
+      posts.push(url);
+      if (url.endsWith('/stop')) {
+        stopped = true;
+        stopKey = JSON.parse(options.body).request_key;
+      }
+      return { acceptance: 'accepted', result: { state: 'done' } };
+    }
+    if (url.includes('transcript')) return { host: 'running', events: [] };
+    const current = state();
+    if (stopped) {
+      current.incarnations[0].state = 'exited';
+      current.controls.push({ kind: 'stop', state: 'done', request_key: stopKey, incarnation_id: 'inc' });
+    }
+    return { host: 'running', seq_high: 1, state: current };
+  };
+  environment.mount('OwnedSessionsView', { sessionId: 's' });
+  await flushEffects();
+  await flushEffects();
+  [...environment.document.querySelectorAll('button')].find(button => button.textContent === '실행 끝내고 이어서 시작').click();
+  await flushEffects(100);
+  assert.equal(posts.filter(url => url.endsWith('/resume')).length, 0);
+  assert.match(environment.document.body.textContent, /실행을 끝내는 중 — 끝나면 이어서 시작을 누르세요/);
+  const resume = [...environment.document.querySelectorAll('button')].find(button => button.textContent === '이어서 시작');
+  assert.equal(resume.disabled, false);
+  resume.click();
+  await flushEffects(30);
+  assert.equal(posts.filter(url => url.endsWith('/resume')).length, 1);
+});

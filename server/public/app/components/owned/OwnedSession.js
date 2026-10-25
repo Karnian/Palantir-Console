@@ -26,6 +26,7 @@ export function OwnedSession({ sessionId, controller, onRemove }) {
         onClick=${() => submit('close')}>${OWNED_COPY.close}</button>
       <button class="btn btn-sm btn-danger" disabled=${disabled || snapshot.session.state !== 'closed'} onClick=${onRemove}>${OWNED_COPY.remove}</button>
     </div>
+    ${controller.restartNotice && html`<p role="status">${controller.restartNotice}</p>`}
     <${OwnedConversation} state=${snapshot} events=${controller.events} sessionId=${sessionId}
       disabled=${disabled} controllable=${controllable} nextPage=${controller.nextPage}
       onHistory=${controller.history} onSubmit=${submit} />
@@ -35,7 +36,7 @@ export function OwnedSession({ sessionId, controller, onRemove }) {
       return html`<${OwnedApproval} key=${card.id} card=${card} sessionId=${sessionId} cwd=${snapshot.session.cwd}
         disabled=${cardDisabled} delivery=${delivery} onSubmit=${submit} />`;
     })}
-    <${OwnedComposer} state=${snapshot} interaction=${interaction} disabled=${disabled || !controllable}
+    <${OwnedComposer} manualNotice=${controller.interruptNotice} state=${snapshot} interaction=${interaction} disabled=${disabled || !controllable}
       uncertain=${!!incarnation?.attribution_uncertain} interruptUnknown=${!!incarnation?.interrupt_unknown} onSubmit=${submit} />
   `;
 }

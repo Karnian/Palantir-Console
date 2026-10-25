@@ -54,6 +54,11 @@ export function canSubmitOwnedPrompt(state, operational, allowQueue = false) {
   if (!operational || !canControlOwnedSession('running', state)) return false;
   if (!incarnation || incarnation.attribution_uncertain || incarnation.interrupt_unknown) return false;
   if (incarnation.state !== 'alive') return false;
+  const interruptPending = (state.deliveries || []).some(delivery => (
+    delivery.incarnation_id === incarnation.id && delivery.kind === 'interrupt'
+    && ['queued', 'sending', 'written', 'provider_observed', 'unknown'].includes(delivery.state)
+  ));
+  if (!allowQueue && interruptPending) return false;
   return ownedInteraction(state) === 'idle' || allowQueue;
 }
 

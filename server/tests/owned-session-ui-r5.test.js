@@ -119,7 +119,7 @@ test('R5 pending A does not block B and is retried only on A with its original k
 });
 
 for (const changedIncarnation of [false, true]) {
-  test('R5 restored interrupt follow-up is ' + (changedIncarnation ? 'held on incarnation change' : 'consumed exactly once'), async t => {
+  test('R6 interrupt receipt recovery has no automatic prompt: incarnation changed=' + changedIncarnation, async t => {
     let settled = false;
     const posts = [];
     const environment = await harness(t, { refreshMemory: true, api: async (url, options) => {
@@ -145,21 +145,17 @@ for (const changedIncarnation of [false, true]) {
     await environment.remount('A');
     await environment.current.retry();
     await flushEffects(100);
-    assert.equal(posts.filter(url => url.endsWith('/prompt')).length, changedIncarnation ? 0 : 1);
-    if (changedIncarnation) assert.ok(environment.current.followUpNotice);
+    assert.equal(posts.filter(url => url.endsWith('/prompt')).length, 0);
     await environment.remount('A');
     await flushEffects(50);
-    assert.equal(posts.filter(url => url.endsWith('/prompt')).length, changedIncarnation ? 0 : 1);
-    if (changedIncarnation) {
-      await environment.current.sendHeldFollowUp();
-      await flushEffects(30);
-      assert.equal(posts.filter(url => url.endsWith('/prompt')).length, 1);
-    }
+    assert.equal(posts.filter(url => url.endsWith('/prompt')).length, 0);
+    await environment.current.submit('prompt', { body: 'explicit human prompt' });
+    assert.equal(posts.filter(url => url.endsWith('/prompt')).length, 1);
   });
 }
 
 
-test('R5 stop-response loss restores resume intent after a fresh storage load', async t => {
+test('R6 recovered stop receipt enables only an explicit human resume', async t => {
   let settled = false;
   let stopKey;
   const posts = [];
@@ -187,6 +183,9 @@ test('R5 stop-response loss restores resume intent after a fresh storage load', 
   await environment.remount('A');
   await environment.current.retry();
   await flushEffects(100);
+  assert.equal(posts.filter(url => url.endsWith('/resume')).length, 0);
+  assert.equal(environment.current.resumeReady, true);
+  await environment.current.submit('resume');
   assert.equal(posts.filter(url => url.endsWith('/resume')).length, 1);
   await environment.remount('A');
   assert.equal(posts.filter(url => url.endsWith('/resume')).length, 1);

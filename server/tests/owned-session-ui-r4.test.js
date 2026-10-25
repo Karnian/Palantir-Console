@@ -100,7 +100,7 @@ test('R4 unresolved start survives a route unmount and blocks a new start key', 
   assert.equal(posts, 1);
 });
 
-test('R4 interrupt-send joins an existing interrupt delivery by accepted id', async t => {
+test('R6 joining an interrupt requires an explicit later prompt', async t => {
   let settled = false;
   const posts = [];
   const environment = await harness(t, { api: async (url, options) => {
@@ -119,6 +119,8 @@ test('R4 interrupt-send joins an existing interrupt delivery by accepted id', as
   settled = true;
   environment.stream().emit('event', { seq: 2, type: 'transition', session_id: 's' });
   await flushEffects(220);
+  assert.equal(posts.filter(url => url.endsWith('/prompt')).length, 0);
+  await environment.current.submit('prompt', { body: 'next prompt' });
   assert.equal(posts.filter(url => url.endsWith('/prompt')).length, 1);
 });
 
