@@ -2286,3 +2286,25 @@ UI 테스트에 현재 불명/기준 시각·이전 값 분리, 필드 이름, �
 - `npx playwright test --grep '@a11y.*owned'`: 127.0.0.1:4177 listen EPERM으로 실행 전에 중단됐다(`/tmp/sh1-c2-r4-a11y.log`). 호스트에서 재검증한다.
 
 실제 Claude·LLM·외부 네트워크 호출, git 조작, 전역 SSE 채널·C1 화면·서버 상태 기계 변경은 수행하지 않았다.
+
+## S1-c2 라운드 5 — 적대리뷰 R2의 복구 고착·대상·후속 의도 수정
+
+수정 전 재현 테스트 5개는 모두 실패했다(`/tmp/sh1-c2-r5-red.log`: tests 5, pass 0, fail 5). 재현은 snapshot 대기 중 SSE error→open→이전 HTTP reject, SSE 정상 중 HTTP 1회 실패, A의 pending이 B를 잠그는 문제, 이동 후 interrupt 후속 prompt 소실, incarnation 변경 뒤 보류 표시 소실이다.
+
+HTTP snapshot 요청 번호와 SSE 연결 세대를 별도로 검사한다. 성공뿐 아니라 catch도 자신이 시작한 요청 번호·연결 세대·데이터 세대가 최신일 때만 동기화 상태를 바꾼다. HTTP 실패는 SSE open을 내리지 않고 snapshot 유효성만 지우며 “동기화 실패 — 다시 시도 중”으로 조작을 잠근다. useOwnedSessions의 timers·retryMs 인자로 주입 가능한 주기(기본 1초)로 다시 읽고 성공하면 조작이 열린다. SSE error는 연결 세대를 올리고 타이머를 정리하며, open은 반드시 새 동기화를 요청한다. 구세대 POST 실패도 새 연결의 동기화 상태를 무효화하지 않는다.
+
+탭 저장소는 같은 키 아래 version 2 문서로 요청과 후속 의도를 세션별로 보관한다. 이전 단일 요청 문서는 대상 session_id를 경로에서 복원하여 읽는다. 시작 요청의 대상은 start다. 현재 화면의 대상 요청만 pending으로 표시하고 그 대상의 신규 요청만 막는다. 다른 대상의 미확정 요청은 이동 링크로 표시하며 현재 화면의 조작을 막지 않는다. 재시도는 저장된 대상과 현재 화면이 같아야 하므로, A의 원래 incarnation·본문·키를 A의 최신 snapshot으로 검사한다. 목록·B의 snapshot으로 A의 prompt를 판단하지 않는다.
+
+복합 작업은 후속 종류·본문·대상 incarnation·원래 interrupt/stop 키·접수된 delivery id·접수 확인 여부를 같은 저장소에 보관한다. 접수 응답이 유실되어도 복귀 후 lookup에서 실제 delivery id를 복원한다. interrupt completed + idle + 정상 귀속, 또는 stop done + resume 허용 조건을 다시 검사한 뒤 이어간다. incarnation 변경·귀속/중단 불명·종료된 prompt 대상·거부/실패/blocked 결과는 held로 남기고 “후속 지시가 보류됨 — 직접 보내기”와 원문 및 사람 버튼을 표시한다. 사람 버튼도 현재 snapshot의 prompt/resume 조건을 검사한다.
+
+후속 효과 전에 소비 표시와 후속 제출의 고정 request_key·본문을 한 번의 저장소 쓰기로 함께 예약한다. 따라서 소비 직후 응답 유실·이동·새로고침이 발생해도 새 후속 키를 만들어 자동 전송하지 않고, 이미 예약한 동일 키를 조회·재시도한다. 저장 실패는 메모리로 보존하고 기존 경고를 표시하며, 소비 기록을 영속화하지 못했을 때 자동 효과를 내지 않는다.
+
+검증:
+
+- 수정 전 R2 재현 0/5 통과 → 수정 후 통과.
+- 기존 UI·R4·R5 집중 테스트 30/30 통과. R5는 위 5개와 stop 응답 유실 후 resume 복구 사례다. 테스트에서 메모리 모듈을 새로 로드해 sessionStorage만으로 복구하고, 후속 prompt/resume 1회·incarnation 변경 시 자동 전송 0회·사람 버튼 전송을 검사한다(`/tmp/sh1-c2-r5-ui-done.log`).
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session*.test.js server/tests/session-host-*.test.js server/tests/work-board.test.js`: tests 635, pass 612, fail 23, cancelled 0, skipped 0. 실패는 기존 소켓·실제 ps EPERM과 host_start_timeout이다(`/tmp/sh1-c2-r5-verified.log`, 최종 재실행 `/tmp/sh1-c2-r5-done.log`).
+- nav·jsdom 변환·SSE 별도 26/26 통과(`/tmp/sh1-c2-r5-other.log`). 화면 모듈의 줄당 160자 제한을 유지했다.
+- `npx playwright test --grep '@a11y.*owned'`: 127.0.0.1:4177 listen EPERM으로 실행 전 종료(`/tmp/sh1-c2-r5-a11y.log`). --list는 owned 12개를 정상 수집했다. 호스트에서 실제 실행이 필요하다.
+
+실제 Claude·LLM·외부 네트워크 호출, git 조작, 서버 상태 기계·전역 SSE·C1 화면·스펙·visual baseline 변경은 수행하지 않았다.

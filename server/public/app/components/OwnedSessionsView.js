@@ -48,6 +48,20 @@ export function OwnedSessionsView({ sessionId }) {
           <button class="btn btn-sm" disabled=${host !== 'running' || busy} onClick=${controller.retry}>${OWNED_COPY.retry}</button>
         </p>
       `}
+      ${controller.otherPending && html`
+        <p><a href=${controller.otherPending.session_id === 'start'
+          ? '#owned' : `#owned/${encodeURIComponent(controller.otherPending.session_id)}`}>
+          ${OWNED_COPY.otherPending}
+        </a></p>
+      `}
+      ${controller.followUpNotice && html`
+        <div role="status"><p>${controller.followUpNotice}</p>
+          ${controller.followUpBody && html`<pre>${controller.followUpBody}</pre>`}
+          <button class="btn btn-sm btn-primary" disabled=${!controller.followUpCanSend} onClick=${controller.sendHeldFollowUp}>
+            ${controller.followUpKind === 'resume' ? OWNED_COPY.followUpResume : OWNED_COPY.followUpSend}
+          </button>
+        </div>
+      `}
       ${controller.storageWarning && html`<p role="alert">${OWNED_COPY.pendingStorageWarning}</p>`}
       ${content}
       ${startOpen && html`<${OwnedStart} open disabled=${startDisabled}

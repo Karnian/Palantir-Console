@@ -3,13 +3,17 @@ import { apiFetch } from '../../lib/api.js';
 import { OWNED_COPY } from '../../lib/copy.js';
 import { ownedApiPath, ownedRequestKey } from './client.js';
 import { ownedLabel } from './format.js';
-import { loadOwnedPending, saveOwnedPending, clearOwnedPending, subscribeOwnedPending } from './pending.js';
+import {
+  loadOwnedPending, saveOwnedPending, clearOwnedPending, subscribeOwnedPending,
+  saveOwnedFollowUp, claimOwnedFollowUp, ownedRequestTarget
+} from './pending.js';
 import {
   getOwnedIncarnation, ownedInteraction, canControlOwnedSession, canResumeOwnedSession,
   canSubmitOwnedPrompt, mergeOwnedEvents
 } from './state.js';
 
-export function useOwnedSessions(sessionId) {
+export function useOwnedSessions(sessionId, { timers = globalThis, retryMs = 1000 } = {}) {
+  const target = sessionId || 'start';
   const [snapshot, setSnapshot] = useState(null);
   const [sessions, setSessions] = useState([]);
   const [events, setEvents] = useState([]);
@@ -17,7 +21,9 @@ export function useOwnedSessions(sessionId) {
   const [asOf, setAsOf] = useState(null);
   const [notice, setNotice] = useState('');
   const [nextPage, setNextPage] = useState(null);
-  const [pending, setPending] = useState(() => loadOwnedPending().request);
+  const [pending, setPending] = useState(() => loadOwnedPending(target).request);
+  const [otherPending, setOtherPending] = useState(() => loadOwnedPending(target).others[0] || null);
+  const [savedFollowUp, setSavedFollowUp] = useState(() => loadOwnedPending(target).followUp);
   const [storageWarning, setStorageWarning] = useState(() => loadOwnedPending().warning);
   const [busy, setBusy] = useState(false);
   const activeSessionId = useRef(sessionId);
@@ -26,8 +32,8 @@ export function useOwnedSessions(sessionId) {
   const submitLock = useRef(false);
   const sequence = useRef(0);
   const lastDraw = useRef(null);
-  const followUp = useRef(null);
   const reload = useRef(() => {});
+  const recoverHttp = useRef(() => {});
   const latestSnapshot = useRef(null);
   const dataGeneration = useRef(0);
   const deleted = useRef(false);
@@ -48,16 +54,20 @@ export function useOwnedSessions(sessionId) {
   };
 
   useEffect(() => subscribeOwnedPending(() => {
-    const stored = loadOwnedPending();
+    const stored = loadOwnedPending(target);
     setPending(stored.request);
+    setOtherPending(stored.others[0] || null);
+    setSavedFollowUp(stored.followUp);
     setStorageWarning(stored.warning);
-  }), []);
+  }), [target]);
 
   useEffect(() => {
     const epoch = ++routeEpoch.current;
     const requestedId = sessionId;
     let source;
     let timer;
+    let retryTimer;
+    let syncRequest = 0;
     let disposed = false;
     let reading = false;
     let queued = false;
@@ -65,7 +75,9 @@ export function useOwnedSessions(sessionId) {
     const current = () => !disposed && activeSessionId.current === requestedId && routeEpoch.current === epoch;
     const markLost = () => {
       if (!current()) return;
-      clearTimeout(timer);
+      timers.clearTimeout(timer);
+      timers.clearTimeout(retryTimer);
+      syncRequest++;
       invalidateConnection();
     };
     const purge = () => {
@@ -112,8 +124,8 @@ export function useOwnedSessions(sessionId) {
         if (!deleted.current && event.type === 'sdk_message' && event.session_id === requestedId) {
           setEvents(previous => mergeOwnedEvents(previous, [event]));
         }
-        clearTimeout(timer);
-        timer = setTimeout(() => { void refresh(false); }, 100);
+        timers.clearTimeout(timer);
+        timer = timers.setTimeout(() => { void refresh(false); }, 100);
       });
     };
     const refresh = async (resubscribe = false) => {
@@ -124,9 +136,20 @@ export function useOwnedSessions(sessionId) {
       }
       if (source && !connection.current.open) return;
       reading = true;
+      timers.clearTimeout(retryTimer);
+      const requestId = ++syncRequest;
       const generation = connection.current.generation;
       const dataEpoch = dataGeneration.current;
-      const valid = () => current() && generation === connection.current.generation && dataEpoch === dataGeneration.current;
+      const valid = () => current() && requestId === syncRequest
+        && generation === connection.current.generation && dataEpoch === dataGeneration.current;
+      const synchronizationFailed = () => {
+        if (!valid()) return;
+        connection.current.snapshotGeneration = -1;
+        connection.current.host = 'sync_failed';
+        setHost('sync_failed');
+        setNotice(OWNED_COPY.syncRetrying);
+        retryTimer = timers.setTimeout(() => { void refresh(resubscribe); }, retryMs);
+      };
       try {
         const result = await apiFetch(ownedApiPath(requestedId));
         if (!valid()) return;
@@ -135,7 +158,7 @@ export function useOwnedSessions(sessionId) {
             connection.current.host = 'not_running';
             setHost('not_running');
           } else {
-            markLost();
+            synchronizationFailed();
           }
           return;
         }
@@ -154,7 +177,7 @@ export function useOwnedSessions(sessionId) {
         if (requestedId && !isDeleted && (!source || resubscribe)) {
           const page = await apiFetch(`${ownedApiPath(requestedId)}/transcript?limit=50`);
           if (!valid() || deleted.current) return;
-          if (page.host !== 'running') { markLost(); return; }
+          if (page.host !== 'running') { synchronizationFailed(); return; }
           setEvents(previous => mergeOwnedEvents(previous, page.events || []));
           setNextPage(page.next_before_seq);
         }
@@ -164,12 +187,10 @@ export function useOwnedSessions(sessionId) {
           connection.current.snapshotGeneration = generation;
           connection.current.host = 'running';
           setHost('running');
+          setNotice(previous => previous === OWNED_COPY.syncRetrying ? '' : previous);
         }
       } catch (error) {
-        if (current()) {
-          setNotice(ownedLabel(error.reason || error.message));
-          markLost();
-        }
+        if (valid()) synchronizationFailed();
       } finally {
         reading = false;
         if (queued && current()) {
@@ -180,6 +201,15 @@ export function useOwnedSessions(sessionId) {
         }
       }
     };
+    recoverHttp.current = () => {
+      if (!current()) return;
+      connection.current.snapshotGeneration = -1;
+      connection.current.host = 'sync_failed';
+      setHost('sync_failed');
+      setNotice(OWNED_COPY.syncRetrying);
+      timers.clearTimeout(retryTimer);
+      retryTimer = timers.setTimeout(() => { void refresh(false); }, retryMs);
+    };
     reload.current = () => refresh(false);
     void refresh();
     return () => {
@@ -188,9 +218,10 @@ export function useOwnedSessions(sessionId) {
       connection.current.open = false;
       connection.current.generation++;
       source?.close();
-      clearTimeout(timer);
+      timers.clearTimeout(timer);
+      timers.clearTimeout(retryTimer);
     };
-  }, [sessionId]);
+  }, [sessionId, timers, retryMs]);
 
   const incarnation = getOwnedIncarnation(snapshot);
   const interaction = ownedInteraction(snapshot);
@@ -199,19 +230,27 @@ export function useOwnedSessions(sessionId) {
   const resumeReady = canResumeOwnedSession(snapshot);
   const canStart = !busy && !pending && (ready() || connection.current.host === 'not_running');
   const receipt = (request, result) => {
+    const requestTarget = request.session_id || ownedRequestTarget(request.path);
+    const waiting = loadOwnedPending(requestTarget).followUp;
+    if (waiting?.key === request.body.request_key && waiting.status === 'waiting') {
+      const rejected = ['rejected', 'failed', 'blocked', 'cancelled', 'expired'].includes(result?.state);
+      saveOwnedFollowUp(requestTarget, {
+        ...waiting, accepted: !rejected, status: rejected ? 'held' : 'waiting', deliveryId: result?.id || waiting.deliveryId
+      });
+    }
     clearOwnedPending(request.body.request_key);
-    const waiting = followUp.current;
-    if (waiting?.key === request.body.request_key && result?.id) waiting.deliveryId = result.id;
   };
   const execute = async (path, body, method = 'POST', requestKey, expectedGeneration, allowQueue = false) => {
     const transport = connection.current;
     const sendingGeneration = transport.generation;
     if (submitLock.current || !ready()) return;
     if (expectedGeneration !== undefined && transport.generation !== expectedGeneration) return;
-    const existing = loadOwnedPending().request;
+    const requestTarget = ownedRequestTarget(path);
+    if (requestTarget !== target) return;
+    const existing = loadOwnedPending(requestTarget).request;
     if (existing && existing.body.request_key !== requestKey) return;
     if (path.endsWith('/prompt') && !canSubmitOwnedPrompt(latestSnapshot.current, ready(), allowQueue)) return;
-    const request = { path, method, allowQueue, body: { ...body, request_key: requestKey || ownedRequestKey() } };
+    const request = { path, method, allowQueue, session_id: requestTarget, body: { ...body, request_key: requestKey || ownedRequestKey() } };
     setStorageWarning(saveOwnedPending(request));
     setPending(request);
     submitLock.current = true;
@@ -239,10 +278,14 @@ export function useOwnedSessions(sessionId) {
       }
     } catch (error) {
       const definitive = error.status && error.status < 500;
-      if (definitive) clearOwnedPending(request.body.request_key);
+      if (definitive) {
+        const waiting = loadOwnedPending(requestTarget).followUp;
+        if (waiting?.key === request.body.request_key) saveOwnedFollowUp(requestTarget, { ...waiting, status: 'held' });
+        clearOwnedPending(request.body.request_key);
+      }
       if (!current()) return;
       if (definitive) setPending(null);
-      if (error.status >= 500) invalidateConnection();
+      if (error.status >= 500 && sendingGeneration === connection.current.generation) recoverHttp.current();
       setNotice(definitive ? ownedLabel(error.reason || error.message) : OWNED_COPY.acceptanceUnknown);
     } finally {
       if (current()) setBusy(false);
@@ -257,38 +300,54 @@ export function useOwnedSessions(sessionId) {
     if (action === 'prompt' && !canSubmitOwnedPrompt(latestSnapshot.current, ready(), allowQueue)) return;
     const key = ownedRequestKey();
     if (action === 'interrupt-send') {
-      followUp.current = { kind: 'prompt', body, incarnation: incarnation?.id, key };
+      saveOwnedFollowUp(target, { kind: 'prompt', body, incarnation: incarnation?.id, key, status: 'waiting' });
       action = 'interrupt';
     }
     if (action === 'restart') {
-      followUp.current = { kind: 'resume', incarnation: incarnation?.id, key };
+      saveOwnedFollowUp(target, { kind: 'resume', incarnation: incarnation?.id, key, status: 'waiting' });
       action = 'stop';
     }
     return execute(`${ownedApiPath(sessionId)}/${action}`, { ...body, incarnation_id: snapshot.current_incarnation_id }, 'POST', key, undefined, allowQueue);
   };
+  const sendFollowUp = (waiting, manual = false) => {
+    if (!ready() || busy || loadOwnedPending(target).request) return;
+    if (waiting.kind === 'prompt' && !canSubmitOwnedPrompt(latestSnapshot.current, ready())) return;
+    if (waiting.kind === 'resume' && !canResumeOwnedSession(latestSnapshot.current)) return;
+    const requestKey = ownedRequestKey();
+    const request = {
+      path: `${ownedApiPath(sessionId)}/${waiting.kind}`, method: 'POST', session_id: target,
+      body: { ...(waiting.body || {}), incarnation_id: latestSnapshot.current.current_incarnation_id, request_key: requestKey }
+    };
+    if (!claimOwnedFollowUp(target, waiting.key, request, manual)) return;
+    return execute(request.path, request.body, request.method, requestKey);
+  };
   useEffect(() => {
-    const waiting = followUp.current;
-    if (!waiting || disabled || waiting.incarnation !== incarnation?.id) return;
+    const waiting = savedFollowUp;
+    if (!waiting || waiting.status !== 'waiting' || disabled || !ready()) return;
+    const unsafe = waiting.incarnation !== incarnation?.id || incarnation?.attribution_uncertain || incarnation?.interrupt_unknown
+      || snapshot.session?.state !== 'active' || (waiting.kind === 'prompt' && incarnation?.state !== 'alive');
+    if (unsafe) {
+      saveOwnedFollowUp(target, { ...waiting, status: 'held' });
+      return;
+    }
+    if (!waiting.accepted) return;
+    let completed = false;
     if (waiting.kind === 'prompt') {
-      const completed = (snapshot.deliveries || []).some(delivery => (
+      completed = (snapshot.deliveries || []).some(delivery => (
         (waiting.deliveryId ? delivery.id === waiting.deliveryId : delivery.request_key === waiting.key)
         && delivery.kind === 'interrupt' && delivery.incarnation_id === incarnation.id && delivery.state === 'completed'
-      ));
-      if (completed && canSubmitOwnedPrompt(snapshot, ready())) {
-        followUp.current = null;
-        submit('prompt', waiting.body);
-      }
-    } else if ((snapshot.controls || []).some(control => (
-      control.request_key === waiting.key && control.kind === 'stop'
-      && control.incarnation_id === incarnation.id && control.state === 'done'
-    ))) {
-      followUp.current = null;
-      submit('resume');
+      )) && canSubmitOwnedPrompt(snapshot, ready());
+    } else {
+      completed = (snapshot.controls || []).some(control => (
+        control.request_key === waiting.key && control.kind === 'stop'
+        && control.incarnation_id === incarnation.id && control.state === 'done'
+      )) && canResumeOwnedSession(snapshot);
     }
-  }, [snapshot, disabled]);
+    if (completed) void sendFollowUp(waiting);
+  }, [snapshot, disabled, savedFollowUp]);
 
   const retry = async () => {
-    const saved = loadOwnedPending().request;
+    const saved = loadOwnedPending(target).request;
     if (!saved) { setPending(null); return; }
     if (!ready() || busy) return;
     const epoch = routeEpoch.current;
@@ -297,7 +356,7 @@ export function useOwnedSessions(sessionId) {
     try {
       const lookup = await apiFetch(`${ownedApiPath()}/requests/${encodeURIComponent(saved.body.request_key)}`);
       if (!current()) return;
-      if (lookup.host !== 'running') { invalidateConnection(); return; }
+      if (lookup.host !== 'running') { recoverHttp.current(); return; }
       const result = lookup.result;
       if (result && result.found !== false && (result.state || result.session_id || result.session_deleted)) {
         receipt(saved, result);
@@ -323,7 +382,7 @@ export function useOwnedSessions(sessionId) {
     try {
       const page = await apiFetch(`${ownedApiPath(sessionId)}/transcript?before_seq=${nextPage}&limit=50`);
       if (!valid()) return;
-      if (page.host !== 'running') { invalidateConnection(); return; }
+      if (page.host !== 'running') { recoverHttp.current(); return; }
       setEvents(previous => mergeOwnedEvents(page.events || [], previous));
       setNextPage(page.next_before_seq);
     } catch {
@@ -340,7 +399,17 @@ export function useOwnedSessions(sessionId) {
     return reload.current();
   };
   return {
-    snapshot, sessions, events, host, asOf, notice, nextPage, pending, busy, storageWarning, canStart, synchronize,
+    snapshot, sessions, events, host, asOf, notice, nextPage, pending, otherPending, busy, storageWarning, canStart, synchronize,
+    followUpNotice: savedFollowUp?.status === 'held' ? OWNED_COPY.followUpHeld : '',
+    followUpBody: savedFollowUp?.body?.body || '',
+    followUpTarget: target,
+    followUpKind: savedFollowUp?.kind,
+    followUpCanSend: !disabled && (savedFollowUp?.kind === 'resume'
+      ? canResumeOwnedSession(snapshot) : canSubmitOwnedPrompt(snapshot, ready())),
+    sendHeldFollowUp: () => {
+      const held = loadOwnedPending(target).followUp;
+      if (held?.status === 'held') return sendFollowUp(held, true);
+    }, 
     incarnation, interaction, controllable, disabled, resumeReady, execute, submit, retry, history
   };
 }
