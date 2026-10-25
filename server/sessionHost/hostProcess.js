@@ -4,6 +4,7 @@ const path = require('node:path');
 const net = require('node:net');
 const { randomBytes, randomUUID } = require('node:crypto');
 const { acquireLock } = require('./lock');
+const { inspectHostRuntime } = require('./launcher');
 const { createHostCore } = require('./core');
 const { createProtocol } = require('./protocol');
 
@@ -11,6 +12,7 @@ async function startHost({ runtimeDir, adapter, identityProbe, clock = Date.now,
   if (process.env.PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS === '1') {
     throw Object.assign(new Error('legacy_credential_mode'), { code: 'legacy_credential_mode' });
   }
+  runtimeDir = inspectHostRuntime(runtimeDir, true).runtimeDir;
   const lock = acquireLock(runtimeDir);
   const address = path.join(runtimeDir, 'host.sock');
   const hostBootId = randomUUID();

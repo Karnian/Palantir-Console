@@ -132,3 +132,15 @@ test('abandon route requires cookie and exact origin, forwards only the path key
   h.service.abandon = async () => { throw Object.assign(new Error('host_unreachable'), { status: 503, code: 'host_unreachable' }); };
   assert.equal((await mutate(h.app, 'post', suffix, {})).status, 503);
 });
+
+test('R1 reconnect is a cookie and exact-origin POST, never GET or bearer', async t => {
+  const h = setup(t); let calls = 0;
+  h.service.reconnect = async () => { calls++; return { host: 'running' }; };
+  assert.equal((await mutate(h.app, 'post', '/reconnect', {})).status, 200);
+  assert.equal(calls, 1);
+  assert.equal((await request(h.app).post(base + '/reconnect').set('Cookie', COOKIE).send({})).status, 403);
+  assert.equal((await request(h.app).post(base + '/reconnect').set('Cookie', COOKIE).set('Origin', 'http://elsewhere').send({})).status, 403);
+  assert.equal((await request(h.app).post(base + '/reconnect').set('Authorization', `Bearer ${TOKEN}`).set('Origin', 'http://localhost').send({})).status, 403);
+  await request(h.app).get(base + '/reconnect').set('Cookie', COOKIE);
+  assert.equal(calls, 1);
+});

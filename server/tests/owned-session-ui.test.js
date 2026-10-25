@@ -40,6 +40,8 @@ test('handoff confirmation, completion-only command and clipboard failure fallba
   [...e.document.querySelectorAll('button')].find(x => x.textContent === '터미널로 넘기기').click();
   await flushEffects(20);
   assert.match(e.document.body.textContent, /인증 게이트도 없다/);
+  assert.equal(e.context.C.handoffFolderTrust, "처음 쓰는 폴더면 터미널에서 '이 폴더를 신뢰하나요?' 확인이 먼저 나옵니다. 신뢰를 고르면 Claude Code 가 사용자 설정에 기록합니다.");
+  assert.ok(e.document.querySelector('.modal-body').textContent.includes(e.context.C.handoffFolderTrust));
   assert.match(e.document.body.textContent, /어느 셸에 붙여 넣어도 \/bin\/sh 로 실행됨/);
   [...e.document.querySelectorAll('button')].find(x => x.textContent === '확인하고 넘기기').click();
   assert.equal(calls, 1);
@@ -48,6 +50,7 @@ test('handoff confirmation, completion-only command and clipboard failure fallba
   assert.match(e.document.body.textContent, /읽기 전용/);
   const command = e.document.querySelector('.owned-handoff-command');
   assert.equal(command.value, s.handoff_command);
+  assert.ok(e.document.body.textContent.includes(e.context.C.handoffFolderTrust));
   assert.match(e.document.body.textContent, /어느 셸에 붙여 넣어도 \/bin\/sh 로 실행됨/);
   [...e.document.querySelectorAll('button')].find(x => x.textContent === '명령 복사').click();
   await flushEffects(20);
@@ -417,4 +420,83 @@ test('R3 handoff refusal shows recovery advice and unsupported path explanation 
   s.controls[0].reason = 'unsupported_path_character'; e.mount('OwnedSessionHeader', props);
   assert.match(e.document.body.textContent, /백슬래시/);
   assert.equal(e.context.ownedLabel('unsupported_path_character'), e.context.C.unsupported_path_character);
+});
+
+test('R1 recovery failure offers manual POST reconnect, next attempt and low-frequency background recovery', async t => {
+  const e = setup(t); const scheduled = new Map(); let serial = 0;
+  const timers = { setTimeout(fn, ms) { scheduled.set(++serial, { fn, ms }); return serial; }, clearTimeout(id) { scheduled.delete(id); } };
+  const calls = []; let online = false;
+  e.context.apiFetch = async (url, options) => {
+    calls.push({ url, options });
+    if (options?.method === 'POST') { online = true; return { host: 'running' }; }
+    return online ? { host: 'running', sessions: [], seq_high: 0 }
+      : { host: 'not_running', reason: 'restart_backoff', diagnostics: { code: 'host_restart_backoff', next_retry_at: 1800000000000 } };
+  };
+  let controller;
+  const hook = e.context.useOwnedSessions;
+  e.context.useOwnedSessions = id => { controller = hook(id, { timers }); return controller; };
+  e.mount('OwnedSessionsView', {}); await flushEffects(30);
+  assert.equal(controller.host, 'not_running');
+  assert.equal(controller.hostRecovery.reason, 'restart_backoff');
+  assert.equal(controller.hostRecovery.diagnostics.next_retry_at, 1800000000000);
+  assert.ok([...scheduled.values()].some(timer => timer.ms === 10000));
+  assert.match(e.document.body.textContent, /호스트 복구 실패/);
+  assert.match(e.document.body.textContent, /다음 자동 시도/);
+  const button = [...e.document.querySelectorAll('button')].find(button => button.textContent === '다시 연결');
+  assert.ok(button); button.click(); button.click(); await flushEffects(60);
+  assert.equal(calls.filter(call => call.options?.method === 'POST').length, 1);
+  assert.equal(calls.find(call => call.options?.method === 'POST').url, '/api/owned-sessions/reconnect');
+  assert.equal(controller.host, 'running');
+  assert.doesNotMatch(e.document.body.textContent, /호스트 복구 실패/);
+});
+for (const reason of ['never_started', 'recovery_failed', 'restart_backoff']) {
+  test('R1 offline periodic GET recovers without a stream or a manual action: ' + reason, async t => {
+    const e = setup(t); const scheduled = new Map(); let serial = 0, online = false, gets = 0;
+    const timers = { setTimeout(fn, ms) { scheduled.set(++serial, { fn, ms }); return serial; }, clearTimeout(id) { scheduled.delete(id); } };
+    e.context.apiFetch = async (url, options) => {
+      assert.equal(options?.method, undefined); gets++;
+      return online ? { host: 'running', sessions: [], seq_high: 0 }
+        : { host: 'not_running', reason, diagnostics: { code: 'host_start_failed', next_retry_at: 1000 } };
+    };
+    let controller;
+    const hook = e.context.useOwnedSessions;
+    e.context.useOwnedSessions = id => { controller = hook(id, { timers }); return controller; };
+    e.mount('OwnedSessionsView', {}); await flushEffects(30);
+    assert.equal(gets, 1);
+    if (reason === 'never_started') {
+      assert.match(e.document.body.textContent, /세션을 시작하면 켜짐/);
+      assert.doesNotMatch(e.document.body.textContent, /호스트 복구 실패/);
+    } else assert.match(e.document.body.textContent, /호스트 복구 실패/);
+    const [id, timer] = [...scheduled].find(([, timer]) => timer.ms === 10000);
+    scheduled.delete(id); online = true; timer.fn(); await flushEffects(60);
+    assert.equal(controller.host, 'running');
+    assert.doesNotMatch(e.document.body.textContent, /호스트 복구 실패/);
+  });
+}
+
+test('R1 stream recovery failure exposes reconnect and switches to low-frequency GET recovery', async t => {
+  const e = setup(t); const scheduled = new Map(); let serial = 0, online = true, controller;
+  const timers = { setTimeout(fn, ms) { scheduled.set(++serial, { fn, ms }); return serial; }, clearTimeout(id) { scheduled.delete(id); } };
+  let stream;
+  e.context.EventSource = class {
+    constructor() { this.listeners = {}; stream = this; setTimeout(() => this.listeners.open?.(), 0); }
+    addEventListener(name, fn) { this.listeners[name] = fn; }
+    close() { this.closed = true; }
+  };
+  e.context.apiFetch = async () => online ? { host: 'running', sessions: [], seq_high: 0 }
+    : { host: 'not_running', reason: 'restart_backoff', diagnostics: { code: 'host_restart_backoff', next_retry_at: 10000 } };
+  const hook = e.context.useOwnedSessions;
+  e.context.useOwnedSessions = id => { controller = hook(id, { timers }); return controller; };
+  e.mount('OwnedSessionsView', {}); await flushEffects(60);
+  assert.equal(controller.host, 'running');
+  online = false;
+  stream.listeners.host_unreachable({ data: JSON.stringify({ host: 'not_running', reason: 'recovery_failed',
+    diagnostics: { code: 'host_start_failed', next_retry_at: 10000 } }) });
+  await flushEffects(20);
+  assert.equal(stream.closed, true);
+  assert.match(e.document.body.textContent, /호스트 복구 실패/);
+  assert.ok([...e.document.querySelectorAll('button')].some(button => button.textContent === '다시 연결'));
+  const [id, timer] = [...scheduled].find(([, timer]) => timer.ms === 10000);
+  scheduled.delete(id); online = true; timer.fn(); await flushEffects(60);
+  assert.equal(controller.host, 'running');
 });

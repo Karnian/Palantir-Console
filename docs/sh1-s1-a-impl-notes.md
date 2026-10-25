@@ -2502,3 +2502,28 @@ copy.js에 두 거부 코드를 추가했다. 신원 누락은 '실행 끝내고
 - 실제 Claude·LLM·외부 네트워크 호출 0. git 조작·spec·package.json·전역 SSE·스키마 변경 없음. 이번 DoD는 지정 Node 전체 테스트이며 a11y 실행은 요청 범위에 포함되지 않는다.
 
 최종 지정 전체 명령 `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session*.test.js server/tests/session-host-*.test.js`: tests 688, pass 664, fail 23, cancelled 0, skipped 1(`/tmp/sh1-e1-r3-all.log`). 실패 23개는 기존 소켓 listen EPERM·실제 ps EPERM/query_failed·host_start_timeout이며, 신규 R3와 갱신한 R2·gate-flow 회귀는 모두 통과했다. fish 미설치 1 skip은 유지한다. 호스트에서 지정 전체 명령의 최종 통과를 재확인해야 한다.
+
+
+### S1-e2 — 실측 후 읽기 복구·넘기기 안내
+
+[실측 기록](sh1-s1-e2-measurement-record.md)의 발견과 조치 1·2를 반영했다. 호스트 크래시 뒤 읽기가 not_running에 머물러 다음 변경 요청까지 복구되지 않았으므로, S1-c1의 “읽기는 연결만” 판정을 브리프 §3.1의 handshake 실패 시 기동 계약으로 넓혔다. 런타임의 host.db 존재만 확인하며 서버가 호스트 DB 내용을 읽지는 않는다. 기록이 없는 최초 사용은 기동하지 않고, 잠금 보유자가 무응답이면 기존 unreachable 판정을 유지한다.
+
+list·snapshot·lookup·transcript·chunks와 SSE 폴링은 변경 요청과 같은 single-flight startup을 사용한다. SSE 복구는 기존 폴링 스케줄에서만 시도하며 기동 실패는 not_running과 host_start_failed 진단으로 반환한다. 넘기기 확인창과 완료 명령 옆에는 처음 쓰는 폴더의 신뢰 확인 및 Claude Code의 사용자 설정 기록 안내를 copy.js 공용 문구로 표시한다.
+
+수정 전 회귀: /tmp/sh1-e2-red.log, 56개 중 8개 실패(읽기 5종·single-flight/진단·SSE·UI). 수정 후 집중 검증은 56/56 통과(/tmp/sh1-e2-focus.log). 프로세스 회귀는 가짜 어댑터 helper main에서 시작·SIGKILL 뒤 실제 GET snapshot으로 exited/host_lost 복구를 검사하도록 작성했으며, 기록 없는 GET 대조도 포함한다. 이 환경에서는 두 검사 모두 TCP·Unix 소켓 listen EPERM으로 차단되어 실제 복구 통과는 확인하지 못했다(/tmp/sh1-e2-process.log).
+
+지정 전체 명령 `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session*.test.js server/tests/session-host-*.test.js`: tests 697, pass 671, fail 25, skipped 1(/tmp/sh1-e2-all.log). 실패 목록은 기존 HTTP/프로세스 브리지 6건, 신규 GET 프로세스 2건, process-lifecycle 14건, 실제 ps 신원 조회 3건이다. 소켓 listen EPERM·/bin/ps EPERM/query_failed·host_start_timeout 제약으로 호스트 재실행이 필요하다. 최종 전체 실행에는 확인창과 완료 명령 옆 신뢰 안내 단언도 포함된다. 실제 Claude·LLM 호출 0, git 조작·실측 기록·spec 변경 없음.
+
+### S1-e2 라운드 2 — 적대리뷰 R1: 재기동 제한·기록 경로·복구 화면
+
+자동 기동은 GET·SSE·변경 요청 모두 같은 single-flight와 실패 횟수·다음 허용 시각을 공유한다. 기동 실패 또는 기동 뒤 30초 전에 연결이 끊어지면 1초→2초→4초→…→최대 60초로 대기한다. 성공 handshake만으로 실패 횟수를 지우지 않으며, 같은 연결이 30초 유지된 것이 확인돼야 초기화한다. launcher client의 실제 socket close 알림에서 연결 종료 시각을 반영하므로, 일찍 죽은 뒤 다음 GET이 30초 넘게 늦게 와도 안정적으로 생존했다고 오판하지 않는다. 진행 중 시도는 수동·자동 모두 합치고, cookie·정확한 origin 검사를 받는 POST `/api/owned-sessions/reconnect`는 사용자가 누른 한 번의 시도에서만 대기를 건너뛴다. 잠금 보유 중 무응답과 최초 사용은 수동 재연결로도 기동하지 않는다.
+
+이전 기록은 host.db의 존재만으로 인정하지 않는다. 공용 `inspectHostRuntime`이 런타임을 realpath로 정규화하고, DB·잠금·SQLite 보조 파일을 lstat로 검사해 일반 파일만 허용한다. 심볼릭 링크·여러 이름을 가진 hard link·디렉터리를 거부한다. 호스트도 잠금 획득과 recover 전에 같은 검사를 거치며 정규화된 런타임 하나를 잠금·DB·소켓에 사용한다. 브리프 §3.2의 “같은 UID 라 격리는 주장하지 않는다”는 위협 모델은 유지한다. 이번 검사는 비용이 작은 잘못된 경로·링크 방어이며, 같은 UID가 검사 직후 파일을 바꾸는 경쟁까지 격리한다고 주장하지 않는다. 코어 상태 기계·spec은 변경하지 않았다.
+
+not_running 응답은 never_started·recovery_failed·restart_backoff로 구분한다. 실패 진단은 고정 코드와 next_retry_at만 반환한다. 화면은 최초 사용에 “세션을 시작하면 켜짐”, 복구 실패·대기 중에는 “호스트 복구 실패 — 다시 연결”과 진단·다음 자동 시도 가능 시각·수동 버튼을 표시한다. 최초 조회와 SSE 장애 모두 10초 간격 GET으로 외부 복구를 확인하고, 실제 기동 빈도는 서버 백오프가 제한한다. SSE 장애 프레임에도 같은 진단을 담는다. 라우트 연결과 공통 상태 표시를 위해 owned 모듈 외에 ownedSessions 라우트와 OwnedSessionsView의 필요한 부분도 수정했다.
+
+수정 전 회귀 `/tmp/sh1-e2-r1-red.log`: 40개 중 7개 실패(연속 크래시·기동 실패/수동 우회·DB 링크·최초 사용·잠금·POST 보호·복구 화면). 수정 후 집중 `/tmp/sh1-e2-r1-focus3.log`: 서비스·라우트·owned UI 전체·launcher client 146/146 통과. 추가 launcher 실제 Duplex 소켓 종료 알림을 포함한 재기동 회귀 `/tmp/sh1-e2-r1-restart-final.log`: 9/9 통과. clock·timers를 주입해 연속 조기 크래시 10회, GET/SSE/변경 요청 공유, 최대 대기·30초 안정 초기화, 늦은 다음 조회, 수동 중복 클릭·single-flight, SSE 단독 기동 실패, runtime 별칭 정규화와 DB/lock/보조 파일 링크 거부를 검사했다. UI는 세 not_running 사유에서 자동 복귀와 수동 POST·중복 클릭 방지·SSE 이후 실패 안내를 검사했다.
+
+실제 Claude·LLM 호출 0. git 조작·실측 기록·spec·package.json 변경 없음. 최종 지정 전체 결과는 `/tmp/sh1-e2-r1-all-final2.log`, a11y는 `/tmp/sh1-e2-r1-a11y-final.log`에 기록한다.
+
+최종 지정 전체 명령 `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session*.test.js server/tests/session-host-*.test.js`: tests 712, pass 686, fail 25, skipped 1(`/tmp/sh1-e2-r1-all-final2.log`). 신규 R1 회귀는 전부 통과했다. 제한 실패 목록: owned HTTP SDK 3건, owned process bridge 3건, 기존 S1-e2 GET process 2건, process-lifecycle 14건, 실제 ps 신원 조회 3건. 오류는 소켓 listen EPERM·/bin/ps EPERM/query_failed·host_start_timeout으로, 제한 없는 호스트 재실행이 필요하다. `PATH=/opt/homebrew/opt/node@22/bin:$PATH npx --no-install playwright test --grep "@a11y.*owned"`는 webServer의 127.0.0.1:4177 listen EPERM으로 브라우저 실행 전에 차단됐다(`/tmp/sh1-e2-r1-a11y-final.log`). 이 실행을 a11y 통과로 간주하지 않는다. 서비스·launcher·hostProcess의 `node --check`도 통과했다.

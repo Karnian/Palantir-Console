@@ -43,11 +43,11 @@ function bridge(t, options = {}) {
       for (let i = 0; i < 100; i++) await Promise.resolve(); }
   };
 }
-test('reads never launch host, distinguish absent lock and unreachable stale values', async t => {
+test('reads without host history never launch host, distinguish absent lock and unreachable stale values', async t => {
   const h = bridge(t); h.online = false;
-  assert.deepEqual(await h.service.list(), { host: 'not_running' });
-  assert.deepEqual(await h.service.snapshot('missing'), { host: 'not_running' });
-  assert.deepEqual(await h.service.lookup(h.f.key()), { host: 'not_running' });
+  assert.deepEqual(await h.service.list(), { host: 'not_running', reason: 'never_started' });
+  assert.deepEqual(await h.service.snapshot('missing'), { host: 'not_running', reason: 'never_started' });
+  assert.deepEqual(await h.service.lookup(h.f.key()), { host: 'not_running', reason: 'never_started' });
   assert.equal(h.launches, 0);
   h.online = true; h.f.start();
   const known = await h.service.snapshot(h.f.sid);
@@ -213,4 +213,42 @@ test('abandon reaches the live host and never starts an absent host', async t =>
   await assert.rejects(h.service.abandon(h.f.key()), { code: 'host_unreachable', status: 503 });
   assert.equal(h.launches, 0);
   await assert.rejects(h.service.abandon('invalid'), { code: 'invalid_request_key', status: 400 });
+});
+
+for (const method of ['list', 'snapshot', 'lookup', 'transcript', 'chunk']) {
+  test('S1-e2 history recovers read: ' + method, async t => {
+    const dir = fs.mkdtempSync('/private/tmp/sh1-e2-unit-');
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    fs.writeFileSync(path.join(dir, 'host.db'), 'history');
+    const b = bridge(t, { runtimeDir: dir }); b.online = false;
+    b.client.transcript = () => ({}); b.client.chunk = () => ({});
+    const args = method === 'lookup' ? [b.f.key()] : [b.f.sid];
+    assert.equal((await b.service[method](...args)).host, 'running');
+    assert.equal(b.launches, 1);
+    b.online = false; b.held = true;
+    assert.equal((await b.service[method](...args)).host, 'unreachable');
+    assert.equal(b.launches, 1);
+  });
+}
+test('S1-e2 history startup is single flight and failure has diagnostics', async t => {
+  const dir = fs.mkdtempSync('/private/tmp/sh1-e2-unit-');
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(dir, 'host.db'), 'history');
+  const h = bridge(t, { runtimeDir: dir }); h.online = false;
+  await Promise.all([h.service.list(), h.service.snapshot(h.f.sid)]);
+  assert.equal(h.launches, 1);
+  const broken = bridge(t, { runtimeDir: dir, ensureHost: async () => { throw Error('secret path'); } });
+  broken.online = false;
+  assert.deepEqual(await broken.service.list(), { host: 'not_running', reason: 'recovery_failed',
+    diagnostics: { code: 'host_start_failed', next_retry_at: broken.f.time + 1000 } });
+});
+test('S1-e2 SSE recovery only runs on scheduled polls', async t => {
+  const dir = fs.mkdtempSync('/private/tmp/sh1-e2-unit-');
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(dir, 'host.db'), 'history');
+  const h = bridge(t, { runtimeDir: dir }); h.online = false;
+  const off = h.service.subscribe(0, () => {});
+  assert.equal(h.launches, 0);
+  await h.tick(); assert.equal(h.launches, 1);
+  await h.tick(); assert.equal(h.launches, 1); off();
 });
