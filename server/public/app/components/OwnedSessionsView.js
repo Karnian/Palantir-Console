@@ -17,7 +17,7 @@ export function OwnedSessionsView({ sessionId }) {
   const [startOpen, setStartOpen] = useState(false);
   const [removeOpen, setRemoveOpen] = useState(false);
   const { host, busy, pending, notice, asOf, snapshot, execute } = controller;
-  const startDisabled = host === 'unreachable' || busy || !!pending;
+  const startDisabled = !controller.canStart;
   const startSession = cwd => execute(`${ownedApiPath()}/start`, {
     cwd, node_id: 'local', confirmed_settings: true
   });
@@ -48,9 +48,10 @@ export function OwnedSessionsView({ sessionId }) {
           <button class="btn btn-sm" disabled=${host !== 'running' || busy} onClick=${controller.retry}>${OWNED_COPY.retry}</button>
         </p>
       `}
+      ${controller.storageWarning && html`<p role="alert">${OWNED_COPY.pendingStorageWarning}</p>`}
       ${content}
       ${startOpen && html`<${OwnedStart} open disabled=${startDisabled}
-        onClose=${() => setStartOpen(false)} onStart=${startSession} />`}
+        onClose=${() => setStartOpen(false)} onStart=${startSession} onPreview=${controller.synchronize} />`}
       <${Modal} open=${removeOpen} onClose=${() => setRemoveOpen(false)} labelledBy="owned-delete-title">
         <div class="modal-body">
           <h2 id="owned-delete-title">${OWNED_COPY.remove}</h2>

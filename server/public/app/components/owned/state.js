@@ -49,9 +49,18 @@ export function canRestartOwnedSession(state) {
     && ['alive', 'orphaned', 'exited', 'never_started'].includes(incarnation.state);
 }
 
+export function canSubmitOwnedPrompt(state, operational, allowQueue = false) {
+  const incarnation = getOwnedIncarnation(state);
+  if (!operational || !canControlOwnedSession('running', state)) return false;
+  if (!incarnation || incarnation.attribution_uncertain || incarnation.interrupt_unknown) return false;
+  if (incarnation.state !== 'alive') return false;
+  return ownedInteraction(state) === 'idle' || allowQueue;
+}
+
 export function canResendOwnedPrompt(state, delivery) {
   const incarnation = getOwnedIncarnation(state);
-  return delivery.incarnation_id !== incarnation?.id && state.incarnations.some(previous => (
+  return canSubmitOwnedPrompt(state, canControlOwnedSession('running', state))
+    && delivery.incarnation_id !== incarnation?.id && state.incarnations.some(previous => (
     previous.id === delivery.incarnation_id && ['exited', 'never_started'].includes(previous.state)
   ));
 }

@@ -1,16 +1,18 @@
 import { h } from '../../../vendor/preact.module.js';
 import { useState } from '../../../vendor/hooks.module.js';
 import htm from '../../../vendor/htm.module.js';
+import { canSubmitOwnedPrompt } from './state.js';
 import { OWNED_COPY } from '../../lib/copy.js';
 const html = htm.bind(h);
 
-export function OwnedComposer({ interaction, disabled, uncertain, interruptUnknown, onSubmit }) {
+export function OwnedComposer({ interaction, disabled, uncertain, interruptUnknown, onSubmit, state }) {
   const [body, setBody] = useState('');
-  const locked = disabled || uncertain || interruptUnknown || interaction === 'unknown';
+  const eligible = state ? canSubmitOwnedPrompt(state, !disabled, interaction !== 'idle') : interaction !== 'unknown';
+  const locked = disabled || uncertain || interruptUnknown || !eligible;
   const submitDisabled = locked || !body.trim();
   let submitControls = html`
     <button class="btn btn-sm" disabled=${submitDisabled} onClick=${() => onSubmit('interrupt-send', { body })}>${OWNED_COPY.interruptSend}</button>
-    <button class="btn btn-sm" disabled=${submitDisabled} onClick=${() => onSubmit('prompt', { body })}>${OWNED_COPY.queue}</button>
+    <button class="btn btn-sm" disabled=${submitDisabled} onClick=${() => onSubmit('queue-prompt', { body })}>${OWNED_COPY.queue}</button>
   `;
   if (interaction === 'idle') {
     submitControls = html`

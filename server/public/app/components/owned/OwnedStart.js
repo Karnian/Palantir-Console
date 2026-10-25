@@ -27,7 +27,7 @@ function OwnedSettingsPreview({ preview }) {
   `;
 }
 
-export function OwnedStart({ open, disabled, onClose, onStart }) {
+export function OwnedStart({ open, disabled, onClose, onStart, onPreview = () => {} }) {
   const [cwd, setCwd] = useState('');
   const [preview, setPreview] = useState(null);
   const [confirmed, setConfirmed] = useState(false);
@@ -55,7 +55,10 @@ export function OwnedStart({ open, disabled, onClose, onStart }) {
       const result = await apiFetch(`${ownedApiPath()}/settings-preview`, {
         method: 'POST', body: JSON.stringify({ cwd, node_id: 'local' })
       });
-      if (requestToken === requestSequence.current) setPreview(result);
+      if (requestToken === requestSequence.current) {
+        setPreview(result);
+        onPreview();
+      }
     } catch (error) {
       if (requestToken === requestSequence.current) setError(ownedLabel(error.reason || error.message));
     } finally {

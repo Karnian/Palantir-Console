@@ -2262,3 +2262,27 @@ UI 테스트에 현재 불명/기준 시각·이전 값 분리, 필드 이름, �
 - `PATH=/opt/homebrew/opt/node@22/bin:$PATH npx playwright test --grep '@a11y.*owned'`: 127.0.0.1:4177 listen EPERM으로 실행 전 종료했다 (`/tmp/sh1-c2-r3-a11y.log`). 같은 필터의 --list에서 owned 시나리오 12개가 정상 수집됐다. 실제 브라우저 검증은 호스트에서 필요하다.
 
 실제 Claude·LLM·외부 네트워크 호출, git 조작, 전역 SSE·C1 화면·서버 실행 상태 기계 변경은 수행하지 않았다.
+
+## S1-c2 라운드 4 — 적대리뷰 R1의 비동기 경계 수정
+
+수정 전에 별도 `owned-session-ui-r4.test.js`로 여섯 지적을 재현했다. SSE error 뒤 남은 타이머의 HTTP 성공으로 조작이 열림, lookup 대기 중 연결 상실 뒤 POST 재생, 라우트 unmount 뒤 시작 키 유실, 기존 interrupt delivery에 합류한 후속 prompt 누락, 불명 상태의 재전송 허용, 삭제 뒤 늦은 transcript 재삽입 여섯 사례가 모두 실패했다. `/tmp/sh1-c2-r4-red.log`: tests 6, pass 0, fail 6. 기존 nav 단일 테스트도 수정 전 tests 1, pass 0, fail 1이었다(`/tmp/sh1-c2-r4-nav-red.log`).
+
+조작 가능 여부는 최신 connection ref의 SSE open·연결 세대·그 세대의 snapshot 확인을 함께 요구한다. HTTP snapshot 성공만으로 연결 상태를 복원하지 않는다. error는 갱신 타이머를 취소하고 세대를 올리며, 재연결·resync는 snapshot을 다시 읽고 필요한 구독을 교체한 뒤에만 열린다. lookup 후와 POST 직전도 최신 ref·세대를 검사한다. 호스트가 꺼진 초기 목록에서는 새 세션 설정 화면을 열 수 있지만, 실제 start POST는 설정 미리보기가 호스트를 띄운 뒤 SSE와 snapshot 동기화가 끝나야 가능하다.
+
+미확정 요청의 경로·메서드·본문·키는 POST 전에 탭 단위 sessionStorage에 기록한다. 응답 유실뿐 아니라 응답 전에 화면을 떠난 경우에도 같은 의도를 복구한다. accepted/rejected 또는 확정 lookup 결과에서만 보관분을 지우며, 확정 lookup은 POST를 반복하지 않는다. 저장 실패는 모듈 메모리로 내려가고 경고를 표시한다. 저장소 변경 구독으로 이전 화면에서 늦게 확정된 요청도 현재 화면에 반영한다. 메모리 보관은 라우트 이동을 견디지만 저장소 실패 상태의 새로고침·탭 닫힘은 견디지 못하므로 경고에 명시한다.
+
+중단하고 보내기는 접수 응답의 실제 delivery id를 저장한다. 따라서 새 request_key가 기존 interrupt의 alias가 되어도 기존 delivery의 completed를 관측해 후속 prompt를 보낸다. prompt 허용은 공통 순수 함수에서 제어 증거·귀속 정상·interrupt 정상과 idle을 확인한다. 명시적인 대기열 제출만 큐 모드를 사용하며, 즉시 전송·재전송·자동 후속은 idle을 요구한다. queued 모드도 귀속 불명과 중단 불명은 우회하지 못한다.
+
+삭제 이벤트 또는 deleting/deleted snapshot을 관측하면 데이터 세대를 올리고 본문을 비운다. 이전 세대 transcript·snapshot은 폐기하며 삭제가 확인된 화면은 조작 가능 상태로 복원하지 않는다.
+
+`work-board.test.js`는 getNavItems와 CommandPalette의 실제 항목 수를 6개(별도 작업 화면 유지 시 7개)로 갱신했다. 전체 hash·한국어 라벨 순서와 owned의 6번째 위치·내 세션 라벨, 뒤따르는 work 위치도 정확히 검사한다. 다른 nav·CommandPalette 관련 테스트를 검색했고, 정적 NAV_ITEMS 자체의 5개 기대값은 유효하므로 바꾸지 않았다.
+
+검증:
+
+- 수정 전: R1 재현 0/6, nav 단일 0/1.
+- 수정 후: 기존 UI 14개와 R4 경계 테스트 10개, 총 24/24 통과. 재연결 snapshot 대기·저장소 예외·확정 lookup·응답 전 이동 사례도 포함한다.
+- nav 단일 테스트 1/1 통과. nav·jsdom 변환·SSE 별도 테스트 26/26 통과(`/tmp/sh1-c2-r4-other.log`).
+- 지정 owned/session-host/work-board 전체 실행: tests 629, pass 606, fail 23, cancelled 0, skipped 0(`/tmp/sh1-c2-r4-verified.log`). 실패는 기존 소켓·실제 ps EPERM 및 이에 따른 host_start_timeout이다.
+- `npx playwright test --grep '@a11y.*owned'`: 127.0.0.1:4177 listen EPERM으로 실행 전에 중단됐다(`/tmp/sh1-c2-r4-a11y.log`). 호스트에서 재검증한다.
+
+실제 Claude·LLM·외부 네트워크 호출, git 조작, 전역 SSE 채널·C1 화면·서버 상태 기계 변경은 수행하지 않았다.

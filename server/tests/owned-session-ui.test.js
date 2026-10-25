@@ -13,9 +13,12 @@ function setup(t) {
   e.context.Modal = ({ children, open }) => open ? children : null;
   e.context.DirectoryPicker = ({ onSelect }) => e.h('button', { onClick: () => onSelect('/safe') }, 'pick');
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../public/app/lib/markdown.js'), 'utf8').replace(/^export /gm, ''), e.context);
-  e.context.EventSource = class { addEventListener() {} close() {} };
+  e.context.EventSource = class {
+    addEventListener(name, callback) { if (name === 'open') setTimeout(callback, 0); }
+    close() {}
+  };
   for (const moduleName of [
-    'format', 'state', 'client', 'OwnedDeliveryBadge', 'OwnedPrompt', 'OwnedMessage',
+    'format', 'state', 'client', 'pending', 'OwnedDeliveryBadge', 'OwnedPrompt', 'OwnedMessage',
     'OwnedQuestion', 'OwnedApproval', 'OwnedComposer', 'OwnedStart', 'OwnedSessionList',
     'OwnedSessionHeader', 'OwnedConversation', 'useOwnedSessions', 'OwnedSession'
   ]) {
@@ -71,7 +74,7 @@ test('start requires explicit confirmation and shows PermissionRequest warning',
 });
 test('unreachable retains last rendered conversation and disables every action', async t => {
   const e = setup(t), listeners = {};
-  e.context.EventSource = class { addEventListener(name, fn) { listeners[name] = fn; } close() {} };
+  e.context.EventSource = class { addEventListener(name, fn) { listeners[name] = fn; if (name === 'open') setTimeout(fn, 0); } close() {} };
   e.context.apiFetch = async url => url.includes('transcript') ? { host: 'running', events: [] } : { host: 'running', state: state(), seq_high: 0 };
   e.mount('OwnedSessionsView', { sessionId: 's' }); await flushEffects(); await flushEffects();
   listeners.host_unreachable(); await flushEffects(30);

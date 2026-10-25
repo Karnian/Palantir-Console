@@ -35,7 +35,7 @@ export function OwnedSession({ sessionId, controller, onRemove }) {
       return html`<${OwnedApproval} key=${card.id} card=${card} sessionId=${sessionId} cwd=${snapshot.session.cwd}
         disabled=${cardDisabled} delivery=${delivery} onSubmit=${submit} />`;
     })}
-    <${OwnedComposer} interaction=${interaction} disabled=${disabled || !controllable}
+    <${OwnedComposer} state=${snapshot} interaction=${interaction} disabled=${disabled || !controllable}
       uncertain=${!!incarnation?.attribution_uncertain} interruptUnknown=${!!incarnation?.interrupt_unknown} onSubmit=${submit} />
   `;
 }
