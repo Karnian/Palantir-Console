@@ -2418,3 +2418,21 @@ submit은 abandoned tombstone을 본문 fingerprint와 무관하게 rejected/req
 - 코어 + 전체 UI 집중: tests 61, pass 61, fail 0(`/tmp/sh1-c2-r10-focus.log`). 추가 큐·응답 유실·launcher 경로 포함 집중: tests 9, pass 9, fail 0(`/tmp/sh1-c2-r10-extra.log`).
 - 최종 지정 명령 `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session*.test.js server/tests/session-host-*.test.js server/tests/work-board.test.js`: tests 680, pass 657, fail 23, cancelled 0, skipped 0(`/tmp/sh1-c2-r10-done.log`). 실패는 이전 라운드와 같은 샌드박스의 listen EPERM·실제 /bin/ps EPERM·host_start_timeout이며 호스트 재검증이 필요하다.
 - git 조작, 실제 Claude·LLM·외부 네트워크 호출, spec·전역 SSE·C1 화면·visual baseline 변경은 하지 않았다. 저장소 스키마 버전과 기존 tombstone 행은 변경하지 않았다.
+## S1-e1 — 터미널로 넘기기(한 방향)
+
+handoff 효과 전에 어댑터의 동기 `verifyExecutable()`을 호출한다. SDK 어댑터는 고정 realpath와 기존 동기 SHA-256 검사 함수를 재사용한다. 불일치 시 `executable_hash_mismatch`로 끝나며 세션 active, interrupt·close·signal 0회를 유지한다. fake adapter는 기본 통과하고 `executableValid: false`로 실패한다. 가짜 대화 ID도 UUID로 생성한다. 명령 입력 경로와 대화 UUID도 효과 전에 검사한다.
+
+순수 `buildHandoffCommand`는 pin의 인증 변수 목록과 두 설정 루트 변수를 합쳐 전부 unset한다. 모든 unset 옵션 뒤에 어댑터의 고정 HOME을 배치하고 동봉 실행 파일 절대 경로를 사용한다. POSIX 작은따옴표로 값을 인용하며 상대 경로·CR/LF·NUL 경로 및 UUID가 아닌 ID를 거부한다.
+
+기존 종료 확인·표지 하위 프로세스 확인을 통과한 트랜잭션에서 완료 명령을 이벤트에 저장한다. snapshot의 `handoff_command`는 handed_off에서만 반환하고 삭제 상태에는 없다. 이후 호스트 재시작에도 저장된 완료 명령을 조회한다. handoff 라우트는 기존 cookie·origin 검사와 접수 경로를 사용하며 incarnation ID를 검증한다. 코어도 제공된 incarnation이 현재 대상과 다른 요청을 거부한다.
+
+화면에는 확인 Modal과 보장 범위 문구, 진행 단계, 해시 불일치·하위 프로세스 차단 이유, PID·시작 시각 목록과 다시 확인 버튼을 추가했다. handed_off는 읽기 전용이며 삭제를 허용한다. 완료 명령은 선택 가능한 textarea와 clipboard 버튼으로 제공하고 복사 실패 시 텍스트를 선택해 수동 복사를 안내한다. owned a11y에는 두 테마의 확인 Modal·완료 명령 화면 시나리오를 추가했다.
+
+검증 기록:
+
+- 수정 전 코어 재현 2개 실패: 해시 불일치인데 넘기기 효과 발생, handed_off 뒤 명령 없음(`/tmp/sh1-e1-red.log`). 같은 실행에서 순수 함수·셸 argv·가짜 실행 파일 env 검사는 3개 통과했다. 순수 함수 자체의 수정 전 실패 증거는 별도로 수집하지 않았다.
+- 수정 후 집중 테스트 51/51 통과(`/tmp/sh1-e1-focus.log`): handoff 코어·SDK realpath/바이트 변경·순수 함수·실제 셸/가짜 실행 파일·라우트·기존 제어·UI. 거부 사례에는 한 필드만 바꾼 통과 대조를 추가했다. 셸 검사는 테스트 코드의 직접 `spawnSync('/bin/sh', ...)`로 실행했으며 production spawn guard나 전역 허용 환경변수를 변경하지 않았다.
+- 지정 전체 명령 `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session*.test.js server/tests/session-host-*.test.js` 실행 시작(`/tmp/sh1-e1-all.log`). 실행 도구 예산(5회 실행·4회 재개)에 도달해 최종 집계를 수집하지 못했다. 마지막 UI 재검증도 같은 셸에 예약했다(`/tmp/sh1-e1-ui-final.log`).
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH npx --no-install playwright test --grep '@a11y.*owned'`: exit 1을 관측했으나 상세 원인은 수집하지 못했다(`/tmp/sh1-e1-a11y.log`). 호스트에서 원인 확인과 재실행이 필요하다. DoD의 전체 테스트·a11y 통과는 아직 확정하지 않았다.
+- 실제 Claude·LLM 호출 0. 외부 네트워크·git 조작·spec·package.json·전역 SSE 변경 없음. 대화형 TUI 실측은 S1-e2에 남긴다.
+

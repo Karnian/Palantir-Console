@@ -16,6 +16,7 @@ const {
   getRecoveredIncarnationState,
   getRecoveredStartResult
 } = require('./stateRules');
+const { buildHandoffCommand } = require('./handoffCommand');
 const CONTROLS = new Set(['start', 'resume', 'stop', 'close', 'handoff', 'delete']);
 const KINDS = new Set([...CONTROLS, 'prompt', 'tool_decision', 'question_answer', 'interrupt']);
 const DAY = 86400000;
@@ -590,6 +591,13 @@ function createHostCore({
         });
       }
       if (controlRequest.kind !== 'stop') {
+        if (controlRequest.kind === 'handoff') {
+          const session = getSession(controlRequest.session_id);
+          recordEvent(session.id, incarnation?.id || null, 'handoff_ready', {
+            command: buildHandoffCommand({ cwd: session.cwd, home: adapter.home,
+              executablePath: adapter.executablePath, claudeSessionId: session.claude_session_id })
+          });
+        }
         transitionSession(getSession(controlRequest.session_id), {
           state: controlRequest.kind === 'handoff' ? 'handed_off' : 'closed'
         });
@@ -781,6 +789,21 @@ function createHostCore({
       deadlines.set(key, now() + pin.initializationDeadlineMs);
       injectFault('after_gating');
       return;
+    }
+    if (controlRequest.kind === 'handoff') {
+      let reason;
+      try {
+        if (adapter.verifyExecutable?.() !== true) reason = 'executable_hash_mismatch';
+        else {
+          const session = getSession(controlRequest.session_id);
+          buildHandoffCommand({ cwd: session.cwd, home: adapter.home,
+            executablePath: adapter.executablePath, claudeSessionId: session.claude_session_id });
+        }
+      } catch (error) { reason = error.code || 'executable_hash_mismatch'; }
+      if (reason) {
+        writeTransaction(() => transitionControl(controlRequest, { state: 'failed', reason }));
+        return;
+      }
     }
     if (!incarnation || ['exited', 'never_started'].includes(incarnation.state)) {
       finishControlRequest(key);
@@ -1038,6 +1061,9 @@ function createHostCore({
           } else if (request.kind === 'handoff' && (!incarnation || !session.claude_session_id)) {
             reason = 'no_session_id';
           }
+        }
+        if (!reason && request.kind === 'handoff' && request.incarnation_id !== undefined && request.incarnation_id !== incarnation?.id) {
+          reason = 'incarnation_mismatch';
         }
         if (!reason && request.kind === 'delete' && !['closed', 'handed_off'].includes(session.state)) {
           reason = 'session_active';
@@ -1524,7 +1550,16 @@ function createHostCore({
       }
       const state = {
         session: session ? snapshotPreview(session) : null,
+        ...(session?.state === 'handed_off' ? {
+          handoff_command: JSON.parse(getRow("SELECT json FROM events WHERE session_id=? AND type='handoff_ready' ORDER BY seq DESC LIMIT 1",
+            sessionId)?.json || '{}').command
+        } : {}),
         current_incarnation_id: getLatestIncarnation(sessionId)?.id || null,
+        ...((session?.state === 'active' && getRow("SELECT request_key FROM control_requests WHERE session_id=? AND kind='handoff' AND state='blocked'",
+          sessionId)) ? { handoff_subprocesses: (() => {
+          try { return identityProbe.listMarkedDescendants(getLatestIncarnation(sessionId)?.id); }
+          catch { return { status: 'query_failed', pids: [] }; }
+        })() } : {}),
         incarnations: rows('SELECT * FROM incarnations WHERE session_id=?', [sessionId], incarnation => {
           const event = getRow("SELECT json FROM events WHERE incarnation_id=? AND type='rate_limit' ORDER BY seq DESC LIMIT 1", incarnation.id);
           // Only a live, locally verified gate provides version and control evidence.

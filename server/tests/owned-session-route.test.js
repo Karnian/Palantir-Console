@@ -6,6 +6,18 @@ const { Duplex } = require('node:stream');
 const { fixture, request, COOKIE, TOKEN } = require('./helpers/session-hub-fixture.cjs');
 const key = 'rk_1800000000000_123456789abcdef0';
 const base = '/api/owned-sessions';
+
+test('handoff route requires cookie, exact origin and incarnation with single-field controls', async t => {
+  const h = setup(t);
+  const body = { request_key: key, incarnation_id: '12345678-1234-1234-1234-123456789abc' };
+  assert.equal((await mutate(h.app, 'post', '/sid/handoff', body)).status, 200);
+  assert.equal((await request(h.app).post(base + '/sid/handoff').set('Cookie', COOKIE)
+    .set('Origin', 'http://elsewhere').send(body)).status, 403);
+  assert.equal((await request(h.app).post(base + '/sid/handoff').set('Authorization', `Bearer ${TOKEN}`)
+    .set('Origin', 'http://localhost').send(body)).status, 403);
+  assert.equal((await mutate(h.app, 'post', '/sid/handoff', { ...body, incarnation_id: 'bad' })).status, 400);
+  assert.equal(h.calls.length, 1);
+});
 function setup(t) {
   const fx = fixture(t);
   const calls = [], subscribers = new Set();
@@ -46,12 +58,12 @@ test('GET exact Fetch-Site checks and browser cookie only', async t => {
     assert.equal((await request(h.app).get(base + suffix).set('Authorization', `Bearer ${TOKEN}`)).status, 403);
   }
 });
-test('start confirmation is mandatory; handoff absent; body parsing bounded after auth', async t => {
+test('start confirmation is mandatory; handoff requires incarnation; body parsing bounded after auth', async t => {
   const h = setup(t);
   assert.equal((await mutate(h.app, 'post', '/start', { request_key: key, cwd: '/safe' })).status, 400);
   assert.equal(h.calls.length, 0);
   assert.equal((await mutate(h.app)).status, 200);
-  assert.equal((await mutate(h.app, 'post', '/id/handoff', { request_key: key })).status, 404);
+  assert.equal((await mutate(h.app, 'post', '/id/handoff', { request_key: key })).status, 400);
   assert.equal((await mutate(h.app, 'post', '/id/prompt', { request_key: key, body: 'x'.repeat(600000) })).status, 400);
   assert.equal((await request(h.app).post(base + '/start').set('Cookie', COOKIE).send('{')).status, 403);
 });
@@ -62,10 +74,10 @@ test('all mutation routes map only defined fields and preserve browser request k
     ['tool-decision', { tool_use_id: 'tool', behavior: 'deny', message: 'no' },
       { target_tool_use_id: 'tool', body: { behavior: 'deny', message: 'no' } }],
     ['question-answer', { tool_use_id: 'q', answer: { choice: 'yes' } }, { target_tool_use_id: 'q', body: { answer: { choice: 'yes' } } }],
-    ...['interrupt', 'stop', 'resume', 'close'].map(route => [route, {}, {}])
+    ...['interrupt', 'stop', 'resume', 'close', 'handoff'].map(route => [route, {}, {}])
   ];
   for (const [route, input, mapped] of cases) {
-    const target = ['prompt', 'tool-decision', 'question-answer', 'interrupt'].includes(route) ?
+    const target = ['prompt', 'tool-decision', 'question-answer', 'interrupt', 'handoff'].includes(route) ?
       { incarnation_id: '12345678-1234-1234-1234-123456789abc' } : {};
     const response = await mutate(h.app, 'post', '/sid/' + route, { request_key: key, ...target, ...input, env: 'PRIVATE', capability: 'PRIVATE' });
     assert.equal(response.status, 200);

@@ -39,6 +39,9 @@ function createFakeAdapter(options = {}) {
     return options.accountInfo ? options.accountInfo(incarnationId) : configuredAccount();
   }
   const adapter = {
+    executablePath: options.executablePath || '/fake/bundled/claude',
+    home: options.home || '/fake/home',
+    verifyExecutable() { return options.executableValid !== false; },
     events,
     log,
     children,
@@ -106,7 +109,7 @@ function createFakeAdapter(options = {}) {
       }
       return {
         ...identity,
-        claude_session_id: resume ? claude_session_id : `fake-conversation-${session_id}`
+        claude_session_id: resume ? claude_session_id : session_id
       };
     },
     facts(incarnationId, toolUseId) {

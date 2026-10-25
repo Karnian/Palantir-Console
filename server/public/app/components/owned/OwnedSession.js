@@ -17,7 +17,10 @@ export function OwnedSession({ sessionId, controller, onRemove }) {
   return html`
     <a href="#owned">${OWNED_COPY.back}</a>
     <${OwnedSessionHeader} state=${snapshot} incarnation=${incarnation} host=${controller.host}
-      asOf=${controller.asOf} />
+      asOf=${controller.asOf} onHandoff=${() => submit('handoff')}
+      handoffDisabled=${disabled || snapshot.controls?.some(control => control.state === 'accepted')
+        || !(controllable || (snapshot.session.state === 'active'
+        && snapshot.handoff_subprocesses && incarnation?.state === 'exited'))} />
     <div class="owned-actions">
       <button class="btn btn-sm" disabled=${!canInterruptOwnedSession(snapshot, !disabled)}
         onClick=${() => submit('interrupt')}>${OWNED_COPY.interrupt}</button>
@@ -25,7 +28,8 @@ export function OwnedSession({ sessionId, controller, onRemove }) {
       <button class="btn btn-sm" disabled=${disabled || !resumeReady} onClick=${() => submit('resume')}>${OWNED_COPY.resume}</button>
       <button class="btn btn-sm btn-danger" disabled=${disabled || snapshot.session.state !== 'active'}
         onClick=${() => submit('close')}>${OWNED_COPY.close}</button>
-      <button class="btn btn-sm btn-danger" disabled=${disabled || snapshot.session.state !== 'closed'} onClick=${onRemove}>${OWNED_COPY.remove}</button>
+      <button class="btn btn-sm btn-danger" disabled=${disabled || !['closed', 'handed_off'].includes(snapshot.session.state)}
+        onClick=${onRemove}>${OWNED_COPY.remove}</button>
     </div>
     ${controller.restartNotice && html`<p role="status">${controller.restartNotice}</p>`}
     <${OwnedConversation} state=${snapshot} events=${controller.events} sessionId=${sessionId}

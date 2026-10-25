@@ -3,6 +3,7 @@ const { EventEmitter } = require('node:events');
 const { randomUUID, createHash } = require('node:crypto');
 const path = require('node:path');
 const childProcess = require('node:child_process');
+const fs = require('node:fs');
 const pin = require('./pin');
 const { capabilityVerdict } = require('./capability');
 const { validateDecision } = require('./decisionValidation');
@@ -47,6 +48,8 @@ function createSdkAdapter({ sdk, executablePath = bundledExecutable(), executabl
   hashFileSync, spawn = childProcess.spawn, extraArgs, testHooks = {} } = {}) {
   const envSnapshot = Object.freeze(Object.assign(Object.create(null), baseEnv));
   const fixedHome = envSnapshot.HOME;
+  let pinnedRealpath;
+  try { pinnedRealpath = fs.realpathSync(executablePath); } catch { pinnedRealpath = null; }
   function rootsMatch() {
     const forbidden = ['CLAUDE_CONFIG_DIR', 'CLAUDE_SECURESTORAGE_CONFIG_DIR'];
     return !forbidden.some(key => Object.hasOwn(process.env, key) || Object.hasOwn(envSnapshot, key)) &&
@@ -109,6 +112,16 @@ function createSdkAdapter({ sdk, executablePath = bundledExecutable(), executabl
     }
   }
   const adapter = {
+    executablePath,
+    home: fixedHome,
+    verifyExecutable() {
+      try {
+        return pinnedRealpath !== null && fs.realpathSync(executablePath) === pinnedRealpath &&
+          checkSpawnOptionsSync({ command: executablePath, args: ['--permission-mode=default'] }, {
+            pinnedPath: pinnedRealpath, pinnedSha256: executableSha256, hashFileSync
+          }).ok;
+      } catch { return false; }
+    },
     events,
     checkSettings(cwd) {
       return Promise.resolve().then(() => { assertConfigRoot(); return sdk.resolveSettings({ cwd }); }).then(resolved => {

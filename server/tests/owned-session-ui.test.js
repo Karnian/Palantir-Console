@@ -30,6 +30,39 @@ function setup(t) {
 }
 const state = (extra = {}) => ({ current_incarnation_id: 'inc', session: { state: 'active', cwd: '/safe' },
   incarnations: [{ id: 'inc', state: 'alive', control_available: true, ...extra }], deliveries: [], tool_requests: [], controls: [] });
+
+test('handoff confirmation, completion-only command and clipboard failure fallback', async t => {
+  const e = setup(t); let calls = 0;
+  const s = state();
+  const props = { state: s, incarnation: s.incarnations[0], host: 'running', handoffDisabled: false, onHandoff: () => calls++ };
+  e.mount('OwnedSessionHeader', props);
+  assert.equal(e.document.querySelector('.owned-handoff-command'), null);
+  [...e.document.querySelectorAll('button')].find(x => x.textContent === '터미널로 넘기기').click();
+  await flushEffects(20);
+  assert.match(e.document.body.textContent, /인증 게이트도 없다/);
+  [...e.document.querySelectorAll('button')].find(x => x.textContent === '확인하고 넘기기').click();
+  assert.equal(calls, 1);
+  s.session.state = 'handed_off'; s.handoff_command = "cd '/safe' && env --resume";
+  e.mount('OwnedSessionHeader', props); await flushEffects(20);
+  assert.match(e.document.body.textContent, /읽기 전용/);
+  const command = e.document.querySelector('.owned-handoff-command');
+  assert.equal(command.value, s.handoff_command);
+  [...e.document.querySelectorAll('button')].find(x => x.textContent === '명령 복사').click();
+  await flushEffects(20);
+  assert.match(e.document.body.textContent, /직접 복사/);
+  assert.equal(command.selectionEnd, command.value.length);
+});
+
+test('handed off session disables mutations and keeps deletion available', t => {
+  const e = setup(t), s = state({ state: 'exited', control_available: false });
+  s.session.state = 'handed_off';
+  e.mount('OwnedSession', { sessionId: 's', controller: { snapshot: s, incarnation: s.incarnations[0],
+    host: 'running', disabled: false, controllable: false, events: [], submit() {} }, onRemove() {} });
+  for (const button of e.document.querySelectorAll('.owned-actions button')) {
+    assert.equal(button.disabled, button.textContent !== e.context.C.remove);
+  }
+  assert.equal(e.document.querySelector('textarea').disabled, true);
+});
 test('delivery unknown is emphasized and outcome is separate', t => {
   const e = setup(t); e.mount('OwnedDeliveryBadge', { delivery: { state: 'provider_observed', outcome: 'outcome_unknown' } });
   assert.equal(e.document.querySelector('.owned-delivery-badge').textContent, '받음 · 결과 불명'); assert.ok(e.document.querySelector('.owned-unknown'));

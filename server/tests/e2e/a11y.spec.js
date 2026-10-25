@@ -110,6 +110,11 @@ async function installOwnedStateFixture(page, theme, scenario) {
     account_snapshot: JSON.stringify({ subscriptionType: 'team' }),
     attribution_uncertain: scenario === 'conversation' ? 1 : 0
   };
+  if (scenario === 'handoff-complete') {
+    session.state = 'handed_off';
+    incarnation.state = 'exited';
+    incarnation.control_available = false;
+  }
   const longInput = JSON.stringify({ command: `echo ${'긴도구입력'.repeat(1800)}`, marker: '전문 마지막 표지' });
   const questionInput = {
     questions: [{ question: '어떤 검증을 진행할까요?', multiSelect: true,
@@ -158,6 +163,7 @@ async function installOwnedStateFixture(page, theme, scenario) {
       body = { host: 'running', events: transcript, next_before_seq: null };
     } else if (url.pathname.endsWith('/owned-a11y')) {
       body = { host: 'running', seq_high: 15, state: { session, current_incarnation_id: 'inc',
+        ...(scenario === 'handoff-complete' ? { handoff_command: "cd '/safe/project' && env -u CLAUDE_CONFIG_DIR HOME='/home/test' '/bundled/claude' --resume '12345678-1234-1234-1234-123456789abc'" } : {}),
         incarnations: [incarnation], deliveries, controls: [], tool_requests: toolRequests } };
     } else {
       body = { host: 'running', seq_high: 15, sessions: [session] };
@@ -171,6 +177,26 @@ async function checkOwnedStateAccessibility(page) {
     .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa']).analyze();
   expect(result.violations.filter(violation => ['critical', 'serious', 'moderate'].includes(violation.impact))).toEqual([]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+}
+
+for (const theme of ['dark', 'light']) {
+  for (const scenario of ['handoff-modal', 'handoff-complete']) {
+    test(`@a11y owned ${theme} ${scenario}`, async ({ page }) => {
+      await installOwnedStateFixture(page, theme, scenario);
+      await page.goto('/#owned/owned-a11y');
+      if (scenario === 'handoff-modal') {
+        await expect(page.locator('.owned-handoff-command')).toHaveCount(0);
+        await page.getByRole('button', { name: '터미널로 넘기기', exact: true }).click();
+        await expect(page.getByRole('dialog', { name: '터미널로 넘기기' })).toBeVisible();
+        await expect(page.getByRole('dialog')).toContainText('인증 게이트도 없다');
+      } else {
+        await expect(page.getByText('터미널로 넘김 · 읽기 전용', { exact: true })).toBeVisible();
+        await expect(page.getByRole('textbox', { name: '터미널에서 실행할 명령' })).toHaveValue(/--resume/);
+        await expect(page.getByRole('button', { name: '명령 복사', exact: true })).toBeEnabled();
+      }
+      await checkOwnedStateAccessibility(page);
+    });
+  }
 }
 
 for (const theme of ['dark', 'light']) {
