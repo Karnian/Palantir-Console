@@ -393,7 +393,7 @@ lock-in 은 사용자가 실제 작업에 써 본 뒤 정한다. brief 는 화�
 | **S1-a2** | 호스트 프로세스: 단일 인스턴스 잠금·소켓·capability·handshake·접수 응답·유휴 종료·기동(setsid)·치명 오류 정책 | ✅ 2026-10-24 — 테스트 167개(프로세스 층 실제 macOS 실행 포함), mutation 3종 검출, codex 적대리뷰 R1 NO-GO → R2 GO → R3 GO, npm test 5299/5299. 잠금은 `flock` 대신 SQLite 배타 잠금(의미 동일 — 기록 `docs/sh1-s1-a-impl-notes.md`) |
 | **S1-b1** | SDK 없이 시험하는 부품: 인증·설정 게이트 판정(`authGate`), 자식 env 구성·최종 검사(`spawnEnv`), argv·실행 파일 고정 확인(`argvCheck`), 실제 `ps` 기반 신원 조회(`psIdentity`), 고정값(`pin`) | ✅ 2026-10-24 — 테스트 212개(실제 ps 포함), codex 적대리뷰 R1·R2 NO-GO → R3 GO, npm test 5344/5344. 실측으로 잡은 것: argv 에 줄바꿈 든 프로세스가 전역 ps 출력을 깨뜨림(→ 전역=존재 판정, 귀속=pid 별 조회), `lstart` 출력 끝 열 맞춤 공백 |
 | **S1-b2a** | 코어의 비동기 게이트 단계: spawn 전 설정 검사(절대 기한), spawn 뒤 초기화 응답 게이트와 실패 시 정리(close → 신원 재대조 SIGTERM → 표지 하위 확인), 게이트 전 승인 응답 차단, prompt 직전 account 재확인(delivery 별 1회 토큰), 첫 system/init 사후 탐지, rate limit 정제 기록, 자식 env 최종 검사 — 가짜 어댑터(동기·비동기 겸용) | ✅ 2026-10-25 — 테스트 337개(비동기 모드 대표 경로 포함), codex 적대리뷰 R1 NO-GO → R2 GO, npm test 5469/5469. 순서는 §4.4 원자성 때문에 "예약 → 설정 검사 → spawn"(spawn 전 검사 계약은 동일) |
-| **S1-b2b** | SDK 설치·실제 어댑터(custom spawn·argvCheck·spawnEnv·psIdentity 연결, 이벤트 변환, 능력 판정), SDK 제어 프로토콜을 흉내 내는 가짜 실행 파일 | §8.1-(b) |
+| **S1-b2b** | SDK 설치·실제 어댑터(custom spawn·argvCheck·spawnEnv·psIdentity 연결, 이벤트 변환, 능력 판정), SDK 제어 프로토콜을 흉내 내는 가짜 실행 파일 | ✅ 2026-10-25 — SDK 0.3.308 정확 고정(동봉 실행 파일 해시·버전·Team ID 설치 직후 확인), 테스트 430개(실제 SDK + 가짜 실행 파일, 정상 지시 20·승인 10 unknown 0), codex 적대리뷰 R1~R3 NO-GO → R4 GO. 실측으로 잡은 것: 실제 SDK 의 `accountInfo()` 는 초기화 캐시 → prompt 직전 재확인은 `reinitialize()` 의 새 응답으로(실제 CLI 반영 여부는 S1-e), psIdentity 가 프로세스 1,400개 맥에서 7.5초(기한 10초) → 표지 줄 후보 + 재조회 일치 빠른 경로. 완료된 승인 요청의 재전달은 항상 거부(결과 재생 없음, fail-closed). 구조화 질문 응답 관측은 S1-e |
 | **S1-c** | 서버 브리지(handshake·seq 재생·읽기 전용 장애 경로·cookie-only·origin) + 최소 화면(상태·전달 배지·승인 카드) | 서버 재시작·장애 사례 |
 | **S1-e** | 터미널 넘기기 + §8.2 최소 안전 실측 | 실측 기록. 미달이면 S1-d 진입 안 함 |
 | **S1-d** | 화면 다듬기 → 사용자 실사용(U8 기록지 병행) → lock-in. lock-in 뒤 e2e visual baseline | 사용자 lock-in 기록 + U8 |
@@ -407,6 +407,7 @@ lock-in 은 사용자가 실제 작업에 써 본 뒤 정한다. brief 는 화�
 - **R3 같은 UID**: 작업 세션은 호스트 DB·capability 파일을 읽을 수 있다(§0.2.7). 격리를 주장하지 않는다.
 - **R4 표지 조회 의존 (S1-0 해소)**: macOS(Darwin 25.5)에서 같은 UID 프로세스의 env 조회가 됐고 도구 하위 프로세스도 표지를 물려받았다. macOS 가 이 조회를 막는 쪽으로 바뀌면 조회 결과는 `query_failed` 로 떨어져 resume·넘기기가 막히는 쪽으로 실패한다.
 - **R6 과금 잔여 위험 (사용자 수락, 2026-10-24)**: ① 한 턴 안의 인증 전환은 감지하지 못할 수 있다(§1.2-3). ② 구독 한도 소진 뒤 계정에서 켠 유료 사용 크레딧으로 이어질 수 있다. Palantir 는 막지 못하지만 `isUsingOverage` 로 사용 중임을 표시한다(S1-0, §1.2 표시). 사용자 판정: "과금은 상관 없어" — 두 가지를 받아들이고 계정 설정을 선행 조건으로 두지 않는다. §1.2-3 의 구독 로그인 게이트와 인증 표시는 그대로 둔다(자격 중계 금지와 표시 정확성 때문).
+- **R7 재확인의 신선도 (S1-b2b)**: 고정 SDK 의 `accountInfo()` 는 초기화 때 값을 돌려준다. prompt 직전 재확인은 `reinitialize()`(매번 새 initialize 요청)의 account 로 한다. 실행 중 CLI 가 새 initialize 에 바뀐 인증을 반영하는지는 S1-e 실측 항목이다. 반영하지 않으면 재확인은 같은 프로세스의 초기 값 대조에 그치고, 남는 방어는 첫 `system/init` 사후 탐지와 다음 spawn 의 게이트다.
 - **R5 1:1 규칙의 사용성**: 진행 중 턴 합류를 막는 것이 실사용에서 불편할 수 있다. S1-d 에서 사용자 판정으로 다시 본다(합류를 열려면 uuid 단위 수신 증거가 먼저 있어야 한다).
 - **Q1 호스트 자동 기동**: 서버가 setsid 로 띄우는 안(권장) vs launchd 등록. 후자는 SH4 원격·로그인 시 상시 기동과 맞지만 설치 단계가 늘어난다.
 

@@ -1476,3 +1476,21 @@ SDK 결과에서 계산 루트를 얻을 수 없다. 이 경우 요구대로 기
 - `R2 real ps ignores unrelated multiline argv while identifying a marked child` — query_failed !== ok (실제 ps 조회 차단)
 - `real ps identifies marked child and grandchild then confirms exit` — query_failed !== ok (실제 ps 조회 차단)
 - `SDK real ps identity reads actual child and inherited grandchild marker then mismatch` — 'spawnSync /bin/ps EPERM'
+
+## S1-b2b 최종 정리 (호스트, R4 GO 뒤)
+
+라운드별 절은 그 시점의 판단이고, 아래가 최종 계약이다. 라운드 3의 "완료 요청 결과 보존"은 라운드 4에서 폐기됐다.
+
+| 항목 | 최종 계약 |
+|---|---|
+| 자식 env | baseEnv 생성 시 불변 스냅샷 → `buildChildEnv`(허용 목록 + SDK 키 3개 + 표지) → `assertChildEnv`. SDK 가 넘기는 부모 env(`CLAUDECODE` 등)는 버림 |
+| 실행 파일 | spawn 마다 spawnGuard → realpath 일치 → 1MiB 조각 SHA-256 → argv 판정(동기 변형, 판정 로직 공유) |
+| 설정 루트 | `CLAUDE_CONFIG_DIR`·`CLAUDE_SECURESTORAGE_CONFIG_DIR` 있으면 거부, HOME 고정, `resolveSettings` 결과의 user 경로가 `<HOME>/.claude/` 아래인지 확인 |
+| prompt 직전 재확인 | `reinitialize()` 새 응답의 account(캐시 아님). 실제 CLI 반영은 S1-e |
+| 승인 요청 재전달 | 대기 중: requestId·도구명·입력 지문이 모두 같을 때만 같은 Promise, 취소 신호는 어댑터 소유 컨트롤러로 통합. 결정 뒤: 항상 이벤트 없이 deny(재생 없음 — stdio·idle 재초기화라 정상 경로에서 도달 불가, 도달해도 실행 0) |
+| 서브에이전트 결과 | tool_use_id 로 귀속(고유 ID), `parent_tool_use_id` 를 이벤트에 추가로 실음 |
+| psIdentity | 표지 줄 → 후보 pid 단사 + 후보 전부 per-pid 표지 확인 + absent 0 + 전역 재조회 매핑 일치일 때만 빠른 경로, 아니면 기존 전체 스캔. 이 맥(프로세스 약 1,400개)에서 7.5초 → 2초 미만 |
+| 구조화 질문 응답 | SDK 로는 `updatedInput.answers` 로 전달하지만 코어 관측(JSON 비교)은 unknown — S1-e 실측 뒤 관측 규칙을 정한다 |
+
+호스트 검증: 실제 macOS 에서 session-host 430/430, 변이 16종 중 15종 검출(나머지 1종은 도달 불가 코드였고 라운드 2 에서 제거). 실제 claude·LLM 호출 0.
+
