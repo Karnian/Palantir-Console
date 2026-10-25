@@ -172,3 +172,10 @@ test('R5 invalid answer is a definitive rejected receipt and can be corrected on
   assert.equal((await h.service.submit({ ...request, body: { answer: 'A' } })).acceptance, 'accepted');
   assert.equal(h.f.adapter.log.decisions.length, 1);
 });
+
+test('R7 metadata overflow is an explicit 503, not a stale snapshot or host restart', async t => {
+  const h = bridge(t);
+  h.client.snapshot = () => { throw Object.assign(Error('snapshot_too_large'), { code: 'snapshot_too_large' }); };
+  await assert.rejects(h.service.snapshot('session'), { code: 'snapshot_too_large', status: 503 });
+  assert.equal((await h.service.list()).host, 'running'); assert.equal(h.launches, 0);
+});

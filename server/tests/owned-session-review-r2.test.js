@@ -51,7 +51,7 @@ test('R2 snapshot previews are bounded and UTF-8 safe; full originals remain ava
 test('R2 snapshot has finite row count and explicit more flag', t => {
   const h = bridge(t); h.f.start();
   const db = new Database(h.f.dbPath);
-  const insert = db.prepare("INSERT INTO tool_requests(id,incarnation_id,tool_use_id,tool_name,input,state) VALUES(?,?,?,'Bash','{}','pending')");
+  const insert = db.prepare("INSERT INTO tool_requests(id,incarnation_id,tool_use_id,tool_name,input,state) VALUES(?,?,?,'Bash','{}','expired')");
   db.transaction(() => { for (let n = 0; n < 500; n++) insert.run('row-' + n, h.f.iid, 'tool-' + n); })(); db.close();
   const snapshot = h.f.core.snapshot(h.f.sid);
   assert.ok(snapshot.state.tool_requests.length < 500); assert.equal(snapshot.more.tool_requests, true);

@@ -225,3 +225,12 @@ test('R2 chunk protocol preserves session ownership arguments and UTF-8 data', a
   await flush(); assert.deepEqual(calls, [['session', 'event', 7, 0]]);
   assert.deepEqual(h.output[1], { type: 'chunk', id: 1, result });
 });
+
+test('R7 metadata overflow returns a fixed snapshot error without closing the connection', async () => {
+  const h = harness({ snapshot() { throw new Error('snapshot_too_large'); },
+    listSessions() { return { sessions: [], seq_high: 0 }; } });
+  h.hello(); h.send({ type: 'snapshot', id: 1, session_id: 'session' });
+  h.send({ type: 'list', id: 2 }); await flush();
+  assert.deepEqual(h.output.find(row => row.id === 1), { type: 'error', id: 1, code: 'snapshot_too_large' });
+  assert.equal(h.output.find(row => row.id === 2).type, 'list'); assert.equal(h.ended, false);
+});

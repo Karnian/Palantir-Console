@@ -55,7 +55,7 @@ function createProtocol({ stream, core, capability, hostBootId, sdkVersion = nul
       }
     } catch (error) {
       if (pending.has(token)) send({ type: 'error', id: message.id,
-        code: ['invalid_request', 'invalid_chunk', 'invalid_offset'].includes(error.message) ? error.message : 'storage_unavailable' });
+        code: ['invalid_request', 'invalid_chunk', 'invalid_offset', 'snapshot_too_large'].includes(error.message) ? error.message : 'storage_unavailable' });
     } finally {
       pending.delete(token);
       onActivity();

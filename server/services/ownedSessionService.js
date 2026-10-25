@@ -145,7 +145,10 @@ function createOwnedSessionService({ runtimeDir = path.resolve(process.cwd(), 'r
       const sessionId = result.state?.session?.id || result.result?.session_id;
       if (!deletedSessions.has(sessionId)) cache.set(key, { as_of: clock(), value: statusOnly(result), sessionId });
       return { host: 'running', host_boot_id: bootId, ...result };
-    } catch { return unavailable(key); }
+    } catch (error) {
+      if (error.code === 'snapshot_too_large' || error.message === 'snapshot_too_large') throw failure('snapshot_too_large', 503);
+      return unavailable(key);
+    }
   }
   async function writable() {
     try { return await connect(); } catch {

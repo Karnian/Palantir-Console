@@ -2056,3 +2056,94 @@ DB 장애 검증은 별도 세션을 start→stop한 뒤 정상 resume에서 가
 - `R2 real ps ignores unrelated multiline argv while identifying a marked child` — `actual: 'query_failed', expected: 'ok'`
 - `real ps identifies marked child and grandchild then confirms exit` — `actual: 'query_failed', expected: 'ok'`
 - `SDK real ps identity reads actual child and inherited grandchild marker then mismatch` — `spawnSync /bin/ps EPERM`
+
+
+## S1-c1 라운드 7 — snapshot의 진행 중 행 보존
+
+### 수정 전 실패 증거
+
+제품 수정 전에 session-host-snapshot-pending.test.js의 다섯 사례를 추가했다.
+`PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-snapshot-pending.test.js`
+→ tests 5, pass 1, fail 4.
+종결 이력 200개에 128행 상한을 적용하는 대조만 통과했다.
+pending·decided 카드 200개, pending 카드 2,100개, 오래된 미종결 delivery·accepted control 보존은 실패했다.
+수정 후 같은 다섯 사례는 5/5 통과했다.
+
+### 진행 중인 상태가 종결 이력보다 우선
+
+snapshot은 단일 read transaction 안에서 필수 행과 종결 이력을 분리해 읽는다.
+다음 필수 행은 개수 상한 없이 모두 포함한다.
+
+- tool_requests: pending·decided.
+- deliveries: queued·sending·written·provider_observed. prompt는 outcome=null인 경우를 보존하며,
+  completed 상태여도 outcome=null인 prompt는 턴 종결 증거가 아직 없으므로 함께 보존한다.
+- control_requests: accepted.
+- incarnations: exited·never_started가 아닌 진행 중인 실행 상태.
+
+종결된 이력에만 종류별 최신 128행 상한을 적용한다.
+최종 응답은 기존과 같이 생성 순서로 정렬한다.
+more는 개수·바이트 예산 때문에 생략된 종결 이력이 있을 때만 true다.
+필수 행의 미리보기가 짧아졌다는 이유로 more를 켜지 않는다.
+기존 라운드 6 행 상한 테스트는 pending을 expired 이력으로 바꿔 종결 이력 대조로 유지했다.
+
+### 바이트 예산
+
+필수 행 전체를 먼저 포함하고 7MiB 행 예산을 확인한다.
+예산을 넘으면 body·input·decision·result_json 등 미리보기 길이를 4KiB에서 절반씩 줄인다.
+UTF-8 경계를 지키며 원래 *_bytes 값은 보존하고 *_truncated를 갱신한다.
+필요하면 미리보기를 0바이트까지 줄일 수 있다. DB 전문과 조각 조회는 변경하지 않는다.
+남은 공간에만 종결 이력을 담으므로 오래된 pending 카드를 이력 때문에 숨기지 않는다.
+
+식별자·상태 메타데이터 자체가 예산을 넘는 극단적 경우에는 모든 행을 넣으면서 유한한
+wire 상한도 지키는 것이 불가능하므로, 행을 조용히 누락하거나 큰 프레임으로 연결을 끊지 않는다.
+명시적 snapshot_too_large 오류를 반환하며 HTTP는 503이다.
+이 오류는 호스트 장애나 DB 쓰기 실패로 분류하지 않고 연결은 유지한다.
+프로토콜의 같은 연결에서 list가 계속 성공하고 브리지가 호스트를 다시 띄우지 않는 것을 검사했다.
+정상 범위의 필수 행은 전부 반환하며 메타데이터 단독 초과는 명시적 실패라는 제한이다.
+
+### 검증 범위
+
+pending·decided 각각 200개가 snapshot에 모두 있고 생성 순서·상태가 유지된다.
+각 카드 입력은 4KiB 미리보기와 원래 바이트 수를 가지며 200개 모두 조각 조회로 전문을 복원했다.
+종결 이력 200개는 최신 128개만 반환하고 more=true인 대조를 확인했다.
+pending 2,100개에서는 모든 행을 보존하면서 미리보기를 줄여 8MiB 미만 응답을 확인했다.
+미종결 delivery 200개와 최신 종결 delivery 128개를 함께 보존하고,
+더 최신인 종결 control 이력이 많아도 예전 accepted control을 보존한다.
+메타데이터만 초과시키는 별도 사례는 snapshot_too_large를 반환하되 원본 카드 행은 그대로다.
+상태 기계·접수·게이트·멱등 규칙은 변경하지 않았다.
+실제 Claude·LLM·동봉 실행 파일·외부 네트워크 호출 및 git 조작은 0이다.
+
+### 라운드 7 최종 검증
+
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-*.test.js server/tests/owned-session*.test.js`
+  → tests 533, pass 510, fail 23, cancelled 0, skipped 0.
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test --test-name-pattern='R7 ' server/tests/session-host-snapshot-pending.test.js server/tests/session-host-protocol.test.js server/tests/owned-session-service.test.js`
+  → tests 8, pass 8, fail 0.
+
+수정 전 로그 /tmp/sh1-r7-before.log: tests 5, pass 1, fail 4.
+
+샌드박스에서 막힌 기존 사례 목록(실제 macOS 재검증 필요):
+
+- `HTTP real SDK pending approval survives server SIGTERM with one provider tool effect` — `Error: listen EPERM: operation not permitted /private/tmp/owned-http-kmKgxw/host.sock`
+- `HTTP real SDK pending approval survives server SIGKILL with one provider tool effect` — `Error: listen EPERM: operation not permitted /private/tmp/owned-http-n3mYFX/host.sock`
+- `HTTP real SDK socket failure preserves pending last-known; identical previously valid mutations all return 503` — `Error: listen EPERM: operation not permitted /private/tmp/owned-http-lpls79/host.sock`
+- `process bridge replacement preserves pending approval; shutdown leaves fake host alive and decision effect once` — `Error: listen EPERM: operation not permitted /private/tmp/owned-x2iube/host.sock`
+- `process accepted-before-reply crash remains unknown; boot change lookup and same key retry cause one start effect` — `Error: listen EPERM: operation not permitted /private/tmp/owned-u2K82K/host.sock`
+- `process broken socket exposes stale snapshot and lock pid only; all valid changes fail closed` — `Error: listen EPERM: operation not permitted /private/tmp/owned-GdAZea/host.sock`
+- `X simultaneous hosts preserve winner socket inode and capability` — `spawnSync /bin/ps EPERM`
+- `X lock does not survive in a live inherited-environment child` — `spawnSync /bin/ps EPERM`
+- `X detached host survives launcher parent SIGKILL` — `spawnSync /bin/ps EPERM`
+- `X detached host survives launcher parent SIGTERM` — `spawnSync /bin/ps EPERM`
+- `X detached host survives launcher parent SIGHUP` — `spawnSync /bin/ps EPERM`
+- `X before accepted crash is reconciled by lookup after boot change, effect occurs once` — `spawnSync /bin/ps EPERM`
+- `X idle drain refuses arrival with not_accepted, new host retries exactly once` — `spawnSync /bin/ps EPERM`
+- `X active ownership prevents idle and SIGTERM exit; zero ownership releases socket and lock` — `spawnSync /bin/ps EPERM`
+- `X private file modes, capability absent from argv and env, launcher sanitizes env` — `host_start_timeout`
+- `X SIGTERM with zero ownership exits cleanly and releases exclusion` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous throw, active ownership=false` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous throw, active ownership=true` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous rejection, active ownership=false` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous rejection, active ownership=true` — `spawnSync /bin/ps EPERM`
+- `R2 real ps ignores unrelated multiline argv while identifying a marked child` — `actual: 'query_failed', expected: 'ok'`
+- `real ps identifies marked child and grandchild then confirms exit` — `actual: 'query_failed', expected: 'ok'`
+- `SDK real ps identity reads actual child and inherited grandchild marker then mismatch` — `spawnSync /bin/ps EPERM`
