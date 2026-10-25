@@ -21,6 +21,8 @@
 unit 요점: `KillMode=mixed`(앱이 먼저 graceful shutdown, 남은 자식은 cgroup 으로 회수), `TimeoutStopSec=30`, `Restart=on-failure`(tailnet IP 가 아직 없어 listen 실패하면 10초 뒤 재시도), `UMask=0077`.
 
 ## 상태 확인
+codev2 안에서 확인할 때는 `codev2` 이름이 tailnet IP 로 풀리지 않으므로 `curl --resolve codev2:4177:100.83.124.113 http://codev2:4177/...` 로 같은 Origin 을 유지한다. 로그인은 `POST /api/auth/login` JSON `{"token":…}`(204) — 토큰은 셸 변수로만 쓰고 출력하지 않는다.
+
 ```sh
 systemctl --user status palantir-console
 journalctl --user -u palantir-console -n 50 --no-pager
@@ -74,6 +76,8 @@ curl -s http://codev2:4177/api/health    # gitSha 가 검토한 SHA 인지
 - **Mac 세션은 수집하지 않는다**(2026-10-14 사용자 결정 — 운영 대상에서 제외). 다른 서버가 생기면 "다른 서버 추가" 절차로 함께 본다.
 - 세션 비서는 codev2 의 Claude 자격(`~/.claude/.credentials.json`)으로 돈다. 이 파일은 claude CLI 가 직접 읽는다 — S1-pre(2026-10-24) 이후 Palantir 는 자격 값을 읽지 않는다. 서비스 env 에 `CLAUDE_CODE_OAUTH_TOKEN` 을 넣어 두었다면 부팅 때 지워지므로 CLI 로그인(`claude` 한 번 실행)으로 바꾼다. 노드 사용량의 Claude 쿼터 카드는 "쿼터 조회 꺼짐 또는 미지원"으로 보인다(레거시 스위치 `PALANTIR_LEGACY_CLAUDE_CREDENTIAL_ACCESS=1` 에서만 조회).
 - tmux 가 없어 워커 실행 엔진은 SubprocessEngine 이다(현재 워커 기능은 꺼져 있음).
+- **"내 세션"(SH1 세션 호스트)은 아직 macOS 전용이다.** 실행 파일 고정값(`pin.js`)이 `darwin-arm64` 동봉 바이너리·해시이고 신원 조회가 macOS `ps -E` 기준이라, codev2(Linux x86_64)에서는 세션 호스트가 어댑터 없이 떠서 시작 요청을 `adapter_unavailable` 로 거절한다. 화면은 `host: not_running, reason: never_started` 로 보인다. Linux 지원은 별도 단계(동봉 linux 바이너리 고정·`/proc` 기반 신원 조회)다.
 
 ## 배포 기록
 - 2026-10-14 최초 배포 `e4cf619`. 검증: health ok·sessionHubActive, 로그인 204, 수동 수집 ok, 답변 조회 4건 final(각 약 0.3초), 세션 비서 1턴(`list_sessions` 호출) 후 stop.
+- 2026-10-26 갱신 `e4cf619` → `d099635`(#606~#622: SH0 Orca 기본 꺼짐 — `orcaBin` 이 있어 켜진 상태 유지, S1-pre OAuth 값 기본 차단 — env 에 OAuth 없음·CLI 로그인 파일 있음 확인, SH1 세션 호스트 S1-a~S1-e2). 마이그레이션 없음. DB 백업 `palantir.db.bak-20261026-080309`. `npm ci` 에 SDK 0.3.308 + linux-x64 동봉 바이너리 추가. 검증: health `d099635`·sessionHubActive, 로그인 204, 수동 수집 `last_result.code=ok`·새 `last_success_at`, observe machine `26de0b2b4038dfff` 최신 `generated_at`, 세션 비서 1턴(`list_sessions` 호출 → 응답) 후 stop, `/api/owned-sessions` = `not_running/never_started`.
