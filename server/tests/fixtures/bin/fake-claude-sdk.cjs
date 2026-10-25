@@ -65,8 +65,8 @@ function finish(batch) {
     const tool = config.tool || (message.message.content === 'tool' ? 'Bash' : message.message.content === 'question' ? 'AskUserQuestion' : null);
     if (!tool) { result([message.uuid]); continue; }
     const id = randomUUID(), toolUseId = `tool_${message.uuid}`;
-    const input = tool === 'AskUserQuestion' ? { questions: [{ question: 'Which?', header: 'Choice', multiSelect: false,
-      options: [{ label: 'A', description: 'First' }, { label: 'B', description: 'Second' }] }] } : { command: 'fake success' };
+    const input = config.toolInput || (tool === 'AskUserQuestion' ? { questions: [{ question: 'Which?', header: 'Choice', multiSelect: false,
+      options: [{ label: 'A', description: 'First' }, { label: 'B', description: 'Second' }] }] } : { command: 'fake success' });
     if (tool === 'AskUserQuestion' && config.questionCount === 2) {
       input.questions.push({ ...input.questions[0], question: 'Why?' });
     }
@@ -75,8 +75,8 @@ function finish(batch) {
     pendingTools.set(id, { message, toolUseId, tool, input, frame, responses: 0, cancelled: !!config.cancelToolRequest });
     log({ type: 'tool_request_sent', request_id: id, tool_use_id: toolUseId, phase: 'initial' });
     send(frame);
-    if (config.redeliverToolRequest) {
-      send(frame);
+    if (config.redeliverToolRequest || config.pendingReplayToolName || config.cancelPendingReplay) {
+      send(config.pendingReplayToolName ? { ...frame, request: { ...frame.request, tool_name: config.pendingReplayToolName } } : frame);
       log({ type: 'tool_request_sent', request_id: id, tool_use_id: toolUseId, phase: 'before_response' });
     }
     if (config.cancelToolRequest) {
@@ -106,6 +106,15 @@ function user(message) {
     }
   } else setTimeout(() => finish([message]), config.delayMs || 0);
 }
+function publishToolResult(entry, decision, allowed) {
+  const allowDecision = decision?.behavior === 'allow';
+  const content = !allowed ? decision?.message || (allowDecision ? 'input_mismatch' : 'denied') : entry.tool === 'AskUserQuestion' ?
+    Object.values(decision.updatedInput.answers).join(', ') : 'ok';
+  send({ type: 'user', session_id: sessionId, uuid: randomUUID(), parent_tool_use_id: config.parentToolUseId ?? null,
+    message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: entry.toolUseId,
+      is_error: !allowed || !!config.toolError, content: config.contentArray ? [{ type: 'text', text: content }] : content }] } });
+  result([entry.message.uuid]);
+}
 const lines = readline.createInterface({ input: process.stdin });
 lines.on('line', line => {
   const message = JSON.parse(line);
@@ -125,6 +134,14 @@ lines.on('line', line => {
       };
       if (config.omitAccount) delete initialization.account;
       if (!config.hangInitialize) response(message.request_id, initialization);
+      if (config.cancelPendingReplay) {
+        for (const [id, entry] of pendingTools) {
+          entry.cancelled = true;
+          send({ type: 'control_cancel_request', request_id: id });
+          log({ type: 'tool_cancel_sent', request_id: id, tool_use_id: entry.toolUseId, phase: 'pending_replay' });
+          result([entry.message.uuid], true);
+        }
+      }
     } else if (request.subtype === 'interrupt') {
       response(message.request_id, config.olderReceipt ? {} : { still_queued: config.stillQueued || [] });
       log({ type: 'interrupt_response', request_id: message.request_id });
@@ -142,7 +159,13 @@ lines.on('line', line => {
     const decision = message.response.response;
     log({ type: 'permission_response', request_id: message.response.request_id,
       tool_use_id: entry.toolUseId, response_count: entry.responses, decision });
-    if (entry.cancelled || entry.responses > 1) return;
+    if (entry.cancelled) return;
+    if (entry.responses > 1) {
+      if (entry.responses === 2 && config.redeliverToolRequest) {
+        publishToolResult(entry, decision, entry.allowed && decision?.behavior === 'allow');
+      }
+      return;
+    }
     if (config.redeliverToolRequest) {
       send(entry.frame);
       log({ type: 'tool_request_sent', request_id: message.response.request_id,
@@ -157,12 +180,8 @@ lines.on('line', line => {
     const allowed = allowDecision && inputMatch;
     if (allowed) log({ type: 'tool', tool_use_id: entry.toolUseId,
       ...(entry.tool === 'AskUserQuestion' ? { answers: decision.updatedInput.answers } : {}) });
-    const content = !allowed ? decision?.message || (allowDecision ? 'input_mismatch' : 'denied') : entry.tool === 'AskUserQuestion' ?
-      Object.values(decision.updatedInput.answers).join(', ') : 'ok';
-    send({ type: 'user', session_id: sessionId, uuid: randomUUID(), parent_tool_use_id: config.parentToolUseId ?? null,
-      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: entry.toolUseId,
-        is_error: !allowed || !!config.toolError, content: config.contentArray ? [{ type: 'text', text: content }] : content }] } });
-    result([entry.message.uuid]);
+    if (config.redeliverToolRequest) { entry.allowed = allowed; return; }
+    publishToolResult(entry, decision, allowed);
   }
 });
 lines.on('close', () => {

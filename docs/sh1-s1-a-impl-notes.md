@@ -1339,3 +1339,140 @@ cancelToolRequest는 can_use_tool 뒤
 - `R2 real ps ignores unrelated multiline argv while identifying a marked child` — query_failed !== ok (실제 ps 조회 차단)
 - `real ps identifies marked child and grandchild then confirms exit` — query_failed !== ok (실제 ps 조회 차단)
 - `SDK real ps identity reads actual child and inherited grandchild marker then mismatch` — 'spawnSync /bin/ps EPERM'
+
+## S1-b2b 수정 라운드 4 — 재생 기능 제거와 실제 설정 경로 확인
+
+이번 절은 라운드 3의 완료 결과 재생 계약을 폐기한다.
+SDK·실행 파일·패키지 설치본은 바꾸지 않았고 실제 Claude·LLM·네트워크 호출은 0이다.
+수정 파일은 어댑터·테스트 전용 실행 파일·SDK 테스트·이 기록이다.
+
+### 수정 전 실패
+
+먼저 아래 테스트를 추가하고 제품 수정 전에 실행했다.
+`PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test --test-name-pattern='R4 ' server/tests/session-host-sdk-adapter.test.js`
+수정 전 tests 5, pass 0, fail 5. 제품 수정 후 같은 명령 tests 5, pass 5, fail 0.
+줄 번호는 수정 전 실행 당시 기준이다.
+
+| 항목 | 테스트 | 실패 줄·원문 요약 |
+|---|---|---|
+| 완료 결과 재생 | `R4 completed request denies instead of replaying allow` | :829, 기대 deny 대신 allow·updatedInput 반환 |
+| 이름 불일치 | `R4 pending replay verifies name` | `assert.notStrictEqual(different, original)`, 이름이 다른데 같은 pending Promise |
+| 입력 불일치 | `R4 pending replay verifies input` | 같은 단언, 입력이 다른데 같은 pending Promise |
+| 재전달 신호 | `R4 accepted replay abort propagates through adapter signal` | :861, event.signal.aborted 기대 true, 실제 false |
+| SDK 실제 루트 | `R4 cached SDK user root cannot hide new HOME forbidden settings` | :887, B의 apiKeyHelper 기대 blocked, 실제 undefined |
+
+### 1. 완료 재생 폐기·대기 요청 일치 조건·취소 신호 통합
+
+decided는 다시 tool_use_id 집합만 보관한다. 결과·Promise·입력의 완료 캐시는 제거했다.
+완료된 ID는 requestId·도구명·입력과 관계없이 이벤트 없이 duplicate_tool_request deny다.
+
+채택한 범위 축소의 근거는 sdk.d.ts:3030–3038이다.
+그 API는 transport 공백 뒤 유실 응답 복구를 위해 재전달을 설명한다.
+제품 어댑터는 프레임 유실 복구·재연결을 제공하지 않는 stdio이고,
+정상 reinitialize는 코어가 prompt 직전 idle에서만 부르므로 대기 중 도구 요청이 없다.
+따라서 완료 요청 재전달을 정상 경로로 지원하지 않는다.
+도달하면 deny로 닫고 원래 allow가 유실되는 비용을 감수한다.
+사람 결정 없이 도구를 실행시키는 결과 재사용 경로는 없다.
+이 전제는 코드 주석에도 기록했다.
+
+대기 요청은 requestId가 있고, 같은 ID·같은 도구명·같은 입력 SHA-256일 때만 Promise를 공유한다.
+입력 지문은 중첩 객체의 키를 정렬한 JSON으로 계산하고 배열 순서는 유지한다.
+이름·입력·requestId 불일치와 requestId 누락은 새 이벤트 없이 deny다.
+키 순서만 바뀐 중첩 입력의 통과 대조를 추가했다.
+
+도구 요청마다 어댑터가 AbortController를 만들고 코어와 facts는 그 signal을 사용한다.
+원래 SDK signal과 수락한 재전달의 SDK signal을 각각 연결한다.
+둘 중 하나라도 abort하면 공통 controller를 abort한다.
+이미 aborted인 수락 재전달도 즉시 공통 controller를 abort한다.
+사람 결정 뒤에도 SDK signal 연결은 남겨 두어 이후 취소 사실을 코어가 받을 수 있게 했다.
+settle은 자기 pending만 제거하고, 자기 abort 리스너를 해제한다.
+exit에서도 모든 공통 controller를 abort하고 SDK signal 리스너를 정리한다.
+
+기존 R3의 완료 결과 재생 테스트는 완료 deny로 뒤집었다.
+wire 가짜는 첫 allow에서만 실행을 기록하며 최종 tool_result는 재전달 응답까지 보류한다.
+두 번째 응답이 deny이면 is_error tool_result를 낸다.
+이 오류가 양성 관측보다 먼저 오므로 원래 allow/answer 전달은 unknown(tool_finished_error)이다.
+첫 allow로 실행 1회, 재전달로 추가 실행 0회를 확인했다.
+이미 양성 결과가 관측된 delivery를 역행시키려 코어를 수정하지 않았다.
+
+### 실제 SDK가 가리는 wire 경로 — 검증 범위 구분
+
+요청된 wire 세부 사례 두 개는 이 고정 SDK에서 그대로 만들 수 없다.
+sdk.mjs:157, 위치 1228390의 handleControlRequest는
+cancelControllers에 같은 request_id가 있으면 processControlRequest·canUseTool 호출 전 반환한다.
+도구명·입력이 달라도 검사하지 않고 중복 프레임을 거른다.
+sdk.mjs:159, 위치 1229424의 control_cancel_request도 그 request_id의 controller 하나만 abort한다.
+initialize의 pending_permission_requests도 같은 handleControlRequest를 사용하므로 우회가 되지 않는다
+(sdk.mjs:159 processPendingPermissionRequests, 위치 1246283).
+
+따라서 검증은 다음처럼 분리했다.
+- 실제 wire에서 대기 중 같은 request_id·다른 도구명을 보내면 카드 1개,
+  두 번째 응답 0개(SDK가 거름), 사람 allow 뒤 응답·실행 각 1회다.
+  요청된 "두 번째 deny"가 나왔다고 주장하지 않는다.
+- 같은 request_id를 재전송한 뒤 wire cancel을 보내면 SDK가 보유한 논리 요청 signal이 abort하고,
+  코어 카드는 cancelled, 늦은 사람 결정 rejected, 실행 0이다.
+  두 번째 콜백이 없으므로 "재전달 쪽 SDK signal만 취소"했다고 주장하지 않는다.
+- 수락된 두 번째 SDK signal 자체의 abort 통합과 이름·입력 불일치 deny는
+  실제 SDK에 넘긴 같은 콜백을 직접 호출하는 경계 테스트로 검증했다.
+  SDK 내부 상태를 지우거나 SDK를 흉내 내서 wire 성공으로 꾸미지 않았다.
+
+이 wire/콜백 경계 대체의 수락 여부는 호스트 판단 항목이다.
+완료 뒤 동일 request_id 재전송은 실제 wire로 콜백까지 도달하므로 deny·추가 실행 0을 직접 검증했다.
+
+### 2. resolveSettings가 실제 쓴 사용자 경로 확인
+
+checkSettings는 스냅샷 검사를 한 뒤 실제 SDK resolveSettings를 호출하고,
+완료 뒤에도 스냅샷 조건을 다시 확인한다.
+sources 및 provenance 값 중 source가 user인 항목의 path가
+고정 HOME/.claude/ 아래의 절대 경로인지 검사한다.
+다른 루트·경로 누락이면 config_root_mismatch로 거부한다.
+프로젝트·관리 설정 경로를 사용자 루트로 잘못 제한하지 않는다.
+
+근거(설치된 압축 sdk.mjs):
+- 39줄 Pt, 위치 266380: HOME으로 .claude 경로를 계산하지만 캐시 키는 cu(CLAUDE_CONFIG_DIR)다.
+- 157줄 d4, 위치 1149586: userSettings 디렉터리는 Pt()에서 얻는다.
+- 157줄 Lc, 위치 1152114: 그 디렉터리에 사용자 settings 파일명을 붙인다.
+- 157줄 p9, 위치 1193805: sources는 source/path/settings, provenance는 source/path 형태로 노출한다.
+  userSettings의 공개 source 값은 user다.
+- 157줄 Y4, 위치 1180944: 비어 있지 않은 설정을 가진 소스만 sources에 넣는다.
+  p9 반환은 effective·provenance·sources뿐이며 별도 계산 루트 필드는 없다.
+
+같은 SDK 모듈로 A에서 비금지 사용자 설정을 읽어 캐시를 만든 뒤,
+B에 apiKeyHelper를 두고 HOME=B인 새 어댑터를 만들었다.
+설치된 SDK는 A 경로를 반환했고 어댑터가 config_root_mismatch로 거부했다.
+B의 설정을 실제 읽는 SDK라면 apiKeyHelper를 코어 게이트가 거부하는 분기도 테스트가 허용한다.
+같은 HOME=A 대조는 시작 성공이다. B에서는 spawn·가짜 로그 0이다.
+
+**허용된 잔여 위험**: 사용자 파일이 없거나 비어 있어 user 범위 항목이 전혀 없으면
+SDK 결과에서 계산 루트를 얻을 수 없다. 이 경우 요구대로 기존 불변 스냅샷 검사만 적용한다.
+예를 들어 먼저 빈 A 루트를 캐시한 뒤 HOME=B로 새 어댑터를 만드는 임의의 프로세스 사용은
+노출 경로가 없어 검출되지 않을 수 있다. 이 위험을 제거했다고 주장하지 않는다.
+제품은 독립 호스트에서 loadSdkAdapter로 시작 시 어댑터 하나를 만들고 HOME을 그때 고정한다.
+
+### 최종 검증
+
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-sdk-adapter.test.js`
+  → tests 81, pass 80, fail 1(기존 실제 ps EPERM).
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-*.test.js`
+  → tests 430, pass 413, fail 17, cancelled 0, skipped 0. 신규 9개 모두 통과.
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/spawn-guard.test.js`
+  → tests 9, pass 9, fail 0.
+
+샌드박스 실패 목록은 아래와 같다. 실제 macOS 검증은 호스트가 해야 한다.
+- `X simultaneous hosts preserve winner socket inode and capability` — 'spawnSync /bin/ps EPERM'
+- `X lock does not survive in a live inherited-environment child` — 'spawnSync /bin/ps EPERM'
+- `X detached host survives launcher parent SIGKILL` — 'spawnSync /bin/ps EPERM'
+- `X detached host survives launcher parent SIGTERM` — 'spawnSync /bin/ps EPERM'
+- `X detached host survives launcher parent SIGHUP` — 'spawnSync /bin/ps EPERM'
+- `X before accepted crash is reconciled by lookup after boot change, effect occurs once` — 'spawnSync /bin/ps EPERM'
+- `X idle drain refuses arrival with not_accepted, new host retries exactly once` — 'spawnSync /bin/ps EPERM'
+- `X active ownership prevents idle and SIGTERM exit; zero ownership releases socket and lock` — 'spawnSync /bin/ps EPERM'
+- `X private file modes, capability absent from argv and env, launcher sanitizes env` — 'host_start_timeout'
+- `X SIGTERM with zero ownership exits cleanly and releases exclusion` — 'spawnSync /bin/ps EPERM'
+- `X R1-01 asynchronous throw, active ownership=false` — 'spawnSync /bin/ps EPERM'
+- `X R1-01 asynchronous throw, active ownership=true` — 'spawnSync /bin/ps EPERM'
+- `X R1-01 asynchronous rejection, active ownership=false` — 'spawnSync /bin/ps EPERM'
+- `X R1-01 asynchronous rejection, active ownership=true` — 'spawnSync /bin/ps EPERM'
+- `R2 real ps ignores unrelated multiline argv while identifying a marked child` — query_failed !== ok (실제 ps 조회 차단)
+- `real ps identifies marked child and grandchild then confirms exit` — query_failed !== ok (실제 ps 조회 차단)
+- `SDK real ps identity reads actual child and inherited grandchild marker then mismatch` — 'spawnSync /bin/ps EPERM'

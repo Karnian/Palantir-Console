@@ -566,7 +566,17 @@ for (const aborted of [false, true]) check(`R2 duplicate tool callback shares pe
   if (aborted) controller.abort();
   const second = callback(event.name, event.input, { signal: controller.signal, toolUseID: tool.tool_use_id, requestId });
   assert.strictEqual(first, second);
-  assert.equal(f.adapter.facts(f.iid, tool.tool_use_id).aborted, false);
+  assert.equal(f.adapter.facts(f.iid, tool.tool_use_id).aborted, aborted);
+  if (aborted) {
+    assert.equal(event.signal.aborted, true);
+    assert.deepEqual(await first, { behavior: 'deny', message: 'request_aborted' });
+    assert.equal(f.core.submit(f.req('tool_decision', {
+      target_tool_use_id: tool.tool_use_id, body: { behavior: 'allow' }
+    })).state, 'rejected');
+    await f.completed(prompt);
+    assert.equal(f.log().filter(row => row.type === 'tool').length, 0);
+    return;
+  }
   const answer = f.core.submit(f.req('tool_decision', { target_tool_use_id: tool.tool_use_id, body: { behavior: 'allow' } }));
   assert.deepEqual(await first, { behavior: 'allow', updatedInput: event.input });
   await f.completed(prompt);
@@ -728,7 +738,7 @@ check('R3 caller environment mutation cannot change child snapshot', async (t, s
   assert.equal(f.spawns[0].opts.env.LANG, 'C');
 });
 
-for (const question of [false, true]) check(`R3 completed same request replays original result question=${question}`, async (t, sdk) => {
+for (const question of [false, true]) check(`R4 completed same request denies original result replay question=${question}`, async (t, sdk) => {
   let callback;
   const f = await fixture(t, sdk, {}, { testHooks: { onQuery({ canUseTool }) { callback = canUseTool; } } });
   await f.start();
@@ -741,12 +751,13 @@ for (const question of [false, true]) check(`R3 completed same request replays o
   f.adapter.decide(f.iid, tool.tool_use_id, question ? { behavior: 'answer', answer: 'A' } : { behavior: 'allow' });
   const result = await pending;
   await f.completed(prompt);
-  assert.strictEqual(await callback(event.name, event.input, options), result);
+  assert.equal(result.behavior, 'allow');
+  assert.deepEqual(await callback(event.name, event.input, options), { behavior: 'deny', message: 'duplicate_tool_request' });
   assert.equal(f.events.filter(event => event.type === 'tool_request').length, 1);
   assert.equal(f.log().filter(row => row.type === 'tool').length, 1);
 });
 
-for (const question of [false, true]) check(`R3 wire redelivery preserves human decision question=${question}`, async (t, sdk) => {
+for (const question of [false, true]) check(`R4 wire completed redelivery denies without another execution question=${question}`, async (t, sdk) => {
   const f = await fixture(t, sdk, { redeliverToolRequest: true });
   await f.start();
   const prompt = f.prompt(question ? 'question' : 'tool');
@@ -761,9 +772,11 @@ for (const question of [false, true]) check(`R3 wire redelivery preserves human 
   await until(() => f.log().filter(row => row.type === 'permission_response').length >= 2, 'replayed wire response');
   const replies = f.log().filter(row => row.type === 'permission_response');
   assert.equal(replies.length, 2);
-  assert.deepEqual(replies[1].decision, replies[0].decision);
+  assert.equal(replies[1].decision.behavior, 'deny');
+  assert.equal(replies[1].decision.message, 'duplicate_tool_request');
   assert.equal(replies[0].decision.behavior, 'allow');
-  assert.equal(f.d(answer).state, 'provider_observed');
+  assert.equal(f.d(answer).state, 'unknown');
+  assert.equal(f.d(answer).reason, 'tool_finished_error');
   assert.equal(f.state().deliveries.filter(row => ['tool_decision', 'question_answer'].includes(row.kind)).length, 1);
   assert.equal(f.events.filter(event => event.type === 'tool_request').length, 1);
   assert.deepEqual(f.log().filter(row => row.type === 'tool_request_sent').map(row => row.phase),
@@ -809,8 +822,153 @@ for (const requestId of ['different-request', undefined]) {
     await f.completed(prompt);
     assert.equal(f.d(decision).state, 'provider_observed');
     assert.deepEqual(await callback(event.name, event.input, options), { behavior: 'deny', message: 'duplicate_tool_request' });
-    assert.strictEqual(await callback(event.name, event.input, { ...options, requestId: originalId }), originalResult);
+    assert.equal(originalResult.behavior, 'allow');
+    assert.deepEqual(await callback(event.name, event.input, { ...options, requestId: originalId }),
+      { behavior: 'deny', message: 'duplicate_tool_request' });
     assert.equal(f.events.filter(event => event.type === 'tool_request').length, 1);
     assert.equal(f.log().filter(row => row.type === 'tool').length, 1);
   });
 }
+
+check('R4 completed request denies instead of replaying allow', async (t, sdk) => {
+  let callback;
+  const f = await fixture(t, sdk, {}, { testHooks: { onQuery({ canUseTool }) { callback = canUseTool; } } });
+  await f.start();
+  const prompt = f.prompt('tool');
+  const tool = await f.pendingTool();
+  const event = f.events.find(event => event.type === 'tool_request');
+  const requestId = f.log().find(row => row.type === 'tool_request_sent').request_id;
+  const options = { signal: new AbortController().signal, toolUseID: tool.tool_use_id, requestId };
+  f.adapter.decide(f.iid, tool.tool_use_id, { behavior: 'allow' });
+  await f.completed(prompt);
+  assert.deepEqual(await callback(event.name, event.input, options), { behavior: 'deny', message: 'duplicate_tool_request' });
+  assert.equal(f.events.filter(event => event.type === 'tool_request').length, 1);
+});
+
+for (const change of ['name', 'input']) check(`R4 pending replay verifies ${change}`, async (t, sdk) => {
+  let callback;
+  const f = await fixture(t, sdk, {}, { testHooks: { onQuery({ canUseTool }) { callback = canUseTool; } } });
+  await f.start();
+  f.prompt('tool');
+  const tool = await f.pendingTool();
+  const event = f.events.find(event => event.type === 'tool_request');
+  const requestId = f.log().find(row => row.type === 'tool_request_sent').request_id;
+  const options = { signal: new AbortController().signal, toolUseID: tool.tool_use_id, requestId };
+  const original = callback(event.name, event.input, options);
+  const different = callback(change === 'name' ? 'OtherTool' : event.name,
+    change === 'input' ? { command: 'different' } : event.input, options);
+  assert.notStrictEqual(different, original);
+  assert.deepEqual(await different, { behavior: 'deny', message: 'duplicate_tool_request' });
+  assert.equal(f.events.filter(event => event.type === 'tool_request').length, 1);
+});
+
+check('R4 accepted replay abort propagates through adapter signal', async (t, sdk) => {
+  let callback;
+  const f = await fixture(t, sdk, {}, { testHooks: { onQuery({ canUseTool }) { callback = canUseTool; } } });
+  await f.start();
+  f.prompt('tool');
+  const tool = await f.pendingTool();
+  const event = f.events.find(event => event.type === 'tool_request');
+  const requestId = f.log().find(row => row.type === 'tool_request_sent').request_id;
+  const duplicate = new AbortController();
+  const promise = callback(event.name, event.input, { signal: duplicate.signal, toolUseID: tool.tool_use_id, requestId });
+  duplicate.abort();
+  assert.equal(event.signal.aborted, true);
+  assert.equal(f.adapter.facts(f.iid, tool.tool_use_id).aborted, true);
+  assert.deepEqual(await promise, { behavior: 'deny', message: 'request_aborted' });
+  assert.equal(f.state().tool_requests[0].state, 'cancelled');
+  assert.equal(f.core.submit(f.req('tool_decision', { target_tool_use_id: tool.tool_use_id, body: { behavior: 'allow' } })).state, 'rejected');
+  assert.equal(f.log().filter(row => row.type === 'tool').length, 0);
+});
+
+check('R4 cached SDK user root cannot hide new HOME forbidden settings', async (t, sdk) => {
+  const settingsA = path.join(home, '.claude/settings.json');
+  const homeB = fs.mkdtempSync(path.join(os.tmpdir(), 'sh1-home-b-'));
+  t.after(() => fs.rmSync(homeB, { recursive: true, force: true }));
+  fs.mkdirSync(path.dirname(settingsA), { recursive: true });
+  fs.writeFileSync(settingsA, JSON.stringify({ model: 'root-control' }));
+  fs.mkdirSync(path.join(homeB, '.claude'));
+  fs.writeFileSync(path.join(homeB, '.claude/settings.json'), JSON.stringify({ apiKeyHelper: 'blocked' }));
+  try {
+    const good = await fixture(t, sdk);
+    const resolvedA = await sdk.resolveSettings({ cwd: good.dir });
+    assert.ok(resolvedA.sources.some(source => source.source === 'user' && source.path.startsWith(home + path.sep)));
+    assert.equal((await good.start()).state, 'done');
+    process.env.HOME = homeB;
+    const f = await fixture(t, sdk);
+    let resolved, rejected = false;
+    try { resolved = await f.adapter.checkSettings(f.dir); }
+    catch (error) { assert.equal(error.code, 'config_root_mismatch'); rejected = true; }
+    if (!rejected) assert.equal(resolved.effective.apiKeyHelper, 'blocked');
+    assert.equal((await f.start()).state, 'failed');
+    assert.equal(f.spawns.length, 0);
+    assert.deepEqual(f.log(), []);
+  } finally {
+    process.env.HOME = home;
+    fs.rmSync(settingsA, { force: true });
+  }
+});
+
+check('R4 sorted JSON fingerprint accepts reordered nested input keys', async (t, sdk) => {
+  let callback;
+  const f = await fixture(t, sdk, { toolInput: { command: 'fake success', metadata: { z: 1, a: 2 } } },
+    { testHooks: { onQuery({ canUseTool }) { callback = canUseTool; } } });
+  await f.start();
+  const prompt = f.prompt('tool');
+  const tool = await f.pendingTool();
+  const event = f.events.find(event => event.type === 'tool_request');
+  const requestId = f.log().find(row => row.type === 'tool_request_sent').request_id;
+  const options = { signal: new AbortController().signal, toolUseID: tool.tool_use_id, requestId };
+  const first = callback(event.name, event.input, options);
+  assert.strictEqual(callback(event.name, { metadata: { a: 2, z: 1 }, command: 'fake success' }, options), first);
+  const decision = f.core.submit(f.req('tool_decision', { target_tool_use_id: tool.tool_use_id, body: { behavior: 'allow' } }));
+  await f.completed(prompt);
+  assert.equal(f.d(decision).state, 'provider_observed');
+  assert.equal(f.log().filter(row => row.type === 'tool').length, 1);
+});
+
+check('R4 child exit aborts adapter controller and facts', async (t, sdk) => {
+  const f = await fixture(t, sdk);
+  await f.start();
+  f.prompt('tool');
+  const tool = await f.pendingTool();
+  const event = f.events.find(event => event.type === 'tool_request');
+  assert.equal(event.signal.aborted, false);
+  await f.exit();
+  assert.equal(event.signal.aborted, true);
+  assert.equal(f.adapter.facts(f.iid, tool.tool_use_id).aborted, true);
+  assert.equal(f.state().tool_requests[0].state, 'cancelled');
+  assert.equal(f.log().filter(row => row.type === 'tool').length, 0);
+});
+
+check('R4 wire pending changed-name replay is deduped by SDK before callback', async (t, sdk) => {
+  const f = await fixture(t, sdk, { pendingReplayToolName: 'OtherTool' });
+  await f.start();
+  const prompt = f.prompt('tool');
+  const tool = await f.pendingTool();
+  await f.adapter.accountInfo(f.iid);
+  assert.equal(f.events.filter(event => event.type === 'tool_request').length, 1);
+  assert.equal(f.log().filter(row => row.type === 'tool_request_sent').length, 2);
+  assert.equal(f.log().filter(row => row.type === 'permission_response').length, 0);
+  const decision = f.core.submit(f.req('tool_decision', { target_tool_use_id: tool.tool_use_id, body: { behavior: 'allow' } }));
+  await f.completed(prompt);
+  assert.equal(f.d(decision).state, 'provider_observed');
+  assert.equal(f.log().filter(row => row.type === 'permission_response').length, 1);
+  assert.equal(f.log().filter(row => row.type === 'tool').length, 1);
+});
+
+check('R4 wire pending replay cancellation cancels shared logical approval', async (t, sdk) => {
+  const f = await fixture(t, sdk, { cancelPendingReplay: true });
+  await f.start();
+  const prompt = f.prompt('tool');
+  const tool = await f.pendingTool();
+  await f.adapter.accountInfo(f.iid);
+  await until(() => f.state().tool_requests[0].state === 'cancelled', 'wire pending replay cancelled');
+  assert.equal(f.adapter.facts(f.iid, tool.tool_use_id).aborted, true);
+  assert.equal(f.core.submit(f.req('tool_decision', { target_tool_use_id: tool.tool_use_id, body: { behavior: 'allow' } })).state, 'rejected');
+  await until(() => f.d(prompt).outcome === 'interrupted', 'cancelled prompt');
+  assert.equal(f.events.filter(event => event.type === 'tool_request').length, 1);
+  assert.equal(f.log().filter(row => row.type === 'tool_request_sent').length, 2);
+  assert.equal(f.log().filter(row => row.type === 'tool_cancel_sent').length, 1);
+  assert.equal(f.log().filter(row => row.type === 'tool').length, 0);
+});

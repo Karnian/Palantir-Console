@@ -1,6 +1,7 @@
 'use strict';
 const { EventEmitter } = require('node:events');
-const { randomUUID } = require('node:crypto');
+const { randomUUID, createHash } = require('node:crypto');
+const path = require('node:path');
 const childProcess = require('node:child_process');
 const pin = require('./pin');
 const { assertSpawnAllowed } = require('../utils/spawnGuard');
@@ -34,6 +35,11 @@ function inputQueue() {
     }
   };
 }
+function inputFingerprint(input) {
+  const canonical = JSON.stringify(input, (_key, value) => value && typeof value === 'object' && !Array.isArray(value) ?
+    Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]])) : value);
+  return createHash('sha256').update(canonical).digest('hex');
+}
 function capabilityVerdict({ systemInitCapabilities, sdkVersion, cliVersion, permissionMode } = {}) {
   const verdict = { observe: 'supported', prompt: 'unknown', tool_approval: 'supported', cancel: 'unknown', resume: 'supported' };
   if (sdkVersion !== pin.sdkVersion || cliVersion !== pin.cliVersion || permissionMode !== 'default') {
@@ -59,6 +65,19 @@ function createSdkAdapter({ sdk, executablePath = bundledExecutable(), executabl
   const initialRootsMatch = rootsMatch();
   function assertConfigRoot() {
     if (!initialRootsMatch || !rootsMatch()) throw failure('config_root_mismatch');
+  }
+  function assertResolvedRoot(resolved) {
+    const sources = Array.isArray(resolved?.sources) ? resolved.sources : [];
+    const provenance = resolved?.provenance && typeof resolved.provenance === 'object' ? Object.values(resolved.provenance) : [];
+    const root = path.resolve(fixedHome, '.claude') + path.sep;
+    for (const entry of [...sources, ...provenance]) {
+      if (entry?.source !== 'user') continue;
+      if (typeof entry.path !== 'string' || !path.isAbsolute(entry.path) || !path.resolve(entry.path).startsWith(root)) {
+        throw failure('config_root_mismatch');
+      }
+    }
+    // resolveSettings exposes no root when the user tier contributes no settings.
+    // In that case only the immutable HOME and forbidden-variable checks apply.
   }
   const events = new EventEmitter(), children = new Map();
   const emit = (id, type, data = {}) => events.emit('event', { incarnation_id: id, type, ...data });
@@ -91,7 +110,13 @@ function createSdkAdapter({ sdk, executablePath = bundledExecutable(), executabl
   }
   const adapter = {
     events,
-    checkSettings(cwd) { return Promise.resolve().then(() => { assertConfigRoot(); return sdk.resolveSettings({ cwd }); }); },
+    checkSettings(cwd) {
+      return Promise.resolve().then(() => { assertConfigRoot(); return sdk.resolveSettings({ cwd }); }).then(resolved => {
+        assertConfigRoot();
+        assertResolvedRoot(resolved);
+        return resolved;
+      });
+    },
     accountInfo(id) {
       return Promise.resolve().then(() => requireChild(id).query.reinitialize()).then(initialization => {
         if (!initialization?.account || typeof initialization.account !== 'object') throw failure('account_unavailable');
@@ -104,7 +129,7 @@ function createSdkAdapter({ sdk, executablePath = bundledExecutable(), executabl
       if (resume === true ? typeof claude_session_id !== 'string' || !claude_session_id :
         resume !== undefined || claude_session_id !== undefined) throw failure('invalid_resume_contract');
       const sessionId = resume ? claude_session_id : randomUUID();
-      const row = { input: inputQueue(), pending: new Map(), signals: new Map(), decided: new Map(), exited: false, closed: false };
+      const row = { input: inputQueue(), pending: new Map(), signals: new Map(), decided: new Set(), exited: false, closed: false };
       let spawnError;
       function customSpawn(opts) {
         try {
@@ -124,9 +149,12 @@ function createSdkAdapter({ sdk, executablePath = bundledExecutable(), executabl
           row.process.once('exit', () => {
             row.exited = true;
             row.input.end();
-            for (const pending of row.pending.values()) pending.settle({ behavior: 'deny', message: 'request_aborted' });
+            for (const cancellation of row.signals.values()) {
+              cancellation.controller.abort();
+              for (const [signal, listener] of cancellation.handlers) signal.removeEventListener('abort', listener);
+              cancellation.handlers.clear();
+            }
             row.decided.clear();
-            row.signals.clear();
             identityProbe.exit?.(id);
             emit(id, 'child_exit');
           });
@@ -147,29 +175,47 @@ function createSdkAdapter({ sdk, executablePath = bundledExecutable(), executabl
           throw spawnError;
         }
       }
+      function linkSignal(cancellation, signal) {
+        if (cancellation.handlers.has(signal)) return;
+        const abort = () => cancellation.controller.abort();
+        if (signal.aborted) { abort(); return; }
+        cancellation.handlers.set(signal, abort);
+        signal.addEventListener('abort', abort, { once: true });
+      }
       function canUseTool(name, input, { signal, toolUseID, requestId }) {
         if (row.exited || row.closed) return Promise.resolve({ behavior: 'deny', message: 'request_aborted' });
-        const existing = row.pending.get(toolUseID) || row.decided.get(toolUseID);
+        const denyDuplicate = () => Promise.resolve({ behavior: 'deny', message: 'duplicate_tool_request' });
+        // sdk.d.ts:3030-3038 describes transport-gap replay; lossless stdio and idle reinitialize exclude it.
+        // Never replay an authorization: accepting a lost allow is less safe than denying it.
+        if (row.decided.has(toolUseID)) return denyDuplicate();
+        let fingerprint;
+        try { fingerprint = inputFingerprint(input); } catch { return denyDuplicate(); }
+        const existing = row.pending.get(toolUseID);
         if (existing) {
-          if (typeof requestId === 'string' && requestId.length > 0 && existing.requestId === requestId) return existing.promise;
-          return Promise.resolve({ behavior: 'deny', message: 'duplicate_tool_request' });
+          if (typeof requestId !== 'string' || !requestId || existing.requestId !== requestId ||
+              existing.name !== name || existing.fingerprint !== fingerprint) return denyDuplicate();
+          linkSignal(existing.cancellation, signal);
+          return existing.promise;
         }
         let resolve;
         const promise = new Promise(done => { resolve = done; });
-        const pending = { input, requestId, promise, settle };
+        const cancellation = { controller: new AbortController(), handlers: new Map() };
+        const adapterSignal = cancellation.controller.signal;
+        const pending = { input, name, fingerprint, requestId, promise, cancellation, settle };
         function settle(result) {
           if (row.pending.get(toolUseID) !== pending) return;
           row.pending.delete(toolUseID);
-          row.decided.set(toolUseID, { requestId, result, promise });
-          signal.removeEventListener('abort', abort);
+          row.decided.add(toolUseID);
+          adapterSignal.removeEventListener('abort', abort);
           resolve(result);
         }
         function abort() { settle({ behavior: 'deny', message: 'request_aborted' }); }
         row.pending.set(toolUseID, pending);
-        row.signals.set(toolUseID, signal);
-        if (signal.aborted || row.exited || row.closed) { abort(); return promise; }
-        signal.addEventListener('abort', abort, { once: true });
-        emit(id, 'tool_request', { tool_use_id: toolUseID, name, input, signal });
+        row.signals.set(toolUseID, cancellation);
+        adapterSignal.addEventListener('abort', abort, { once: true });
+        linkSignal(cancellation, signal);
+        if (adapterSignal.aborted) return promise;
+        emit(id, 'tool_request', { tool_use_id: toolUseID, name, input, signal: adapterSignal });
         return promise;
       }
       try {
@@ -247,7 +293,7 @@ function createSdkAdapter({ sdk, executablePath = bundledExecutable(), executabl
     },
     facts(id, toolUseId) {
       const row = children.get(id);
-      return { exited: !row || row.exited, aborted: row?.signals.get(toolUseId)?.aborted === true };
+      return { exited: !row || row.exited, aborted: row?.signals.get(toolUseId)?.controller.signal.aborted === true };
     }
   };
   return adapter;
