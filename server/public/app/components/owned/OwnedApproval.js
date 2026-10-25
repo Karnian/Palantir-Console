@@ -5,6 +5,7 @@ import { OWNED_COPY } from '../../lib/copy.js';
 import { ownedFullText } from './client.js';
 import { ownedLabel, parseOwnedJson, formatOwnedTime } from './format.js';
 import { OwnedDeliveryBadge } from './OwnedDeliveryBadge.js';
+import { getOwnedToolInputPreview } from './state.js';
 import { OwnedQuestion } from './OwnedQuestion.js';
 const html = htm.bind(h);
 
@@ -36,19 +37,27 @@ export function OwnedApproval({ card, sessionId, cwd, disabled, delivery, onSubm
     <label>${OWNED_COPY.reason}
       <input value=${reason} disabled=${locked} onInput=${event => setReason(event.target.value)} />
     </label>
-    <button disabled=${locked} onClick=${allowTool}>${OWNED_COPY.allow}</button>
-    <button disabled=${locked} onClick=${denyTool}>${OWNED_COPY.deny}</button>
+    <button class="btn btn-sm btn-primary" disabled=${locked} onClick=${allowTool}>${OWNED_COPY.allow}</button>
+    <button class="btn btn-sm btn-danger" disabled=${locked} onClick=${denyTool}>${OWNED_COPY.deny}</button>
   `;
   if (card.tool_name === 'AskUserQuestion') {
     decisionControls = html`<${OwnedQuestion} input=${parseOwnedJson(fullInput)} disabled=${locked} onAnswer=${answerQuestion} />`;
   }
+  const inputPreview = getOwnedToolInputPreview(inputText);
   return html`
     <article class="owned-card">
       <h3>${card.tool_name}</h3>
       <p>${cwd} · ${OWNED_COPY.timestamp}: ${formatOwnedTime(card.created_at)}</p>
-      <details open><summary>${OWNED_COPY.input}</summary><pre>${inputText}</pre></details>
+      <div class="owned-approval-actions">${decisionControls}</div>
       <p>${ownedLabel(card.state)} ${delivery && html`<${OwnedDeliveryBadge} delivery=${delivery} />`}</p>
-      ${decisionControls}
+      ${inputPreview.long && html`
+        <p>${OWNED_COPY.inputPreview}</p>
+        <pre class="owned-tool-preview">${inputPreview.preview}</pre>
+      `}
+      <details class="owned-tool-input" open=${!inputPreview.long}>
+        <summary>${inputPreview.long ? OWNED_COPY.expandInput : OWNED_COPY.input}</summary>
+        <pre class="owned-tool-full">${inputText}</pre>
+      </details>
     </article>
   `;
 }

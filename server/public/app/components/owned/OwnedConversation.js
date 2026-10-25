@@ -10,7 +10,7 @@ export function OwnedConversation({ state, events, sessionId, disabled, controll
   const conversation = buildOwnedConversation(state, events);
   return html`
     <h2>${OWNED_COPY.conversation}</h2>
-    ${nextPage && html`<button disabled=${disabled} onClick=${onHistory}>${OWNED_COPY.history}</button>`}
+    ${nextPage && html`<button class="btn btn-sm" disabled=${disabled} onClick=${onHistory}>${OWNED_COPY.history}</button>`}
     ${conversation.map(({ kind, row }) => {
       if (kind === 'prompt') {
         const resendDisabled = disabled || !controllable || !canResendOwnedPrompt(state, row);

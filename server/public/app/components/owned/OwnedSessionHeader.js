@@ -1,21 +1,37 @@
 import { h } from '../../../vendor/preact.module.js';
 import htm from '../../../vendor/htm.module.js';
 import { OWNED_COPY } from '../../lib/copy.js';
-import { ownedLabel, parseOwnedJson } from './format.js';
+import { ownedLabel, parseOwnedJson, formatOwnedTime } from './format.js';
+import { getOwnedHeaderState } from './state.js';
 const html = htm.bind(h);
 
-export function OwnedSessionHeader({ state, incarnation, host, controllable, interaction }) {
+function OwnedHeaderField({ label, value, lastValue, asOf }) {
+  return html`
+    <span class="owned-header-field">
+      ${label}: ${ownedLabel(value)}
+      ${lastValue && html`<span class="owned-last-known">
+        (${formatOwnedTime(asOf)} ${OWNED_COPY.lastKnown}: ${ownedLabel(lastValue)})
+      </span>`}
+    </span>
+  `;
+}
+
+export function OwnedSessionHeader({ state, incarnation, host, asOf }) {
   const account = parseOwnedJson(incarnation?.account_snapshot);
-  let liveness = OWNED_COPY.unknown;
-  if (['alive', 'orphaned'].includes(incarnation?.state)) liveness = OWNED_COPY.alive;
-  if (['exited', 'never_started'].includes(incarnation?.state)) liveness = OWNED_COPY.exited;
+  const { current, lastKnown } = getOwnedHeaderState(host, state);
+  const fields = [
+    ['execution', OWNED_COPY.headerExecution],
+    ['control', OWNED_COPY.headerControl],
+    ['interaction', OWNED_COPY.headerInteraction],
+    ['session', OWNED_COPY.headerSession]
+  ];
   const capabilityNames = ['observe', 'prompt', 'tool_approval', 'cancel', 'resume'];
   return html`
     <div class="owned-card">
-      <p>
-        ${host === 'running' ? OWNED_COPY.connected : OWNED_COPY.disconnected} · ${liveness} ·
-        ${controllable ? OWNED_COPY.control : OWNED_COPY.noControl} ·
-        ${ownedLabel(interaction)} · ${ownedLabel(state.session.state)}
+      <p class="owned-header-status">
+        <span>${OWNED_COPY.headerHost}: ${host === 'running' ? OWNED_COPY.hostConnected : OWNED_COPY.hostLost}</span>
+        ${fields.map(([name, label]) => html`<${OwnedHeaderField} key=${name} label=${label}
+          value=${current[name]} lastValue=${lastKnown?.[name]} asOf=${asOf} />`)}
       </p>
       <p>${OWNED_COPY.cwd}: ${state.session.cwd}</p>
       <p>

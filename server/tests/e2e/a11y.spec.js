@@ -182,10 +182,14 @@ for (const theme of ['dark', 'light']) {
       await expect(page.getByRole('heading', { name: '내 세션', exact: true })).toBeVisible();
       if (scenario === 'permissions' || scenario === 'unreachable') {
         const approval = page.locator('.owned-card').filter({ has: page.getByRole('heading', { name: 'Bash', exact: true }) });
-        await expect(approval.locator('pre')).toContainText('전문 마지막 표지');
+        await expect(approval.locator('.owned-tool-full')).toContainText('전문 마지막 표지');
         await expect(page.getByRole('button', { name: '허용', exact: true })).toBeEnabled();
         await expect(page.getByText('어떤 검증을 진행할까요?', { exact: true })).toBeVisible();
+        const fullInput = approval.locator('.owned-tool-input');
+        await expect(fullInput).not.toHaveAttribute('open');
         if (scenario === 'permissions') {
+          await approval.getByText('전문 펼치기', { exact: true }).click();
+          await expect(approval.locator('.owned-tool-full')).toBeVisible();
           await page.getByRole('checkbox', { name: /단위 검사/ }).check();
           await expect(page.getByRole('button', { name: '답변 보내기', exact: true })).toBeEnabled();
         } else {
@@ -193,13 +197,17 @@ for (const theme of ['dark', 'light']) {
             data: JSON.stringify({ seq: 15, current_state_known: false })
           })));
           await expect(page.getByText(/호스트 응답 없음.*기준, 현재 상태 불명/)).toBeVisible();
+          for (const field of ['실행', '제어', '상호작용']) {
+            await expect(page.locator('.owned-header-field').filter({ hasText: field + ':' })).toContainText(field + ': 불명');
+          }
+          await expect(page.locator('.owned-last-known').first()).toContainText(/기준 마지막: 생존/);
           const buttons = page.locator('.owned-view button');
           expect(await buttons.count()).toBeGreaterThan(0);
           for (const button of await buttons.all()) await expect(button).toBeDisabled();
-          await expect(approval.locator('pre')).toContainText('전문 마지막 표지');
+          await expect(approval.locator('.owned-tool-full')).toContainText('전문 마지막 표지');
         }
       } else if (scenario === 'conversation') {
-        await expect(page.getByText('받음·결과 불명', { exact: false })).toBeVisible();
+        await expect(page.getByText('받음 · 결과 불명', { exact: true })).toBeVisible();
         await expect(page.locator('.owned-unknown').filter({ hasText: '전달 불명' }).first()).toBeVisible();
         await expect(page.getByText('귀속 불명 결과', { exact: true })).toBeVisible();
         await expect(page.locator('.owned-view textarea')).toBeDisabled();

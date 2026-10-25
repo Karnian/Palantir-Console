@@ -9051,3 +9051,57 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 .owned-actions { display: flex; flex-wrap: wrap; }
 .owned-unknown { color: var(--text-primary); border: 2px solid var(--warning-badge-fg); padding: 8px; font-weight: 600; }
 .owned-badge { display: inline-block; padding: 4px; margin: 2px; border: 1px solid var(--border); }
+
+/* Owned controls use the shared button class vocabulary, scoped to this screen. */
+.owned-view .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-hover);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.owned-view .btn-primary {
+  border-color: var(--accent-light);
+  background: var(--accent-bg-subtle);
+  color: var(--accent-light);
+  font-weight: 600;
+}
+.owned-view .btn-danger {
+  border-color: var(--danger);
+  color: var(--danger);
+  font-weight: 600;
+}
+.owned-view .btn:not(:disabled):hover { background: var(--bg-hover); }
+.owned-view .btn:disabled {
+  border-style: dashed;
+  border-color: var(--border-hover);
+  background: var(--bg-base);
+  color: var(--text-muted);
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.owned-header-status { display: flex; flex-wrap: wrap; gap: 6px 12px; }
+.owned-header-field { display: inline-block; }
+.owned-last-known { color: var(--text-secondary); }
+.owned-prompt-body {
+  display: block;
+  margin-bottom: 12px;
+  font-family: var(--font-sans);
+  font-size: 1rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.owned-prompt-status { display: block; clear: both; }
+.owned-delivery-badge { display: inline-block; max-width: 100%; line-height: 1.5; }
+.owned-approval-actions { margin-block: 8px 12px; }
+.owned-tool-preview { line-height: 1.5; max-height: 18em; overflow: hidden; }
+.owned-tool-input { margin-top: 8px; }
+.owned-tool-input summary { cursor: pointer; padding-block: 8px; }

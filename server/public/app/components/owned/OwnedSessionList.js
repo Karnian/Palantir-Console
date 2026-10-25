@@ -6,7 +6,7 @@ const html = htm.bind(h);
 
 export function OwnedSessionList({ sessions, disabled, onStart }) {
   return html`
-    <button disabled=${disabled} onClick=${onStart}>${OWNED_COPY.newSession}</button>
+    <button class="btn btn-sm btn-primary" disabled=${disabled} onClick=${onStart}>${OWNED_COPY.newSession}</button>
     ${!sessions.length && html`<p>${OWNED_COPY.empty}</p>`}
     <ul>
       ${sessions.map(session => html`

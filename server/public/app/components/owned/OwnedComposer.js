@@ -9,11 +9,15 @@ export function OwnedComposer({ interaction, disabled, uncertain, interruptUnkno
   const locked = disabled || uncertain || interruptUnknown || interaction === 'unknown';
   const submitDisabled = locked || !body.trim();
   let submitControls = html`
-    <button disabled=${submitDisabled} onClick=${() => onSubmit('interrupt-send', { body })}>${OWNED_COPY.interruptSend}</button>
-    <button disabled=${submitDisabled} onClick=${() => onSubmit('prompt', { body })}>${OWNED_COPY.queue}</button>
+    <button class="btn btn-sm" disabled=${submitDisabled} onClick=${() => onSubmit('interrupt-send', { body })}>${OWNED_COPY.interruptSend}</button>
+    <button class="btn btn-sm" disabled=${submitDisabled} onClick=${() => onSubmit('prompt', { body })}>${OWNED_COPY.queue}</button>
   `;
   if (interaction === 'idle') {
-    submitControls = html`<button disabled=${submitDisabled} onClick=${() => onSubmit('prompt', { body })}>${OWNED_COPY.send}</button>`;
+    submitControls = html`
+      <button class="btn btn-sm btn-primary" disabled=${submitDisabled} onClick=${() => onSubmit('prompt', { body })}>
+        ${OWNED_COPY.send}
+      </button>
+    `;
   }
   return html`
     <div>

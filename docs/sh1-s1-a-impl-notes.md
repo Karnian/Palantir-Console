@@ -2240,3 +2240,25 @@ a11y에는 dark/light 각각 360px로 상태별 여덟 시나리오를 추가했
 - `npm run test:a11y -- --project=chromium --grep owned`: 127.0.0.1:4177 listen EPERM으로 실행 전 종료 (`/tmp/sh1-c2-r2-a11y.log`). `--list`에서는 owned 시나리오 12개가 정상 수집됐다. 호스트에서 전체 a11y 재실행이 필요하다.
 
 실제 Claude·LLM·외부 네트워크 호출과 git 조작은 수행하지 않았다. visual baseline·전역 SSE 채널·C1 화면·스펙·패키지 설정은 변경하지 않았다.
+
+## S1-c2 라운드 3 — 호스트 화면 확인에서 발견한 사용성 결함
+
+호스트의 라운드 2 관련 597/597·owned a11y 12/12 통과 이후 직접 화면에서 발견한 결함을 반영했다. 배치 lock-in이나 visual baseline은 변경하지 않았다.
+
+모든 owned 자체 버튼에 기존 btn·btn-sm 클래스 체계를 적용했다. 허용·보내기·질문 답변·시작은 btn-primary, 거부·삭제·세션 끝내기는 btn-danger다. 기존 버튼 CSS가 특정 화면에만 정의되어 있어 클래스만으로는 owned에 버튼 외형이 생기지 않으므로, owned 범위에 배경·테두리·패딩·hover·disabled 규칙을 추가했다. 색은 기존 토큰만 사용하며 비활성 버튼은 흐린 색·점선 테두리·not-allowed 커서로 구분한다.
+
+getOwnedHeaderState 순수 함수는 호스트가 응답하지 않으면 실행·제어·상호작용·세션의 현재 값을 unknown으로 반환한다. snapshot 값은 별도 lastKnown에만 두고 화면에서는 각 값 앞에 기준 시각과 “기준 마지막”을 붙인다. 연결 중에는 “호스트: 연결됨”, “실행: 생존”, “제어: 가능”, “상호작용: 질문 대기”, “세션: 열림”처럼 필드 이름을 표시한다. 호스트가 연결되지 않은 동안 기존 snapshot을 현재 생존·상호작용 사실로 표시하지 않는다.
+
+prompt 본문은 일반 크기의 별도 블록으로 바꾸고 줄바꿈·긴 문자열 줄바꿈을 유지한다. 전달 배지는 그 아래 별도 행이다. provider_observed + outcome_unknown 조합은 “받음 · 결과 불명”으로 표시하며 수신 문구를 중복하지 않는다.
+
+승인 결정 버튼과 거부 사유를 도구명·요청 시각 다음으로 옮겼다. 긴 입력은 최대 12줄·600자 미리보기와 기본 접힌 “전문 펼치기”로 표시한다. 단일 긴 줄도 미리보기 높이를 12줄로 제한하므로 결정을 밀어내지 않는다. 전문은 종전대로 chunk 조회로 모두 받아 별도 전문 영역에 그대로 보관하며, 미리보기 제한은 원문에 적용하지 않는다. 짧은 입력은 기본 펼침을 유지한다. 전문을 받기 전 승인 버튼 비활성 규칙도 유지한다.
+
+UI 테스트에 현재 불명/기준 시각·이전 값 분리, 필드 이름, 배지 중복 제거와 본문/배지 분리, 긴 입력에서 결정 영역의 DOM 선행과 펼친 전문의 마지막 표지, 짧은 입력 기본 펼침 단언을 추가했다. 기존 a11y 시나리오도 접힌 전문을 펼쳐 확인하고, 호스트 상실 때 머리의 불명과 마지막 값 표시를 검사하도록 갱신했다.
+
+검증 결과:
+
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session*.test.js server/tests/session-host-*.test.js`: tests 555, pass 532, fail 23, cancelled 0, skipped 0. 실패는 종전과 같은 소켓·실제 ps EPERM 및 이에 따른 host_start_timeout이다 (`/tmp/sh1-c2-r3-all.log`).
+- UI: tests 14, pass 14, fail 0. UI·nav·SSE 집중 실행: tests 27, pass 27, fail 0 (`/tmp/sh1-c2-r3-focused.log`). 화면 모듈의 줄당 160자 제한도 유지했다.
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH npx playwright test --grep '@a11y.*owned'`: 127.0.0.1:4177 listen EPERM으로 실행 전 종료했다 (`/tmp/sh1-c2-r3-a11y.log`). 같은 필터의 --list에서 owned 시나리오 12개가 정상 수집됐다. 실제 브라우저 검증은 호스트에서 필요하다.
+
+실제 Claude·LLM·외부 네트워크 호출, git 조작, 전역 SSE·C1 화면·서버 실행 상태 기계 변경은 수행하지 않았다.

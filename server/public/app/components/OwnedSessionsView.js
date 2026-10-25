@@ -45,7 +45,7 @@ export function OwnedSessionsView({ sessionId }) {
       </div>
       ${pending && html`
         <p class="owned-unknown">${OWNED_COPY.acceptanceUnknown}
-          <button disabled=${host !== 'running' || busy} onClick=${controller.retry}>${OWNED_COPY.retry}</button>
+          <button class="btn btn-sm" disabled=${host !== 'running' || busy} onClick=${controller.retry}>${OWNED_COPY.retry}</button>
         </p>
       `}
       ${content}
@@ -55,7 +55,7 @@ export function OwnedSessionsView({ sessionId }) {
         <div class="modal-body">
           <h2 id="owned-delete-title">${OWNED_COPY.remove}</h2>
           <p>${OWNED_COPY.deleteWarning}</p>
-          <button disabled=${controller.disabled} onClick=${deleteSession}>${OWNED_COPY.remove}</button>
+          <button class="btn btn-sm btn-danger" disabled=${controller.disabled} onClick=${deleteSession}>${OWNED_COPY.remove}</button>
         </div>
       </${Modal}>
     </section>

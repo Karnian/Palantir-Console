@@ -28,11 +28,11 @@ export function OwnedPrompt({ row, sessionId, disabled, onResend }) {
   if (body === null) bodyText = error ? OWNED_COPY.fullError : OWNED_COPY.loading;
   return html`
     <article class="owned-card">
-      <pre>${bodyText}</pre>
-      <${OwnedDeliveryBadge} delivery=${row} />
+      <div class="owned-prompt-body">${bodyText}</div>
+      <div class="owned-prompt-status"><${OwnedDeliveryBadge} delivery=${row} /></div>
       ${row.state === 'unknown' && html`
         <p>${OWNED_COPY.resendWarning}
-          <button disabled=${disabled || typeof body !== 'string'} onClick=${() => onResend(body)}>
+          <button class="btn btn-sm" disabled=${disabled || typeof body !== 'string'} onClick=${() => onResend(body)}>
             ${OWNED_COPY.resend}
           </button>
         </p>

@@ -70,3 +70,30 @@ export function mergeOwnedEvents(previous, incoming) {
   const bySequence = new Map([...previous, ...incoming].map(event => [event.seq, event]));
   return [...bySequence.values()].sort((left, right) => left.seq - right.seq);
 }
+
+
+// Current facts must not inherit cached values when the host cannot answer.
+export function getOwnedHeaderState(host, state) {
+  const incarnation = getOwnedIncarnation(state);
+  let execution = 'unknown';
+  if (['alive', 'orphaned'].includes(incarnation?.state)) execution = 'executionAlive';
+  if (['exited', 'never_started'].includes(incarnation?.state)) execution = 'executionExited';
+  const snapshotValues = {
+    execution,
+    control: canControlOwnedSession('running', state) ? 'controlPossible' : 'controlUnavailable',
+    interaction: ownedInteraction(state),
+    session: state?.session?.state || 'unknown'
+  };
+  if (host === 'running') return { current: snapshotValues, lastKnown: null };
+  return {
+    current: { execution: 'unknown', control: 'unknown', interaction: 'unknown', session: 'unknown' },
+    lastKnown: state?.session ? snapshotValues : null
+  };
+}
+
+export function getOwnedToolInputPreview(input) {
+  const text = input || '';
+  const lines = text.split('\n');
+  const long = lines.length > 12 || text.length > 600;
+  return { long, preview: lines.slice(0, 12).join('\n').slice(0, 600) };
+}

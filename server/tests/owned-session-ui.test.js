@@ -29,7 +29,7 @@ const state = (extra = {}) => ({ current_incarnation_id: 'inc', session: { state
   incarnations: [{ id: 'inc', state: 'alive', control_available: true, ...extra }], deliveries: [], tool_requests: [], controls: [] });
 test('delivery unknown is emphasized and outcome is separate', t => {
   const e = setup(t); e.mount('OwnedDeliveryBadge', { delivery: { state: 'provider_observed', outcome: 'outcome_unknown' } });
-  assert.match(e.document.body.textContent, /받음·결과 불명/); assert.ok(e.document.querySelector('.owned-unknown'));
+  assert.equal(e.document.querySelector('.owned-delivery-badge').textContent, '받음 · 결과 불명'); assert.ok(e.document.querySelector('.owned-unknown'));
   e.mount('OwnedDeliveryBadge', { delivery: { state: 'unknown' } }); assert.match(e.document.body.textContent, /원본이 실행됐을/);
 });
 test('one prompt per turn: idle sends, running queues or interrupts, uncertain locks', t => {
@@ -135,4 +135,100 @@ test('capability evaluator is pure and sdkAdapter re-exports the same function',
   const adapter = require('../sessionHost/sdkAdapter');
   assert.equal(adapter.capabilityVerdict, capability.capabilityVerdict);
   assert.doesNotMatch(fs.readFileSync(corePath, 'utf8'), /require\(['"]\.\/sdkAdapter['"]\)/);
+});
+
+
+test('R3 header separates unknown current facts from timestamped last-known facts', t => {
+  const environment = setup(t);
+  const snapshot = state();
+  snapshot.tool_requests.push({ incarnation_id: 'inc', state: 'pending', tool_name: 'AskUserQuestion' });
+  const selectHeader = environment.context.getOwnedHeaderState;
+  const connected = selectHeader('running', snapshot);
+  assert.equal(connected.current.execution, 'executionAlive');
+  assert.equal(connected.current.control, 'controlPossible');
+  assert.equal(connected.current.interaction, 'awaiting_user');
+  assert.equal(connected.lastKnown, null);
+  const lost = selectHeader('unreachable', snapshot);
+  assert.deepEqual(JSON.parse(JSON.stringify(lost.current)), {
+    execution: 'unknown', control: 'unknown', interaction: 'unknown', session: 'unknown'
+  });
+  assert.equal(lost.lastKnown.execution, 'executionAlive');
+  assert.equal(lost.lastKnown.control, 'controlPossible');
+  assert.equal(lost.lastKnown.interaction, 'awaiting_user');
+  const asOf = 1800000000000;
+  environment.mount('OwnedSessionHeader', {
+    state: snapshot, incarnation: snapshot.incarnations[0], host: 'unreachable', asOf
+  });
+  const fields = [...environment.document.querySelectorAll('.owned-header-field')];
+  const timestamp = environment.context.formatOwnedTime(asOf);
+  for (const field of fields) {
+    const text = field.textContent.replace(/\s+/g, ' ');
+    assert.match(text, /: 불명/);
+    assert.ok(text.includes(timestamp + ' 기준 마지막:'));
+  }
+  assert.match(fields[0].textContent, /기준 마지막: 생존/);
+  assert.match(fields[1].textContent, /기준 마지막: 가능/);
+  assert.match(fields[2].textContent, /기준 마지막: 질문 대기/);
+  environment.mount('OwnedSessionHeader', {
+    state: snapshot, incarnation: snapshot.incarnations[0], host: 'running', asOf
+  });
+  const text = environment.document.body.textContent.replace(/\s+/g, ' ');
+  assert.match(text, /호스트: 연결됨/);
+  assert.match(text, /실행: 생존/);
+  assert.match(text, /제어: 가능/);
+  assert.match(text, /상호작용: 질문 대기/);
+  assert.match(text, /세션: 열림/);
+  assert.equal(environment.document.querySelector('.owned-last-known'), null);
+});
+
+test('R3 prompt body precedes a separate nonduplicated delivery badge row', t => {
+  const environment = setup(t);
+  environment.mount('OwnedPrompt', {
+    row: { id: 'prompt', body: JSON.stringify('첫 줄\n둘째 줄'), state: 'provider_observed', outcome: 'outcome_unknown' },
+    sessionId: 'session'
+  });
+  const body = environment.document.querySelector('.owned-prompt-body');
+  const status = environment.document.querySelector('.owned-prompt-status');
+  assert.equal(body.textContent, '첫 줄\n둘째 줄');
+  assert.equal(body.nextElementSibling, status);
+  assert.equal(status.textContent, '받음 · 결과 불명');
+  assert.equal((status.textContent.match(/받음/g) || []).length, 1);
+  assert.ok(status.querySelector('.owned-unknown'));
+});
+
+test('R3 long approval keeps decisions first and expands the complete chunked input', async t => {
+  const environment = setup(t);
+  const fullInput = Array.from({ length: 30 }, (_, index) => '입력 ' + index).join('\n') + '\n전문 마지막 표지';
+  environment.context.apiFetch = async () => ({ host: 'running', found: true, data: fullInput, done: true });
+  environment.mount('OwnedApproval', {
+    card: { id: 'long', state: 'pending', tool_name: 'Bash', input: 'preview', input_truncated: true },
+    sessionId: 'session'
+  });
+  await flushEffects();
+  await flushEffects();
+  const actions = environment.document.querySelector('.owned-approval-actions');
+  const details = environment.document.querySelector('.owned-tool-input');
+  const preview = environment.document.querySelector('.owned-tool-preview');
+  assert.ok(actions.compareDocumentPosition(preview) & environment.window.Node.DOCUMENT_POSITION_FOLLOWING);
+  assert.ok(actions.compareDocumentPosition(details) & environment.window.Node.DOCUMENT_POSITION_FOLLOWING);
+  assert.ok(actions.querySelector('input'));
+  assert.ok(actions.querySelector('.btn-primary'));
+  assert.ok(actions.querySelector('.btn-danger'));
+  assert.equal(details.open, false);
+  assert.equal(details.querySelector('summary').textContent, '전문 펼치기');
+  assert.equal(preview.textContent.split('\n').length, 12);
+  assert.ok(!preview.textContent.includes('전문 마지막 표지'));
+  details.querySelector('summary').click();
+  assert.equal(details.open, true);
+  assert.equal(details.querySelector('.owned-tool-full').textContent, fullInput);
+  assert.match(details.querySelector('.owned-tool-full').textContent, /전문 마지막 표지$/);
+});
+
+test('R3 short approval input remains expanded', t => {
+  const environment = setup(t);
+  environment.mount('OwnedApproval', {
+    card: { id: 'short', state: 'pending', tool_name: 'Bash', input: 'short input' }, sessionId: 'session'
+  });
+  assert.equal(environment.document.querySelector('.owned-tool-input').open, true);
+  assert.equal(environment.document.querySelector('.owned-tool-preview'), null);
 });

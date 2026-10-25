@@ -7,8 +7,9 @@ const html = htm.bind(h);
 export function OwnedDeliveryBadge({ delivery }) {
   const uncertain = delivery.state === 'unknown' || delivery.outcome === 'outcome_unknown';
   const status = delivery.state === 'unknown' ? OWNED_COPY.deliveryUnknown : ownedLabel(delivery.state);
-  const outcome = delivery.outcome ? ` · ${ownedLabel(delivery.outcome)}` : '';
+  const outcomeLabel = delivery.outcome === 'outcome_unknown' ? OWNED_COPY.resultUnknown : ownedLabel(delivery.outcome);
+  const outcome = delivery.outcome ? ` · ${outcomeLabel}` : '';
   const hasToolResult = ['tool_finished', 'tool_finished_error'].includes(delivery.reason);
   const toolResult = hasToolResult ? ` · ${ownedLabel(delivery.reason)}` : '';
-  return html`<span class=${uncertain ? 'owned-unknown' : ''}>${status}${outcome}${toolResult}</span>`;
+  return html`<span class=${`owned-delivery-badge ${uncertain ? 'owned-unknown' : ''}`}>${status}${outcome}${toolResult}</span>`;
 }

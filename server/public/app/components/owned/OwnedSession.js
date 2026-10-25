@@ -17,13 +17,14 @@ export function OwnedSession({ sessionId, controller, onRemove }) {
   return html`
     <a href="#owned">${OWNED_COPY.back}</a>
     <${OwnedSessionHeader} state=${snapshot} incarnation=${incarnation} host=${controller.host}
-      controllable=${controllable} interaction=${interaction} />
+      asOf=${controller.asOf} />
     <div class="owned-actions">
-      <button disabled=${disabled || !controllable} onClick=${() => submit('interrupt')}>${OWNED_COPY.interrupt}</button>
-      <button disabled=${disabled || !canRestartOwnedSession(snapshot)} onClick=${() => submit('restart')}>${OWNED_COPY.restart}</button>
-      <button disabled=${disabled || !resumeReady} onClick=${() => submit('resume')}>${OWNED_COPY.resume}</button>
-      <button disabled=${disabled || snapshot.session.state !== 'active'} onClick=${() => submit('close')}>${OWNED_COPY.close}</button>
-      <button disabled=${disabled || snapshot.session.state !== 'closed'} onClick=${onRemove}>${OWNED_COPY.remove}</button>
+      <button class="btn btn-sm" disabled=${disabled || !controllable} onClick=${() => submit('interrupt')}>${OWNED_COPY.interrupt}</button>
+      <button class="btn btn-sm" disabled=${disabled || !canRestartOwnedSession(snapshot)} onClick=${() => submit('restart')}>${OWNED_COPY.restart}</button>
+      <button class="btn btn-sm" disabled=${disabled || !resumeReady} onClick=${() => submit('resume')}>${OWNED_COPY.resume}</button>
+      <button class="btn btn-sm btn-danger" disabled=${disabled || snapshot.session.state !== 'active'}
+        onClick=${() => submit('close')}>${OWNED_COPY.close}</button>
+      <button class="btn btn-sm btn-danger" disabled=${disabled || snapshot.session.state !== 'closed'} onClick=${onRemove}>${OWNED_COPY.remove}</button>
     </div>
     <${OwnedConversation} state=${snapshot} events=${controller.events} sessionId=${sessionId}
       disabled=${disabled} controllable=${controllable} nextPage=${controller.nextPage}

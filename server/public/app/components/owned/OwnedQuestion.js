@@ -61,7 +61,7 @@ export function OwnedQuestion({ input, disabled, onAnswer }) {
           </label>
         </fieldset>
       `)}
-      <button disabled=${disabled || !questions.length || incomplete} onClick=${sendAnswers}>${OWNED_COPY.answer}</button>
+      <button class="btn btn-sm btn-primary" disabled=${disabled || !questions.length || incomplete} onClick=${sendAnswers}>${OWNED_COPY.answer}</button>
     </div>
   `;
 }

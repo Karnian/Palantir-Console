@@ -67,7 +67,7 @@ export function OwnedStart({ open, disabled, onClose, onStart }) {
       <div class="modal-header"><h2 id="owned-start-title">${OWNED_COPY.newSession}</h2></div>
       <div class="modal-body owned-view">
         <${DirectoryPicker} value=${cwd} onSelect=${selectDirectory} nodeId="local" directoryNodeId="local" />
-        <button disabled=${disabled || !cwd || busy} onClick=${inspectSettings}>${OWNED_COPY.settings}</button>
+        <button class="btn btn-sm" disabled=${disabled || !cwd || busy} onClick=${inspectSettings}>${OWNED_COPY.settings}</button>
         <p>${OWNED_COPY.projectWarning}</p>
         <p>${OWNED_COPY.userWarning}</p>
         <${OwnedSettingsPreview} preview=${preview} />
@@ -79,7 +79,8 @@ export function OwnedStart({ open, disabled, onClose, onStart }) {
         <p role="status">${busy ? OWNED_COPY.settings_checking : error}</p>
       </div>
       <div class="modal-footer">
-        <button disabled=${disabled || !preview?.ok || !confirmed || busy} onClick=${() => onStart(cwd)}>${OWNED_COPY.start}</button>
+        <button class="btn btn-sm btn-primary" disabled=${disabled || !preview?.ok || !confirmed || busy}
+          onClick=${() => onStart(cwd)}>${OWNED_COPY.start}</button>
       </div>
     </${Modal}>
   `;

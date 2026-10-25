@@ -14,6 +14,10 @@
 
 // Task lifecycle (server/db `tasks.status`).
 export const OWNED_COPY = {
+  headerHost: '호스트', headerExecution: '실행', headerControl: '제어', headerInteraction: '상호작용', headerSession: '세션',
+  hostConnected: '연결됨', hostLost: '응답 없음', executionAlive: '생존', executionExited: '종료',
+  controlPossible: '가능', controlUnavailable: '불가', lastKnown: '기준 마지막', resultUnknown: '결과 불명',
+  inputPreview: '도구 입력 미리보기', expandInput: '전문 펼치기',
   title: '내 세션', newSession: '새 세션', back: '목록으로', empty: '아직 시작한 세션이 없습니다.',
   off: '호스트 꺼짐 — 세션을 시작하면 켜집니다', lost: '호스트 응답 없음 — 아래는', asOf: '기준, 현재 상태 불명',
   reconnect: '재연결됨', connected: '호스트 연결됨', disconnected: '호스트 연결 상실',
