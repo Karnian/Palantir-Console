@@ -48,12 +48,12 @@ test('process bridge replacement preserves pending approval; shutdown leaves fak
   let service = f.bridge();
   const start = await service.submit({ kind: 'start', cwd: process.cwd(), confirmed_settings: true, request_key: key() });
   const id = start.result.session_id;
-  await service.submit({ kind: 'prompt', session_id: id, body: 'tool', request_key: key() });
+  await service.submit({ kind: 'prompt', incarnation_id: start.result.incarnation_id, session_id: id, body: 'tool', request_key: key() });
   await poll(async () => (await service.snapshot(id)).state?.tool_requests?.some(row => row.state === 'pending'));
   await service.shutdown(); assert.equal(child.exitCode, null); assert.equal(child.signalCode, null);
   service = f.bridge();
   assert.equal((await service.snapshot(id)).state.tool_requests[0].state, 'pending');
-  const decision = { kind: 'tool_decision', session_id: id, request_key: key(), target_tool_use_id: 'tool', body: { behavior: 'allow' } };
+  const decision = { kind: 'tool_decision', incarnation_id: start.result.incarnation_id, session_id: id, request_key: key(), target_tool_use_id: 'tool', body: { behavior: 'allow' } };
   await service.submit(decision); await service.submit(decision);
   const effects = fs.readFileSync(path.join(f.runtimeDir, 'effects'), 'utf8').trim().split('\n');
   assert.equal(effects.filter(name => name === 'decide').length, 1);
@@ -87,7 +87,7 @@ test('process broken socket exposes stale snapshot and lock pid only; all valid 
   assert.equal(typeof unavailable.as_of, 'number'); assert.deepEqual(unavailable.last_known.sessions, known.sessions);
   assert.equal(unavailable.diagnostics.pid, child.pid);
   for (const kind of ['start', 'prompt', 'tool_decision', 'question_answer', 'interrupt', 'stop', 'resume', 'close', 'delete']) {
-    await assert.rejects(service.submit({ kind, request_key: key(), cwd: process.cwd(), confirmed_settings: true }),
+    await assert.rejects(service.submit({ kind, request_key: key(), cwd: process.cwd(), confirmed_settings: true, incarnation_id: '12345678-1234-1234-1234-123456789abc' }),
       { code: 'host_unreachable', status: 503 });
   }
 });

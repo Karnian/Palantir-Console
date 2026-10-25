@@ -1030,3 +1030,16 @@ for (const invalid of ['cycle', 'bigint']) {
     assert.ok(f.events.some(event => event.type === 'sdk_message' && event.message.serialization_failed === true));
   });
 }
+
+check('R1 raw rate limit message cannot bypass field allowlist', async (t, sdk) => {
+  const wrapped = { ...sdk, query(args) {
+    const query = sdk.query(args); const iterator = query[Symbol.asyncIterator].bind(query);
+    query[Symbol.asyncIterator] = async function* () {
+      yield { type: 'rate_limit_event', rate_limit_info: { status: 'allowed', email: 'SECRET-RATE-EMAIL' }, email: 'SECRET-RATE-TOP' };
+      yield* { [Symbol.asyncIterator]: iterator };
+    };
+    return query;
+  } };
+  const f = await fixture(t, wrapped); await f.start();
+  assert.equal(JSON.stringify(f.core.eventsSince(0)).includes('SECRET-RATE'), false);
+});

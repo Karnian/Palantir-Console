@@ -59,7 +59,7 @@ test('reads never launch host, distinguish absent lock and unreachable stale val
 for (const kind of ['start', 'prompt', 'tool_decision', 'question_answer', 'interrupt', 'stop', 'resume', 'close', 'delete']) {
   test('unreachable lock owner rejects mutation: ' + kind, async t => {
     const h = bridge(t); h.online = false; h.held = true;
-    await assert.rejects(h.service.submit({ kind, request_key: h.f.key(), cwd: process.cwd(), confirmed_settings: true }),
+    await assert.rejects(h.service.submit({ kind, request_key: h.f.key(), cwd: process.cwd(), confirmed_settings: true, incarnation_id: '12345678-1234-1234-1234-123456789abc' }),
       { code: 'host_unreachable', status: 503 });
     assert.equal(h.launches, 0);
   });
@@ -93,7 +93,7 @@ test('request format, confirmation, cwd and remote node fail before host access'
   await assert.rejects(h.service.submit({ ...req, cwd: link }), { code: 'invalid_cwd' });
   const file = path.join(h.f.dir, 'file'); fs.writeFileSync(file, 'x');
   await assert.rejects(h.service.submit({ ...req, cwd: file }), { code: 'invalid_cwd' });
-  await assert.rejects(h.service.submit({ kind: 'prompt', request_key: h.f.key(), body: 'x'.repeat(600000) }), { status: 413 });
+  await assert.rejects(h.service.submit({ kind: 'prompt', incarnation_id: '12345678-1234-1234-1234-123456789abc', request_key: h.f.key(), body: 'x'.repeat(600000) }), { status: 413 });
 });
 test('snapshot to subscription replays intervening raw message without gaps and polls only with subscribers', async t => {
   const h = bridge(t); h.f.start();
@@ -123,7 +123,7 @@ test('bridge replacement preserves host pending approvals and sends decision exa
   const service = createOwnedSessionService({ createClient: () => h.client, diagnose: () => ({ held: true }) });
   t.after(() => service.shutdown());
   assert.equal((await service.snapshot(h.f.sid)).state.tool_requests[0].state, 'pending');
-  const req = { kind: 'tool_decision', session_id: h.f.sid, request_key: h.f.key(), target_tool_use_id: 'tool', body: { behavior: 'allow' } };
+  const req = { kind: 'tool_decision', incarnation_id: h.f.iid, session_id: h.f.sid, request_key: h.f.key(), target_tool_use_id: 'tool', body: { behavior: 'allow' } };
   assert.equal((await service.submit(req)).acceptance, 'accepted'); await service.submit(req);
   assert.equal(h.f.adapter.log.decisions.length, 1);
   assert.equal(h.f.adapter.log.closes.length, 0);
@@ -137,18 +137,18 @@ test('DB write failure refuses bridge transmission without exposing private erro
   const h = bridge(t); h.f.start();
   const original = h.f.faults.hit.bind(h.f.faults);
   h.f.faults.hit = point => { if (point === 'db_write') throw Error('PRIVATE DB /path'); return original(point); };
-  await assert.rejects(h.service.submit({ kind: 'prompt', request_key: h.f.key(), session_id: h.f.sid, body: 'hello' }),
+  await assert.rejects(h.service.submit({ kind: 'prompt', incarnation_id: h.f.iid, request_key: h.f.key(), session_id: h.f.sid, body: 'hello' }),
     { code: 'host_unreachable', status: 503 });
   assert.equal(h.f.adapter.log.received.length, 0);
 });
 
-test('scrubbed tombstone returns prior result and refuses new submission without incarnation evidence', async t => {
+test('scrubbed tombstone retries preserve client incarnation and return the durable result', async t => {
   const h = bridge(t); h.f.start();
-  const req = { kind: 'prompt', request_key: h.f.key(), session_id: h.f.sid, body: 'hello' };
+  const req = { kind: 'prompt', incarnation_id: h.f.iid, request_key: h.f.key(), session_id: h.f.sid, body: 'hello' };
   await h.service.submit(req);
   h.f.core.submit(h.f.req('close')); h.f.core.submit(h.f.req('delete'));
   const retry = await h.service.submit(req);
-  assert.equal(retry.acceptance, 'rejected'); assert.equal(retry.code, 'session_deleted');
+  assert.equal(retry.acceptance, 'accepted');
   assert.equal(retry.result.session_deleted, 1);
   assert.equal(h.f.adapter.log.received.length, 1);
 });

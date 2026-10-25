@@ -8,10 +8,17 @@ const { isWithinRoot } = require('../utils/pathGuard');
 const POLL_MS = 500;
 const MAX_BODY_BYTES = 512 * 1024;
 const KINDS = new Set(['start', 'prompt', 'tool_decision', 'question_answer', 'interrupt', 'stop', 'resume', 'close', 'delete']);
+const DELIVERY_KINDS = new Set(['prompt', 'tool_decision', 'question_answer', 'interrupt']);
 const failure = (code, status = 400) => Object.assign(new Error(code), { code, status });
 function validateKey(key) {
   if (typeof key !== 'string' || key.length > 256 || !/^rk_\d{1,16}_[a-fA-F0-9]{16,}$/.test(key)) throw failure('invalid_request_key');
   return key;
+}
+function validateIncarnation(id) {
+  if (typeof id !== 'string' || !/^[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}$/.test(id)) {
+    throw failure('invalid_incarnation_id');
+  }
+  return id;
 }
 function validateCwd(cwd) {
   if (typeof cwd !== 'string' || !path.isAbsolute(cwd) || /[\0\r\n]/.test(cwd)) throw failure('invalid_cwd');
@@ -53,6 +60,7 @@ function createOwnedSessionService({ runtimeDir = path.resolve(process.cwd(), 'r
   timers = globalThis, pollMs = POLL_MS, clock = Date.now } = {}) {
   const client = createClient({ runtimeDir });
   const cache = new Map();
+  const deletedSessions = new Set();
   const subscribers = new Set();
   let closed = false;
   let timer;
@@ -93,11 +101,33 @@ function createOwnedSessionService({ runtimeDir = path.resolve(process.cwd(), 'r
       last_known: previous?.value ?? null, diagnostics: { pid: diagnosis.pid ?? null,
         identity: diagnosis.identity || { status: 'query_failed' } } };
   }
+  function purgeSession(id) {
+    if (!id) return;
+    deletedSessions.add(id);
+    for (const [key, entry] of cache) {
+      if (key === 'list' || key === `snapshot:${id}` || entry.sessionId === id) cache.delete(key);
+    }
+  }
+  function observe(result) {
+    const session = result.state?.session;
+    if (session && ['deleting', 'deleted'].includes(session.state)) purgeSession(session.id);
+    if (result.sessions) {
+      const visible = new Set(result.sessions.map(row => row.id));
+      for (const row of result.sessions) if (['deleting', 'deleted'].includes(row.state)) purgeSession(row.id);
+      for (const entry of [...cache.values()]) if (entry.sessionId && !visible.has(entry.sessionId)) purgeSession(entry.sessionId);
+    }
+    for (const event of result.events || []) {
+      if (event.type === 'transition' && event.json?.table === 'owned_sessions' &&
+          ['deleting', 'deleted'].includes(event.json.state)) purgeSession(event.session_id || event.json.id);
+    }
+  }
   async function read(key, operation) {
     try {
       await connect();
       const result = await operation(client);
-      cache.set(key, { as_of: clock(), value: result });
+      observe(result);
+      const sessionId = result.state?.session?.id || result.result?.session_id;
+      if (!deletedSessions.has(sessionId)) cache.set(key, { as_of: clock(), value: result, sessionId });
       return { host: 'running', host_boot_id: bootId, ...result };
     } catch { return unavailable(key); }
   }
@@ -114,6 +144,7 @@ function createOwnedSessionService({ runtimeDir = path.resolve(process.cwd(), 'r
   async function submit(request) {
     validateKey(request?.request_key);
     if (!KINDS.has(request.kind)) throw failure('invalid_request');
+    if (DELIVERY_KINDS.has(request.kind)) validateIncarnation(request.incarnation_id);
     if (Buffer.byteLength(JSON.stringify(request)) > MAX_BODY_BYTES) throw failure('body_too_large', 413);
     if (request.node_id !== undefined && request.node_id !== 'local') throw failure('local_node_required');
     if (request.kind === 'start') {
@@ -122,17 +153,11 @@ function createOwnedSessionService({ runtimeDir = path.resolve(process.cwd(), 'r
     }
     const host = await writable();
     try {
-      if (['prompt', 'tool_decision', 'question_answer', 'interrupt'].includes(request.kind)) {
-        const existing = await host.lookup(request.request_key);
-        // Scrubbed tombstones have no original incarnation to bind a new submission to.
-        if (existing.session_deleted) return { acceptance: 'rejected', request_key: request.request_key,
-          code: 'session_deleted', result: existing };
-        const snapshot = existing.found === false ? await host.snapshot(request.session_id) : null;
-        request = { ...request, incarnation_id: existing.incarnation_id || snapshot?.state?.incarnations?.at(-1)?.id || null };
-      }
       const result = await host.submit(request);
+      if (request.kind === 'delete' && result.state !== 'rejected') purgeSession(request.session_id);
       return { acceptance: 'accepted', request_key: request.request_key, result };
     } catch (error) {
+      if (error.message === 'acceptance_unknown' && request.kind === 'delete') purgeSession(request.session_id);
       if (error.message === 'acceptance_unknown') return { acceptance: 'acceptance_unknown', request_key: request.request_key };
       const codes = new Set(['invalid_request', 'key_expired', 'key_future', 'fingerprint_conflict', 'not_accepted']);
       if (codes.has(error.code || error.message)) return { acceptance: 'rejected', request_key: request.request_key,
@@ -146,7 +171,13 @@ function createOwnedSessionService({ runtimeDir = path.resolve(process.cwd(), 'r
       await connect();
       for (const subscriber of [...subscribers]) {
         if (subscriber.paused) continue;
-        const result = await client.eventsSince(subscriber.seq);
+        const result = await client.eventsSince(subscriber.seq, { maxBytes: 4 * 1024 * 1024 });
+        observe(result);
+        // A deletion can erase the very transition needed to invalidate cached data.
+        if (result.snapshot_required) {
+          cache.clear();
+          observe(await client.list());
+        }
         if (result.snapshot_required) {
           subscriber.paused = true;
           emit(subscriber, 'resync', { seq: subscriber.seq, host_boot_id: bootId });
@@ -203,4 +234,4 @@ function createOwnedSessionService({ runtimeDir = path.resolve(process.cwd(), 'r
     }
   };
 }
-module.exports = { createOwnedSessionService, validateKey, validateCwd, lockStatus, POLL_MS, MAX_BODY_BYTES };
+module.exports = { createOwnedSessionService, validateKey, validateCwd, lockStatus, validateIncarnation, POLL_MS, MAX_BODY_BYTES };

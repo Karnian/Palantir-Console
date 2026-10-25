@@ -45,7 +45,7 @@ function createProtocol({ stream, core, capability, hostBootId, sdkVersion = nul
       else if (message.type === 'snapshot') result = await core.snapshot(message.session_id);
       else if (message.type === 'list') result = await core.listSessions();
       else if (message.type === 'settings_preview') result = await core.settingsPreview(message.cwd);
-      else result = await core.eventsSince(message.seq);
+      else result = await core.eventsSince(message.seq, { maxBytes: message.max_bytes });
       if (pending.has(token) && receipt && !receipt.durable) {
         send({ type: 'rejected', id: message.id, request_key: message.request.request_key, code: receipt.code });
       } else if (pending.has(token)) {

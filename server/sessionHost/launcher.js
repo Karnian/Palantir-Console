@@ -147,7 +147,8 @@ function createClient({ runtimeDir, timeoutMs = 2000 }) {
     snapshot: session_id => request('snapshot', { session_id }),
     list: () => request('list', {}),
     settingsPreview: cwd => request('settings_preview', { cwd }),
-    eventsSince: seq => request('events_since', { seq }),
+    eventsSince: (seq, options = {}) => request('events_since', { seq,
+      ...(options.maxBytes !== undefined ? { max_bytes: options.maxBytes } : {}) }),
     async reconcile() {
       await connect();
       const results = new Map();

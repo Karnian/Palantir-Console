@@ -1,7 +1,7 @@
 'use strict';
 const express = require('express');
 const { requireSessionHubCookie } = require('../middleware/sessionHubCookie');
-const { MAX_BODY_BYTES } = require('../services/ownedSessionService');
+const { MAX_BODY_BYTES, validateIncarnation } = require('../services/ownedSessionService');
 const invalid = code => Object.assign(new Error(code), { code, status: 400 });
 function createOwnedSessionsRouter({ service }) {
   const router = express.Router();
@@ -30,11 +30,12 @@ function createOwnedSessionsRouter({ service }) {
         if (event === 'shutdown') { cleanup(); res.end(); return; }
         const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
         // Disconnect a slow reader; its last sequence can be replayed on a new connection.
-        if (res.writableLength + Buffer.byteLength(frame) > 2 * 1024 * 1024) { cleanup(); res.destroy(); return; }
+        if (res.writableLength > 2 * 1024 * 1024) { cleanup(); res.destroy(); return; }
         res.write(frame);
       });
       res.set({ 'Content-Type': 'text/event-stream', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
       res.flushHeaders();
+      req.on('close', cleanup);
       res.on('close', cleanup);
       res.on('error', cleanup);
     } catch (error) { cleanup(); next(error); }
@@ -55,6 +56,9 @@ function createOwnedSessionsRouter({ service }) {
     router.post(`/:id/${route}`, handle(req => {
       const input = req.body || {};
       const request = { kind, request_key: input.request_key, session_id: req.params.id };
+      if (['prompt', 'tool_decision', 'question_answer', 'interrupt'].includes(kind)) {
+        request.incarnation_id = validateIncarnation(input.incarnation_id);
+      }
       if (kind === 'prompt') {
         if (typeof input.body !== 'string' || !input.body.trim()) throw invalid('invalid_body');
         request.body = input.body;

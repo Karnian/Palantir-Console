@@ -65,9 +65,11 @@ test('all mutation routes map only defined fields and preserve browser request k
     ...['interrupt', 'stop', 'resume', 'close'].map(route => [route, {}, {}])
   ];
   for (const [route, input, mapped] of cases) {
-    const response = await mutate(h.app, 'post', '/sid/' + route, { request_key: key, ...input, env: 'PRIVATE', capability: 'PRIVATE' });
+    const target = ['prompt', 'tool-decision', 'question-answer', 'interrupt'].includes(route) ?
+      { incarnation_id: '12345678-1234-1234-1234-123456789abc' } : {};
+    const response = await mutate(h.app, 'post', '/sid/' + route, { request_key: key, ...target, ...input, env: 'PRIVATE', capability: 'PRIVATE' });
     assert.equal(response.status, 200);
-    assert.deepEqual(h.calls.at(-1), { kind: route.replaceAll('-', '_'), request_key: key, session_id: 'sid', ...mapped });
+    assert.deepEqual(h.calls.at(-1), { kind: route.replaceAll('-', '_'), request_key: key, session_id: 'sid', ...target, ...mapped });
     assert.equal(response.text.includes('PRIVATE'), false);
     assert.equal(response.text.includes('PALANTIR_TOKEN'), false);
   }

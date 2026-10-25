@@ -209,3 +209,10 @@ test('C1 list and settings preview preserve protocol authentication and argument
     { type: 'settings_preview', id: 2, result: { ok: true } }
   ]);
 });
+
+test('R1 protocol forwards replay byte limit and more flag', async () => {
+  let options;
+  const h = harness({ eventsSince(seq, value) { options = value; return { events: [{ seq: seq + 1 }], seq_high: 10, more: true }; } });
+  h.hello(); h.send({ type: 'events_since', id: 1, seq: 3, max_bytes: 2048 }); await flush();
+  assert.deepEqual(options, { maxBytes: 2048 }); assert.equal(h.output[1].result.more, true);
+});

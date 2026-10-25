@@ -96,7 +96,7 @@ function createSdkAdapter({ sdk, executablePath = bundledExecutable(), executabl
     } catch {
       raw = { type: message.type, serialization_failed: true };
     }
-    emit(id, 'sdk_message', { message: raw });
+    if (message.type !== 'rate_limit_event') emit(id, 'sdk_message', { message: raw });
     if (message.type === 'system' && message.subtype === 'init') {
       emit(id, 'system_init', { capabilities: message.capabilities, apiKeySource: message.apiKeySource });
     } else if (message.type === 'command_lifecycle') {

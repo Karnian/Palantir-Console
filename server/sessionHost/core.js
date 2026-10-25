@@ -1416,14 +1416,16 @@ function createHostCore({
       if (session && ['deleting', 'deleted'].includes(session.state)) {
         return {
           state: {
-            session: session
+            session: session,
+            current_incarnation_id: getLatestIncarnation(sessionId)?.id || null
           },
           seq_high: getRow('SELECT COALESCE(MAX(seq),0) n FROM events').n
         };
       }
       const state = {
         session: session || null,
-        incarnations: getRows('SELECT * FROM incarnations WHERE session_id=?', sessionId).map(incarnation => {
+        current_incarnation_id: getLatestIncarnation(sessionId)?.id || null,
+        incarnations: getRows('SELECT * FROM incarnations WHERE session_id=? ORDER BY rowid ASC', sessionId).map(incarnation => {
           const event = getRow("SELECT json FROM events WHERE incarnation_id=? AND type='rate_limit' ORDER BY seq DESC LIMIT 1", incarnation.id);
           return { ...incarnation, rate_limit_info: event ? JSON.parse(event.json) : null };
         }),
@@ -1491,23 +1493,32 @@ function createHostCore({
     finally { clearTimeout(timer); }
   }
 
-  function eventsSince(seq) {
+  function eventsSince(seq, { maxBytes = 4 * 1024 * 1024 } = {}) {
+    const limit = Number.isSafeInteger(maxBytes) && maxBytes > 0 ? Math.min(maxBytes, 12 * 1024 * 1024) : 4 * 1024 * 1024;
     return store.read(() => {
-      const rows = getRows('SELECT * FROM events WHERE seq>? ORDER BY seq', seq);
       const high = getRow("SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='events'),0) n").n;
-      if (seq < 0 || seq > high || seq < high && (!rows.length || rows[0].seq !== seq + 1) || rows.some((eventRow, eventIndex) => eventIndex &&
-        eventRow.seq !== rows[eventIndex - 1].seq + 1)) {
-        return {
-          snapshot_required: true
-        };
+      if (!Number.isSafeInteger(seq) || seq < 0 || seq > high) return { snapshot_required: true };
+      const events = [];
+      let bytes = 0;
+      let last = seq;
+      const statement = database.prepare('SELECT * FROM events WHERE seq>? ORDER BY seq');
+      for (const row of statement.iterate(seq)) {
+        if (row.seq !== last + 1) return { snapshot_required: true };
+        const rawBytes = Buffer.byteLength(row.json);
+        let event = rawBytes > 12 * 1024 * 1024 ?
+          { seq: row.seq, type: row.type, oversized: true, bytes: rawBytes } : { ...row, json: JSON.parse(row.json) };
+        let size = Buffer.byteLength(JSON.stringify(event));
+        if (size > 12 * 1024 * 1024) {
+          event = { seq: row.seq, type: row.type, oversized: true, bytes: size };
+          size = Buffer.byteLength(JSON.stringify(event));
+        }
+        if (events.length && bytes + size > limit) break;
+        events.push(event);
+        bytes += size;
+        last = row.seq;
       }
-      return {
-        events: rows.map(eventRow => ({
-          ...eventRow,
-          json: JSON.parse(eventRow.json)
-        })),
-        seq_high: high
-      };
+      if (!events.length && seq < high) return { snapshot_required: true };
+      return { events, seq_high: high, more: last < high };
     });
   }
   adapter.events.on('event', onEvent);
