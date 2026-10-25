@@ -36,7 +36,16 @@ function checkArgs(args) {
   return { ok: true };
 }
 function hashFileSync(file) {
-  return createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  const hash = createHash('sha256');
+  const buffer = Buffer.allocUnsafe(1024 * 1024);
+  const fd = fs.openSync(file, 'r');
+  try {
+    let count;
+    while ((count = fs.readSync(fd, buffer, 0, buffer.length, null)) > 0) hash.update(buffer.subarray(0, count));
+    return hash.digest('hex');
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 function checkSpawnOptionsSync({ command, args } = {}, options = {}) {
   const fail = reason => ({ ok: false, reason });

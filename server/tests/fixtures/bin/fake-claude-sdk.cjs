@@ -29,9 +29,14 @@ if (config.spawnGrandchild) {
     const fs = require('node:fs');
     fs.appendFileSync(process.argv[1], JSON.stringify({type:'grandchild',pid:process.pid,
       marker:process.env.PALANTIR_OWNED_INCARNATION})+'\\n');
-    setTimeout(()=>{}, 1500);
-  `, logPath], { stdio: 'ignore', env: process.env });
+    const owner = Number(process.argv[2]);
+    setInterval(()=>{ if (process.ppid !== owner) process.exit(0); }, 100);
+  `, logPath, String(process.pid)], { stdio: 'ignore', env: process.env });
   process.on('exit', () => { try { child.kill('SIGKILL'); } catch {} });
+  if (!config.ignoreSigterm) process.on('SIGTERM', () => {
+    child.once('exit', () => process.exit(0));
+    if (!child.kill('SIGKILL')) process.exit(0);
+  });
 }
 if (config.ignoreSigterm) process.on('SIGTERM', () => {});
 const pendingTools = new Map(), active = new Map();
@@ -75,7 +80,8 @@ function user(message) {
   lifecycle(message.uuid, 'started');
   if (!initialized) {
     initialized = true;
-    send({ type: 'system', subtype: 'init', capabilities, apiKeySource: Object.hasOwn(config, 'apiKeySource') ? config.apiKeySource : 'none', session_id: sessionId });
+    send({ type: 'system', subtype: 'init', capabilities,
+      apiKeySource: Object.hasOwn(config, 'apiKeySource') ? config.apiKeySource : 'none', session_id: sessionId });
     if (config.rateLimit) send({ type: 'rate_limit_event', rate_limit_info: config.rateLimit, session_id: sessionId, uuid: randomUUID() });
   }
   if (config.merge) {

@@ -72,8 +72,50 @@ function createPsIdentityProbe({ pinnedPath, execFileSync = childProcess.execFil
     if (found.status !== 'ok') return 'query_failed';
     return found.startedAt === normalized ? 'match' : 'mismatch_confirmed';
   }
+  function scanCandidates(output, pids, id, budget) {
+    const candidates = [];
+    let nearestPid;
+    for (const line of output.split('\n')) {
+      const row = /^ *([1-9]\d*) /.exec(line);
+      if (row) nearestPid = Number(row[1]);
+      if (markerState(line, id).exact) candidates.push(nearestPid);
+    }
+    const knownPids = new Set(pids);
+    if (candidates.some(pid => !knownPids.has(pid))) return null;
+    if (new Set(candidates).size !== candidates.length) return null;
+    const marked = [];
+    let absent = 0;
+    for (const pid of candidates) {
+      const before = start(pid, budget);
+      if (before.status === 'absent') { absent++; continue; }
+      if (before.status !== 'ok') return failed();
+      const command = readProcess(['-E', '-ww', '-o', 'command=', '-p', String(pid)], budget);
+      if (command.status === 'absent') { absent++; continue; }
+      if (command.status !== 'ok') return failed();
+      const marker = markerState(command.output, id);
+      if (marker.partial) return failed();
+      if (!marker.exact) return null;
+      const markers = command.output.split(/\s+/).filter(token => token.startsWith('PALANTIR_OWNED_INCARNATION='));
+      if (markers.length !== 1) return failed();
+      const parent = readProcess(['-o', 'ppid=', '-p', String(pid)], budget);
+      if (parent.status === 'absent') { absent++; continue; }
+      if (parent.status !== 'ok') return failed();
+      const parentLine = parent.output.endsWith('\n') ? parent.output.slice(0, -1) : parent.output;
+      const ppid = /^ *\d+ *$/.test(parentLine) ? Number(parentLine) : NaN;
+      if (!Number.isSafeInteger(ppid)) return failed();
+      const after = start(pid, budget);
+      if (after.status === 'absent') { absent++; continue; }
+      if (after.status !== 'ok' || before.startedAt !== after.startedAt) return failed();
+      marked.push({ pid, startedAt: before.startedAt, ppid, command: command.output });
+    }
+    // Each environment ends its process record once. An injective mapping of marker lines
+    // to equally many verified processes is bijective; newline-forged PID rows must pass
+    // both uniqueness and per-PID marker checks, otherwise the original full scan runs.
+    if (marked.length + absent !== candidates.length) return null;
+    return { status: marked.length ? 'ok' : 'inconsistent', marked };
+  }
   function scanOnce(id, budget) {
-    // Global command output is only an existence hint: argv may contain arbitrary newlines.
+    // Global command output supplies untrusted candidates: argv may contain arbitrary newlines.
     const output = run(['-E', '-ww', '-A', '-o', 'pid=,command='], budget);
     if (typeof output !== 'string' || !output.trim()) return failed();
     const globalMarker = markerState(output, id);
@@ -86,6 +128,9 @@ function createPsIdentityProbe({ pinnedPath, execFileSync = childProcess.execFil
     const pids = lines.map(line => /^ *[1-9]\d* *$/.test(line) ? Number(line) : NaN);
     if (pids.some(pid => !Number.isSafeInteger(pid)) || new Set(pids).size !== pids.length) return failed();
     budget.pidCount += pids.length;
+    const candidates = scanCandidates(output, pids, id, budget);
+    if (candidates) return candidates;
+    // Keep the conservative full scan for ambiguous or forged global attribution.
     const marked = [];
     for (const pid of pids) {
       // Read before every command: whether this PID is marked is not known yet.

@@ -952,7 +952,7 @@ provider 로그의 user UUID·tool_use_id 개수를 효과로 센다.
 정상 20회 지시·10회 승인에서 UUID별 수신/실행 각 1회, unknown 0을 확인했다.
 거부는 실행 0, 단일 질문 문자열 답변은 observed다.
 실제 손자 표지 상속은 ps 없이도 별도 테스트로 확인했다.
-각 fixture의 after는 직접 자식 SIGKILL 후 exit를 기다리고 손자 자연 종료도 기다린다.
+각 fixture의 after는 직접 자식 SIGKILL 후 exit를 기다리고 손자 종료도 기다린다.
 각 테스트는 20초 제한, 폴링은 4초 제한을 가진다.
 
 능력 판정은 고정 버전쌍·default 모드에서 observe/tool_approval/resume을 supported로 둔다.
@@ -982,3 +982,99 @@ provider 로그의 user UUID·tool_use_id 개수를 효과로 센다.
    파일 핸들로 exec하는 OS 계약을 도입하지 않았으며, 같은 UID 격리도 주장하지 않는다.
 5. 실제 CLI/LLM·키체인·hooks·도구 부작용은 실행하지 않았다.
    가짜 wire 검증은 실제 CLI 의미 전체의 증명이 아니다. 실제 ps·소켓 검증은 아래 환경 제한을 따른다.
+
+
+## S1-b2b 수정 라운드 1 — ps 후보 검증과 동기 해시 메모리
+
+호스트가 실제 macOS에서 관측한 전체 스캔 비용은 표지 하위 조회 7,510ms·ps 1,394회였다.
+1.5초 손자가 스캔 도중 종료돼 SDK 실제 ps 테스트가 실패했다.
+이번 수정은 ps 후보 최적화, 가짜 손자 수명, 동기 해시 버퍼의 세 항목으로 한정했다.
+코어·게이트·상태 규칙·SDK 어댑터·설치본은 수정하지 않았다.
+
+### 빠른 후보 경로와 전체 스캔 fallback
+
+G(`-E -ww -A -o pid=,command=`)와 P(`-A -o pid=`)를 같은 순서로 읽는다.
+G의 정확한 표지 줄마다 그 줄 또는 위쪽의 가장 가까운 숫자 시작 줄에서 PID를 얻는다.
+후보가 없거나 P에 없거나 두 표지 줄이 같은 PID로 매핑되면 기존 전체 스캔으로 돌아간다.
+후보마다 before lstart → per-PID command·정확한 표지 1개 → ppid → after lstart를 검증한다.
+per-PID에 표지가 없으면 전체 스캔으로 돌아간다.
+absent는 건너뛰고, 조회 오류·부분 표지·시작시각 불일치는 기존처럼 query_failed다.
+검증된 표지 수 + absent 수가 표지 줄 수와 같아야 빠른 결과를 채택한다.
+원래 전체 PID 순회 본문과 재시도·공유 기한·PID 예산은 유지했다.
+
+근거: env 표지는 프로세스 레코드 끝에 한 번 나오므로 표지 줄 수는 표지 보유 프로세스 수다.
+매핑이 단사이고 매핑 대상의 실제 per-PID 표지가 확인됐으면,
+같은 크기 집합으로의 단사는 전단사이므로 빠진 표지 프로세스가 없다.
+argv 줄바꿈으로 다른 실제 PID를 위조해도 중복 매핑이나 per-PID 표지 불일치가 드러나면
+전체 스캔으로 돌아간다. 후보만으로 PID를 신뢰하거나 신호를 보내지 않는다.
+absent를 제외한 모든 채택 신원은 앞뒤 시작시각도 일치해야 한다.
+의도적으로 모호한 출력의 느린 경로는 여전히 O(전체 PID 수)이고 기한을 넘기면 fail-closed다.
+
+주입 프로세스 3,000개·표지 2개 테스트에서 findMarked와 listMarkedDescendants 모두
+ps 10회(전역 2 + 표지별 4)로 끝났다.
+위조 PID 중복, 후보 표지 부재, absent 후보, 기존 여러 줄 argv·권한 오류·PID 재사용·불일치 재시도도 검증했다.
+기존 R2 fixture 기본 출력은 후보를 특정하지 않는 전역 hint로 두어 전체 스캔 오류 검증을 유지했다.
+정상 여러 줄 argv 사례의 queryCount는 8→6으로 갱신했다.
+기존 R3 재시도 사례는 실패 후보의 before/command 2회가 전체 스캔 앞에 추가되므로
+persistent 8→12, transient 10→12, 제한 예산 사례의 누적 command 수 2→3으로 갱신했다.
+재시도 횟수·기한·최종 판정 단언은 유지했다.
+
+### 손자 수명과 실제 ps 테스트의 한계
+
+가짜 손자의 1.5초 자동 종료를 제거했다. 부모가 살아 있으면 interval로 계속 산다.
+부모 정상 exit에서는 소유 ChildProcess 핸들로 손자를 SIGKILL한다.
+SIGTERM에서는 손자 exit를 기다린 뒤 부모가 종료한다.
+부모 SIGKILL은 exit 콜백이 실행되지 않으므로 손자가 전달받은 원래 부모 PID와
+현재 ppid를 100ms마다 비교해 고아가 되면 스스로 끝난다.
+기존 fixture after의 직접 자식 kill·exit 대기·손자 종료 대기는 유지했다.
+ps 없이도 부모가 살아 있을 때 손자가 1.6초 이후 생존함을 단언한다.
+
+SDK 실제 ps 테스트는 readStartTime·check·손자 포함 listMarkedDescendants·종료 뒤 mismatch_confirmed만 검증한다.
+셔뱅 가짜의 ps command는 `node <script> …`이므로 이 가짜로는
+findMarked의 `pinnedPath` 루트 접두사 판정을 증명하지 않는다.
+제품은 동봉 실행 파일 자체가 루트이므로 판정 대상이 다르다.
+별도 기존 native Node 루트 테스트에서 findMarked와 listMarkedDescendants 각각 2초 미만을 단언하고,
+SDK 가짜 테스트에서도 listMarkedDescendants 2초 미만을 단언한다.
+이 샌드박스에서는 실제 ps가 차단돼 시간 기준 달성 여부는 호스트가 재검증해야 한다.
+
+### 동기 해시와 검증 결과
+
+hashFileSync는 openSync 후 고정 1MiB 버퍼로 readSync를 반복한다.
+마지막 부분 읽기는 실제 읽은 길이만 해시에 넣으며 fd는 finally에서 닫는다.
+빈 파일·1바이트·정확한 1MiB·2MiB+17바이트에서 async hash 및 기준 SHA-256과 동일했다.
+readSync 예외를 주입해 closeSync가 한 번 호출되는 것도 확인했다.
+274MB 동봉 파일을 통째로 할당하는 경로는 제거했다.
+
+검증 명령:
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-*.test.js`
+  → tests 390, pass 373, fail 17, cancelled 0, skipped 0.
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-gate-review-r3.test.js server/tests/session-host-ps-identity-fast.test.js`
+  → tests 15, pass 15, fail 0.
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/spawn-guard.test.js`
+  → tests 9, pass 9, fail 0.
+
+역회귀는 psIdentity.js를 각각 임시 변형한 뒤 원본 바이트로 원복했다.
+- 중복 매핑 fallback 검사 삭제 → (b) tests 1, pass 0, fail 1.
+  기대 PID [10,11] 대신 [11,11]이 반환돼 실패했다.
+- per-PID 표지 부재 fallback 검사 삭제 → (c) tests 1, pass 0, fail 1.
+  기대 ok 대신 query_failed라 실패했다.
+- 원복 후 신규 빠른 경로·해시 테스트 tests 6, pass 6, fail 0.
+
+전체 테스트의 환경 제한 실패 목록(테스트를 skip하지 않음):
+- `X simultaneous hosts preserve winner socket inode and capability` — 'spawnSync /bin/ps EPERM'
+- `X lock does not survive in a live inherited-environment child` — 'spawnSync /bin/ps EPERM'
+- `X detached host survives launcher parent SIGKILL` — 'spawnSync /bin/ps EPERM'
+- `X detached host survives launcher parent SIGTERM` — 'spawnSync /bin/ps EPERM'
+- `X detached host survives launcher parent SIGHUP` — 'spawnSync /bin/ps EPERM'
+- `X before accepted crash is reconciled by lookup after boot change, effect occurs once` — 'spawnSync /bin/ps EPERM'
+- `X idle drain refuses arrival with not_accepted, new host retries exactly once` — 'spawnSync /bin/ps EPERM'
+- `X active ownership prevents idle and SIGTERM exit; zero ownership releases socket and lock` — 'spawnSync /bin/ps EPERM'
+- `X private file modes, capability absent from argv and env, launcher sanitizes env` — 'host_start_timeout'
+- `X SIGTERM with zero ownership exits cleanly and releases exclusion` — 'spawnSync /bin/ps EPERM'
+- `X R1-01 asynchronous throw, active ownership=false` — 'spawnSync /bin/ps EPERM'
+- `X R1-01 asynchronous throw, active ownership=true` — 'spawnSync /bin/ps EPERM'
+- `X R1-01 asynchronous rejection, active ownership=false` — 'spawnSync /bin/ps EPERM'
+- `X R1-01 asynchronous rejection, active ownership=true` — 'spawnSync /bin/ps EPERM'
+- `R2 real ps ignores unrelated multiline argv while identifying a marked child` — query_failed !== ok (ps 오류를 보수적으로 반환)
+- `real ps identifies marked child and grandchild then confirms exit` — query_failed !== ok (ps 오류를 보수적으로 반환)
+- `SDK real ps identity reads actual child and inherited grandchild marker then mismatch` — 'spawnSync /bin/ps EPERM'

@@ -289,7 +289,10 @@ check('SDK real ps identity reads actual child and inherited grandchild marker t
   assert.equal(probe.check(child.pid, identity.startedAt), 'match');
   const grandchild = await until(() => f.log().find(row => row.type === 'grandchild'), 'grandchild');
   assert.equal(grandchild.marker, f.iid);
-  assert.ok(probe.listMarkedDescendants(f.iid).pids.some(row => row.pid === grandchild.pid));
+  const descendants = probe.listMarkedDescendants(f.iid);
+  assert.equal(descendants.status, 'ok');
+  assert.ok(descendants.pids.some(row => row.pid === grandchild.pid));
+  assert.ok(descendants.diagnostics.elapsedMs < 2000, JSON.stringify(descendants.diagnostics));
   await f.exit();
   assert.equal(probe.check(child.pid, identity.startedAt), 'mismatch_confirmed');
 });
@@ -422,6 +425,8 @@ check('SDK fake grandchild inherits exact marker with no credentials', async (t,
   const record = await until(() => f.log().find(row => row.type === 'grandchild'), 'grandchild marker');
   assert.equal(record.marker, f.iid);
   assert.notEqual(record.pid, f.processes[0].pid);
+  await delay(1600);
+  assert.doesNotThrow(() => process.kill(record.pid, 0), 'grandchild must outlive the previous 1.5 second timer');
 });
 
 check('SDK settings use isolated process HOME user settings, not parent account configuration', async (t, sdk) => {

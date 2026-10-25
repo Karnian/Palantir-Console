@@ -13,7 +13,7 @@ function absent() {
   return Object.assign(Error(), { status: 1, stdout: '', stderr: '' });
 }
 function fixture(options = {}) {
-  const state = { global: `10 ${pinnedPath} ${marker}\n20 unrelated\n`, pids: '10\n20\n',
+  const state = { global: `global hint ${pinnedPath} ${marker}\n20 unrelated\n`, pids: '10\n20\n',
     commands: { 10: `${pinnedPath} ${marker}\n`, 20: '/tool unrelated\n' },
     parents: { 10: '1\n', 20: '1\n' }, calls: [], elapsed: 0 };
   const probe = createPsIdentityProbe({ pinnedPath, clock: () => state.elapsed, ...options, execFileSync(command, args, execution) {
@@ -41,7 +41,7 @@ test('R2-01 unrelated multiline argv and marked multiline argv use per-PID attri
   assert.deepEqual(result.pids, [{ pid: 10, startedAt }]);
   assert.ok(state.calls.some(call => call.args.join(' ') === '-A -o pid='));
   assert.ok(state.calls.some(call => call.args.join(' ') === '-E -ww -o command= -p 20'));
-  assert.deepEqual(result.diagnostics, { elapsedMs: 0, queryCount: 8 });
+  assert.deepEqual(result.diagnostics, { elapsedMs: 0, queryCount: 6 });
 });
 test('R2-01 global no-token multiline output succeeds empty without per-PID queries', () => {
   const { state, probe } = fixture();
