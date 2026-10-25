@@ -428,15 +428,38 @@ export function useOwnedSessions(sessionId, { timers = globalThis, retryMs = 100
   const hasUnacceptedRequest = !!pending && unaccepted?.key === pending.body.request_key;
   const canDiscardPending = ready() && !busy && !lookupLock.current && !submitLock.current
     && hasUnacceptedRequest && unaccepted.generation === connection.current.generation;
-  const discardPending = () => {
+  const discardPending = async () => {
     if (!canDiscardPending || !ready() || lookupLock.current || submitLock.current) return;
     if (unaccepted.generation !== connection.current.generation) return;
     const saved = loadOwnedPending(target).request;
     if (!saved || saved.body.request_key !== unaccepted.key) return;
-    clearOwnedPending(unaccepted.key);
-    setPending(null);
+    const epoch = routeEpoch.current;
+    const generation = connection.current.generation;
+    const current = () => routeEpoch.current === epoch && ready() && connection.current.generation === generation;
+    lookupLock.current = true;
+    setBusy(true);
     setUnaccepted(null);
-    setNotice(OWNED_COPY.requestDiscarded);
+    try {
+      const result = await apiFetch(`${ownedApiPath()}/requests/${encodeURIComponent(saved.body.request_key)}/abandon`, {
+        method: 'POST', body: '{}'
+      });
+      if (result.host !== 'running' || (result.abandoned !== true && !(result.abandoned === false && result.existing))) {
+        throw new Error('host_unreachable');
+      }
+      // Only a durable host fence or a confirmed existing request can release browser retention.
+      clearOwnedPending(saved.body.request_key);
+      if (!current()) return;
+      setPending(null);
+      setNotice(result.abandoned ? OWNED_COPY.requestDiscarded : OWNED_COPY.requestAlreadyAccepted);
+      if (!result.abandoned && saved.path.endsWith('/start') && result.existing.session_id) {
+        location.hash = `owned/${result.existing.session_id}`;
+      } else if (!result.abandoned) await reload.current();
+    } catch {
+      if (current()) setNotice(OWNED_COPY.abandonUnknown);
+    } finally {
+      lookupLock.current = false;
+      if (routeEpoch.current === epoch) setBusy(false);
+    }
   };
   const history = async () => {
     if (!ready() || deleted.current) return;

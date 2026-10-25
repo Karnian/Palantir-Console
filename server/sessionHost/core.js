@@ -907,6 +907,42 @@ function createHostCore({
       request.body ?? null), hash(request.cwd ?? null)]);
   }
 
+  function abandonedResult(requestKey) {
+    return { request_key: requestKey, state: 'rejected', reason: 'request_abandoned' };
+  }
+
+  function keyRejection(requestKey) {
+    const match = typeof requestKey === 'string' && /^rk_(\d{1,16})_([a-fA-F0-9]{16,})$/.exec(requestKey);
+    if (!match) return { state: 'rejected', reason: 'invalid_request' };
+    if (+match[1] < now() - DAY) return { state: 'expired', reason: 'key_expired' };
+    if (+match[1] > now() + 300000) return { state: 'rejected', reason: 'key_future' };
+    return null;
+  }
+
+  function abandon(requestKey) {
+    if (crashed) throw new SimulatedCrash('core_crashed');
+    if (store.failed) throw new Error('storage_unavailable');
+    const invalid = keyRejection(requestKey);
+    if (invalid?.reason === 'invalid_request') throw new Error(invalid.reason);
+    let result;
+    // This transaction is synchronous with submit's acceptance: no await separates the lookup and fence.
+    writeTransaction(() => {
+      const alias = getRow('SELECT * FROM request_aliases WHERE request_key=?', requestKey);
+      const existing = (alias && getDelivery(alias.target_delivery_id))
+        || getRow('SELECT * FROM deliveries WHERE request_key=?', requestKey) || getControl(requestKey)
+        || getRow('SELECT * FROM request_tombstones WHERE request_key=?', requestKey);
+      if (existing) {
+        result = { abandoned: false, existing: existing.state === 'abandoned' ? abandonedResult(requestKey) : existing };
+        return;
+      }
+      if (invalid) { result = { invalid: invalid.reason }; return; }
+      execute('INSERT INTO request_tombstones VALUES(?,?,?,?,?)', requestKey, '', 'abandoned', 0, now() + 30 * DAY);
+      result = { abandoned: true };
+    });
+    if (result.invalid) throw new Error(result.invalid);
+    return result;
+  }
+
   function submit(request) {
 
     function getLatestRequestResult(result) {
@@ -936,6 +972,7 @@ function createHostCore({
     const existing = getRow('SELECT * FROM deliveries WHERE request_key=?', request.request_key) || getControl(request.request_key) || getRow(
       'SELECT * FROM request_tombstones WHERE request_key=?', request.request_key);
     if (existing) {
+      if (existing.state === 'abandoned') return abandonedResult(request.request_key);
       if (existing.fingerprint !== fingerprint) {
         return {
           state: 'rejected',
@@ -945,29 +982,18 @@ function createHostCore({
       }
       return existing;
     }
-    const keyMatch = /^rk_(\d{1,16})_([a-fA-F0-9]{16,})$/.exec(request.request_key || '');
-    if (!keyMatch || !KINDS.has(request.kind)) {
-      return {
-        state: 'rejected',
-        reason: 'invalid_request'
-      };
-    }
-    if (+keyMatch[1] < now() - DAY) {
-      return {
-        state: 'expired',
-        reason: 'key_expired'
-      };
-    }
-    if (+keyMatch[1] > now() + 300000) {
-      return {
-        state: 'rejected',
-        reason: 'key_future'
-      };
-    }
+    if (!KINDS.has(request.kind)) return { state: 'rejected', reason: 'invalid_request' };
+    const invalid = keyRejection(request.request_key);
+    if (invalid) return invalid;
     const isControl = CONTROLS.has(request.kind);
     let result;
     const sessionId = request.kind === 'start' ? randomUUID() : request.session_id;
     enqueue(sessionId, () => {
+      const tombstone = getRow('SELECT * FROM request_tombstones WHERE request_key=?', request.request_key);
+      if (tombstone?.state === 'abandoned') {
+        result = abandonedResult(request.request_key);
+        return;
+      }
       let session = sessionId && getSession(sessionId);
       let incarnation = session && getLatestIncarnation(sessionId);
       let reason;
@@ -1660,6 +1686,7 @@ function createHostCore({
   adapter.events.on('event', onEvent);
   return {
     submit,
+    abandon,
     async flush() {
       while (pending.size) await Promise.all([...pending]);
       if (asyncErrors.length) throw asyncErrors.shift();
@@ -1677,7 +1704,7 @@ function createHostCore({
         const persisted = getRow('SELECT * FROM request_aliases WHERE request_key=?', request.request_key) ||
           getRow('SELECT * FROM deliveries WHERE request_key=?', request.request_key) || getControl(request.request_key) ||
           getRow('SELECT * FROM request_tombstones WHERE request_key=?', request.request_key);
-        const durable = Boolean(persisted && persisted.fingerprint === requestFingerprint(request));
+        const durable = Boolean(persisted && (persisted.state === 'abandoned' || persisted.fingerprint === requestFingerprint(request)));
         return { durable, result, ...(!durable ? { code: result.reason || 'not_recorded' } : {}) };
       });
     },
@@ -1693,9 +1720,10 @@ function createHostCore({
     lookup(requestKey) {
       return store.read(() => {
         const alias = getRow('SELECT * FROM request_aliases WHERE request_key=?', requestKey);
-        return (alias && getDelivery(alias.target_delivery_id)) ||
+        const result = (alias && getDelivery(alias.target_delivery_id)) ||
           getRow('SELECT * FROM deliveries WHERE request_key=?', requestKey) || getControl(requestKey) ||
           getRow('SELECT * FROM request_tombstones WHERE request_key=?', requestKey) || { found: false };
+        return result.state === 'abandoned' ? abandonedResult(requestKey) : result;
       });
     },
     activity() {

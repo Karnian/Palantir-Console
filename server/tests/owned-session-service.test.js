@@ -18,6 +18,7 @@ function bridge(t, options = {}) {
     async reconcile() { reconcileCalls++; return client.lookup('unknown'); },
     list: () => f.core.listSessions(), snapshot: id => f.core.snapshot(id),
     lookup(key) { lookups++; return f.core.lookup(key); },
+    abandon: key => f.core.abandon(key),
     settingsPreview: cwd => f.core.settingsPreview(cwd),
     eventsSince: seq => f.core.eventsSince(seq),
     async submit(req) {
@@ -201,4 +202,15 @@ test('R2 offline approval cache preserves the exact status field set including r
   assert.deepEqual(Object.keys(offline.last_known.state.tool_requests[0]).sort(), [
     'created_at', 'id', 'incarnation_id', 'state', 'tool_name', 'tool_use_id'
   ]);
+});
+
+test('abandon reaches the live host and never starts an absent host', async t => {
+  const h = bridge(t);
+  const key = h.f.key();
+  assert.deepEqual(await h.service.abandon(key), { host: 'running', abandoned: true });
+  assert.equal((await h.service.lookup(key)).result.reason, 'request_abandoned');
+  h.online = false;
+  await assert.rejects(h.service.abandon(h.f.key()), { code: 'host_unreachable', status: 503 });
+  assert.equal(h.launches, 0);
+  await assert.rejects(h.service.abandon('invalid'), { code: 'invalid_request_key', status: 400 });
 });

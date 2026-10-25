@@ -2395,3 +2395,26 @@ fake adapter 테스트는 A 종료 직후 interrupt → B의 별도 interrupt(pr
 - UI 집중: tests 55, pass 55, fail 0(`/tmp/sh1-c2-r9-ui-final.log`)이며 최종 전체 실행에서도 UI 전부 통과했다.
 - 최종 지정 명령 `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session*.test.js server/tests/session-host-*.test.js server/tests/work-board.test.js`: tests 668, pass 645, fail 23, cancelled 0, skipped 0(`/tmp/sh1-c2-r9-done.log`). 실패는 이전과 같은 샌드박스의 listen EPERM·실제 /bin/ps EPERM·host_start_timeout이다. 실제 macOS 부하에서 프로세스 기동 대기 변경을 재검증해야 한다.
 - 화면 소스 160자 제한 유지. 실제 Claude·LLM·외부 네트워크 호출, git 조작, 코어·spec·전역 SSE·C1 화면·visual baseline 변경은 하지 않았다.
+
+### S1-c2 라운드 10 — 요청 버리기의 호스트 영속 abandon
+
+수정 전 회귀 6개 모두 실패했다(`/tmp/sh1-c2-r10-red.log`: tests 6, pass 0, fail 6). 코어 abandon API 부재, 기존 접수 보존과 경쟁 직렬화 부재, 키 창 검증 부재, 화면의 호스트 확인 없는 로컬 제거를 재현했다.
+
+기존 request_tombstones의 state는 자유 TEXT이므로 스키마 변경·마이그레이션 없이 abandoned를 기록한다. fingerprint는 빈 문자열이고 session_deleted=0, expires_at은 기존 tombstone과 같은 30일이다. 키 외에 본문·세션 원문을 남기지 않는다. 기존 행은 변경하지 않는다.
+
+core.abandon(request_key)는 submit과 같은 키 형식·24시간 창·5분 미래 허용 범위를 검사한다. 한 동기 write transaction 안에서 delivery/control/alias/tombstone을 조회하고, 있으면 abandoned:false와 기존 결과를 반환한다. 없으면 abandoned tombstone을 커밋한 뒤 abandoned:true를 반환한다. 기존 결과 조회가 키 만료보다 먼저인 순서도 submit과 같다. 잘못된 키는 정상 검증 오류이며 저장소 장애로 오인하지 않는다.
+
+submit은 abandoned tombstone을 본문 fingerprint와 무관하게 rejected/request_abandoned로 반환한다. submitWithReceipt에서도 영속 tombstone을 접수 근거로 인정하므로 프로토콜이 같은 키를 미접수로 오인하지 않는다. 세션 큐에 이미 들어간 submit도 실제 처리를 시작할 때 tombstone을 다시 확인한다. 따라서 앞선 큐 작업 뒤에 대기 중이던 요청도 abandon 뒤 효과를 만들 수 없다. lookup도 같은 확정 거절을 반환하며 재시작 뒤에도 유지된다.
+
+인증된 호스트 프로토콜에 abandon, launcher에 abandon(request_key), 서비스에 abandon(key), 라우트에 POST /api/owned-sessions/requests/:request_key/abandon을 추가했다. cookie·정확한 origin 검사를 기존 미들웨어로 적용한다. 서비스는 캐시로 성공을 대신하거나 호스트를 새로 띄우지 않으며, 연결 실패·응답 유실이면 503이다. launcher의 미확정 상태 메타데이터도 확정 결과에 맞춰 정리한다.
+
+요청 버리기는 이제 위 API를 호출한다. 응답 전에는 본문과 pending을 유지한다. abandoned:true일 때만 영속 차단 완료로 지우며, abandoned:false면 기존 결과를 확정 처리하고 “이미 접수된 요청이었습니다.”를 표시한 뒤 snapshot을 다시 받는다. 시작 요청의 기존 결과는 해당 세션으로 이동한다. 실패·응답 불명에서는 원래 키와 본문을 유지하고 접수 확인 후 다시 시도하도록 안내한다. 연결·세대 fence와 중복 제출 잠금은 유지한다. 라운드 9의 found:false는 버튼을 제공하는 근거이며, 로컬 삭제의 근거로 사용하지 않는다.
+
+검증 범위는 abandon 후 지연 submit 효과 0회·변경 본문도 거절·재시작 보존·30일 만료와 원문 없음, 기존 row/alias/tombstone 불변, 두 호출 순서의 경쟁 효과 0/1회, 큐에 대기하던 submit 차단, 프로토콜 양방향 순서, launcher→인증 프로토콜→코어 경로, 서비스 오프라인 503·새 호스트 시작 0회, 라우트 cookie/origin, 화면 두 응답 분기와 응답 유실 시 pending 유지다. 실제 Claude·LLM·외부 네트워크 호출은 없다.
+
+검증 결과:
+
+- 수정 전 재현: tests 6, pass 0, fail 6(`/tmp/sh1-c2-r10-red.log`).
+- 코어 + 전체 UI 집중: tests 61, pass 61, fail 0(`/tmp/sh1-c2-r10-focus.log`). 추가 큐·응답 유실·launcher 경로 포함 집중: tests 9, pass 9, fail 0(`/tmp/sh1-c2-r10-extra.log`).
+- 최종 지정 명령 `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session*.test.js server/tests/session-host-*.test.js server/tests/work-board.test.js`: tests 680, pass 657, fail 23, cancelled 0, skipped 0(`/tmp/sh1-c2-r10-done.log`). 실패는 이전 라운드와 같은 샌드박스의 listen EPERM·실제 /bin/ps EPERM·host_start_timeout이며 호스트 재검증이 필요하다.
+- git 조작, 실제 Claude·LLM·외부 네트워크 호출, spec·전역 SSE·C1 화면·visual baseline 변경은 하지 않았다. 저장소 스키마 버전과 기존 tombstone 행은 변경하지 않았다.

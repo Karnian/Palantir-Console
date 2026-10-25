@@ -92,6 +92,7 @@ test('R9 retry replays an unaccepted interrupt unchanged after the turn becomes 
 test('R9 confirmed unaccepted request can be discarded only while connected', async t => {
   let posts = 0;
   const environment = await harness(t, { api: async (url, options) => {
+    if (url.endsWith('/abandon')) return { host: 'running', abandoned: true };
     if (options?.method) { posts++; return { acceptance: 'acceptance_unknown' }; }
     if (url.includes('/requests/')) return { host: 'running', result: { found: false } };
     if (url.includes('transcript')) return { host: 'running', events: [] };
@@ -109,7 +110,7 @@ test('R9 confirmed unaccepted request can be discarded only while connected', as
   environment.stream().emit('error');
   await flushEffects(20);
   assert.equal(environment.current.canDiscardPending, false);
-  environment.current.discardPending();
+  await environment.current.discardPending();
   assert.ok(environment.current.pending);
   await environment.current.retry();
   assert.equal(posts, 1);
@@ -117,7 +118,7 @@ test('R9 confirmed unaccepted request can be discarded only while connected', as
   await flushEffects(70);
   await environment.current.checkPending();
   await flushEffects(20);
-  environment.current.discardPending();
+  await environment.current.discardPending();
   await flushEffects(20);
   assert.equal(environment.current.pending, null);
   assert.equal(environment.current.disabled, false);

@@ -237,6 +237,18 @@ function createOwnedSessionService({ runtimeDir = path.resolve(process.cwd(), 'r
       }
     },
     lookup(key) { validateKey(key); return read(`lookup:${key}`, async host => ({ result: await host.lookup(key) })); },
+    async abandon(key) {
+      validateKey(key);
+      // Abandon must never start a host or fall back to a cached read.
+      try {
+        const host = await connect();
+        return { host: 'running', ...await host.abandon(key) };
+      } catch (error) {
+        const code = error.code || error.message;
+        if (['invalid_request', 'key_expired', 'key_future'].includes(code)) throw failure(code);
+        throw failure('host_unreachable', 503);
+      }
+    },
     submit,
     async settingsPreview(cwd) {
       cwd = validateCwd(cwd);

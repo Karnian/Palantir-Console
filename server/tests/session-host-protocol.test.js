@@ -234,3 +234,25 @@ test('R7 metadata overflow returns a fixed snapshot error without closing the co
   assert.deepEqual(h.output.find(row => row.id === 1), { type: 'error', id: 1, code: 'snapshot_too_large' });
   assert.equal(h.output.find(row => row.id === 2).type, 'list'); assert.equal(h.ended, false);
 });
+
+test('P abandon and delayed submit serialize on the same durable key over the protocol', async t => {
+  const { fixture } = require('./helpers/session-host-fixture');
+  for (const abandonFirst of [true, false]) {
+    const f = fixture(t, { manual: true });
+    f.start();
+    const request = f.req('prompt', { body: 'delayed wire request' });
+    const h = harness(f.core);
+    h.hello();
+    const frames = [{ type: 'abandon', id: 'a', request_key: request.request_key }, { type: 'submit', id: 's', request }];
+    if (!abandonFirst) frames.reverse();
+    for (const frame of frames) h.send(frame);
+    await flush();
+    const abandonment = h.output.find(row => row.id === 'a');
+    const submission = h.output.find(row => row.id === 's');
+    assert.equal(abandonment.result.abandoned, abandonFirst);
+    assert.equal(submission.type, 'accepted');
+    if (abandonFirst) assert.equal(submission.result.reason, 'request_abandoned');
+    else assert.equal(abandonment.result.existing.id, submission.result.id);
+    assert.equal(f.adapter.log.received.length, abandonFirst ? 0 : 1);
+  }
+});
