@@ -145,6 +145,7 @@ function createClient({ runtimeDir, timeoutMs = 2000 }) {
     submit: value => request('submit', { request: value }),
     lookup: request_key => request('lookup', { request_key }),
     snapshot: session_id => request('snapshot', { session_id }),
+    transcript: (session_id, before_seq, limit = 50) => request('transcript', { session_id, before_seq, limit }),
     chunk: (session_id, source, id_or_seq, offset = 0) => request('chunk', { session_id, source, id_or_seq, offset }),
     list: () => request('list', {}),
     settingsPreview: cwd => request('settings_preview', { cwd }),

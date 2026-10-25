@@ -225,6 +225,7 @@ function createOwnedSessionService({ runtimeDir = path.resolve(process.cwd(), 'r
   return {
     list: () => read('list', host => host.list()),
     snapshot: id => read(`snapshot:${id}`, host => host.snapshot(id)),
+    transcript: (id, before, limit) => read(`transcript:${id}`, host => host.transcript(id, before, limit)),
     async chunk(sessionId, source, ref, offset) {
       try {
         await connect();

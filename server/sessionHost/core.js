@@ -1472,10 +1472,19 @@ function createHostCore({
         current_incarnation_id: getLatestIncarnation(sessionId)?.id || null,
         incarnations: rows('SELECT * FROM incarnations WHERE session_id=?', [sessionId], incarnation => {
           const event = getRow("SELECT json FROM events WHERE incarnation_id=? AND type='rate_limit' ORDER BY seq DESC LIMIT 1", incarnation.id);
-          return { ...incarnation, rate_limit_info: event ? JSON.parse(event.json) : null };
+          // Only a live, locally verified gate provides version and control evidence.
+          const verified = incarnation.host_boot_id === hostBootId && hasPassedGate(incarnation);
+          const caps = incarnation.capabilities === null ? undefined : JSON.parse(incarnation.capabilities);
+          const capabilityVerdict = verified ? require('./sdkAdapter').capabilityVerdict({
+            sdkVersion: pin.sdkVersion, cliVersion: pin.cliVersion, permissionMode: 'default', systemInitCapabilities: caps
+          }) : null;
+          return { ...incarnation, rate_limit_info: event ? JSON.parse(event.json) : null,
+            cli_version: verified ? pin.cliVersion : null, control_available: !!verified && incarnation.state === 'alive', capabilityVerdict };
         }),
         deliveries: rows('SELECT * FROM deliveries WHERE session_id=?', [sessionId]),
-        tool_requests: rows('SELECT * FROM tool_requests WHERE incarnation_id IN (SELECT id FROM incarnations WHERE session_id=?)', [sessionId]),
+        tool_requests: rows('SELECT * FROM tool_requests WHERE incarnation_id IN (SELECT id FROM incarnations WHERE session_id=?)', [sessionId], card => ({
+          ...card, created_at: getRow("SELECT created_at FROM events WHERE incarnation_id=? AND type='sdk' AND json_extract(json,'$.type')='tool_request' AND json_extract(json,'$.tool_use_id')=? ORDER BY seq LIMIT 1", card.incarnation_id, card.tool_use_id)?.created_at || null
+        })),
         controls: rows('SELECT * FROM control_requests WHERE session_id=?', [sessionId])
       };
       store.readCheckpoint();
@@ -1575,6 +1584,24 @@ function createHostCore({
       return { events, seq_high: high, more: last < high };
     });
   }
+  function transcript(sessionId, beforeSeq, limit = 50) {
+    if (beforeSeq !== undefined && (!Number.isSafeInteger(beforeSeq) || beforeSeq < 0) ||
+        !Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error('invalid_request');
+    return store.read(() => {
+      const session = getSession(sessionId);
+      if (!session || ['deleting', 'deleted'].includes(session.state)) return { events: [], next_before_seq: null };
+      const rows = getRows("SELECT seq,session_id,incarnation_id,type,created_at,substr(CAST(json AS BLOB),1,4100) preview," +
+    "length(CAST(json AS BLOB)) bytes FROM events WHERE session_id=? AND type='sdk_message' AND seq<? ORDER BY seq DESC LIMIT ?",
+      sessionId, beforeSeq ?? Number.MAX_SAFE_INTEGER, limit + 1);
+      const more = rows.length > limit;
+      const events = rows.slice(0, limit).map(({ preview, ...row }) => {
+        const text = utf8Prefix(preview, 4096);
+        return { ...row, preview: text, truncated: Buffer.byteLength(text) < row.bytes,
+          ref: { source: 'event', id_or_seq: row.seq } };
+      });
+      return { events, next_before_seq: more ? events.at(-1).seq : null };
+    });
+  }
   function chunk(sessionId, source, ref, offset = 0) {
     const fail = code => { throw Object.assign(new Error(code), { code }); };
     if (!Number.isSafeInteger(offset) || offset < 0) fail('invalid_offset');
@@ -1614,6 +1641,7 @@ function createHostCore({
     settingsPreview,
     eventsSince,
     chunk,
+    transcript,
     submitWithReceipt(request) {
       const result = this.submit(request);
       return store.read(() => {

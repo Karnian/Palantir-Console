@@ -9036,3 +9036,18 @@ input[type="date"]::-webkit-datetime-edit-day-field {
 }
 
 .session-hub-chat .manager-chat-header .session-hub-icon { padding: 0; }
+/* Owned sessions: deliberately minimal, with token-only colors. */
+.owned-view { padding: 16px; min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.owned-view * { box-sizing: border-box; min-width: 0; }
+.owned-view ul { padding-left: 18px; }
+.owned-card, .owned-message { padding: 12px; margin-block: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-surface); }
+.owned-view pre { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; max-width: 100%; }
+.owned-view img { max-width: 100%; }
+.owned-view textarea, .owned-view input:not([type=checkbox]):not([type=radio]) { width: 100%; max-width: 100%; }
+.owned-view textarea { min-height: 90px; }
+.owned-view label { display: block; margin-block: 8px; }
+.owned-view button { margin: 4px; white-space: normal; }
+.owned-view fieldset { max-width: 100%; }
+.owned-actions { display: flex; flex-wrap: wrap; }
+.owned-unknown { color: var(--text-primary); border: 2px solid var(--warning-badge-fg); padding: 8px; font-weight: 600; }
+.owned-badge { display: inline-block; padding: 4px; margin: 2px; border: 1px solid var(--border); }

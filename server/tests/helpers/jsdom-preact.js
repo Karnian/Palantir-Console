@@ -68,7 +68,7 @@ const clientMessageKeySrc = fs.readFileSync(path.join(APP_LIB_DIR, 'clientMessag
  */
 function transformComponentSource(raw) {
   return raw
-    .replace(/^export\s+function\s+/gm, 'function ')
+    .replace(/^export\s+(?=(?:async\s+)?function\s+)/gm, '')
     .replace(/^import\s+\{([^}]+)\}\s+from\s+['"][^'"]*preact\.module\.js['"];?\s*$/gm,
       (_, names) => `const {${names}} = window.preact;`)
     .replace(/^import\s+\{([^}]+)\}\s+from\s+['"][^'"]*hooks\.module\.js['"];?\s*$/gm,

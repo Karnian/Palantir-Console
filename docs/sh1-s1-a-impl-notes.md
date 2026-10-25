@@ -2193,3 +2193,28 @@ pending 2,100개에서는 모든 행을 보존하면서 미리보기를 줄여 8
 - `R2 real ps ignores unrelated multiline argv while identifying a marked child` — `expected: 'ok'; actual: 'query_failed'`
 - `real ps identifies marked child and grandchild then confirms exit` — `real /bin/ps must be available; sandbox EPERM requires host rerun`
 - `SDK real ps identity reads actual child and inherited grandchild marker then mismatch` — `error: 'spawnSync /bin/ps EPERM'`
+## S1-c2 — 내 세션 최소 화면
+
+`#owned` 목록과 `#owned/<session_id>` 세션 화면을 추가했다. 내비 라벨은 `copy.js`의 “내 세션”이며 기존 C1 화면과 전역 useSSE 채널은 수정하지 않았다. 목록에는 cwd·세션 상태·실행 상태·승인 대기 수·마지막 활동 순번을 표시한다. 이번 화면은 사용자 배치 lock-in 전의 최소 구현이다.
+
+세션별 `GET /api/owned-sessions/:id/transcript?before_seq=&limit=`는 기존 cookie·Fetch-Site 검사를 통과한 뒤 서비스 → 소켓 프로토콜 → 코어로 전달된다. 세션 소속 sdk_message만 seq 내림차순으로 페이지를 나누며 기본 50개·최대 100개다. UTF-8 경계를 지킨 4KiB 미리보기와 event ref를 반환하고 전문은 기존 chunk API로 읽는다. 삭제 중·삭제됨·없는 세션은 빈 목록이며 다른 세션 ref로 전문을 읽을 수 없다.
+
+snapshot에는 현재 호스트에서 초기화 게이트를 통과했다는 증거가 있을 때 CLI 버전·제어 가능 여부·기존 capabilityVerdict 결과를 함께 싣는다. 증거가 없으면 null/false이며 화면이 능력을 추정하지 않는다. 승인 카드 요청 시각은 해당 tool_request 이벤트의 기록 시각을 사용한다. 저장소 스키마와 실행 상태 기계는 바꾸지 않았다.
+
+시작 모달은 기존 로컬 DirectoryPicker와 설정 미리보기를 사용한다. 프로젝트·사용자 hooks/MCP 실행 문구, 출처 경로, PermissionRequest 경고, 거부 사유를 표시하며 확인 체크 전에는 시작할 수 없다. 승인 입력과 긴 prompt·SDK 이벤트는 전문 조각을 복원한다. 전문을 받기 전 승인·질문 제출은 잠긴다. 질문 답은 질문 텍스트를 키로 하는 문자열 사전이며 다중 선택은 선택한 라벨을 쉼표로 연결한다.
+
+대화는 사용자 prompt와 SDK 메시지를 기록 시각으로 정렬한다. assistant 텍스트는 기존 renderMarkdown을 거치고 도구 입력·결과는 텍스트 노드로 표시한다. 전달 unknown과 outcome_unknown을 별개로 강조한다. unknown prompt의 새 키 재전송은 원래 incarnation 종료가 확인되고 현재 실행이 제어 가능한 경우의 사람 버튼으로만 가능하다.
+
+전용 EventSource는 snapshot의 seq_high에서 시작하고 전환·unmount 때 닫는다. 전이 이벤트는 디바운스로 snapshot을 갱신하고 sdk_message는 seq로 중복 제거한다. 호스트 응답 없음이나 SSE 연결 오류에서는 마지막으로 표시한 원문을 유지하고 모든 제출을 잠근다. 서버 재연결·브라우저 SSE 재연결·resync는 snapshot 이후 구독을 다시 잡는다. snapshot_too_large는 별도 오류 문구를 표시한다. id·수명·호스트 상실 세대 fence로 늦은 응답 반영을 막는다.
+
+request_key는 브라우저에서 rk_<시각>_<16바이트 난수 hex>로 만든다. 네트워크 오류·acceptance_unknown은 본문과 키를 보관하고 사람이 누른 같은 키 재시도에서 lookup 후 동일 요청을 재생한다. 모든 세션 제출에 snapshot의 incarnation_id를 함께 보낸다. 중단하고 보내기는 해당 키의 interrupt completed와 idle을 기다린다. 실행 끝내고 이어서 시작은 해당 키의 stop done을 기다린 뒤 resume한다. 독립 resume 버튼은 stop으로 하위 프로세스 확인까지 통과한 종료 실행에서만 활성화한다. 그 외 종료 실행은 실행 끝내고 이어서 시작 경로에서 stop 확인부터 다시 진행한다.
+
+검증 결과:
+
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session*.test.js server/tests/session-host-*.test.js`: tests 548, pass 525, fail 23, cancelled 0, skipped 0. 기존 기록과 동일한 소켓 listen EPERM·실제 /bin/ps EPERM·그에 따른 host_start_timeout 사례다. 로그 `/tmp/sh1-c2-done.log`.
+- UI·transcript·nav·SSE 집중 실행: tests 24, pass 24, fail 0. 로그 `/tmp/sh1-c2-confirmed.log`. unknown/outcome, 입력 규칙, 승인 전문 chunk, 다중 선택 사전, 시작 확인·hook 경고, 호스트 상실 비활성화, 같은 키 재시도, XSS 안전 경로, 세션 소속·페이지·삭제를 검사했다.
+- 지정 boot.smoke + sse-channels 실행은 boot HTTP listen EPERM으로 38개 boot 사례 중 37개 실패·1개 통과를 출력한 뒤 열린 핸들로 끝나지 않아 50초 후 중단했다. SSE 채널 검사는 집중 실행에서 별도로 8/8 통과했다. 로그 `/tmp/sh1-c2-final-smoke.log`.
+- `npm run test:a11y -- --project=chromium --grep 'minimum owned session screen'`: 서버의 127.0.0.1:4177 listen EPERM으로 시나리오 실행 전 종료. owned 목록·세션에 dark/light × 360px API mock 시나리오 4개를 추가했다. 호스트에서 전체 `npm run test:a11y` 재검증이 필요하다. visual baseline은 추가하지 않았다.
+
+실제 Claude·LLM 호출, 외부 네트워크 호출, git 조작은 수행하지 않았다. 라이트·다크·360px의 실제 브라우저 검증과 화면 배치 lock-in은 호스트 및 S1-d에서 수행한다. 과거 실행에 버전·능력 판정 증거가 없으면 판정 전으로 남기며, 마지막 활동은 서버가 기존에 제공하던 순번으로 표시한다.
+

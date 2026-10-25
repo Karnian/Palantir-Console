@@ -48,6 +48,17 @@ function createOwnedSessionsRouter({ service }) {
     return service.chunk(req.params.id, source, ref, Number(raw));
   }));
   router.get('/:id', handle(req => service.snapshot(req.params.id)));
+  router.get('/:id/transcript', handle(req => {
+    const number = (value, fallback) => {
+      if (value === undefined) return fallback;
+      if (typeof value !== 'string' || !/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) throw invalid('invalid_request');
+      return Number(value);
+    };
+    const before = number(req.query.before_seq, undefined);
+    const limit = number(req.query.limit, 50);
+    if (limit < 1 || limit > 100) throw invalid('invalid_request');
+    return service.transcript(req.params.id, before, limit);
+  }));
   router.post('/settings-preview', handle(req => {
     if (req.body?.node_id !== undefined && req.body.node_id !== 'local') throw invalid('local_node_required');
     return service.settingsPreview(req.body?.cwd);

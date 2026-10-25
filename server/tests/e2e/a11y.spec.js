@@ -56,6 +56,32 @@ const ROUTES = [
   'operator/profiles',
 ];
 const THEMES = ['dark', 'light'];
+
+for (const theme of ['dark', 'light']) {
+  for (const route of ['owned', 'owned/owned-a11y']) {
+    test(`@a11y ${route} ${theme} minimum owned session screen`, async ({ page }) => {
+      await page.setViewportSize({ width: 360, height: 800 });
+      await page.addInitScript(value => localStorage.setItem('palantir.theme', value), theme);
+      await page.route('**/api/owned-sessions**', async requestRoute => {
+        const url = new URL(requestRoute.request().url());
+        if (url.pathname.endsWith('/stream')) return requestRoute.fulfill({ contentType: 'text/event-stream', body: ': mock\n\n' });
+        const session = { id: 'owned-a11y', cwd: '/safe/project', state: 'active', pending_approvals: 0, last_activity_seq: 1,
+          incarnation: { id: 'inc', state: 'alive' } };
+        const body = url.pathname.endsWith('/transcript') ? { host: 'running', events: [], next_before_seq: null } :
+          url.pathname.endsWith('/owned-a11y') ? { host: 'running', seq_high: 1, state: { session, current_incarnation_id: 'inc',
+            incarnations: [{ id: 'inc', state: 'alive', control_available: true }], deliveries: [], controls: [], tool_requests: [] } } :
+            { host: 'running', seq_high: 1, sessions: [session] };
+        return requestRoute.fulfill({ contentType: 'application/json', body: JSON.stringify(body) });
+      });
+      await page.goto(`/#${route}`);
+      await expect(page.getByRole('heading', { name: '내 세션', exact: true })).toBeVisible();
+      await expect(page.getByText('/safe/project', { exact: route === 'owned' })).toBeVisible();
+      const result = await new AxeBuilder({ page }).include('.owned-view').withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa']).analyze();
+      expect(result.violations.filter(item => ['critical', 'serious', 'moderate'].includes(item.impact))).toEqual([]);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    });
+  }
+}
 const VIEWPORTS = [
   { name: 'desktop', width: 1280, height: 800 },
   { name: 'mobile', width: 375, height: 667 },
