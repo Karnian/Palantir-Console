@@ -1095,6 +1095,11 @@ function createHostCore({
     if (!incarnation || ['deleting', 'deleted'].includes(getSession(incarnation.session_id)?.state)) {
       return;
     }
+    if (adapterEvent.type === 'sdk_message') {
+      enqueue(incarnation.session_id, () => writeTransaction(() =>
+        recordEvent(incarnation.session_id, incarnation.id, 'sdk_message', { message: adapterEvent.message })));
+      return;
+    }
     if (['initialization', 'initialization_failed'].includes(adapterEvent.type)) {
       enqueue(incarnation.session_id, () => {
         const control = getRow("SELECT * FROM control_requests WHERE incarnation_id=? AND state='accepted' AND stage='gating'", incarnation.id);
@@ -1434,6 +1439,58 @@ function createHostCore({
     });
   }
 
+  function listSessions() {
+    return store.read(() => {
+      const sessions = getRows("SELECT id,title,cwd,state,created_at FROM owned_sessions WHERE state!='deleted'").map(session => {
+        const incarnation = getLatestIncarnation(session.id);
+        return {
+          ...session,
+          incarnation: incarnation ? {
+            id: incarnation.id, state: incarnation.state, has_pid: incarnation.pid !== null, end_reason: incarnation.end_reason
+          } : null,
+          attribution_uncertain: incarnation?.attribution_uncertain || 0,
+          pending_approvals: incarnation ? getRow("SELECT COUNT(*) n FROM tool_requests WHERE incarnation_id=? AND state='pending'",
+            incarnation.id).n : 0,
+          last_activity_seq: getRow('SELECT COALESCE(MAX(seq),0) n FROM events WHERE session_id=?', session.id).n
+        };
+      });
+      store.readCheckpoint();
+      return { sessions, seq_high: getRow('SELECT COALESCE(MAX(seq),0) n FROM events').n };
+    });
+  }
+
+  async function settingsPreview(cwd) {
+    let timer;
+    const failed = { ok: false, reason: 'settings_check_failed' };
+    try {
+      const started = Date.now();
+      const resolved = await Promise.race([
+        Promise.resolve().then(() => adapter.checkSettings(cwd)),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('settings_check_failed')), pin.resolveSettingsDeadlineMs); })
+      ]);
+      if (Date.now() - started >= pin.resolveSettingsDeadlineMs) return failed;
+      const verdict = authGate.evaluateResolvedSettings(resolved);
+      if (verdict.reason === 'settings_check_failed') return failed;
+      const paths = value => {
+        if (Array.isArray(value)) return [...new Set(value.flatMap(paths))];
+        if (!value || typeof value !== 'object') return [];
+        return [...new Set([
+          ...(typeof value.path === 'string' && !/[\0\r\n]/.test(value.path) ? [value.path] : []),
+          ...Object.entries(value).filter(([key]) => key !== 'path').flatMap(([, item]) => paths(item))
+        ])];
+      };
+      const provenance = resolved.provenance;
+      return {
+        ...verdict,
+        hooks: Object.keys(resolved.effective.hooks || {}).map(event => ({ event, paths: paths(provenance.hooks) })),
+        mcp_servers: Object.keys(resolved.effective.mcpServers || {}).map(name => ({ name, paths: paths(provenance.mcpServers) })),
+        source_paths: [...new Set(resolved.sources.flatMap(source => paths({ path: source?.path })))],
+        warnings: Object.hasOwn(resolved.effective.hooks || {}, 'PermissionRequest') ? ['permission_request_hook'] : []
+      };
+    } catch { return failed; }
+    finally { clearTimeout(timer); }
+  }
+
   function eventsSince(seq) {
     return store.read(() => {
       const rows = getRows('SELECT * FROM events WHERE seq>? ORDER BY seq', seq);
@@ -1462,6 +1519,8 @@ function createHostCore({
     },
     recover,
     snapshot,
+    listSessions,
+    settingsPreview,
     eventsSince,
     submitWithReceipt(request) {
       const result = this.submit(request);

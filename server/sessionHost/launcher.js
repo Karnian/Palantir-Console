@@ -145,6 +145,8 @@ function createClient({ runtimeDir, timeoutMs = 2000 }) {
     submit: value => request('submit', { request: value }),
     lookup: request_key => request('lookup', { request_key }),
     snapshot: session_id => request('snapshot', { session_id }),
+    list: () => request('list', {}),
+    settingsPreview: cwd => request('settings_preview', { cwd }),
     eventsSince: seq => request('events_since', { seq }),
     async reconcile() {
       await connect();

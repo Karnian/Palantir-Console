@@ -22,7 +22,7 @@ function clientHarness(t, reply, lookupResult = { state: 'completed', outcome: '
         response = { type: 'lookup', id: message.id, result: typeof lookupResult === 'function' ? lookupResult() : lookupResult };
       } else if (message.type === 'events_since') response = { type: 'events_since', id: message.id, result: { events, seq_high: 1 } };
       else {
-        const result = reply(message.request);
+        const result = reply(message.request, message);
         response = result && { id: message.id, ...result };
       }
       if (response) queueMicrotask(() => stream.push(JSON.stringify(response) + '\n'));
@@ -209,4 +209,17 @@ test('R2-M tombstone remains terminal when session_deleted is zero', async t => 
   await h.reboot();
   assert.equal((await h.client.reconcile()).size, 0);
   assert.deepEqual(h.lookups, []);
+});
+
+
+test('C1 client list and settings preview send matching protocol frames', async t => {
+  const frames = [];
+  const h = clientHarness(t, (_request, message) => {
+    frames.push(message);
+    return { type: message.type, result: message.type === 'list' ? { sessions: [], seq_high: 0 } : { ok: true } };
+  });
+  await h.client.connect();
+  assert.deepEqual(await h.client.list(), { sessions: [], seq_high: 0 });
+  assert.deepEqual(await h.client.settingsPreview('/safe'), { ok: true });
+  assert.deepEqual(frames.map(({ id, ...frame }) => frame), [{ type: 'list' }, { type: 'settings_preview', cwd: '/safe' }]);
 });

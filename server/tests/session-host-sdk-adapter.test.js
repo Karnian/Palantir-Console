@@ -51,7 +51,8 @@ check('SDK core normal 20 prompts and 10 approvals have provider effect once and
   assert.equal(f.state().deliveries.filter(row => row.state === 'unknown').length, 0);
   assert.equal(f.state().deliveries.filter(row => row.state === 'completed').length, 20);
   assert.equal(f.state().deliveries.filter(row => row.state === 'provider_observed').length, 10);
-  assert.equal(JSON.stringify(f.events).includes('not retained'), false);
+  assert.equal(JSON.stringify(f.events.filter(event => event.type !== 'sdk_message')).includes('not retained'), false);
+  assert.equal(JSON.stringify(f.events.filter(event => event.type === 'sdk_message')).includes('not retained'), true);
   const spawn = rows.find(row => row.type === 'spawn');
   assert.ok(spawn.argv.includes(`--session-id=${f.state().session.claude_session_id}`));
 });
@@ -971,4 +972,38 @@ check('R4 wire pending replay cancellation cancels shared logical approval', asy
   assert.equal(f.log().filter(row => row.type === 'tool_request_sent').length, 2);
   assert.equal(f.log().filter(row => row.type === 'tool_cancel_sent').length, 1);
   assert.equal(f.log().filter(row => row.type === 'tool').length, 0);
+});
+
+check('C1 SDK stream preserves full messages alongside existing translated events', async (t, sdk) => {
+  const f = await fixture(t, sdk);
+  assert.equal((await f.start()).state, 'done');
+  const delivery = f.prompt('hello');
+  await f.completed(delivery);
+  const raw = f.events.filter(event => event.type === 'sdk_message');
+  assert.ok(raw.length > 0);
+  assert.ok(raw.some(event => event.message.type === 'result'));
+  assert.ok(raw.some(event => event.message.type === 'command_lifecycle'));
+  assert.ok(f.events.some(event => event.type === 'result'));
+  const persisted = f.core.eventsSince(0).events.filter(event => event.type === 'sdk_message');
+  assert.deepEqual(persisted.map(event => event.json.message), raw.map(event => event.message));
+  assert.deepEqual(JSON.parse(JSON.stringify(raw)), raw);
+});
+
+check('C1 SDK raw messages omit functions and AbortSignal runtime values', async (t, sdk) => {
+  const wrappedSdk = { ...sdk, query(args) {
+    const query = sdk.query(args);
+    const iterator = query[Symbol.asyncIterator].bind(query);
+    query[Symbol.asyncIterator] = async function* () {
+      for await (const message of { [Symbol.asyncIterator]: iterator }) {
+        yield { ...message, runtime: { signal: new AbortController().signal, callback() {}, text: 'retained text' } };
+      }
+    };
+    return query;
+  } };
+  const f = await fixture(t, wrappedSdk);
+  assert.equal((await f.start()).state, 'done');
+  await f.completed(f.prompt('hello'));
+  const messages = f.events.filter(event => event.type === 'sdk_message');
+  assert.ok(messages.length > 0);
+  for (const event of messages) assert.deepEqual(event.message.runtime, { text: 'retained text' });
 });

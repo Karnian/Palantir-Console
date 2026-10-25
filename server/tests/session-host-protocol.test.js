@@ -194,3 +194,18 @@ test('R1-02 unavailable adapter receipt preserves fixed adapter_unavailable resu
   assert.equal(receipt.durable, true);
   assert.equal(receipt.result.reason, 'adapter_unavailable');
 });
+
+test('C1 list and settings preview preserve protocol authentication and arguments', async () => {
+  const calls = [];
+  const h = harness({ listSessions() { calls.push('list'); return { sessions: [], seq_high: 0 }; },
+    settingsPreview(cwd) { calls.push(cwd); return { ok: true }; } });
+  h.hello();
+  h.send({ type: 'list', id: 1 });
+  h.send({ type: 'settings_preview', id: 2, cwd: '/safe' });
+  await flush();
+  assert.deepEqual(calls, ['list', '/safe']);
+  assert.deepEqual(h.output.slice(1), [
+    { type: 'list', id: 1, result: { sessions: [], seq_high: 0 } },
+    { type: 'settings_preview', id: 2, result: { ok: true } }
+  ]);
+});

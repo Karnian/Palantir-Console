@@ -1494,3 +1494,77 @@ SDK 결과에서 계산 루트를 얻을 수 없다. 이 경우 요구대로 기
 
 호스트 검증: 실제 macOS 에서 session-host 430/430, 변이 16종 중 15종 검출(나머지 1종은 도달 불가 코드였고 라운드 2 에서 제거). 실제 claude·LLM 호출 0.
 
+
+
+## S1-c1 — 호스트 보강 완료, 서버 브리지 후속
+
+이번 호출은 요청의 시간 제한과 우선순위에 따라 호스트 보강(1~4)까지 구현했다.
+`ownedSessionService`, HTTP/SSE 라우트, 공유 cookie 미들웨어, app 등록·shutdown 연결은 아직 구현하지 않았다.
+S1-c1 전체 완료나 서버 API 사용 가능을 의미하지 않는다.
+실제 Claude·LLM·동봉 실행 파일·네트워크 호출과 git 조작은 0이다.
+SDK 검증은 기존 실제 SDK + 테스트 전용 가짜 실행 파일만 사용했다.
+
+### 원문 이벤트
+
+SDK 스트림의 모든 메시지를 기존 변환 이벤트와 함께 `sdk_message`로 내보낸다.
+JSON 데이터로 복사하면서 함수·symbol·AbortSignal은 제외한다.
+코어는 원문을 events에 기록하고 즉시 반환하므로 상태 전이·지시 큐 배출을 수행하지 않는다.
+기존의 미지 이벤트 처리는 기록 뒤 큐 배출까지 이어질 수 있어 원문 전용 분기가 필요했다.
+이벤트 원문은 `eventsSince`로 재생되며 기존 삭제 경로가 함께 제거한다.
+삭제 중 크래시·복구 테스트에 고유 원문을 넣고 이벤트 행과 DB 파일 모두에서 제거됨을 확인했다.
+
+기존 SDK 정상 경로 테스트의 원문 미보존 단언은 새 요구와 충돌했다.
+변환 이벤트에 원문이 없는지와 sdk_message에 원문이 있는지를 각각 검사하도록 갱신했다.
+원문 보존·직렬화 검사와 별도로 코어 snapshot의 상태 전체가 불변임을 검사한다.
+
+### 목록·설정 미리보기·프로토콜
+
+`listSessions()`는 요약과 seq_high를 한 read transaction에서 반환한다.
+세션 기본 필드, 최신 incarnation의 id·state·has_pid·end_reason,
+attribution_uncertain, pending_approvals, last_activity_seq를 제공한다.
+deleting은 포함하고 deleted는 제외한다.
+다른 DB 연결이 목록 조회 중 이벤트를 삽입해도 seq_high가 같은 read view에 머무르고
+그 뒤 eventsSince로 삽입 이벤트를 받을 수 있음을 검증했다.
+
+`settingsPreview(cwd)`는 pin.resolveSettingsDeadlineMs 안에서 adapter.checkSettings를 호출한다.
+authGate.evaluateResolvedSettings 판정과 hooks 이벤트명·MCP 서버명·출처 경로·PermissionRequest 경고만 반환한다.
+env 값·명령·헤더·인자·sources.settings는 응답에 넣지 않는다.
+예외·잘못된 구조·기한 초과는 settings_check_failed이고, 인증 우회 설정은 settings_auth_override다.
+미리보기는 spawn하지 않는다.
+
+소켓 프로토콜에 list·settings_preview를 추가하고 client.list()·client.settingsPreview(cwd)를 연결했다.
+hello·durable submit·접수 미확인·reconcile 동작은 그대로다.
+프로토콜과 클라이언트 테스트에서 새 메시지와 인자 전달을 확인했다.
+
+### 검증
+
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test --test-name-pattern='C1' server/tests/session-host-bridge.test.js server/tests/session-host-sdk-adapter.test.js server/tests/session-host-client.test.js server/tests/session-host-protocol.test.js`
+  → tests 15, pass 15, fail 0.
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-hub-chat*.test.js server/tests/spawn-guard.test.js`
+  → tests 27, pass 27, fail 0.
+
+서비스·라우트가 없으므로 owned-session 테스트 및 DoD의 합동 명령은 아직 완료하지 않았다.
+후속 작업은 서비스(읽기 전용 연결·잠금 진단·접수 결과·SSE 재생) → 라우트·공유 검사 → app 연결 순서다.
+서버 재시작·소켓 장애·origin·cwd·snapshot/SSE 사이 이벤트·shutdown 보존 사례는 그 단계에서 추가해야 한다.
+
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-*.test.js`
+  → tests 445, pass 428, fail 17, cancelled 0, skipped 0.
+
+아래 17개는 기존 샌드박스 ps·소켓 제한 사례와 동일하다. 호스트 macOS에서 재실행해야 한다.
+- `X simultaneous hosts preserve winner socket inode and capability` — `spawnSync /bin/ps EPERM`
+- `X lock does not survive in a live inherited-environment child` — `spawnSync /bin/ps EPERM`
+- `X detached host survives launcher parent SIGKILL` — `spawnSync /bin/ps EPERM`
+- `X detached host survives launcher parent SIGTERM` — `spawnSync /bin/ps EPERM`
+- `X detached host survives launcher parent SIGHUP` — `spawnSync /bin/ps EPERM`
+- `X before accepted crash is reconciled by lookup after boot change, effect occurs once` — `spawnSync /bin/ps EPERM`
+- `X idle drain refuses arrival with not_accepted, new host retries exactly once` — `spawnSync /bin/ps EPERM`
+- `X active ownership prevents idle and SIGTERM exit; zero ownership releases socket and lock` — `spawnSync /bin/ps EPERM`
+- `X private file modes, capability absent from argv and env, launcher sanitizes env` — `host_start_timeout`
+- `X SIGTERM with zero ownership exits cleanly and releases exclusion` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous throw, active ownership=false` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous throw, active ownership=true` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous rejection, active ownership=false` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous rejection, active ownership=true` — `spawnSync /bin/ps EPERM`
+- `R2 real ps ignores unrelated multiline argv while identifying a marked child` — `actual: 'query_failed', expected: 'ok'`
+- `real ps identifies marked child and grandchild then confirms exit` — `actual: 'query_failed', expected: 'ok'`
+- `SDK real ps identity reads actual child and inherited grandchild marker then mismatch` — `spawnSync /bin/ps EPERM`

@@ -29,7 +29,7 @@ function createProtocol({ stream, core, capability, hostBootId, sdkVersion = nul
       send({ type: 'not_accepted', id: message.id });
       return close();
     }
-    if (!['submit', 'lookup', 'snapshot', 'events_since'].includes(message.type) ||
+    if (!['submit', 'lookup', 'snapshot', 'events_since', 'list', 'settings_preview'].includes(message.type) ||
         !['string', 'number'].includes(typeof message.id)) return close();
     const token = { id: message.id };
     pending.add(token);
@@ -43,6 +43,8 @@ function createProtocol({ stream, core, capability, hostBootId, sdkVersion = nul
         result = receipt.result;
       } else if (message.type === 'lookup') result = await core.lookup(message.request_key);
       else if (message.type === 'snapshot') result = await core.snapshot(message.session_id);
+      else if (message.type === 'list') result = await core.listSessions();
+      else if (message.type === 'settings_preview') result = await core.settingsPreview(message.cwd);
       else result = await core.eventsSince(message.seq);
       if (pending.has(token) && receipt && !receipt.durable) {
         send({ type: 'rejected', id: message.id, request_key: message.request.request_key, code: receipt.code });
