@@ -51,7 +51,8 @@ check('SDK core normal 20 prompts and 10 approvals have provider effect once and
   assert.equal(f.state().deliveries.filter(row => row.state === 'unknown').length, 0);
   assert.equal(f.state().deliveries.filter(row => row.state === 'completed').length, 20);
   assert.equal(f.state().deliveries.filter(row => row.state === 'provider_observed').length, 10);
-  assert.equal(JSON.stringify(f.events).includes('not retained'), false);
+  assert.equal(JSON.stringify(f.events.filter(event => event.type !== 'sdk_message')).includes('not retained'), false);
+  assert.equal(JSON.stringify(f.events.filter(event => event.type === 'sdk_message')).includes('not retained'), true);
   const spawn = rows.find(row => row.type === 'spawn');
   assert.ok(spawn.argv.includes(`--session-id=${f.state().session.claude_session_id}`));
 });
@@ -610,9 +611,11 @@ for (const answer of [{}, { 'Which?': 'A' }, { 'Which?': 'A', 'Why?': 'B', Extra
     const tool = await f.pendingTool();
     assert.throws(() => f.adapter.decide(f.iid, tool.tool_use_id, { behavior: 'answer', answer }), { code: 'invalid_decision' });
     assert.equal(f.log().filter(row => row.type === 'tool').length, 0);
-    f.adapter.decide(f.iid, tool.tool_use_id, { behavior: 'answer', answer: { 'Which?': 'A', 'Why?': 'B' } });
     await f.completed(prompt);
-    assert.equal(f.log().filter(row => row.type === 'tool').length, 1);
+    assert.equal(f.log().filter(row => row.type === 'tool_response').length, 1);
+    assert.equal(f.log().filter(row => row.type === 'tool').length, 0);
+    assert.throws(() => f.adapter.decide(f.iid, tool.tool_use_id, { behavior: 'answer',
+      answer: { 'Which?': 'A', 'Why?': 'B' } }), { code: 'tool_request_missing' });
   });
 }
 
@@ -972,3 +975,145 @@ check('R4 wire pending replay cancellation cancels shared logical approval', asy
   assert.equal(f.log().filter(row => row.type === 'tool_cancel_sent').length, 1);
   assert.equal(f.log().filter(row => row.type === 'tool').length, 0);
 });
+
+check('C1 SDK stream preserves full messages alongside existing translated events', async (t, sdk) => {
+  const f = await fixture(t, sdk);
+  assert.equal((await f.start()).state, 'done');
+  const delivery = f.prompt('hello');
+  await f.completed(delivery);
+  const raw = f.events.filter(event => event.type === 'sdk_message');
+  assert.ok(raw.length > 0);
+  assert.ok(raw.some(event => event.message.type === 'result'));
+  assert.ok(raw.some(event => event.message.type === 'command_lifecycle'));
+  assert.ok(f.events.some(event => event.type === 'result'));
+  const persisted = f.core.eventsSince(0).events.filter(event => event.type === 'sdk_message');
+  assert.deepEqual(persisted.map(event => event.json.message), raw.map(event => event.message));
+  assert.deepEqual(JSON.parse(JSON.stringify(raw)), raw);
+});
+
+check('C1 SDK raw messages omit functions and AbortSignal runtime values', async (t, sdk) => {
+  const wrappedSdk = { ...sdk, query(args) {
+    const query = sdk.query(args);
+    const iterator = query[Symbol.asyncIterator].bind(query);
+    query[Symbol.asyncIterator] = async function* () {
+      for await (const message of { [Symbol.asyncIterator]: iterator }) {
+        yield { ...message, runtime: { signal: new AbortController().signal, callback() {}, text: 'retained text' } };
+      }
+    };
+    return query;
+  } };
+  const f = await fixture(t, wrappedSdk);
+  assert.equal((await f.start()).state, 'done');
+  await f.completed(f.prompt('hello'));
+  const messages = f.events.filter(event => event.type === 'sdk_message');
+  assert.ok(messages.length > 0);
+  for (const event of messages) assert.deepEqual(event.message.runtime, { text: 'retained text' });
+});
+
+for (const invalid of ['cycle', 'bigint']) {
+  check('C1 serialization failure preserves subsequent lifecycle and result: ' + invalid, async (t, sdk) => {
+    const wrapped = { ...sdk, query(args) {
+      const query = sdk.query(args);
+      const iterator = query[Symbol.asyncIterator].bind(query);
+      query[Symbol.asyncIterator] = async function* () {
+        const bad = { type: 'assistant' };
+        bad.extra = invalid === 'cycle' ? bad : 1n;
+        yield bad;
+        yield* { [Symbol.asyncIterator]: iterator };
+      };
+      return query;
+    } };
+    const f = await fixture(t, wrapped);
+    assert.equal((await f.start()).state, 'done');
+    const delivery = f.prompt('hello');
+    assert.equal((await f.completed(delivery)).state, 'completed');
+    assert.ok(f.events.some(event => event.type === 'lifecycle'));
+    assert.ok(f.events.some(event => event.type === 'result'));
+    assert.ok(f.events.some(event => event.type === 'sdk_message' && event.message.serialization_failed === true));
+  });
+}
+
+check('R1 raw rate limit message cannot bypass field allowlist', async (t, sdk) => {
+  const wrapped = { ...sdk, query(args) {
+    const query = sdk.query(args); const iterator = query[Symbol.asyncIterator].bind(query);
+    query[Symbol.asyncIterator] = async function* () {
+      yield { type: 'rate_limit_event', rate_limit_info: { status: 'allowed', email: 'SECRET-RATE-EMAIL' }, email: 'SECRET-RATE-TOP' };
+      yield* { [Symbol.asyncIterator]: iterator };
+    };
+    return query;
+  } };
+  const f = await fixture(t, wrapped); await f.start();
+  assert.equal(JSON.stringify(f.core.eventsSince(0)).includes('SECRET-RATE'), false);
+});
+
+check('R4 missing fake configuration initializes SDK session with defaults', async (t, sdk) => {
+  const f = await fixture(t, sdk);
+  fs.unlinkSync(path.join(f.dir, 'fake-claude.json'));
+  assert.equal((await f.start()).state, 'done');
+  assert.ok(f.log().some(row => row.type === 'initialize'));
+});
+
+check('R5 invalid question key preserves pending card and zero responses; corrected answer completes', async (t, sdk) => {
+  const f = await fixture(t, sdk, { contentArray: true }); await f.start();
+  const prompt = f.prompt('question'); const tool = await f.pendingTool();
+  const before = f.state().deliveries.length;
+  const request = f.req('question_answer', { target_tool_use_id: tool.tool_use_id, body: { answer: { Choice: 'A' } } });
+  const rejected = f.core.submit(request);
+  assert.equal(rejected.state, 'rejected'); assert.equal(rejected.reason, 'invalid_answer');
+  assert.equal(f.state().deliveries.length, before);
+  assert.equal(f.state().tool_requests[0].state, 'pending');
+  assert.equal(f.log().filter(row => row.type === 'tool_response').length, 0);
+  // Only the answer field changes; the same key and card remain usable.
+  const accepted = f.core.submit({ ...request, body: { answer: 'A' } });
+  await f.completed(prompt);
+  assert.equal(f.d(accepted).state, 'provider_observed');
+  assert.equal(f.log().filter(row => row.type === 'tool').length, 1);
+});
+
+for (const count of [1, 2]) check('R5 string answer requires exactly one question count=' + count, async (t, sdk) => {
+  const f = await fixture(t, sdk, { questionCount: count, contentArray: true }); await f.start();
+  const prompt = f.prompt('question'); const tool = await f.pendingTool();
+  const before = f.state().deliveries.length;
+  const answer = f.core.submit(f.req('question_answer', { target_tool_use_id: tool.tool_use_id, body: { answer: 'A' } }));
+  if (count === 1) {
+    await f.completed(prompt); assert.equal(f.d(answer).state, 'provider_observed');
+  } else {
+    assert.equal(answer.state, 'rejected'); assert.equal(answer.reason, 'invalid_answer');
+    assert.equal(f.state().deliveries.length, before); assert.equal(f.state().tool_requests[0].state, 'pending');
+    assert.equal(f.log().filter(row => row.type === 'tool_response').length, 0);
+    f.core.submit(f.req('question_answer', { target_tool_use_id: tool.tool_use_id, body: { answer: { 'Which?': 'A', 'Why?': 'B' } } }));
+    await f.completed(prompt);
+  }
+});
+
+for (const force of [false, true]) check('R5 decide failure settles SDK promise with deny force=' + force, async (t, sdk) => {
+  const f = await fixture(t, sdk, {}, { testHooks: { beforeDecide() { if (force) throw Error('forced_decide_failure'); } } });
+  await f.start(); const prompt = f.prompt('tool'); const tool = await f.pendingTool();
+  const decision = f.core.submit(f.req('tool_decision', { target_tool_use_id: tool.tool_use_id, body: { behavior: 'allow' } }));
+  await f.completed(prompt);
+  if (force) {
+    assert.equal(f.d(decision).state, 'unknown'); assert.equal(f.d(decision).reason, 'effect_failed');
+    const response = f.log().find(row => row.type === 'tool_response');
+    assert.equal(response.behavior, 'deny'); assert.equal(response.message, 'invalid_decision');
+    assert.equal(f.log().filter(row => row.type === 'tool').length, 0);
+    assert.equal(f.core.idle(f.sid), true);
+    assert.equal(f.state().incarnations.at(-1).attribution_uncertain, 0);
+    await f.completed(f.prompt('after failed decision'));
+  } else {
+    assert.equal(f.d(decision).state, 'provider_observed'); assert.equal(f.log().filter(row => row.type === 'tool').length, 1);
+  }
+});
+
+for (const body of [{ behavior: 'invalid' }, { behavior: 'allow', message: 3 }]) {
+  check('R5 invalid tool decision preserves pending card ' + JSON.stringify(body), async (t, sdk) => {
+    const f = await fixture(t, sdk); await f.start(); const prompt = f.prompt('tool'); const tool = await f.pendingTool();
+    const before = f.state().deliveries.length;
+    const request = f.req('tool_decision', { target_tool_use_id: tool.tool_use_id, body });
+    const rejected = f.core.submit(request);
+    assert.equal(rejected.state, 'rejected'); assert.equal(rejected.reason, 'invalid_decision');
+    assert.equal(f.state().tool_requests[0].state, 'pending'); assert.equal(f.state().deliveries.length, before);
+    assert.equal(f.log().filter(row => row.type === 'tool_response').length, 0);
+    const accepted = f.core.submit({ ...request, body: { ...body, ...(body.behavior === 'invalid' ? { behavior: 'allow' } : { message: 'ok' }) } });
+    await f.completed(prompt); assert.equal(f.d(accepted).state, 'provider_observed');
+  });
+}

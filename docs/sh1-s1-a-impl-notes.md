@@ -1494,3 +1494,702 @@ SDK 결과에서 계산 루트를 얻을 수 없다. 이 경우 요구대로 기
 
 호스트 검증: 실제 macOS 에서 session-host 430/430, 변이 16종 중 15종 검출(나머지 1종은 도달 불가 코드였고 라운드 2 에서 제거). 실제 claude·LLM 호출 0.
 
+
+
+## S1-c1 — 호스트 보강 완료, 서버 브리지 후속
+
+이번 호출은 요청의 시간 제한과 우선순위에 따라 호스트 보강(1~4)까지 구현했다.
+`ownedSessionService`, HTTP/SSE 라우트, 공유 cookie 미들웨어, app 등록·shutdown 연결은 아직 구현하지 않았다.
+S1-c1 전체 완료나 서버 API 사용 가능을 의미하지 않는다.
+실제 Claude·LLM·동봉 실행 파일·네트워크 호출과 git 조작은 0이다.
+SDK 검증은 기존 실제 SDK + 테스트 전용 가짜 실행 파일만 사용했다.
+
+### 원문 이벤트
+
+SDK 스트림의 모든 메시지를 기존 변환 이벤트와 함께 `sdk_message`로 내보낸다.
+JSON 데이터로 복사하면서 함수·symbol·AbortSignal은 제외한다.
+코어는 원문을 events에 기록하고 즉시 반환하므로 상태 전이·지시 큐 배출을 수행하지 않는다.
+기존의 미지 이벤트 처리는 기록 뒤 큐 배출까지 이어질 수 있어 원문 전용 분기가 필요했다.
+이벤트 원문은 `eventsSince`로 재생되며 기존 삭제 경로가 함께 제거한다.
+삭제 중 크래시·복구 테스트에 고유 원문을 넣고 이벤트 행과 DB 파일 모두에서 제거됨을 확인했다.
+
+기존 SDK 정상 경로 테스트의 원문 미보존 단언은 새 요구와 충돌했다.
+변환 이벤트에 원문이 없는지와 sdk_message에 원문이 있는지를 각각 검사하도록 갱신했다.
+원문 보존·직렬화 검사와 별도로 코어 snapshot의 상태 전체가 불변임을 검사한다.
+
+### 목록·설정 미리보기·프로토콜
+
+`listSessions()`는 요약과 seq_high를 한 read transaction에서 반환한다.
+세션 기본 필드, 최신 incarnation의 id·state·has_pid·end_reason,
+attribution_uncertain, pending_approvals, last_activity_seq를 제공한다.
+deleting은 포함하고 deleted는 제외한다.
+다른 DB 연결이 목록 조회 중 이벤트를 삽입해도 seq_high가 같은 read view에 머무르고
+그 뒤 eventsSince로 삽입 이벤트를 받을 수 있음을 검증했다.
+
+`settingsPreview(cwd)`는 pin.resolveSettingsDeadlineMs 안에서 adapter.checkSettings를 호출한다.
+authGate.evaluateResolvedSettings 판정과 hooks 이벤트명·MCP 서버명·출처 경로·PermissionRequest 경고만 반환한다.
+env 값·명령·헤더·인자·sources.settings는 응답에 넣지 않는다.
+예외·잘못된 구조·기한 초과는 settings_check_failed이고, 인증 우회 설정은 settings_auth_override다.
+미리보기는 spawn하지 않는다.
+
+소켓 프로토콜에 list·settings_preview를 추가하고 client.list()·client.settingsPreview(cwd)를 연결했다.
+hello·durable submit·접수 미확인·reconcile 동작은 그대로다.
+프로토콜과 클라이언트 테스트에서 새 메시지와 인자 전달을 확인했다.
+
+### 검증
+
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test --test-name-pattern='C1' server/tests/session-host-bridge.test.js server/tests/session-host-sdk-adapter.test.js server/tests/session-host-client.test.js server/tests/session-host-protocol.test.js`
+  → tests 15, pass 15, fail 0.
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-hub-chat*.test.js server/tests/spawn-guard.test.js`
+  → tests 27, pass 27, fail 0.
+
+서비스·라우트가 없으므로 owned-session 테스트 및 DoD의 합동 명령은 아직 완료하지 않았다.
+후속 작업은 서비스(읽기 전용 연결·잠금 진단·접수 결과·SSE 재생) → 라우트·공유 검사 → app 연결 순서다.
+서버 재시작·소켓 장애·origin·cwd·snapshot/SSE 사이 이벤트·shutdown 보존 사례는 그 단계에서 추가해야 한다.
+
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-*.test.js`
+  → tests 445, pass 428, fail 17, cancelled 0, skipped 0.
+
+아래 17개는 기존 샌드박스 ps·소켓 제한 사례와 동일하다. 호스트 macOS에서 재실행해야 한다.
+- `X simultaneous hosts preserve winner socket inode and capability` — `spawnSync /bin/ps EPERM`
+- `X lock does not survive in a live inherited-environment child` — `spawnSync /bin/ps EPERM`
+- `X detached host survives launcher parent SIGKILL` — `spawnSync /bin/ps EPERM`
+- `X detached host survives launcher parent SIGTERM` — `spawnSync /bin/ps EPERM`
+- `X detached host survives launcher parent SIGHUP` — `spawnSync /bin/ps EPERM`
+- `X before accepted crash is reconciled by lookup after boot change, effect occurs once` — `spawnSync /bin/ps EPERM`
+- `X idle drain refuses arrival with not_accepted, new host retries exactly once` — `spawnSync /bin/ps EPERM`
+- `X active ownership prevents idle and SIGTERM exit; zero ownership releases socket and lock` — `spawnSync /bin/ps EPERM`
+- `X private file modes, capability absent from argv and env, launcher sanitizes env` — `host_start_timeout`
+- `X SIGTERM with zero ownership exits cleanly and releases exclusion` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous throw, active ownership=false` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous throw, active ownership=true` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous rejection, active ownership=false` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous rejection, active ownership=true` — `spawnSync /bin/ps EPERM`
+- `R2 real ps ignores unrelated multiline argv while identifying a marked child` — `actual: 'query_failed', expected: 'ok'`
+- `real ps identifies marked child and grandchild then confirms exit` — `actual: 'query_failed', expected: 'ok'`
+- `SDK real ps identity reads actual child and inherited grandchild marker then mismatch` — `spawnSync /bin/ps EPERM`
+
+
+## S1-c1 라운드 2 — 서버 서비스·라우트
+
+앞 절의 서버 서비스·라우트 미구현 항목을 이번 라운드에서 연결했다.
+실제 Claude·LLM·동봉 실행 파일·네트워크 호출 및 git 조작은 0이다.
+실제 SDK 검증은 기존 테스트 전용 가짜 실행 파일을 사용한다.
+프로세스 통합 테스트는 별도 Node 호스트 + createFakeAdapter + 실제 Unix 소켓으로 구성했다.
+
+### 직렬화 실패 격리
+
+translate의 원문 JSON 복사를 try/catch로 감싸고 실패하면
+`{type: message.type, serialization_failed: true}`만 원문 메시지로 기록한다.
+기존 lifecycle·result 변환과 이후 스트림 처리는 계속된다.
+순환 참조와 BigInt 메시지를 정상 lifecycle·result 앞에 삽입하는 두 테스트를 추가했다.
+try/catch를 제거한 변이에서 tests 2, pass 0, fail 2를 확인한 뒤 제품 코드를 복구했다.
+
+### 서버 브리지
+
+runtime/session-host를 기본 경로로 사용하며 runtimeDir·client·launcher·진단·타이머·시계를 주입할 수 있다.
+읽기는 createClient.connect만 사용하고, 잠금 보유자 없음은 not_running이다.
+보유자가 있는데 연결되지 않으면 unreachable + current_state_known:false + as_of + last_known을 반환한다.
+캐시는 서버 메모리뿐이고 서버 DB에 원문을 복제하지 않는다.
+진단은 host.lock만 검사하며 host.db는 열지 않는다.
+SQLite 배타 잠금 때문에 잠금 파일을 읽을 수 없으면 커밋된 잠금 메타데이터의 메모리 복사에서 pid만 추출한다.
+신원 조회는 시작 시각 조회 결과만 투영한다. 실패는 query_failed로 닫는다.
+
+변경은 연결을 먼저 시도하고 잠금 보유자가 없을 때만 ensureHost를 호출한다.
+잠금 보유자가 응답하지 않으면 고정 host_unreachable/503으로 거부한다.
+동일 client를 유지하여 launcher가 추적하는 미확인 요청을 잃지 않고 boot 변경 때 reconcile/lookup한다.
+접수 응답은 acceptance:accepted/rejected/acceptance_unknown으로 구분한다.
+브라우저 request_key는 형식만 검사하고 재생성하지 않는다.
+지시·승인·질문·인터럽트의 재제출은 lookup의 기존 incarnation_id를 사용한다.
+새 요청은 호스트 snapshot의 최신 incarnation에 묶는다.
+
+cwd는 원래 입력의 절대 경로 여부, realpath, 디렉터리 존재, 로컬 노드 여부를 확인한다.
+재사용 가능한 기존 위험 경로 차단 함수는 찾지 못했다.
+CLAUDE.md의 기존 /etc·/var·/usr 차단 정책을 적용하고 기존 pathGuard.isWithinRoot로 정규 경로를 비교한다.
+시스템 디렉터리와 해당 디렉터리를 가리키는 symlink는 거부한다.
+
+SSE는 구독자마다 since를 보존하고 구독자가 있을 때만 주입 가능한 500ms 타이머로 events_since를 조회한다.
+snapshot 뒤 구독 전에 삽입한 원문 이벤트가 seq_high+1로 중계되는 것을 검사한다.
+보존 범위 밖은 resync, 연결 상실은 host_unreachable + 마지막 seq,
+재연결은 reconnected, boot 변경은 resync다.
+resync 뒤 구독자는 새 snapshot과 새 SSE 연결을 사용해야 한다.
+느린 HTTP 구독자의 버퍼가 2MiB를 넘으면 연결을 닫아 재생으로 복구하게 한다.
+shutdown은 SSE·타이머·client만 닫고 호스트 stop·자식 close·signal은 호출하지 않는다.
+
+### 라우트와 인증
+
+requireSessionHubCookie 본문을 공유 미들웨어로 이동하고 기존 라우터 export도 유지했다.
+새 라우트는 /api/owned-sessions이며 요청된 list·snapshot·lookup·stream·settings-preview·start와
+prompt·tool-decision·question-answer·interrupt·stop·resume·close·delete를 제공한다.
+handoff는 없다. 기존 public SSE 채널과 화면 파일은 변경하지 않았다.
+새 경로는 전역 JSON 파서를 건너뛰고 cookie·origin 검사 뒤 전용 크기 제한으로 파싱한다.
+라우트는 요청 필드를 허용 목록으로 투영하고 자유문 오류·socket capability·host env를 응답에 넣지 않는다.
+앱은 options.ownedSessionService를 주입할 수 있어 테스트에서 실제 호스트를 기동하지 않는다.
+app.shutdown은 이 서비스의 shutdown을 한 번 호출한다.
+
+### 남은 계약 확인
+
+삭제된 delivery의 tombstone에는 원래 incarnation_id가 없어 브라우저의 축약 요청으로
+원본 fingerprint를 재구성할 수 없다. 이 경우 재제출을 accepted로 우회하지 않는다.
+acceptance:rejected, code:session_deleted와 기존 tombstone 결과를 함께 반환하고 효과는 실행하지 않는다.
+lookup은 기존 결과를 제공한다. 원 패킷의 삭제 후 재시도를 accepted 기존 결과로 통일하려면
+원래 대상 incarnation의 요청 증거를 브라우저가 보존하는 API 계약 등을 후속 검토해야 한다.
+코어의 fingerprint·상태 기계·게이트 규칙은 변경하지 않았다.
+
+### 라운드 2 검증 결과
+
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-*.test.js server/tests/owned-session*.test.js`
+  → tests 476, pass 456, fail 20, cancelled 0, skipped 0.
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-hub-chat*.test.js server/tests/spawn-guard.test.js`
+  → tests 27, pass 27, fail 0.
+- 서비스·라우트 집중: tests 26, pass 26, fail 0. 직렬화 변이: tests 2, pass 0, fail 2.
+
+샌드박스에서 실패한 20개는 아래와 같다. 신규 실제 소켓 3개는 listen EPERM이며, 기존 17개는 ps·소켓 제한이다.
+이 목록은 통과를 대신하지 않으며 호스트 macOS 재실행이 필요하다.
+
+- `process bridge replacement preserves pending approval; shutdown leaves fake host alive and decision effect once` — `Error: listen EPERM: operation not permitted /private/tmp/owned-2p3LxI/host.sock`
+- `process accepted-before-reply crash remains unknown; boot change lookup and same key retry cause one start effect` — `Error: listen EPERM: operation not permitted /private/tmp/owned-gZN31i/host.sock`
+- `process broken socket exposes stale snapshot and lock pid only; all valid changes fail closed` — `Error: listen EPERM: operation not permitted /private/tmp/owned-Dgd5UN/host.sock`
+- `X simultaneous hosts preserve winner socket inode and capability` — `spawnSync /bin/ps EPERM`
+- `X lock does not survive in a live inherited-environment child` — `spawnSync /bin/ps EPERM`
+- `X detached host survives launcher parent SIGKILL` — `spawnSync /bin/ps EPERM`
+- `X detached host survives launcher parent SIGTERM` — `spawnSync /bin/ps EPERM`
+- `X detached host survives launcher parent SIGHUP` — `spawnSync /bin/ps EPERM`
+- `X before accepted crash is reconciled by lookup after boot change, effect occurs once` — `spawnSync /bin/ps EPERM`
+- `X idle drain refuses arrival with not_accepted, new host retries exactly once` — `spawnSync /bin/ps EPERM`
+- `X active ownership prevents idle and SIGTERM exit; zero ownership releases socket and lock` — `spawnSync /bin/ps EPERM`
+- `X private file modes, capability absent from argv and env, launcher sanitizes env` — `host_start_timeout`
+- `X SIGTERM with zero ownership exits cleanly and releases exclusion` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous throw, active ownership=false` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous throw, active ownership=true` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous rejection, active ownership=false` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous rejection, active ownership=true` — `spawnSync /bin/ps EPERM`
+- `R2 real ps ignores unrelated multiline argv while identifying a marked child` — `actual: 'query_failed', expected: 'ok'`
+- `real ps identifies marked child and grandchild then confirms exit` — `actual: 'query_failed', expected: 'ok'`
+- `SDK real ps identity reads actual child and inherited grandchild marker then mismatch` — `spawnSync /bin/ps EPERM`
+
+
+## S1-c1 라운드 3 — 적대리뷰 R1
+
+### 수정 전 실패 증거
+
+제품 수정 전에 owned-session-review-r1.test.js를 추가해 실행했다.
+`PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session-review-r1.test.js`
+→ tests 10, pass 0, fail 10.
+오래된 incarnation 재지정, snapshot 현재 실행 누락, 삭제 캐시 4경로,
+페이지·oversized 부재, 3MiB SSE 거부, incarnation 필수 검증 부재, 요청 close 미해제를 검출했다.
+
+`PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test --test-name-pattern='R1 raw rate' server/tests/session-host-sdk-adapter.test.js`
+→ tests 1, pass 0, fail 1. sdk_message의 rate limit 원문에서 허용 밖 email이 저장되는 결함을 검출했다.
+제품 수정 직후 같은 두 명령은 각각 10/10, 1/1 통과했다.
+후속 강화에서 페이지 진행·같은 키 재시도·인증 방식만 바꾸는 대조를 추가했다.
+
+### 제품 수정
+
+prompt·tool_decision·question_answer·interrupt는 브라우저가 incarnation_id(UUID 형식)를 반드시 보낸다.
+라우트와 서비스가 형식을 검사하고 서버는 값을 변경하지 않는다.
+lookup/snapshot으로 incarnation을 고르던 코드를 제거했다.
+기존 코어가 세션의 최신 incarnation과 다른 대상을 incarnation_mismatch로 거부하는 것을 확인했다.
+stop→resume 뒤 옛 대상은 수신 0, 새 대상은 수신 1의 대조를 추가했다.
+이전 실행에서 접수된 동일 키 재시도는 이전 결과를 반환하고 새 효과는 없다.
+snapshot은 incarnations를 rowid 생성 순서로 반환하고 state.current_incarnation_id를 명시한다.
+상태 기계·게이트·fingerprint 규칙은 변경하지 않았다.
+
+이 변경으로 라운드 2의 tombstone 응답 예외도 제거했다.
+원래 incarnation_id를 포함한 재제출은 호스트의 기존 fingerprint 검증을 그대로 통과하며
+삭제 tombstone의 기존 결과를 accepted로 반환한다. incarnation 증거 없이 재제출하는 API는 이제 400이다.
+
+삭제 접수와 접수 미확인 delete에서 해당 세션 snapshot·lookup 캐시를 즉시 제거한다.
+list·snapshot·폴링에서 삭제 상태를 관측해도 제거하며,
+삭제로 재생 구간이 사라져 snapshot_required가 오면 캐시를 먼저 비우고 목록을 다시 확인한다.
+삭제를 관측한 세션의 늦게 도착한 읽기 응답도 캐시에 다시 넣지 않는다.
+캐시 원문이 장애 last_known에 남지 않는 네 경로를 검사했다.
+
+rate_limit_event는 sdk_message를 만들지 않고 기존 정제된 전용 이벤트만 사용한다.
+원문의 허용 밖 필드는 이벤트 저장소 및 동일 eventsSince 기반 SSE 재생에 들어가지 않는다.
+
+core.eventsSince(seq, {maxBytes})는 기본 4MiB 페이지와 more를 반환한다.
+최소 한 이벤트는 반환하며, 단일 이벤트가 12MiB를 넘으면
+{seq,type,oversized:true,bytes} 자리표시로 중계한다.
+**DB의 SDK 원문은 그대로 보존한다.** 화면·전송의 자리표시와 저장 원문 보존은 별도다.
+메모리에서 전체 재생 구간을 all()로 펼치지 않고 read transaction 안의 iterator로 페이지를 만든다.
+프로토콜 max_bytes와 client maxBytes를 연결했고 서비스는 마지막 전달 seq부터 다음 폴링 페이지를 받는다.
+
+SSE의 느린 구독자 판정은 기존 writableLength만 사용한다.
+3MiB 단일 프레임은 빠른 구독자에게 전달하고 기존 버퍼가 2MiB를 넘은 구독자는 닫는다.
+요청 close에서도 구독을 해제한다. 앱 종료와 별도로 구독 해제·폴링 타이머 취소를 검사했다.
+
+### 실제 프로세스 경계 테스트 강화
+
+새 owned-session-sdk-host.cjs는 격리 HOME에서 실제 SDK를 로드하고
+테스트 전용 fake-claude-sdk.cjs의 파일 해시를 고정해 custom spawn한다.
+owned-session-http-server.cjs는 별도 Node 프로세스로 실제 인증 미들웨어·서비스·라우트를 제공한다.
+SIGTERM·SIGKILL 각각에 대해 서버 재시작, host·fake CLI pid 생존, HTTP snapshot pending 유지,
+결정 재시도 뒤 가짜 CLI의 tool 실행 로그 1회를 검사한다.
+어댑터 메서드 호출 로그는 이 신규 테스트의 provider 효과 증거로 쓰지 않는다.
+
+같은 구성에서 settings-preview·start·snapshot·prompt·tool-decision을 HTTP로 지나가며,
+snapshot 뒤 생성한 이벤트를 HTTP SSE로 받아 seq_high까지 전 seq가 누락·중복 없이 오는지 검사한다.
+SSE HTTP 연결을 abort한 뒤 별도 IPC 통계로 구독 수 0도 확인한다.
+정상 prompt 효과를 가짜 CLI 로그로 먼저 확인한 뒤 실제 호스트 DB 쓰기 실패를 주입하고
+prompt·start·resume의 추가 효과 0을 확인한다.
+또 다른 사례는 정상 시 통과한 변경 요청의 본문·키·대상을 그대로 보존한 뒤 소켓만 끊어
+모두 503이고 pending 카드 포함 last_known·as_of·current_state_known:false인지 검사한다.
+
+자식 프로세스 핸들·SSE abort controller·소켓·임시 디렉터리를 정리한다.
+SDK 호스트 helper는 직접 생성한 ChildProcess 핸들을 보관해 close 후 필요하면 SIGKILL로 정리한다.
+조건 대기를 사용하며 고정 sleep은 없다.
+신규 실제 경계 테스트는 샌드박스 listen EPERM으로 준비 단계에서 막히므로
+macOS 호스트에서 내부 단언까지 검증해야 한다. 통과했다고 주장하지 않는다.
+
+### 기각 항목의 근거
+
+설정 미리보기는 시작 흐름의 일부이므로 변경 경로로 두고 필요하면 호스트를 기동한다.
+목록·snapshot·lookup 읽기는 계속 연결만 한다.
+/private/var는 기존 문서의 /etc·/var·/usr 위험 경로 정책과 동일하게 차단한다.
+두 항목은 제품 코드를 변경하지 않았다.
+
+### 라운드 3 최종 검증
+
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-*.test.js server/tests/owned-session*.test.js`
+  → tests 494, pass 471, fail 23, cancelled 0, skipped 0.
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-hub-chat*.test.js server/tests/spawn-guard.test.js`
+  → tests 27, pass 27, fail 0.
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session-review-r1.test.js`
+  → tests 13, pass 13, fail 0.
+- SDK rate limit 회귀 단독: tests 1, pass 1, fail 0.
+
+샌드박스에서 막힌 사례 목록(실제 macOS 재검증 필요):
+
+- `HTTP real SDK pending approval survives server SIGTERM with one provider tool effect` — `Error: listen EPERM: operation not permitted /private/tmp/owned-http-Mx7h0E/host.sock`
+- `HTTP real SDK pending approval survives server SIGKILL with one provider tool effect` — `Error: listen EPERM: operation not permitted /private/tmp/owned-http-5oaBc8/host.sock`
+- `HTTP real SDK socket failure preserves pending last-known; identical previously valid mutations all return 503` — `Error: listen EPERM: operation not permitted /private/tmp/owned-http-OIK80N/host.sock`
+- `process bridge replacement preserves pending approval; shutdown leaves fake host alive and decision effect once` — `Error: listen EPERM: operation not permitted /private/tmp/owned-gsTPwA/host.sock`
+- `process accepted-before-reply crash remains unknown; boot change lookup and same key retry cause one start effect` — `Error: listen EPERM: operation not permitted /private/tmp/owned-ZMPyKR/host.sock`
+- `process broken socket exposes stale snapshot and lock pid only; all valid changes fail closed` — `Error: listen EPERM: operation not permitted /private/tmp/owned-NLbebZ/host.sock`
+- `X simultaneous hosts preserve winner socket inode and capability` — `spawnSync /bin/ps EPERM`
+- `X lock does not survive in a live inherited-environment child` — `spawnSync /bin/ps EPERM`
+- `X detached host survives launcher parent SIGKILL` — `spawnSync /bin/ps EPERM`
+- `X detached host survives launcher parent SIGTERM` — `spawnSync /bin/ps EPERM`
+- `X detached host survives launcher parent SIGHUP` — `spawnSync /bin/ps EPERM`
+- `X before accepted crash is reconciled by lookup after boot change, effect occurs once` — `spawnSync /bin/ps EPERM`
+- `X idle drain refuses arrival with not_accepted, new host retries exactly once` — `spawnSync /bin/ps EPERM`
+- `X active ownership prevents idle and SIGTERM exit; zero ownership releases socket and lock` — `spawnSync /bin/ps EPERM`
+- `X private file modes, capability absent from argv and env, launcher sanitizes env` — `host_start_timeout`
+- `X SIGTERM with zero ownership exits cleanly and releases exclusion` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous throw, active ownership=false` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous throw, active ownership=true` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous rejection, active ownership=false` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous rejection, active ownership=true` — `spawnSync /bin/ps EPERM`
+- `R2 real ps ignores unrelated multiline argv while identifying a marked child` — `actual: 'query_failed', expected: 'ok'`
+- `real ps identifies marked child and grandchild then confirms exit` — `actual: 'query_failed', expected: 'ok'`
+- `SDK real ps identity reads actual child and inherited grandchild marker then mismatch` — `spawnSync /bin/ps EPERM`
+
+
+## S1-c1 라운드 4 — 실제 호스트에서 드러난 테스트 결함
+
+제품 코드는 변경하지 않았다. 실제 Claude·LLM·동봉 실행 파일·네트워크 호출 및 git 조작은 0이다.
+SDK 검증에는 기존 테스트 전용 가짜 실행 파일만 사용했다.
+
+### 수정 전 실패와 수정
+
+먼저 설정 파일을 지운 cwd에서 실제 SDK로 시작하는 회귀 테스트를 추가했다.
+`PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test --test-name-pattern='R4 missing fake configuration' server/tests/session-host-sdk-adapter.test.js`
+수정 전 tests 1, pass 0, fail 1이며 단언 원문은 `'failed' !== 'done'`이었다.
+가짜 실행 파일의 initialize 재조회는 ENOENT만 config={}로 처리하도록 바꿨다.
+다른 파일 오류와 JSON 파싱 오류는 그대로 throw한다.
+같은 명령은 수정 후 tests 1, pass 1, fail 0이다.
+
+HTTP 프로세스 테스트의 대기를 settledPrompt와 settledControl로 분리했다.
+prompt는 outcome이 null·undefined가 아닌 턴 종결까지 기다린다.
+제어 요청은 행이 존재하고 state가 accepted가 아닐 때까지 기다린다.
+provider_observed/outcome:null → completed/outcome:completed 대조와
+accepted → done 대조를 사용하는 결정적 회귀 테스트를 추가했다.
+기존 대기 조건으로 잠시 되돌린 검사에서 tests 1, pass 0, fail 1을 확인한 뒤 수정 코드를 복구했다.
+수정 코드는 tests 1, pass 1, fail 0이다.
+
+### 전체 파일 재검토
+
+소켓 장애 사례는 각 prompt 종결 뒤 다음 prompt를 보내고,
+start·stop·resume·close·delete는 별도 제어 대기를 사용한다.
+SIGTERM·SIGKILL 사례에서도 승인 뒤 첫 턴 종결을 확인한 다음 후속 입력을 보낸다.
+SSE snapshot 경계와 DB 실패 주입 전의 완료 확인도 outcome 기록을 함께 기다린다.
+
+host·가짜 CLI pid 생존, pending 승인 유지, 가짜 CLI tool 효과 1회,
+SSE seq 누락·중복 0, 정상 요청 대비 소켓 장애 503,
+DB 쓰기 실패 뒤 추가 효과 0의 기존 단언은 유지했다.
+자식 프로세스·SSE controller·임시 디렉터리 정리 경로도 다시 읽어 확인했다.
+실제 HTTP/소켓 경계의 내부 단언은 아래 샌드박스 제한 때문에 macOS 호스트에서 재실행해야 한다.
+
+### 라운드 4 최종 검증
+
+`PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-*.test.js server/tests/owned-session*.test.js`
+
+→ tests 496, pass 473, fail 23, cancelled 0, skipped 0.
+
+실패 23개는 소켓·ps 제한이며 목록은 아래와 같다. 신규 HTTP 프로세스 3개는 listen EPERM으로 준비 단계에서 막혔다.
+
+- `HTTP real SDK pending approval survives server SIGTERM with one provider tool effect` — `Error: listen EPERM: operation not permitted /private/tmp/owned-http-r0SE8Y/host.sock`
+- `HTTP real SDK pending approval survives server SIGKILL with one provider tool effect` — `Error: listen EPERM: operation not permitted /private/tmp/owned-http-JaoDEZ/host.sock`
+- `HTTP real SDK socket failure preserves pending last-known; identical previously valid mutations all return 503` — `Error: listen EPERM: operation not permitted /private/tmp/owned-http-cfasUg/host.sock`
+- `process bridge replacement preserves pending approval; shutdown leaves fake host alive and decision effect once` — `Error: listen EPERM: operation not permitted /private/tmp/owned-F31VRA/host.sock`
+- `process accepted-before-reply crash remains unknown; boot change lookup and same key retry cause one start effect` — `Error: listen EPERM: operation not permitted /private/tmp/owned-NaxBVo/host.sock`
+- `process broken socket exposes stale snapshot and lock pid only; all valid changes fail closed` — `Error: listen EPERM: operation not permitted /private/tmp/owned-vix0Ea/host.sock`
+- `X simultaneous hosts preserve winner socket inode and capability` — `spawnSync /bin/ps EPERM`
+- `X lock does not survive in a live inherited-environment child` — `spawnSync /bin/ps EPERM`
+- `X detached host survives launcher parent SIGKILL` — `spawnSync /bin/ps EPERM`
+- `X detached host survives launcher parent SIGTERM` — `spawnSync /bin/ps EPERM`
+- `X detached host survives launcher parent SIGHUP` — `spawnSync /bin/ps EPERM`
+- `X before accepted crash is reconciled by lookup after boot change, effect occurs once` — `spawnSync /bin/ps EPERM`
+- `X idle drain refuses arrival with not_accepted, new host retries exactly once` — `spawnSync /bin/ps EPERM`
+- `X active ownership prevents idle and SIGTERM exit; zero ownership releases socket and lock` — `spawnSync /bin/ps EPERM`
+- `X private file modes, capability absent from argv and env, launcher sanitizes env` — `host_start_timeout`
+- `X SIGTERM with zero ownership exits cleanly and releases exclusion` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous throw, active ownership=false` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous throw, active ownership=true` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous rejection, active ownership=false` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous rejection, active ownership=true` — `spawnSync /bin/ps EPERM`
+- `R2 real ps ignores unrelated multiline argv while identifying a marked child` — `actual: 'query_failed', expected: 'ok'`
+- `real ps identifies marked child and grandchild then confirms exit` — `actual: 'query_failed', expected: 'ok'`
+- `SDK real ps identity reads actual child and inherited grandchild marker then mismatch` — `spawnSync /bin/ps EPERM`
+
+
+## S1-c1 라운드 5 — 잘못된 질문 답의 접수 거부와 decide 실패 정리
+
+실제 Claude·LLM·동봉 실행 파일·외부 네트워크 호출 및 git 조작은 0이다.
+실제 SDK 검증에는 기존 테스트 전용 가짜 실행 파일만 사용했다.
+
+### 수정 전 실패 증거
+
+제품 수정 전에 SDK 경계의 R5 테스트 7개를 추가했다.
+`PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test --test-name-pattern='R5 ' server/tests/session-host-sdk-adapter.test.js`
+→ tests 7, pass 2, fail 5.
+정상 단일 질문 문자열 답과 정상 allow 대조는 통과했고,
+잘못된 질문 키·두 질문에 문자열 답·decide 실패 정리·잘못된 behavior·잘못된 message 검사가 실패했다.
+잘못된 질문 답은 rejected/invalid_answer 대신 카드를 소비한 결과로 나왔다.
+이 실패 로그는 /tmp/sh1-r5-before.log에 남겼다.
+
+### 공유 검증과 접수 순서
+
+decisionValidation.js의 validateDecision 하나를 코어와 SDK 어댑터가 공유한다.
+question_answer는 저장된 tool_requests.input.questions로 검증한다.
+문자열 답은 질문이 정확히 하나이고 답이 비어 있지 않을 때만 허용한다.
+사전 답은 질문 텍스트의 키 집합과 정확히 같아야 하며 모든 값이 공백뿐이지 않은 문자열이어야 한다.
+배열·null·빈 답·잘못된 키·누락·추가 키·비문자열 값은 거부한다.
+tool_decision은 behavior가 allow/deny이고 선택적 message가 문자열인 경우만 허용한다.
+누락된 behavior나 answer behavior를 암묵적 allow로 바꾸지 않는다.
+
+코어 submit의 기존 키 조회·대상 검증 뒤, pending 카드의 검증을
+새 delivery 생성과 pending→decided보다 먼저 수행한다.
+실패는 비접수 rejected(invalid_answer/invalid_decision)이며 delivery·효과를 만들지 않는다.
+카드는 pending이고, 같은 request_key로 올바른 답을 다시 제출할 수 있다.
+브리지는 이 두 고정 코드를 definitive rejected로 반환하며 503으로 오인하지 않는다.
+
+가짜 어댑터의 기본 AskUserQuestion 카드에는 실제 질문 입력을 넣었다.
+기존 정상·gate·복구 테스트 중 생략했던 tool_decision body는 명시적 allow로 고쳤다.
+잘못된 입력 테스트의 단언을 약화하지 않고 정상 입력을 유효한 새 계약에 맞춘 것이다.
+
+### 어댑터의 최종 방어
+
+접수 뒤 SDK 쪽 상태 변경이나 내부 예외가 있어도 decide의 catch에서
+해당 pending Promise를 deny/invalid_decision으로 정리하고 invalid_decision을 던진다.
+사람이 허용하지 않은 도구를 실행하는 경로는 없다.
+코어 delivery는 unknown/effect_failed이고, 이 정리로 생긴 invalid_decision 오류 tool_result가
+그 원인을 tool_finished_error로 덮지 않도록 원인을 보존한다.
+기존 턴 종결·귀속 장벽 정리 규칙은 그대로 사용한다.
+강제 실패 테스트에서 가짜 provider의 deny 응답·tool 실행 0·턴 종결·idle·귀속 불명 해제와
+다음 prompt 완료를 확인했다.
+가짜 provider 응답 로그에 behavior·message를 추가해 어댑터 호출 횟수 대신 실제 wire 응답으로 검사한다.
+
+과거 R2의 어댑터 직접 호출 테스트는 이제 잘못된 직접 결정 뒤 deny로 턴이 끝나는 것을 검사한다.
+어댑터까지 도달한 실패 요청을 다시 allow로 바꾸지 않는다.
+사용자 재답변은 그 앞의 코어 접수 검증에서 pending 카드를 보존하는 경로다.
+
+### 질문 응답과 프로세스 테스트
+
+단일 질문은 잘못된 키 답에서 문자열 A로 answer 필드만 바꾼 대조로
+rejected/pending/응답 0 → observed/턴 종결을 검증했다.
+질문 수만 1→2로 바꾸면 같은 문자열 답이 거부되는 대조도 추가했다.
+유효한 사전 답의 기존 S1-e 관측 한계는 변경하지 않았다.
+두 질문의 유효한 사전 답은 SDK에 전달되고 턴은 끝나지만 기존 비교 규칙대로 unknown일 수 있다.
+
+HTTP 소켓 장애 테스트는 카드의 input을 파싱해 questions[0].question을 실제 응답 키로 사용한다.
+{Choice:A}처럼 header를 질문 텍스트로 잘못 쓰지 않는다.
+실제 HTTP/소켓 내부 단언은 이 샌드박스의 listen EPERM 때문에 macOS 재검증이 필요하다.
+
+### 라운드 5 최종 검증
+
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-*.test.js server/tests/owned-session*.test.js`
+  → tests 517, pass 494, fail 23, cancelled 0, skipped 0.
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test --test-name-pattern='R5 |R2 question rejects|B2a-R1-01' server/tests/session-host-sdk-adapter.test.js server/tests/session-host-decision-validation.test.js server/tests/owned-session-service.test.js server/tests/session-host-gate-flow-r1.test.js`
+  → tests 36, pass 36, fail 0.
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-hub-chat*.test.js server/tests/spawn-guard.test.js`
+  → tests 27, pass 27, fail 0.
+
+샌드박스에서 막힌 23개는 아래와 같다. macOS 호스트에서 내부 단언까지 재실행해야 한다.
+
+- `HTTP real SDK pending approval survives server SIGTERM with one provider tool effect` — `Error: listen EPERM: operation not permitted /private/tmp/owned-http-HmB99A/host.sock`
+- `HTTP real SDK pending approval survives server SIGKILL with one provider tool effect` — `Error: listen EPERM: operation not permitted /private/tmp/owned-http-T3GaKu/host.sock`
+- `HTTP real SDK socket failure preserves pending last-known; identical previously valid mutations all return 503` — `Error: listen EPERM: operation not permitted /private/tmp/owned-http-XwAdss/host.sock`
+- `process bridge replacement preserves pending approval; shutdown leaves fake host alive and decision effect once` — `Error: listen EPERM: operation not permitted /private/tmp/owned-x6KIbI/host.sock`
+- `process accepted-before-reply crash remains unknown; boot change lookup and same key retry cause one start effect` — `Error: listen EPERM: operation not permitted /private/tmp/owned-GzU8n7/host.sock`
+- `process broken socket exposes stale snapshot and lock pid only; all valid changes fail closed` — `Error: listen EPERM: operation not permitted /private/tmp/owned-y3WeN7/host.sock`
+- `X simultaneous hosts preserve winner socket inode and capability` — `spawnSync /bin/ps EPERM`
+- `X lock does not survive in a live inherited-environment child` — `spawnSync /bin/ps EPERM`
+- `X detached host survives launcher parent SIGKILL` — `spawnSync /bin/ps EPERM`
+- `X detached host survives launcher parent SIGTERM` — `spawnSync /bin/ps EPERM`
+- `X detached host survives launcher parent SIGHUP` — `spawnSync /bin/ps EPERM`
+- `X before accepted crash is reconciled by lookup after boot change, effect occurs once` — `spawnSync /bin/ps EPERM`
+- `X idle drain refuses arrival with not_accepted, new host retries exactly once` — `spawnSync /bin/ps EPERM`
+- `X active ownership prevents idle and SIGTERM exit; zero ownership releases socket and lock` — `spawnSync /bin/ps EPERM`
+- `X private file modes, capability absent from argv and env, launcher sanitizes env` — `host_start_timeout`
+- `X SIGTERM with zero ownership exits cleanly and releases exclusion` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous throw, active ownership=false` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous throw, active ownership=true` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous rejection, active ownership=false` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous rejection, active ownership=true` — `spawnSync /bin/ps EPERM`
+- `R2 real ps ignores unrelated multiline argv while identifying a marked child` — `actual: 'query_failed', expected: 'ok'`
+- `real ps identifies marked child and grandchild then confirms exit` — `actual: 'query_failed', expected: 'ok'`
+- `SDK real ps identity reads actual child and inherited grandchild marker then mismatch` — `spawnSync /bin/ps EPERM`
+
+
+## S1-c1 라운드 6 — 장애 원문 캐시 제거와 제한된 읽기
+
+### 수정 전 실패 증거
+
+제품 수정 전에 owned-session-review-r2.test.js의 네 사례를 추가했다.
+`PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session-review-r2.test.js`
+→ tests 4, pass 0, fail 4.
+장애 캐시 원문 보존, snapshot 전문·무제한 행 반환, oversized 이벤트 ref/조각 조회 부재를 검출했다.
+수정 직후 같은 네 사례는 4/4 통과했고, createApp 마운트·잘못된 UTF-8 offset 대조를 추가한 집중 검증은 6/6 통과했다.
+수정 전 로그는 /tmp/sh1-r6-before.log다.
+
+### 장애 캐시는 상태 사실만
+
+서버 캐시는 statusOnly 허용 목록으로 깊게 투영한 객체만 보관한다.
+세션·incarnation 상태·식별자·시각, delivery의 id/kind/state/outcome/reason/시각,
+tool_request의 id/tool_use_id/tool_name/state, control 상태를 남긴다.
+body·input·decision·result_json·sdk_message·title·cwd 등 자유문 원문은 캐시에 넣지 않는다.
+브라우저는 마지막으로 그린 대화와 승인 내용을 이미 가지고 있으므로,
+서버가 장애 시 원문을 다시 보내는 기능은 필요하지 않다.
+last_known은 상태 사실과 as_of/current_state_known:false로만 장애를 설명한다.
+기존 삭제 접수·관측·snapshot_required 때 캐시를 제거하는 로직은 유지했다.
+조각 조회 응답은 캐시하지 않는다.
+
+### snapshot은 제한된 미리보기
+
+body·input은 앞 4KiB의 UTF-8 완성 문자까지만 보내고
+body_bytes/input_bytes와 body_truncated/input_truncated를 붙인다.
+다른 긴 문자열 열도 같은 미리보기·크기 표시를 적용해 행의 자유문이 크기 예산을 우회하지 못하게 했다.
+작은 값은 기존 문자열 형태를 유지한다. 전문은 호스트 DB에 그대로 있다.
+
+가장 단순한 행 상한을 선택했다. 각 종류별 최신 최대 128행을 반환하고,
+출력 순서는 생성 순서다. 전체 행 바이트 예산은 7MiB로 잡아 envelope를 포함해 8MiB 안에 머물게 한다.
+상한 때문에 생략하면 top-level more.{incarnations,deliveries,tool_requests,controls}=true다.
+전체 snapshot 행 페이지 API를 추가하지 않았다. 응답은 부분 snapshot임을 명시하며,
+원문은 ref 조각 조회, 과거 이벤트는 기존 seq 재생으로 읽는다.
+조회는 기존 단일 read transaction 안에서 iterator와 LIMIT 129를 사용한다.
+
+### 세션에 묶인 원문 조각 조회
+
+소켓 chunk는 session_id와 source(event/delivery_body/tool_input), id_or_seq, offset을 받는다.
+SQL에서 해당 세션 소속을 함께 검사하고 BLOB 기준 offset부터 최대 1MiB 조각만 읽는다.
+응답은 found/total_bytes/offset/data/done이며 UTF-8 경계에서 조각을 닫는다.
+문자 중간 offset은 invalid_offset으로 거부하며 다음 offset은 offset+data의 UTF-8 바이트 수다.
+존재하지 않는 참조·다른 세션 참조·deleting/deleted 세션은 found:false, data:''이며 HTTP는 404다.
+원문을 가져오기 위해 서버가 host.db를 직접 열지 않는다.
+
+GET /api/owned-sessions/:id/chunks?source=&ref=&offset=는 기존 cookie·GET Fetch-Site 검사를 그대로 사용한다.
+oversized 이벤트는 session_id와 ref:{source:'event',id_or_seq:seq}를 함께 내보낸다.
+13MiB SDK 이벤트의 자리표시를 구독으로 받은 뒤 HTTP 조각들을 이어 붙여
+DB 원문 JSON과 바이트가 완전히 같은 것을 검증했다.
+다른 세션과 삭제 뒤에는 같은 ref로 원문을 얻을 수 없다.
+프로토콜·클라이언트의 세션·source·ref·offset 전달도 별도로 검사한다.
+
+### createApp 경로와 DB 장애 resume 대조
+
+HTTP 서버 helper는 직접 인증·라우트를 조립하지 않고 createApp을 호출한다.
+ownedSessionService를 주입하지 않고 ownedSessionServiceOptions로 runtimeDir 등을 전달하여
+기본 서비스 생성과 실제 마운트 경로를 검증한다.
+독립 임시 app DB·storage·plugins 경로를 사용하고 SessionHub·distill·scheduler·fleet·specialist를 끈다.
+SIGTERM도 app.shutdown을 사용한다.
+샌드박스 내 createApp 테스트는 기본 브리지 생성·chunk 마운트·cookie 통과·bearer/cross-site 거부를 검증했다.
+실제 자식 프로세스의 HTTP 경계는 소켓 제한으로 macOS 재검증이 필요하다.
+
+DB 장애 검증은 별도 세션을 start→stop한 뒤 정상 resume에서 가짜 CLI spawn이 정확히 1개 늘어남을 확인한다.
+그 실행을 다시 stop하고 incarnation exited·실제 pid 소멸을 확인한 다음 DB 쓰기 장애를 주입한다.
+같은 종료된 대상의 resume은 추가 spawn이 없어야 한다.
+가짜 CLI의 spawn pid 로그 배열이 그대로이고 기존 정상 세션 pid가 살아 있는지도 검사한다.
+실제 Claude·LLM·동봉 실행 파일·외부 네트워크 호출과 git 조작은 0이다.
+
+### 라운드 6 최종 검증
+
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-*.test.js server/tests/owned-session*.test.js`
+  → tests 525, pass 502, fail 23, cancelled 0, skipped 0.
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/owned-session-review-r2.test.js`
+  → 수정 전 tests 4, pass 0, fail 4; 최종 tests 6, pass 6, fail 0.
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-hub-chat*.test.js server/tests/spawn-guard.test.js`
+  → tests 27, pass 27, fail 0.
+
+샌드박스에서 막힌 사례 목록(실제 macOS 내부 단언 재검증 필요):
+
+- `HTTP real SDK pending approval survives server SIGTERM with one provider tool effect` — `Error: listen EPERM: operation not permitted /private/tmp/owned-http-VZ0n4o/host.sock`
+- `HTTP real SDK pending approval survives server SIGKILL with one provider tool effect` — `Error: listen EPERM: operation not permitted /private/tmp/owned-http-Gfp4W9/host.sock`
+- `HTTP real SDK socket failure preserves pending last-known; identical previously valid mutations all return 503` — `Error: listen EPERM: operation not permitted /private/tmp/owned-http-5Gsqr9/host.sock`
+- `process bridge replacement preserves pending approval; shutdown leaves fake host alive and decision effect once` — `Error: listen EPERM: operation not permitted /private/tmp/owned-RiyjWH/host.sock`
+- `process accepted-before-reply crash remains unknown; boot change lookup and same key retry cause one start effect` — `Error: listen EPERM: operation not permitted /private/tmp/owned-6hjSbs/host.sock`
+- `process broken socket exposes stale snapshot and lock pid only; all valid changes fail closed` — `Error: listen EPERM: operation not permitted /private/tmp/owned-vAZaA3/host.sock`
+- `X simultaneous hosts preserve winner socket inode and capability` — `spawnSync /bin/ps EPERM`
+- `X lock does not survive in a live inherited-environment child` — `spawnSync /bin/ps EPERM`
+- `X detached host survives launcher parent SIGKILL` — `spawnSync /bin/ps EPERM`
+- `X detached host survives launcher parent SIGTERM` — `spawnSync /bin/ps EPERM`
+- `X detached host survives launcher parent SIGHUP` — `spawnSync /bin/ps EPERM`
+- `X before accepted crash is reconciled by lookup after boot change, effect occurs once` — `spawnSync /bin/ps EPERM`
+- `X idle drain refuses arrival with not_accepted, new host retries exactly once` — `spawnSync /bin/ps EPERM`
+- `X active ownership prevents idle and SIGTERM exit; zero ownership releases socket and lock` — `spawnSync /bin/ps EPERM`
+- `X private file modes, capability absent from argv and env, launcher sanitizes env` — `host_start_timeout`
+- `X SIGTERM with zero ownership exits cleanly and releases exclusion` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous throw, active ownership=false` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous throw, active ownership=true` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous rejection, active ownership=false` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous rejection, active ownership=true` — `spawnSync /bin/ps EPERM`
+- `R2 real ps ignores unrelated multiline argv while identifying a marked child` — `actual: 'query_failed', expected: 'ok'`
+- `real ps identifies marked child and grandchild then confirms exit` — `actual: 'query_failed', expected: 'ok'`
+- `SDK real ps identity reads actual child and inherited grandchild marker then mismatch` — `spawnSync /bin/ps EPERM`
+
+
+## S1-c1 라운드 7 — snapshot의 진행 중 행 보존
+
+### 수정 전 실패 증거
+
+제품 수정 전에 session-host-snapshot-pending.test.js의 다섯 사례를 추가했다.
+`PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-snapshot-pending.test.js`
+→ tests 5, pass 1, fail 4.
+종결 이력 200개에 128행 상한을 적용하는 대조만 통과했다.
+pending·decided 카드 200개, pending 카드 2,100개, 오래된 미종결 delivery·accepted control 보존은 실패했다.
+수정 후 같은 다섯 사례는 5/5 통과했다.
+
+### 진행 중인 상태가 종결 이력보다 우선
+
+snapshot은 단일 read transaction 안에서 필수 행과 종결 이력을 분리해 읽는다.
+다음 필수 행은 개수 상한 없이 모두 포함한다.
+
+- tool_requests: pending·decided.
+- deliveries: queued·sending·written·provider_observed. prompt는 outcome=null인 경우를 보존하며,
+  completed 상태여도 outcome=null인 prompt는 턴 종결 증거가 아직 없으므로 함께 보존한다.
+- control_requests: accepted.
+- incarnations: exited·never_started가 아닌 진행 중인 실행 상태.
+
+종결된 이력에만 종류별 최신 128행 상한을 적용한다.
+최종 응답은 기존과 같이 생성 순서로 정렬한다.
+more는 개수·바이트 예산 때문에 생략된 종결 이력이 있을 때만 true다.
+필수 행의 미리보기가 짧아졌다는 이유로 more를 켜지 않는다.
+기존 라운드 6 행 상한 테스트는 pending을 expired 이력으로 바꿔 종결 이력 대조로 유지했다.
+
+### 바이트 예산
+
+필수 행 전체를 먼저 포함하고 7MiB 행 예산을 확인한다.
+예산을 넘으면 body·input·decision·result_json 등 미리보기 길이를 4KiB에서 절반씩 줄인다.
+UTF-8 경계를 지키며 원래 *_bytes 값은 보존하고 *_truncated를 갱신한다.
+필요하면 미리보기를 0바이트까지 줄일 수 있다. DB 전문과 조각 조회는 변경하지 않는다.
+남은 공간에만 종결 이력을 담으므로 오래된 pending 카드를 이력 때문에 숨기지 않는다.
+
+식별자·상태 메타데이터 자체가 예산을 넘는 극단적 경우에는 모든 행을 넣으면서 유한한
+wire 상한도 지키는 것이 불가능하므로, 행을 조용히 누락하거나 큰 프레임으로 연결을 끊지 않는다.
+명시적 snapshot_too_large 오류를 반환하며 HTTP는 503이다.
+이 오류는 호스트 장애나 DB 쓰기 실패로 분류하지 않고 연결은 유지한다.
+프로토콜의 같은 연결에서 list가 계속 성공하고 브리지가 호스트를 다시 띄우지 않는 것을 검사했다.
+정상 범위의 필수 행은 전부 반환하며 메타데이터 단독 초과는 명시적 실패라는 제한이다.
+
+### 검증 범위
+
+pending·decided 각각 200개가 snapshot에 모두 있고 생성 순서·상태가 유지된다.
+각 카드 입력은 4KiB 미리보기와 원래 바이트 수를 가지며 200개 모두 조각 조회로 전문을 복원했다.
+종결 이력 200개는 최신 128개만 반환하고 more=true인 대조를 확인했다.
+pending 2,100개에서는 모든 행을 보존하면서 미리보기를 줄여 8MiB 미만 응답을 확인했다.
+미종결 delivery 200개와 최신 종결 delivery 128개를 함께 보존하고,
+더 최신인 종결 control 이력이 많아도 예전 accepted control을 보존한다.
+메타데이터만 초과시키는 별도 사례는 snapshot_too_large를 반환하되 원본 카드 행은 그대로다.
+상태 기계·접수·게이트·멱등 규칙은 변경하지 않았다.
+실제 Claude·LLM·동봉 실행 파일·외부 네트워크 호출 및 git 조작은 0이다.
+
+### 라운드 7 최종 검증
+
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-*.test.js server/tests/owned-session*.test.js`
+  → tests 533, pass 510, fail 23, cancelled 0, skipped 0.
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test --test-name-pattern='R7 ' server/tests/session-host-snapshot-pending.test.js server/tests/session-host-protocol.test.js server/tests/owned-session-service.test.js`
+  → tests 8, pass 8, fail 0.
+
+수정 전 로그 /tmp/sh1-r7-before.log: tests 5, pass 1, fail 4.
+
+샌드박스에서 막힌 기존 사례 목록(실제 macOS 재검증 필요):
+
+- `HTTP real SDK pending approval survives server SIGTERM with one provider tool effect` — `Error: listen EPERM: operation not permitted /private/tmp/owned-http-kmKgxw/host.sock`
+- `HTTP real SDK pending approval survives server SIGKILL with one provider tool effect` — `Error: listen EPERM: operation not permitted /private/tmp/owned-http-n3mYFX/host.sock`
+- `HTTP real SDK socket failure preserves pending last-known; identical previously valid mutations all return 503` — `Error: listen EPERM: operation not permitted /private/tmp/owned-http-lpls79/host.sock`
+- `process bridge replacement preserves pending approval; shutdown leaves fake host alive and decision effect once` — `Error: listen EPERM: operation not permitted /private/tmp/owned-x2iube/host.sock`
+- `process accepted-before-reply crash remains unknown; boot change lookup and same key retry cause one start effect` — `Error: listen EPERM: operation not permitted /private/tmp/owned-u2K82K/host.sock`
+- `process broken socket exposes stale snapshot and lock pid only; all valid changes fail closed` — `Error: listen EPERM: operation not permitted /private/tmp/owned-GdAZea/host.sock`
+- `X simultaneous hosts preserve winner socket inode and capability` — `spawnSync /bin/ps EPERM`
+- `X lock does not survive in a live inherited-environment child` — `spawnSync /bin/ps EPERM`
+- `X detached host survives launcher parent SIGKILL` — `spawnSync /bin/ps EPERM`
+- `X detached host survives launcher parent SIGTERM` — `spawnSync /bin/ps EPERM`
+- `X detached host survives launcher parent SIGHUP` — `spawnSync /bin/ps EPERM`
+- `X before accepted crash is reconciled by lookup after boot change, effect occurs once` — `spawnSync /bin/ps EPERM`
+- `X idle drain refuses arrival with not_accepted, new host retries exactly once` — `spawnSync /bin/ps EPERM`
+- `X active ownership prevents idle and SIGTERM exit; zero ownership releases socket and lock` — `spawnSync /bin/ps EPERM`
+- `X private file modes, capability absent from argv and env, launcher sanitizes env` — `host_start_timeout`
+- `X SIGTERM with zero ownership exits cleanly and releases exclusion` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous throw, active ownership=false` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous throw, active ownership=true` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous rejection, active ownership=false` — `spawnSync /bin/ps EPERM`
+- `X R1-01 asynchronous rejection, active ownership=true` — `spawnSync /bin/ps EPERM`
+- `R2 real ps ignores unrelated multiline argv while identifying a marked child` — `actual: 'query_failed', expected: 'ok'`
+- `real ps identifies marked child and grandchild then confirms exit` — `actual: 'query_failed', expected: 'ok'`
+- `SDK real ps identity reads actual child and inherited grandchild marker then mismatch` — `spawnSync /bin/ps EPERM`
+
+
+### S1-c1 라운드 8 — snapshot 행 상한 제거
+
+- snapshot에서 행 수 상한, 필수/종결 행 분류, `more`를 제거했다. 생성 순서대로 모든 incarnation·delivery·tool_request·control 행을 반환한다. 삭제 중/삭제된 세션의 원문 차단은 유지한다.
+- 기본 8MiB 예산은 `{state, seq_high}` 전체 JSON의 실제 UTF-8 바이트 수로 검사한다. 본문·입력 미리보기만 4KiB에서 2KiB, 1KiB 순으로 0까지 줄인다. 원본 바이트 수와 truncated 표시는 축소 후에도 정확하며, 전문은 기존 세션 소속 검사와 조각 조회로 복원한다.
+- 행 메타데이터 수백 바이트 × 수만 행까지 예산 안에 들어간다. 미리보기가 0이어도 메타데이터가 예산을 넘으면 행을 빼는 대신 고정 코드 `snapshot_too_large`로 명시적으로 실패한다. 관측 중인 unknown을 종결로 오분류해 누락시키는 것보다 안전하다. 서버는 호스트 장애나 오래된 캐시로 바꾸지 않고 HTTP 413과 같은 코드를 전달한다. 프로토콜의 기존 고정 오류 전달·연결 유지 처리는 그대로 사용한다.
+- 테스트 전용 `snapshotMaxBytes` 주입으로 작은 예산에서도 동일한 축소·실패 경로를 검사한다. 상태 기계·접수·멱등 규칙은 변경하지 않았다.
+
+수정 전 실패 증거:
+
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-snapshot-all.test.js` — `# tests 3`, `# pass 0`, `# fail 3`.
+- 종결 delivery 300개 + 기존 unknown prompt(attribution_pending=1)·unknown interrupt: `128 !== 302`.
+- 큰 본문 300개와 주입 예산: `128 !== 300`.
+- 메타데이터만으로 4096바이트 예산 초과: `Missing expected exception.`.
+
+수정 후 검증:
+
+- snapshot 신규·기존 승인·서비스·HTTP 집중 테스트 38/38 통과. 300개 큰 본문 모두 유지·UTF-8 경계·원본 바이트 수·전문 조각 복원·주입 예산·고정 오류 및 HTTP 413을 확인했다. 기존 200개 pending/decided 승인, 2100개 pending 축소, 200/500개 종결 이력 테스트도 행 전체를 요구하도록 갱신했다.
+- `PATH=/opt/homebrew/opt/node@22/bin:$PATH node --test server/tests/session-host-*.test.js server/tests/owned-session*.test.js` — `# tests 537`, `# pass 514`, `# fail 23`, `# cancelled 0`, `# skipped 0`. 실패는 소켓 listen·실제 ps 제한 및 이에 따른 host_start_timeout이다. 실제 Claude·LLM·동봉 실행 파일·네트워크·git 조작은 수행하지 않았다.
+
+샌드박스 실패 사례 및 오류 원문(실제 macOS 재검증 필요):
+
+- `HTTP real SDK pending approval survives server SIGTERM with one provider tool effect` — `Error: listen EPERM: operation not permitted /private/tmp/owned-http-hNwWI2/host.sock`
+- `HTTP real SDK pending approval survives server SIGKILL with one provider tool effect` — `Error: listen EPERM: operation not permitted /private/tmp/owned-http-kzQlUe/host.sock`
+- `HTTP real SDK socket failure preserves pending last-known; identical previously valid mutations all return 503` — `Error: listen EPERM: operation not permitted /private/tmp/owned-http-Fhd6LM/host.sock`
+- `process bridge replacement preserves pending approval; shutdown leaves fake host alive and decision effect once` — `Error: listen EPERM: operation not permitted /private/tmp/owned-G2rAa0/host.sock`
+- `process accepted-before-reply crash remains unknown; boot change lookup and same key retry cause one start effect` — `Error: listen EPERM: operation not permitted /private/tmp/owned-VVaf8p/host.sock`
+- `process broken socket exposes stale snapshot and lock pid only; all valid changes fail closed` — `Error: listen EPERM: operation not permitted /private/tmp/owned-rIXBQ0/host.sock`
+- `X simultaneous hosts preserve winner socket inode and capability` — `error: 'spawnSync /bin/ps EPERM'`
+- `X lock does not survive in a live inherited-environment child` — `error: 'spawnSync /bin/ps EPERM'`
+- `X detached host survives launcher parent SIGKILL` — `error: 'spawnSync /bin/ps EPERM'`
+- `X detached host survives launcher parent SIGTERM` — `error: 'spawnSync /bin/ps EPERM'`
+- `X detached host survives launcher parent SIGHUP` — `error: 'spawnSync /bin/ps EPERM'`
+- `X before accepted crash is reconciled by lookup after boot change, effect occurs once` — `error: 'spawnSync /bin/ps EPERM'`
+- `X idle drain refuses arrival with not_accepted, new host retries exactly once` — `error: 'spawnSync /bin/ps EPERM'`
+- `X active ownership prevents idle and SIGTERM exit; zero ownership releases socket and lock` — `error: 'spawnSync /bin/ps EPERM'`
+- `X private file modes, capability absent from argv and env, launcher sanitizes env` — `error: 'host_start_timeout'`
+- `X SIGTERM with zero ownership exits cleanly and releases exclusion` — `error: 'spawnSync /bin/ps EPERM'`
+- `X R1-01 asynchronous throw, active ownership=false` — `error: 'spawnSync /bin/ps EPERM'`
+- `X R1-01 asynchronous throw, active ownership=true` — `error: 'spawnSync /bin/ps EPERM'`
+- `X R1-01 asynchronous rejection, active ownership=false` — `error: 'spawnSync /bin/ps EPERM'`
+- `X R1-01 asynchronous rejection, active ownership=true` — `error: 'spawnSync /bin/ps EPERM'`
+- `R2 real ps ignores unrelated multiline argv while identifying a marked child` — `expected: 'ok'; actual: 'query_failed'`
+- `real ps identifies marked child and grandchild then confirms exit` — `real /bin/ps must be available; sandbox EPERM requires host rerun`
+- `SDK real ps identity reads actual child and inherited grandchild marker then mismatch` — `error: 'spawnSync /bin/ps EPERM'`

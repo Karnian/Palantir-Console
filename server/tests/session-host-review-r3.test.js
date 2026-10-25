@@ -51,7 +51,7 @@ for (const otherCause of [false, true]) test(`R3-03 target result clears interru
   if (otherCause) {
     f.adapter.toolRequest(f.iid, 'other'); const decide = f.adapter.decide;
     f.adapter.decide = (...args) => { decide(...args); throw new Error('ambiguous_tool'); };
-    f.core.submit(f.req('tool_decision', { target_tool_use_id: 'other' }));
+    f.core.submit(f.req('tool_decision', { target_tool_use_id: 'other', body: { behavior: 'allow' } }));
   }
   const interrupt = f.adapter.interrupt;
   f.adapter.interrupt = (...args) => { interrupt(...args); throw new Error('ambiguous_interrupt'); };

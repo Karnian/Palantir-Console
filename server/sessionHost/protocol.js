@@ -29,7 +29,7 @@ function createProtocol({ stream, core, capability, hostBootId, sdkVersion = nul
       send({ type: 'not_accepted', id: message.id });
       return close();
     }
-    if (!['submit', 'lookup', 'snapshot', 'events_since'].includes(message.type) ||
+    if (!['submit', 'lookup', 'snapshot', 'events_since', 'list', 'settings_preview', 'chunk'].includes(message.type) ||
         !['string', 'number'].includes(typeof message.id)) return close();
     const token = { id: message.id };
     pending.add(token);
@@ -43,7 +43,10 @@ function createProtocol({ stream, core, capability, hostBootId, sdkVersion = nul
         result = receipt.result;
       } else if (message.type === 'lookup') result = await core.lookup(message.request_key);
       else if (message.type === 'snapshot') result = await core.snapshot(message.session_id);
-      else result = await core.eventsSince(message.seq);
+      else if (message.type === 'list') result = await core.listSessions();
+      else if (message.type === 'settings_preview') result = await core.settingsPreview(message.cwd);
+      else if (message.type === 'chunk') result = await core.chunk(message.session_id, message.source, message.id_or_seq, message.offset);
+      else result = await core.eventsSince(message.seq, { maxBytes: message.max_bytes });
       if (pending.has(token) && receipt && !receipt.durable) {
         send({ type: 'rejected', id: message.id, request_key: message.request.request_key, code: receipt.code });
       } else if (pending.has(token)) {
@@ -52,7 +55,7 @@ function createProtocol({ stream, core, capability, hostBootId, sdkVersion = nul
       }
     } catch (error) {
       if (pending.has(token)) send({ type: 'error', id: message.id,
-        code: error.message === 'invalid_request' ? 'invalid_request' : 'storage_unavailable' });
+        code: ['invalid_request', 'invalid_chunk', 'invalid_offset', 'snapshot_too_large'].includes(error.message) ? error.message : 'storage_unavailable' });
     } finally {
       pending.delete(token);
       onActivity();

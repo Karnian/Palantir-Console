@@ -194,3 +194,43 @@ test('R1-02 unavailable adapter receipt preserves fixed adapter_unavailable resu
   assert.equal(receipt.durable, true);
   assert.equal(receipt.result.reason, 'adapter_unavailable');
 });
+
+test('C1 list and settings preview preserve protocol authentication and arguments', async () => {
+  const calls = [];
+  const h = harness({ listSessions() { calls.push('list'); return { sessions: [], seq_high: 0 }; },
+    settingsPreview(cwd) { calls.push(cwd); return { ok: true }; } });
+  h.hello();
+  h.send({ type: 'list', id: 1 });
+  h.send({ type: 'settings_preview', id: 2, cwd: '/safe' });
+  await flush();
+  assert.deepEqual(calls, ['list', '/safe']);
+  assert.deepEqual(h.output.slice(1), [
+    { type: 'list', id: 1, result: { sessions: [], seq_high: 0 } },
+    { type: 'settings_preview', id: 2, result: { ok: true } }
+  ]);
+});
+
+test('R1 protocol forwards replay byte limit and more flag', async () => {
+  let options;
+  const h = harness({ eventsSince(seq, value) { options = value; return { events: [{ seq: seq + 1 }], seq_high: 10, more: true }; } });
+  h.hello(); h.send({ type: 'events_since', id: 1, seq: 3, max_bytes: 2048 }); await flush();
+  assert.deepEqual(options, { maxBytes: 2048 }); assert.equal(h.output[1].result.more, true);
+});
+
+test('R2 chunk protocol preserves session ownership arguments and UTF-8 data', async () => {
+  const calls = [];
+  const result = { found: true, total_bytes: 3, offset: 0, data: '가', done: true };
+  const h = harness({ chunk(...args) { calls.push(args); return result; } });
+  h.hello(); h.send({ type: 'chunk', id: 1, session_id: 'session', source: 'event', id_or_seq: 7, offset: 0 });
+  await flush(); assert.deepEqual(calls, [['session', 'event', 7, 0]]);
+  assert.deepEqual(h.output[1], { type: 'chunk', id: 1, result });
+});
+
+test('R7 metadata overflow returns a fixed snapshot error without closing the connection', async () => {
+  const h = harness({ snapshot() { throw new Error('snapshot_too_large'); },
+    listSessions() { return { sessions: [], seq_high: 0 }; } });
+  h.hello(); h.send({ type: 'snapshot', id: 1, session_id: 'session' });
+  h.send({ type: 'list', id: 2 }); await flush();
+  assert.deepEqual(h.output.find(row => row.id === 1), { type: 'error', id: 1, code: 'snapshot_too_large' });
+  assert.equal(h.output.find(row => row.id === 2).type, 'list'); assert.equal(h.ended, false);
+});

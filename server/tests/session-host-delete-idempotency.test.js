@@ -15,8 +15,9 @@ test('§8.1 request_key time: future six minutes rejected, 25h expired; existing
 
 test('§8.1 active delete rejected; deleting crash resumes scrub, tombstone prevents replay after 30 days', t => {
   const f = fixture(t); f.start(); const req = f.req('prompt', { body: 'SECRET-BODY-UNIQUE' }); f.core.submit(req);
-  f.adapter.toolRequest(f.iid, 't', 'Bash', { secret: 'SECRET-INPUT-UNIQUE' }); f.core.submit(f.req('tool_decision', { target_tool_use_id: 't' }));
+  f.adapter.toolRequest(f.iid, 't', 'Bash', { secret: 'SECRET-INPUT-UNIQUE' }); f.core.submit(f.req('tool_decision', { target_tool_use_id: 't', body: { behavior: 'allow' } }));
   assert.equal(f.core.submit(f.req('delete')).state, 'rejected');
+  f.core.onEvent({ type: 'sdk_message', incarnation_id: f.iid, message: { text: 'SECRET-SDK-UNIQUE' } });
   f.core.submit(f.req('close')); const del = f.req('delete'); f.faults.arm('after_deleting_commit');
   assert.throws(() => f.core.submit(del), SimulatedCrash);
   f.reboot(); assert.equal(f.state().session.state, 'deleting'); f.core.recover();
@@ -33,6 +34,10 @@ test('§8.1 active delete rejected; deleting crash resumes scrub, tombstone prev
   db.close();
   assert.equal(fs.readFileSync(f.dbPath).includes(Buffer.from('SECRET-BODY-UNIQUE')), false);
   assert.equal(fs.readFileSync(f.dbPath).includes(Buffer.from('SECRET-INPUT-UNIQUE')), false);
+  assert.equal(fs.readFileSync(f.dbPath).includes(Buffer.from('SECRET-SDK-UNIQUE')), false);
+  const scrubbed = new Database(f.dbPath);
+  assert.equal(scrubbed.prepare("SELECT count(*) n FROM events WHERE type='sdk_message'").get().n, 0);
+  scrubbed.close();
   assert.equal(f.core.eventsSince(0).snapshot_required, true);
   f.advance(31 * 86400000); f.reboot().recover();
   assert.equal(f.core.submit(req).state, 'expired'); assert.equal(f.adapter.log.received.length, 1);

@@ -77,6 +77,8 @@ const { createAssistantMemoryService } = require('./services/assistantMemoryServ
 const { createSessionHubMemoryRouter } = require('./routes/sessionHubMemory');
 const { createSessionHubService } = require('./services/sessionHubService');
 const { createSessionHubChatRouter } = require('./routes/sessionHubChat');
+const { createOwnedSessionService } = require('./services/ownedSessionService');
+const { createOwnedSessionsRouter } = require('./routes/ownedSessions');
 const { createAnswerQueryService } = require('./services/answerQueryService');
 const { createSnapshotRefreshService } = require('./services/snapshotRefreshService');
 const { createSnapshotRefreshRouter } = require('./routes/snapshotRefresh');
@@ -1867,7 +1869,7 @@ function createApp(options = {}) {
   const parseJson = express.json({ limit: '2mb' });
   app.use(function parseNonObserveJson(req, res, next) {
     // Spec §5.3: observe authenticates before parsing bodies.
-    if (/^\/api\/(?:observe|session-hub)(?:\/|$)/i.test(req.path)) return next();
+    if (/^\/api\/(?:observe|session-hub|owned-sessions)(?:\/|$)/i.test(req.path)) return next();
     return parseJson(req, res, next);
   });
   app.use((req, res, next) => {
@@ -1958,6 +1960,9 @@ function createApp(options = {}) {
     },
   });
   app.use('/api', auth);
+  const ownedSessionService = options.ownedSessionService || createOwnedSessionService(options.ownedSessionServiceOptions);
+  app.ownedSessionService = ownedSessionService;
+  app.use('/api/owned-sessions', createOwnedSessionsRouter({ service: ownedSessionService }));
   app.use('/api/session-hub/snapshots', createSnapshotRefreshRouter({ service: snapshotRefreshService }));
   if (sessionHubService) {
     app.use('/api/session-hub/chat', createSessionHubChatRouter({ service: sessionHubService }));
@@ -2387,6 +2392,7 @@ function createApp(options = {}) {
     // disposeSession() itself calling app.shutdown) so every phase runs once.
     if (_shuttingDown) return Promise.resolve();
     _shuttingDown = true;
+    const ownedShutdown = ownedSessionService.shutdown();
     const hubShutdown = sessionHubService?.shutdown();
     const snapshotShutdown = snapshotRefreshService.shutdown();
     const answerShutdown = answerQueryService?.shutdown();
@@ -2407,8 +2413,8 @@ function createApp(options = {}) {
       // no-work path remains synchronous and preserves manager shutdown timing.
       _shutdownPromise = Promise.resolve(_sweepWorkersThenFinish());
     }
-    if (hubShutdown || snapshotShutdown) {
-      _shutdownPromise = Promise.allSettled([_shutdownPromise, hubShutdown, snapshotShutdown, answerShutdown]).then(results => {
+    if (hubShutdown || snapshotShutdown || ownedShutdown) {
+      _shutdownPromise = Promise.allSettled([_shutdownPromise, hubShutdown, snapshotShutdown, answerShutdown, ownedShutdown]).then(results => {
         const failed = results.find(result => result.status === 'rejected');
         if (failed) throw failed.reason;
       });

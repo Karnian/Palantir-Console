@@ -2,6 +2,7 @@
 
 const { randomUUID, createHash } = require('node:crypto');
 const authGate = require('./authGate');
+const { validateDecision } = require('./decisionValidation');
 const pin = require('./pin');
 const { openStore } = require('./store');
 const { SimulatedCrash } = require('./faults');
@@ -46,6 +47,30 @@ function canonical(value) {
 }
 const hash = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
 
+function utf8Prefix(buffer, limit) {
+  let end = Math.min(buffer.length, limit);
+  while (end < buffer.length && end > 0 && (buffer[end] & 0xc0) === 0x80) end--;
+  return buffer.subarray(0, end).toString('utf8');
+}
+function snapshotPreview(row, previewBytes = 4096) {
+  const result = { ...row };
+  for (const [key, value] of Object.entries(row)) {
+    if ((key === 'body' || key === 'input') && value == null) {
+      result[key + '_bytes'] = 0; result[key + '_truncated'] = false;
+    }
+    if (typeof value !== 'string') continue;
+    const buffer = Buffer.from(value);
+    const limit = ['body', 'input'].includes(key) ? previewBytes : 4096;
+    const total = row[key + '_bytes'] ?? buffer.length;
+    if (key === 'body' || key === 'input' || buffer.length > limit || row[key + '_bytes'] !== undefined) {
+      result[key] = utf8Prefix(buffer, limit);
+      result[key + '_bytes'] = total;
+      result[key + '_truncated'] = Buffer.byteLength(result[key]) < total;
+    }
+  }
+  return result;
+}
+
 function createHostCore({
   dbPath,
   adapter,
@@ -53,7 +78,8 @@ function createHostCore({
   clock = Date.now,
   hostBootId = randomUUID(),
   faults,
-  readHooks
+  readHooks,
+  snapshotMaxBytes = 8 * 1024 * 1024
 } = {}) {
   const now = typeof clock === 'function' ? clock : () => clock.now();
   const store = openStore(dbPath, {
@@ -1014,6 +1040,17 @@ function createHostCore({
         if (!reason && (session.state !== 'active' || !incarnation || request.incarnation_id !== incarnation.id)) {
           reason = 'incarnation_mismatch';
         }
+        if (!reason && ['question_answer', 'tool_decision'].includes(request.kind)) {
+          const tool = getRow('SELECT * FROM tool_requests WHERE incarnation_id=? AND tool_use_id=?',
+            incarnation.id, request.target_tool_use_id || null);
+          const decision = request.kind === 'question_answer' ?
+            { behavior: 'answer', answer: request.body?.answer ?? request.body } : request.body;
+          // Validate before creating a delivery or consuming the pending card.
+          if (tool?.state === 'pending' && !validateDecision(JSON.parse(tool.input), decision, request.kind).ok) {
+            result = { state: 'rejected', reason: request.kind === 'question_answer' ? 'invalid_answer' : 'invalid_decision' };
+            return;
+          }
+        }
         if (!reason && request.kind === 'interrupt') {
           for (const [id, token] of rechecks) {
             const queued = getDelivery(id);
@@ -1093,6 +1130,11 @@ function createHostCore({
     }
     const incarnation = getIncarnation(adapterEvent.incarnation_id);
     if (!incarnation || ['deleting', 'deleted'].includes(getSession(incarnation.session_id)?.state)) {
+      return;
+    }
+    if (adapterEvent.type === 'sdk_message') {
+      enqueue(incarnation.session_id, () => writeTransaction(() =>
+        recordEvent(incarnation.session_id, incarnation.id, 'sdk_message', { message: adapterEvent.message })));
       return;
     }
     if (['initialization', 'initialization_failed'].includes(adapterEvent.type)) {
@@ -1230,7 +1272,8 @@ function createHostCore({
           const observed = isToolDecisionObserved(delivery, decision, adapterEvent);
           transitionDelivery(delivery, ['sending', 'written', 'unknown'], {
             state: observed ? 'provider_observed' : 'unknown',
-            reason: getToolResultReason(observed, adapterEvent)
+            reason: delivery.reason === 'effect_failed' && adapterEvent.is_error && adapterEvent.content === 'invalid_decision' ?
+              'effect_failed' : getToolResultReason(observed, adapterEvent)
           });
           // This exact tool has finished, so an ambiguous call cannot execute later.
           resolveAttributionCause(delivery);
@@ -1409,48 +1452,153 @@ function createHostCore({
     return store.read(() => {
       const session = getSession(sessionId);
       if (session && ['deleting', 'deleted'].includes(session.state)) {
-        return {
+        const result = {
           state: {
-            session: session
+            session: snapshotPreview(session),
+            current_incarnation_id: getLatestIncarnation(sessionId)?.id || null
           },
           seq_high: getRow('SELECT COALESCE(MAX(seq),0) n FROM events').n
         };
+        if (Buffer.byteLength(JSON.stringify(result)) > snapshotMaxBytes) {
+          throw Object.assign(new Error('snapshot_too_large'), { code: 'snapshot_too_large' });
+        }
+        return result;
+      }
+      function rows(sql, parameters, transform = value => value) {
+        return Array.from(database.prepare(sql + ' ORDER BY rowid ASC').iterate(...parameters), row => snapshotPreview(transform(row)));
       }
       const state = {
-        session: session || null,
-        incarnations: getRows('SELECT * FROM incarnations WHERE session_id=?', sessionId).map(incarnation => {
+        session: session ? snapshotPreview(session) : null,
+        current_incarnation_id: getLatestIncarnation(sessionId)?.id || null,
+        incarnations: rows('SELECT * FROM incarnations WHERE session_id=?', [sessionId], incarnation => {
           const event = getRow("SELECT json FROM events WHERE incarnation_id=? AND type='rate_limit' ORDER BY seq DESC LIMIT 1", incarnation.id);
           return { ...incarnation, rate_limit_info: event ? JSON.parse(event.json) : null };
         }),
-        deliveries: getRows('SELECT * FROM deliveries WHERE session_id=?', sessionId),
-        tool_requests: getRows('SELECT * FROM tool_requests WHERE incarnation_id IN (SELECT id FROM incarnations WHERE session_id=?)', sessionId),
-        controls: getRows('SELECT * FROM control_requests WHERE session_id=?', sessionId)
+        deliveries: rows('SELECT * FROM deliveries WHERE session_id=?', [sessionId]),
+        tool_requests: rows('SELECT * FROM tool_requests WHERE incarnation_id IN (SELECT id FROM incarnations WHERE session_id=?)', [sessionId]),
+        controls: rows('SELECT * FROM control_requests WHERE session_id=?', [sessionId])
       };
       store.readCheckpoint();
-      return {
-        state,
-        seq_high: getRow('SELECT COALESCE(MAX(seq),0) n FROM events').n
-      };
+      const result = { state, seq_high: getRow('SELECT COALESCE(MAX(seq),0) n FROM events').n };
+      const bytes = () => Buffer.byteLength(JSON.stringify(result));
+      // Preserve every row; only body/input previews shrink to meet the byte budget.
+      for (let limit = 2048; bytes() > snapshotMaxBytes; limit = Math.floor(limit / 2)) {
+        for (const name of ['incarnations', 'deliveries', 'tool_requests', 'controls']) {
+          state[name] = state[name].map(row => snapshotPreview(row, limit));
+        }
+        if (limit === 0) break;
+      }
+      if (bytes() > snapshotMaxBytes) throw Object.assign(new Error('snapshot_too_large'), { code: 'snapshot_too_large' });
+      return result;
     });
   }
 
-  function eventsSince(seq) {
+  function listSessions() {
     return store.read(() => {
-      const rows = getRows('SELECT * FROM events WHERE seq>? ORDER BY seq', seq);
-      const high = getRow("SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='events'),0) n").n;
-      if (seq < 0 || seq > high || seq < high && (!rows.length || rows[0].seq !== seq + 1) || rows.some((eventRow, eventIndex) => eventIndex &&
-        eventRow.seq !== rows[eventIndex - 1].seq + 1)) {
+      const sessions = getRows("SELECT id,title,cwd,state,created_at FROM owned_sessions WHERE state!='deleted'").map(session => {
+        const incarnation = getLatestIncarnation(session.id);
         return {
-          snapshot_required: true
+          ...session,
+          incarnation: incarnation ? {
+            id: incarnation.id, state: incarnation.state, has_pid: incarnation.pid !== null, end_reason: incarnation.end_reason
+          } : null,
+          attribution_uncertain: incarnation?.attribution_uncertain || 0,
+          pending_approvals: incarnation ? getRow("SELECT COUNT(*) n FROM tool_requests WHERE incarnation_id=? AND state='pending'",
+            incarnation.id).n : 0,
+          last_activity_seq: getRow('SELECT COALESCE(MAX(seq),0) n FROM events WHERE session_id=?', session.id).n
         };
-      }
-      return {
-        events: rows.map(eventRow => ({
-          ...eventRow,
-          json: JSON.parse(eventRow.json)
-        })),
-        seq_high: high
+      });
+      store.readCheckpoint();
+      return { sessions, seq_high: getRow('SELECT COALESCE(MAX(seq),0) n FROM events').n };
+    });
+  }
+
+  async function settingsPreview(cwd) {
+    let timer;
+    const failed = { ok: false, reason: 'settings_check_failed' };
+    try {
+      const started = Date.now();
+      const resolved = await Promise.race([
+        Promise.resolve().then(() => adapter.checkSettings(cwd)),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('settings_check_failed')), pin.resolveSettingsDeadlineMs); })
+      ]);
+      if (Date.now() - started >= pin.resolveSettingsDeadlineMs) return failed;
+      const verdict = authGate.evaluateResolvedSettings(resolved);
+      if (verdict.reason === 'settings_check_failed') return failed;
+      const paths = value => {
+        if (Array.isArray(value)) return [...new Set(value.flatMap(paths))];
+        if (!value || typeof value !== 'object') return [];
+        return [...new Set([
+          ...(typeof value.path === 'string' && !/[\0\r\n]/.test(value.path) ? [value.path] : []),
+          ...Object.entries(value).filter(([key]) => key !== 'path').flatMap(([, item]) => paths(item))
+        ])];
       };
+      const provenance = resolved.provenance;
+      return {
+        ...verdict,
+        hooks: Object.keys(resolved.effective.hooks || {}).map(event => ({ event, paths: paths(provenance.hooks) })),
+        mcp_servers: Object.keys(resolved.effective.mcpServers || {}).map(name => ({ name, paths: paths(provenance.mcpServers) })),
+        source_paths: [...new Set(resolved.sources.flatMap(source => paths({ path: source?.path })))],
+        warnings: Object.hasOwn(resolved.effective.hooks || {}, 'PermissionRequest') ? ['permission_request_hook'] : []
+      };
+    } catch { return failed; }
+    finally { clearTimeout(timer); }
+  }
+
+  function eventsSince(seq, { maxBytes = 4 * 1024 * 1024 } = {}) {
+    const limit = Number.isSafeInteger(maxBytes) && maxBytes > 0 ? Math.min(maxBytes, 12 * 1024 * 1024) : 4 * 1024 * 1024;
+    return store.read(() => {
+      const high = getRow("SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='events'),0) n").n;
+      if (!Number.isSafeInteger(seq) || seq < 0 || seq > high) return { snapshot_required: true };
+      const events = [];
+      let bytes = 0;
+      let last = seq;
+      const statement = database.prepare('SELECT * FROM events WHERE seq>? ORDER BY seq');
+      for (const row of statement.iterate(seq)) {
+        if (row.seq !== last + 1) return { snapshot_required: true };
+        const rawBytes = Buffer.byteLength(row.json);
+        let event = rawBytes > 12 * 1024 * 1024 ?
+          { seq: row.seq, session_id: row.session_id, type: row.type, oversized: true, bytes: rawBytes,
+            ref: { source: 'event', id_or_seq: row.seq } } : { ...row, json: JSON.parse(row.json) };
+        let size = Buffer.byteLength(JSON.stringify(event));
+        if (size > 12 * 1024 * 1024) {
+          event = { seq: row.seq, session_id: row.session_id, type: row.type, oversized: true, bytes: size,
+            ref: { source: 'event', id_or_seq: row.seq } };
+          size = Buffer.byteLength(JSON.stringify(event));
+        }
+        if (events.length && bytes + size > limit) break;
+        events.push(event);
+        bytes += size;
+        last = row.seq;
+      }
+      if (!events.length && seq < high) return { snapshot_required: true };
+      return { events, seq_high: high, more: last < high };
+    });
+  }
+  function chunk(sessionId, source, ref, offset = 0) {
+    const fail = code => { throw Object.assign(new Error(code), { code }); };
+    if (!Number.isSafeInteger(offset) || offset < 0) fail('invalid_offset');
+    const sources = {
+      event: { table: 'events', column: 'json', where: 'session_id=? AND seq=?' },
+      delivery_body: { table: 'deliveries', column: 'body', where: 'session_id=? AND id=?' },
+      tool_input: { table: 'tool_requests', column: 'input',
+        where: 'incarnation_id IN (SELECT id FROM incarnations WHERE session_id=?) AND id=?' }
+    };
+    if (!Object.hasOwn(sources, source) || !['string', 'number'].includes(typeof ref) || String(ref).length > 256) fail('invalid_chunk');
+    return store.read(() => {
+      const session = getSession(sessionId);
+      const absent = { found: false, total_bytes: 0, offset, data: '', done: true };
+      if (!session || ['deleting', 'deleted'].includes(session.state)) return absent;
+      const { table, column, where } = sources[source];
+      const row = getRow(`SELECT length(CAST(${column} AS BLOB)) total_bytes, ` +
+        `substr(CAST(${column} AS BLOB),?,?) data FROM ${table} WHERE ${where}`, offset + 1, 1024 * 1024 + 4, sessionId, ref);
+      if (!row) return absent;
+      const total = row.total_bytes || 0;
+      if (offset > total) fail('invalid_offset');
+      const data = row.data || Buffer.alloc(0);
+      if (offset && data.length && (data[0] & 0xc0) === 0x80) fail('invalid_offset');
+      const text = utf8Prefix(data, 1024 * 1024);
+      return { found: true, total_bytes: total, offset, data: text, done: offset + Buffer.byteLength(text) === total };
     });
   }
   adapter.events.on('event', onEvent);
@@ -1462,7 +1610,10 @@ function createHostCore({
     },
     recover,
     snapshot,
+    listSessions,
+    settingsPreview,
     eventsSince,
+    chunk,
     submitWithReceipt(request) {
       const result = this.submit(request);
       return store.read(() => {

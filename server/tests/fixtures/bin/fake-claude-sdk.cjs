@@ -121,7 +121,8 @@ lines.on('line', line => {
   if (message.type === 'control_request') {
     const request = message.request;
     if (request.subtype === 'initialize') {
-      config = JSON.parse(fs.readFileSync('fake-claude.json', 'utf8'));
+      try { config = JSON.parse(fs.readFileSync('fake-claude.json', 'utf8')); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; config = {}; }
       log({ type: 'initialize' });
       if (config.initializationError) {
         send({ type: 'control_response', response: { subtype: 'error', request_id: message.request_id, error: 'fake_initialization_error' } });
@@ -175,7 +176,7 @@ lines.on('line', line => {
     const expectedInput = entry.tool === 'AskUserQuestion' ?
       { ...entry.input, answers: decision?.updatedInput?.answers } : entry.input;
     const inputMatch = JSON.stringify(decision?.updatedInput) === JSON.stringify(expectedInput);
-    log({ type: 'tool_response', tool_use_id: entry.toolUseId, updatedInput: decision?.updatedInput, inputMatch });
+    log({ type: 'tool_response', tool_use_id: entry.toolUseId, behavior: decision?.behavior, message: decision?.message, updatedInput: decision?.updatedInput, inputMatch });
     if (allowDecision && !inputMatch) log({ type: 'input_mismatch', tool_use_id: entry.toolUseId });
     const allowed = allowDecision && inputMatch;
     if (allowed) log({ type: 'tool', tool_use_id: entry.toolUseId,

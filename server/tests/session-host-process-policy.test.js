@@ -43,7 +43,9 @@ test('lookup exposes delivery aliases, controls and deletion tombstones without 
   const started = f.start();
   assert.deepEqual(f.core.lookup(started.request_key), started);
   const delivery = f.prompt();
-  assert.deepEqual(f.core.lookup(delivery.request_key), f.d(delivery.id));
+  const { body_bytes, body_truncated, ...expected } = f.d(delivery.id);
+  assert.deepEqual(f.core.lookup(delivery.request_key), expected);
+  assert.equal(body_bytes, Buffer.byteLength(expected.body)); assert.equal(body_truncated, false);
   assert.deepEqual(f.core.lookup('missing'), { found: false });
   f.core.submit(f.req('close'));
   f.core.submit(f.req('delete'));
@@ -58,7 +60,9 @@ test('lookup resolves a durable interrupt alias to its original delivery', t => 
   const secondRequest = f.req('interrupt');
   const second = f.core.submit(secondRequest);
   assert.equal(second.id, first.id);
-  assert.deepEqual(f.core.lookup(secondRequest.request_key), f.d(first.id));
+  const { body_bytes, body_truncated, ...expected } = f.d(first.id);
+  assert.deepEqual(f.core.lookup(secondRequest.request_key), expected);
+  assert.equal(body_bytes, Buffer.byteLength(expected.body)); assert.equal(body_truncated, false);
 });
 test('SQLite exclusive lock fails immediately for a second connection and releases explicitly', t => {
   const fs = require('node:fs');
