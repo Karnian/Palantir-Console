@@ -165,6 +165,12 @@ function createPsIdentityProbe({ pinnedPath, execFileSync = childProcess.execFil
       return 'query_failed';
     }
   }
-  return { findMarked, check, listMarkedDescendants, verifyThenSignal, signal: verifyThenSignal };
+  return {
+    findMarked, check, listMarkedDescendants, verifyThenSignal, signal: verifyThenSignal,
+    readStartTime(pid) {
+      const result = start(pid);
+      return result.status === 'ok' ? result : failed();
+    }
+  };
 }
 module.exports = { createPsIdentityProbe };

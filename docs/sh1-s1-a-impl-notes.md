@@ -842,3 +842,143 @@ resume rejected(subprocess_remaining)·handoff blocked(subprocess_remaining)·�
 실패는 기존 X 14개(ps EPERM 13개·host_start_timeout 1개)와 실제 ps 통합 2개(query_failed)다.
 실패를 skip하지 않았다. 이번 라운드의 전체 337개는 실제 macOS 호스트에서 다시 확인해야 한다.
 SDK 설치·실제 claude 실행·npm test·git 조작은 하지 않았다.
+
+## S1-b2b — 실제 SDK 어댑터와 테스트 전용 실행 파일
+
+2026-10-25, 설치된 SDK 0.3.308을 그대로 사용했다.
+설치·rebuild·네트워크·실제 Claude 실행·LLM 호출은 하지 않았다.
+코어·stateRules·spawnEnv·authGate 등 변경 금지 파일은 수정하지 않았다.
+제품 main은 ESM SDK를 import한 어댑터와 동봉 경로를 가진 psIdentity를 연결한다.
+SDK 또는 동봉 경로를 찾지 못하면 unavailableAdapter로 호스트를 유지한다.
+시작 요청 전에는 query·spawn·resolveSettings를 호출하지 않는다.
+
+### wire 근거와 타입 선언의 누락
+
+다음 줄 번호는 이 worktree에 설치된 파일 기준이다.
+sdk.mjs는 압축돼 있어 한 줄이 매우 길다. 함수 이름과 바이트 위치도 함께 적는다.
+
+| 근거 | 확인한 계약 |
+|---|---|
+| sdk.d.ts:2492, 9767, 9819 | custom spawn 콜백, ChildProcess 호환 SpawnedProcess, command·args·cwd·env·signal |
+| sdk.d.ts:2555 | allow의 updatedInput, deny의 message |
+| sdk.d.ts:4742, 4753, 4776 | initialize 응답에 account가 필수, claude_code_version은 선택 필드 |
+| sdk.d.ts:4813, 4815, 4819 | older CLI는 still_queued 없는 성공 응답, 배열이 있어야 영수증 |
+| sdk.d.ts:4991, 5200, 5251 | can_use_tool 요청, control_request, control_response의 바깥 구조 |
+| sdk.d.ts:5870, 5950, 6000 | rate_limit_event와 result의 user_message_uuids 배열 |
+| sdk.d.ts:6236, 6508 | system/init capabilities, user 메시지 content와 parent_tool_use_id |
+| sdk.d.ts:3375 | resolveSettings의 settingSources 생략은 CLI 기본 소스와 같음 |
+| sdk-tools.d.ts:1136, 2685, 3959 | AskUserQuestion questions와 answers의 질문 텍스트→문자열 사전 |
+| sdk.mjs:157, 위치 1210728 | ProcessTransport.initialize 안에서 custom spawn 직접 호출 |
+| sdk.mjs:163 Rv, 164 d9e | query → Rv → transport 생성. spawn throw가 query에서 동기로 전파됨 |
+| sdk.mjs:157 handleControlRequest, 159 processControlRequest | success 응답의 response.request_id·response.response, canUseTool의 toolUseID 전달 |
+| sdk.mjs:161 streamInput, 163 Tv | initialize 쓰기 뒤 입력 iterable 소비, user NDJSON 전달 |
+| sdk.mjs:159 interrupt, 위치 1240267 | SDK 자체도 still_queued 배열이 아니면 undefined 반환 |
+| sdk.mjs:161 accountInfo, 위치 1253138 | 초기화 Promise의 account를 반환하며 새 CLI 요청을 보내지 않음 |
+| sdk.mjs:157 readMessages | 제어 프레임 처리 뒤 일반 메시지는 inputStream.enqueue로 전달 |
+| sdk.mjs:157 p9, 39 Pt·cu | resolveSettings는 프로세스의 설정 루트·HOME을 읽음. query의 자식 env로 바뀌지 않음 |
+
+**선언 누락**: 이 SDK의 SDKMessage union(sdk.d.ts:5556)에는 command_lifecycle이 없다.
+4803줄 주석에서 이름만 언급한다. 따라서 선언에서 type/subtype을 확인했다고 주장하지 않는다.
+S1-0 기록도 lifecycle의 type/subtype을 생략했으므로 그것만으로 wire를 추측하지 않았다.
+동봉 바이너리를 실행하지 않고 mmap으로 읽은 선언 문자열의 위치 219689000에
+`type:T("command_lifecycle"),command_uuid:o(),state:U([...])`가 있다.
+실제 wire는 최상위 `type:'command_lifecycle'`이며 system subtype이 아니다.
+상태는 queued·started·completed·cancelled·discarded·refused다.
+가짜와 어댑터 모두 이 최상위 type을 사용하며 SDK가 그대로 전달하는 것을 테스트했다.
+초기화 응답의 pid·current_permission_mode·remote_control_auto_enable도 이 공개 응답 타입에는 없다.
+이 필드는 S1-0 s11-initfields 실측과 게이트 계약을 따르며 SDK는 응답 전문을 보존한다.
+account는 선언에 있으므로 accountInfo 결과를 합치지 않는다. 누락·null을 그대로 게이트에 넘긴다.
+
+### 실행·효과 경계
+
+start는 빈 입력 queue를 query에 주고 동기로 pid·시작시각·대화 UUID를 반환한다.
+새 대화는 randomUUID를 sessionId로, resume은 기존 대화 UUID를 resume으로 넘긴다.
+SDK가 custom spawn의 오류를 감추는 경우에도 기록한 오류를 동기 throw하도록 방어한다.
+실제 고정 SDK에서는 숨기지 않고 그대로 동기 throw한다.
+
+spawn 순서는 spawnGuard → 공유 argv 판정·매번 파일 해시 → buildChildEnv·assertChildEnv
+→ pipe stdio로 spawn → identityProbe.readStartTime이다.
+새 프로세스 그룹이나 detached 옵션은 없다. stderr는 저장하지 않고 소비해 pipe 정체를 막는다.
+SDK가 부모에서 받은 CLAUDECODE·CLAUDE_CODE_SESSION_ID·CLAUDE_PID 등은 자식에게 전달하지 않는다.
+허용된 SDK 키 세 개만 buildChildEnv가 고르며 표지는 예약 UUID 하나다.
+체크 실패는 경로·env 값 없는 고정 code/message로 바꾼다.
+argvCheck의 기존 비동기 함수와 새 동기 함수는 경로·argv 판정 함수를 공유한다.
+해시는 캐시하지 않는다. start와 resume 두 spawn에서 해시 호출이 각각 일어남을 검증했다.
+
+시작시각 조회 실패면 즉시 소유 ChildProcess 핸들로 SIGKILL하고 identity_unavailable을 throw한다.
+핸들 kill은 아직 회수하지 않은 직접 자식을 대상으로 한다.
+직접 자식이 죽어도 wait/reap 전 PID는 재사용되지 않고, Node가 exit를 처리하면 핸들이 닫힌다.
+따라서 저장된 숫자 PID를 나중에 다시 보내는 경로와 달리 PID 재사용 대상에 신호를 보내지 않는다.
+코어는 동기 실패를 never_started로 기록하며, 뒤의 실제 exit 이벤트도 이를 exited로 덮지 않는다.
+단, SIGKILL 요청 반환은 사망 확인이 아니며 OS 오류·호스트 동시 사망·이미 생긴 하위 작업의 위험은 남는다.
+특히 이 오류 경로의 never_started는 코어에 정상 신원을 커밋하지 않았다는 뜻이다.
+실제 spawn이 전혀 없었다는 뜻으로 확대하면 안 된다. 표지 복구와 하위 확인이 계속 필요하다.
+
+send·decide·interrupt 호출부에는 await가 없다.
+도구별 대기 Promise는 한 번만 resolve하며 두 번째 결정은 throw한다.
+abort면 대기를 삭제하고 deny로 정리한다. 코어는 전달한 AbortSignal을 직접 관측한다.
+allow는 입력 객체 그대로, deny는 nonce 포함 메시지 그대로 반환한다.
+answer는 answers 사전을 합친 updatedInput을 반환한다.
+기존 문자열 answer는 질문 하나일 때만 질문 텍스트를 키로 변환한다.
+복수 질문은 명시적인 사전을 받아야 하며 값은 전부 문자열이어야 한다.
+
+일반 이벤트는 코어가 요구하는 최소 필드만 전달한다.
+assistant·본문·알 수 없는 프레임은 버린다. result의 단수 uuid를 배열로 승격하지 않는다.
+tool_result 배열 content는 text 블록만 연결한다.
+초기화 성공은 전문, 실패는 고정 코드 이벤트다.
+스트림 종료·오류·close 반환은 사망 이벤트가 아니며 child_exit는 직접 자식 exit에서 한 번만 나온다.
+SDK interrupt의 undefined 반환도 어댑터에서 다시 검사한다.
+
+checkSettings와 query는 모두 settingSources를 지정하지 않아 user/project/local 기본값을 공유한다.
+테스트 파일 프로세스에서 SDK import 전에 HOME을 임시 디렉터리로 바꾸고
+CLAUDE_CONFIG_DIR·CLAUDE_SECURESTORAGE_CONFIG_DIR을 제거한다.
+자식도 같은 HOME을 받는다. project 설정뿐 아니라 임시 HOME의 user 설정을 읽는 대조도 통과했다.
+사용자 실제 ~/.claude 설정·hooks를 가짜 실행 파일에 넘기지 않는다.
+
+### 가짜와 테스트
+
+fake-claude-sdk.cjs는 의존성 없는 executable Node 스크립트다.
+설정은 cwd의 fake-claude.json에서만 읽는다.
+initialize·can_use_tool·interrupt 제어 요청/응답, uuid lifecycle, system/init,
+assistant/result, user tool_result를 실제 SDK와 교환한다.
+merge는 실제로 받은 두 입력을 묶는다. 코어는 두 번째 입력을 보내지 않으므로
+이 결함 테스트만 어댑터로 두 번째 UUID를 직접 넣어 provider 이상을 주입한다.
+drop·delayMs·omitLifecycle·olderReceipt·초기화 필드 덮어쓰기·초기화 정체/실패,
+EOF/SIGTERM 무시·손자·rate limit·toolError·단수 uuid 결과도 재현한다.
+SDK close 자체도 나중에 SIGTERM/SIGKILL을 예약하므로 정리 미확인 테스트는
+주입 clock을 먼저 진행시켜 코어의 보수적 판정을 검증한다.
+
+provider 로그의 user UUID·tool_use_id 개수를 효과로 센다.
+정상 20회 지시·10회 승인에서 UUID별 수신/실행 각 1회, unknown 0을 확인했다.
+거부는 실행 0, 단일 질문 문자열 답변은 observed다.
+실제 손자 표지 상속은 ps 없이도 별도 테스트로 확인했다.
+각 fixture의 after는 직접 자식 SIGKILL 후 exit를 기다리고 손자 자연 종료도 기다린다.
+각 테스트는 20초 제한, 폴링은 4초 제한을 가진다.
+
+능력 판정은 고정 버전쌍·default 모드에서 observe/tool_approval/resume을 supported로 둔다.
+첫 system/init 전 prompt·cancel은 unknown이며,
+각각 msg_lifecycle_v1·interrupt_receipt_v1이 확인되면 supported, 없으면 unsupported다.
+버전 또는 모드가 다르면 다섯 능력 모두 unsupported다. snapshot 연결은 S1-c다.
+
+### 변경 금지 경계에서 확인한 불일치·남는 위험
+
+1. **구조화된 question_answer 관측**:
+   stateRules.js:18은 제출 answer를 그대로 보존하고 50줄에서
+   `JSON.stringify(adapterEvent.content) === JSON.stringify(decision.answer)`로 비교한다.
+   이번 계약은 tool_result.content를 반드시 문자열로 정규화하므로 사전 형태 answer는
+   올바른 SDK updatedInput.answers와 성공 tool_result가 있어도 unknown(tool_finished)이다.
+   문자열 단일 질문 경로는 observed이고, 구조화된 답변의 한계는 별도 재현 테스트로 고정했다.
+   content를 객체로 바꾸거나 stateRules를 수정해 숨기지 않았다. S1-e 전에 호스트 판단이 필요하다.
+2. **accountInfo의 신선도**:
+   어댑터는 요구대로 q.accountInfo()를 호출하지만 고정 SDK는 초기화 account를 반환한다.
+   따라서 매 prompt 호출이 실제 인증 소스의 새 조회를 의미하지 않는다.
+   reinitialize 같은 별도 제어는 이번 경계에 추가하지 않았다.
+3. **baseEnv 거부 문구와 필터 계약**:
+   baseEnv의 PALANTIR_TOKEN·ANTHROPIC_API_KEY·ANTHROPIC_BASE_URL은 기존 buildChildEnv가 버린다.
+   이 입력만으로 spawn 0을 요구하는 문구는 지정된 필터 계약과 맞지 않는다.
+   안전한 최종 env는 spawn 1로 대조하고, 허용 키 HOME에 sk-ant- 값을 넣으면 spawn 0을 확인했다.
+   최종 env의 금지 키·표지 누락·일반 prototype은 assertChildEnv가 거부한다.
+4. 실행 파일 realpath/해시 확인과 실제 exec 사이의 파일 교체 경쟁은 남는다.
+   파일 핸들로 exec하는 OS 계약을 도입하지 않았으며, 같은 UID 격리도 주장하지 않는다.
+5. 실제 CLI/LLM·키체인·hooks·도구 부작용은 실행하지 않았다.
+   가짜 wire 검증은 실제 CLI 의미 전체의 증명이 아니다. 실제 ps·소켓 검증은 아래 환경 제한을 따른다.
