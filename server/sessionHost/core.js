@@ -47,6 +47,28 @@ function canonical(value) {
 }
 const hash = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
 
+function utf8Prefix(buffer, limit) {
+  let end = Math.min(buffer.length, limit);
+  while (end < buffer.length && end > 0 && (buffer[end] & 0xc0) === 0x80) end--;
+  return buffer.subarray(0, end).toString('utf8');
+}
+function snapshotPreview(row) {
+  const result = { ...row };
+  for (const [key, value] of Object.entries(row)) {
+    if ((key === 'body' || key === 'input') && value == null) {
+      result[key + '_bytes'] = 0; result[key + '_truncated'] = false;
+    }
+    if (typeof value !== 'string') continue;
+    const buffer = Buffer.from(value);
+    if (key === 'body' || key === 'input' || buffer.length > 4096) {
+      result[key] = utf8Prefix(buffer, 4096);
+      result[key + '_bytes'] = buffer.length;
+      result[key + '_truncated'] = Buffer.byteLength(result[key]) < buffer.length;
+    }
+  }
+  return result;
+}
+
 function createHostCore({
   dbPath,
   adapter,
@@ -1429,26 +1451,43 @@ function createHostCore({
       if (session && ['deleting', 'deleted'].includes(session.state)) {
         return {
           state: {
-            session: session,
+            session: snapshotPreview(session),
             current_incarnation_id: getLatestIncarnation(sessionId)?.id || null
           },
           seq_high: getRow('SELECT COALESCE(MAX(seq),0) n FROM events').n
         };
       }
+      const more = {};
+      let bytes = Buffer.byteLength(JSON.stringify(snapshotPreview(session || {}))) + 4096;
+      function rows(name, sql, parameters, transform = value => value) {
+        const result = [];
+        more[name] = false;
+        for (const row of database.prepare(sql + ' ORDER BY rowid DESC LIMIT 129').iterate(...parameters)) {
+          if (result.length === 128) { more[name] = true; break; }
+          const value = snapshotPreview(transform(row));
+          const size = Buffer.byteLength(JSON.stringify(value)) + 1;
+          if (bytes + size > 7 * 1024 * 1024) { more[name] = true; break; }
+          bytes += size;
+          result.push(value);
+        }
+        return result.reverse();
+      }
       const state = {
-        session: session || null,
+        session: session ? snapshotPreview(session) : null,
         current_incarnation_id: getLatestIncarnation(sessionId)?.id || null,
-        incarnations: getRows('SELECT * FROM incarnations WHERE session_id=? ORDER BY rowid ASC', sessionId).map(incarnation => {
+        incarnations: rows('incarnations', 'SELECT * FROM incarnations WHERE session_id=?', [sessionId], incarnation => {
           const event = getRow("SELECT json FROM events WHERE incarnation_id=? AND type='rate_limit' ORDER BY seq DESC LIMIT 1", incarnation.id);
           return { ...incarnation, rate_limit_info: event ? JSON.parse(event.json) : null };
         }),
-        deliveries: getRows('SELECT * FROM deliveries WHERE session_id=?', sessionId),
-        tool_requests: getRows('SELECT * FROM tool_requests WHERE incarnation_id IN (SELECT id FROM incarnations WHERE session_id=?)', sessionId),
-        controls: getRows('SELECT * FROM control_requests WHERE session_id=?', sessionId)
+        deliveries: rows('deliveries', 'SELECT * FROM deliveries WHERE session_id=?', [sessionId]),
+        tool_requests: rows('tool_requests',
+          'SELECT * FROM tool_requests WHERE incarnation_id IN (SELECT id FROM incarnations WHERE session_id=?)', [sessionId]),
+        controls: rows('controls', 'SELECT * FROM control_requests WHERE session_id=?', [sessionId])
       };
       store.readCheckpoint();
       return {
         state,
+        more,
         seq_high: getRow('SELECT COALESCE(MAX(seq),0) n FROM events').n
       };
     });
@@ -1519,10 +1558,12 @@ function createHostCore({
         if (row.seq !== last + 1) return { snapshot_required: true };
         const rawBytes = Buffer.byteLength(row.json);
         let event = rawBytes > 12 * 1024 * 1024 ?
-          { seq: row.seq, type: row.type, oversized: true, bytes: rawBytes } : { ...row, json: JSON.parse(row.json) };
+          { seq: row.seq, session_id: row.session_id, type: row.type, oversized: true, bytes: rawBytes,
+            ref: { source: 'event', id_or_seq: row.seq } } : { ...row, json: JSON.parse(row.json) };
         let size = Buffer.byteLength(JSON.stringify(event));
         if (size > 12 * 1024 * 1024) {
-          event = { seq: row.seq, type: row.type, oversized: true, bytes: size };
+          event = { seq: row.seq, session_id: row.session_id, type: row.type, oversized: true, bytes: size,
+            ref: { source: 'event', id_or_seq: row.seq } };
           size = Buffer.byteLength(JSON.stringify(event));
         }
         if (events.length && bytes + size > limit) break;
@@ -1532,6 +1573,32 @@ function createHostCore({
       }
       if (!events.length && seq < high) return { snapshot_required: true };
       return { events, seq_high: high, more: last < high };
+    });
+  }
+  function chunk(sessionId, source, ref, offset = 0) {
+    const fail = code => { throw Object.assign(new Error(code), { code }); };
+    if (!Number.isSafeInteger(offset) || offset < 0) fail('invalid_offset');
+    const sources = {
+      event: { table: 'events', column: 'json', where: 'session_id=? AND seq=?' },
+      delivery_body: { table: 'deliveries', column: 'body', where: 'session_id=? AND id=?' },
+      tool_input: { table: 'tool_requests', column: 'input',
+        where: 'incarnation_id IN (SELECT id FROM incarnations WHERE session_id=?) AND id=?' }
+    };
+    if (!Object.hasOwn(sources, source) || !['string', 'number'].includes(typeof ref) || String(ref).length > 256) fail('invalid_chunk');
+    return store.read(() => {
+      const session = getSession(sessionId);
+      const absent = { found: false, total_bytes: 0, offset, data: '', done: true };
+      if (!session || ['deleting', 'deleted'].includes(session.state)) return absent;
+      const { table, column, where } = sources[source];
+      const row = getRow(`SELECT length(CAST(${column} AS BLOB)) total_bytes, ` +
+        `substr(CAST(${column} AS BLOB),?,?) data FROM ${table} WHERE ${where}`, offset + 1, 1024 * 1024 + 4, sessionId, ref);
+      if (!row) return absent;
+      const total = row.total_bytes || 0;
+      if (offset > total) fail('invalid_offset');
+      const data = row.data || Buffer.alloc(0);
+      if (offset && data.length && (data[0] & 0xc0) === 0x80) fail('invalid_offset');
+      const text = utf8Prefix(data, 1024 * 1024);
+      return { found: true, total_bytes: total, offset, data: text, done: offset + Buffer.byteLength(text) === total };
     });
   }
   adapter.events.on('event', onEvent);
@@ -1546,6 +1613,7 @@ function createHostCore({
     listSessions,
     settingsPreview,
     eventsSince,
+    chunk,
     submitWithReceipt(request) {
       const result = this.submit(request);
       return store.read(() => {

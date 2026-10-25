@@ -84,7 +84,7 @@ test('process broken socket exposes stale snapshot and lock pid only; all valid 
   fs.unlinkSync(path.join(f.runtimeDir, 'host.sock'));
   const unavailable = await service.list();
   assert.equal(unavailable.host, 'unreachable'); assert.equal(unavailable.current_state_known, false);
-  assert.equal(typeof unavailable.as_of, 'number'); assert.deepEqual(unavailable.last_known.sessions, known.sessions);
+  assert.equal(typeof unavailable.as_of, 'number'); assert.deepEqual(unavailable.last_known.sessions.map(row => row.id), known.sessions.map(row => row.id));
   assert.equal(unavailable.diagnostics.pid, child.pid);
   for (const kind of ['start', 'prompt', 'tool_decision', 'question_answer', 'interrupt', 'stop', 'resume', 'close', 'delete']) {
     await assert.rejects(service.submit({ kind, request_key: key(), cwd: process.cwd(), confirmed_settings: true, incarnation_id: '12345678-1234-1234-1234-123456789abc' }),

@@ -53,7 +53,8 @@ test('reads never launch host, distinguish absent lock and unreachable stale val
   h.online = false; h.held = true;
   const stale = await h.service.snapshot(h.f.sid);
   assert.equal(stale.host, 'unreachable'); assert.equal(stale.current_state_known, false);
-  assert.equal(stale.as_of, h.f.time); assert.deepEqual(stale.last_known.state, known.state);
+  assert.equal(stale.as_of, h.f.time); assert.equal(stale.last_known.state.session.id, known.state.session.id);
+  assert.equal(stale.last_known.state.session.state, known.state.session.state);
   assert.equal(h.launches, 0);
 });
 for (const kind of ['start', 'prompt', 'tool_decision', 'question_answer', 'interrupt', 'stop', 'resume', 'close', 'delete']) {

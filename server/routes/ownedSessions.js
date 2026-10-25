@@ -10,7 +10,7 @@ function createOwnedSessionsRouter({ service }) {
   const handle = operation => async (req, res, next) => {
     try {
       const value = await operation(req);
-      const status = value?.acceptance === 'rejected' && value.code === 'fingerprint_conflict' ? 409 : 200;
+      const status = value?.found === false ? 404 : value?.acceptance === 'rejected' && value.code === 'fingerprint_conflict' ? 409 : 200;
       res.status(status).json(value);
     } catch (error) { next(error); }
   };
@@ -40,6 +40,13 @@ function createOwnedSessionsRouter({ service }) {
       res.on('error', cleanup);
     } catch (error) { cleanup(); next(error); }
   });
+  router.get('/:id/chunks', handle(req => {
+    const { source, ref } = req.query;
+    const raw = req.query.offset ?? '0';
+    if (!['event', 'delivery_body', 'tool_input'].includes(source) || typeof ref !== 'string' || !ref || ref.length > 256 ||
+        typeof raw !== 'string' || !/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw))) throw invalid('invalid_chunk');
+    return service.chunk(req.params.id, source, ref, Number(raw));
+  }));
   router.get('/:id', handle(req => service.snapshot(req.params.id)));
   router.post('/settings-preview', handle(req => {
     if (req.body?.node_id !== undefined && req.body.node_id !== 'local') throw invalid('local_node_required');

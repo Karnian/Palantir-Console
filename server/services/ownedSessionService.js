@@ -55,6 +55,22 @@ function lockStatus(runtimeDir, identityProbe = createPsIdentityProbe()) {
     finally { copy?.close(); }
   } finally { db?.close(); }
 }
+// The browser already retains rendered text. Failure recovery stores facts only.
+function statusOnly(value) {
+  const fields = new Set(['id', 'session_id', 'incarnation_id', 'current_incarnation_id', 'host_boot_id', 'request_key',
+    'kind', 'state', 'outcome', 'reason', 'end_reason', 'stage', 'pid', 'has_pid', 'tool_use_id', 'tool_name',
+    'created_at', 'updated_at', 'started_at', 'ended_at', 'seq', 'seq_high', 'last_activity_seq', 'pending_approvals',
+    'attribution_uncertain', 'interrupt_unknown', 'close_after_turn', 'found', 'session_deleted', 'expires_at']);
+  const containers = new Set(['state', 'session', 'sessions', 'incarnation', 'incarnations', 'deliveries', 'tool_requests', 'controls', 'result']);
+  if (Array.isArray(value)) return value.map(statusOnly);
+  if (!value || typeof value !== 'object') return value;
+  const result = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (containers.has(key) && item && typeof item === 'object') result[key] = statusOnly(item);
+    else if (fields.has(key) && (item === null || ['string', 'number', 'boolean'].includes(typeof item))) result[key] = item;
+  }
+  return result;
+}
 function createOwnedSessionService({ runtimeDir = path.resolve(process.cwd(), 'runtime', 'session-host'),
   createClient = launcher.createClient, ensureHost = launcher.ensureHost, diagnose = () => lockStatus(runtimeDir),
   timers = globalThis, pollMs = POLL_MS, clock = Date.now } = {}) {
@@ -127,7 +143,7 @@ function createOwnedSessionService({ runtimeDir = path.resolve(process.cwd(), 'r
       const result = await operation(client);
       observe(result);
       const sessionId = result.state?.session?.id || result.result?.session_id;
-      if (!deletedSessions.has(sessionId)) cache.set(key, { as_of: clock(), value: result, sessionId });
+      if (!deletedSessions.has(sessionId)) cache.set(key, { as_of: clock(), value: statusOnly(result), sessionId });
       return { host: 'running', host_boot_id: bootId, ...result };
     } catch { return unavailable(key); }
   }
@@ -206,6 +222,16 @@ function createOwnedSessionService({ runtimeDir = path.resolve(process.cwd(), 'r
   return {
     list: () => read('list', host => host.list()),
     snapshot: id => read(`snapshot:${id}`, host => host.snapshot(id)),
+    async chunk(sessionId, source, ref, offset) {
+      try {
+        await connect();
+        const result = await client.chunk(sessionId, source, ref, offset);
+        return { host: 'running', host_boot_id: bootId, ...result };
+      } catch (error) {
+        if (['invalid_chunk', 'invalid_offset'].includes(error.code || error.message)) throw failure(error.code || error.message);
+        return unavailable('chunk');
+      }
+    },
     lookup(key) { validateKey(key); return read(`lookup:${key}`, async host => ({ result: await host.lookup(key) })); },
     submit,
     async settingsPreview(cwd) {

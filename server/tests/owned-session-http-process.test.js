@@ -126,15 +126,35 @@ for (const signal of ['SIGTERM', 'SIGKILL']) {
         server.child.send('stats'); return (await message(server.child, 'stats')).subscriptions === 0;
       });
       await poll(async () => (await server.call('/' + id)).body.state.deliveries.some(row => row.request_key === prompt.request_key && row.state === 'completed' && row.outcome !== null));
+      // A separate stopped session proves resume is normally executable before the DB fault.
+      const extra = await server.call('/start', 'POST', { request_key: key(), cwd: f.dir, confirmed_settings: true });
+      const extraId = extra.body.result.session_id;
+      assert.equal((await settledControl(server, extra.body.request_key)).state, 'done');
+      const stopped = await server.call('/' + extraId + '/stop', 'POST', { request_key: key() });
+      assert.equal((await settledControl(server, stopped.body.request_key)).state, 'done');
+      const beforeResume = f.logs().filter(row => row.type === 'spawn').length;
+      const resumed = await server.call('/' + extraId + '/resume', 'POST', { request_key: key() });
+      assert.equal((await settledControl(server, resumed.body.request_key)).state, 'done');
+      assert.equal(f.logs().filter(row => row.type === 'spawn').length, beforeResume + 1);
+      const stoppedAgain = await server.call('/' + extraId + '/stop', 'POST', { request_key: key() });
+      assert.equal((await settledControl(server, stoppedAgain.body.request_key)).state, 'done');
+      const ended = (await server.call('/' + extraId)).body.state;
+      const endedIncarnation = ended.incarnations.find(row => row.id === ended.current_incarnation_id);
+      assert.equal(endedIncarnation.state, 'exited');
+      await poll(() => { try { process.kill(endedIncarnation.pid, 0); return false; } catch (error) {
+        if (error.code === 'ESRCH') return true; throw error;
+      } });
       const effects = f.logs().filter(row => row.type === 'user').length;
+      const spawned = f.logs().filter(row => row.type === 'spawn').map(row => row.pid);
       f.host.send('fail-db'); await message(f.host, 'db-failed');
       for (const [route, body] of [['/' + id + '/prompt', { ...prompt, request_key: key() }],
-        ['/start', { request_key: key(), cwd: f.dir, confirmed_settings: true }], ['/' + id + '/resume', { request_key: key() }]]) {
+        ['/start', { request_key: key(), cwd: f.dir, confirmed_settings: true }], ['/' + extraId + '/resume', { request_key: key() }]]) {
         const failed = await server.call(route, 'POST', body);
         assert.ok(failed.status === 503 || failed.body.acceptance === 'acceptance_unknown');
       }
       assert.equal(f.logs().filter(row => row.type === 'user').length, effects);
-      assert.equal(f.logs().filter(row => row.type === 'spawn').length, 1);
+      assert.deepEqual(f.logs().filter(row => row.type === 'spawn').map(row => row.pid), spawned);
+      assert.doesNotThrow(() => process.kill(pid, 0));
     }
   });
 }
@@ -176,7 +196,9 @@ test('HTTP real SDK socket failure preserves pending last-known; identical previ
     server.child.send('break-socket'); await message(server.child, 'socket-broken');
     const offline = await server.call('/' + activeId);
     assert.equal(offline.body.current_state_known, false); assert.equal(typeof offline.body.as_of, 'number');
-    assert.deepEqual(offline.body.last_known.state.tool_requests, known.state.tool_requests);
+    const status = row => ({ id: row.id, incarnation_id: row.incarnation_id, tool_use_id: row.tool_use_id, tool_name: row.tool_name, state: row.state });
+    assert.deepEqual(offline.body.last_known.state.tool_requests, known.state.tool_requests.map(status));
+    assert.equal(Object.hasOwn(offline.body.last_known.state.tool_requests[0], 'input'), false);
     for (const { route, body, method } of controls) assert.equal((await server.call(route, method, body)).status, 503);
   });
 

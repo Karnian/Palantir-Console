@@ -216,3 +216,12 @@ test('R1 protocol forwards replay byte limit and more flag', async () => {
   h.hello(); h.send({ type: 'events_since', id: 1, seq: 3, max_bytes: 2048 }); await flush();
   assert.deepEqual(options, { maxBytes: 2048 }); assert.equal(h.output[1].result.more, true);
 });
+
+test('R2 chunk protocol preserves session ownership arguments and UTF-8 data', async () => {
+  const calls = [];
+  const result = { found: true, total_bytes: 3, offset: 0, data: '가', done: true };
+  const h = harness({ chunk(...args) { calls.push(args); return result; } });
+  h.hello(); h.send({ type: 'chunk', id: 1, session_id: 'session', source: 'event', id_or_seq: 7, offset: 0 });
+  await flush(); assert.deepEqual(calls, [['session', 'event', 7, 0]]);
+  assert.deepEqual(h.output[1], { type: 'chunk', id: 1, result });
+});

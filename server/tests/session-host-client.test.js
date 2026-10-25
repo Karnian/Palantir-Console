@@ -223,3 +223,13 @@ test('C1 client list and settings preview send matching protocol frames', async 
   assert.deepEqual(await h.client.settingsPreview('/safe'), { ok: true });
   assert.deepEqual(frames.map(({ id, ...frame }) => frame), [{ type: 'list' }, { type: 'settings_preview', cwd: '/safe' }]);
 });
+
+test('R2 client chunk sends explicit session, source, reference and byte offset', async t => {
+  let frame;
+  const result = { total_bytes: 3, offset: 0, data: '가', done: true };
+  const h = clientHarness(t, (_request, message) => { frame = message; return { type: 'chunk', result }; });
+  await h.client.connect();
+  assert.deepEqual(await h.client.chunk('session', 'tool_input', 'tool-row', 0), result);
+  const { id, ...fields } = frame;
+  assert.deepEqual(fields, { type: 'chunk', session_id: 'session', source: 'tool_input', id_or_seq: 'tool-row', offset: 0 });
+});
