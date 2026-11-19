@@ -1,5 +1,7 @@
 # codev2 운영 runbook (Palantir Console)
 
+> **2026-11-18 운영 위치를 ocr2 로 옮겼다. 현재 절차는 [runbook-ocr2-ops.md](runbook-ocr2-ops.md) 를 따른다.** 이 문서는 codev2 운영 기간(2026-10-14 ~ 2026-11-18)의 기록으로 남긴다.
+
 2026-10-14 사용자 결정으로 운영 위치를 codev2 로 옮겼다(codev1 반납). 범위는 **세션 관측(observe) + 지시별 답변 + 세션 비서**다. Agent API capability(매니저·워커)는 꺼져 있다(`[security] Agent API capabilities disabled` — OS 사용자/컨테이너 격리 미선언).
 
 ## 접속
